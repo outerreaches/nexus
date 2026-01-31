@@ -144,6 +144,7 @@ Tool usage guidelines and restrictions.
 - **credential_generate**: Prefer for new accounts; generates a strong password locally and stores it (never shown to the model).
 - **browser.type_secret**: Use for password fields instead of \`browser.type\`.
 - **human_request**: Use for OTP/MFA/CAPTCHA handoffs; operator responds via Telegram \`/act <ID> ...\`. Avoid asking for secrets in chat.
+- **browser.type_action**: Use to type a fulfilled human action response into a browser field without exposing it to the model.
 
 ## Forbidden Patterns
 - Never run \`rm -rf\` without explicit confirmation.

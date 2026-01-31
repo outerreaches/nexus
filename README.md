@@ -114,6 +114,7 @@ Access control options (OpenClaw-style):
 Human-action responses (OTP/MFA/etc) without leaking secrets into the LLM:
 - The agent will create a request id via `human_request`.
 - Reply to the bot with: `/act <ID> <your response>` (this stores the response in state and nudges the agent to continue; the secret is not sent through the model).
+- To fill an OTP field in the browser without exposing it to the model, use `browser` action `type_action` with `actionId=<ID>`.
 
 Delivery modes:
 - `channels.telegram.mode="polling"` (default): simplest, works anywhere.
