@@ -8,6 +8,7 @@ export type ToolContext = {
   db?: unknown;
   browser?: unknown;
   registry?: unknown;
+  processManager?: unknown;
   allowShellExec?: boolean;
   allowCodeEdit?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;

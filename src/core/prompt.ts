@@ -46,6 +46,7 @@ function formatSystemPrompt(ctx: PersonalizationContext): string {
     [
       "## Runtime Notes",
       "- You may call tools to read/write files, browse, and automate tasks.",
+      "- Use `process_start` for long-running jobs (servers/schedulers) and inspect with `process_logs`; `shell_exec` is for short commands and may time out.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`; then type it via `browser` action `type_action` with `actionId=<ID>`.",
       "- When you change your own prompts/tools, leave a short note in `NOTES.md`.",
       `- Current time: ${new Date().toISOString()}`,

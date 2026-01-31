@@ -1,6 +1,7 @@
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
+import { createHash } from "node:crypto";
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -45,6 +46,11 @@ function safeJson(value: unknown): string {
   }
 }
 
+function toolCallSignature(call: import("./types.js").ToolCall): string {
+  const hash = createHash("sha256").update(call.name).update("\n").update(call.arguments).digest("hex").slice(0, 16);
+  return `${call.name}:${hash}`;
+}
+
 export type AgentBudget = {
   maxToolCalls: number;
   maxIterations: number;
@@ -75,6 +81,8 @@ export class AgentRunner {
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];
 
     let toolCallsUsed = 0;
+    const repeatedFailures = new Map<string, number>();
+    const maxSameToolFailures = 4;
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       let content: string | null;
       let toolCalls: import("./types.js").ToolCall[];
@@ -118,7 +126,8 @@ export class AgentRunner {
       messages.push(toolCallingMsg);
       newMessages.push(toolCallingMsg);
 
-      for (const call of toolCalls) {
+      for (let i = 0; i < toolCalls.length; i++) {
+        const call = toolCalls[i];
         toolCallsUsed += 1;
         if (toolCallsUsed > this.deps.budget.maxToolCalls) {
           return {
@@ -171,6 +180,45 @@ export class AgentRunner {
         };
         messages.push(toolResultMsg);
         newMessages.push(toolResultMsg);
+
+        const sig = toolCallSignature(call);
+        if (status === "error") {
+          const next = (repeatedFailures.get(sig) ?? 0) + 1;
+          repeatedFailures.set(sig, next);
+          if (next >= maxSameToolFailures) {
+            const firstLine = truncate(result.split(/\r?\n/)[0] ?? "ERROR", 220);
+            const abortText =
+              `Aborting run: tool '${call.name}' failed ${next} times with the same arguments. ` +
+              `Stop retrying and change approach (inspect logs/error output, adjust inputs, or use a different tool). ` +
+              `Last error: ${firstLine}`;
+
+            // Ensure every tool_call gets a tool response, even if we abort early.
+            for (let j = i + 1; j < toolCalls.length; j++) {
+              const pending = toolCalls[j];
+              const pendingMsg: ChatMessage = {
+                role: "tool",
+                name: pending.name,
+                toolCallId: pending.id,
+                content: `ERROR: aborted by runner due to repeated tool failures (${call.name})`,
+              };
+              messages.push(pendingMsg);
+              newMessages.push(pendingMsg);
+            }
+
+            const assistantMsg: ChatMessage = { role: "assistant", content: abortText };
+            messages.push(assistantMsg);
+            newMessages.push(assistantMsg);
+            return {
+              status: "failed",
+              output: abortText,
+              newMessages,
+              toolCallsUsed,
+              iterationsUsed: iteration + 1,
+            };
+          }
+        } else {
+          repeatedFailures.delete(sig);
+        }
       }
     }
 

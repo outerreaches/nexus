@@ -7,6 +7,7 @@ import { ensureConfigExists, loadConfig } from "../state/config.js";
 import { bootstrapState } from "../state/bootstrap.js";
 import { resolveRuntimePaths } from "../state/paths.js";
 import { getBuiltInTools } from "../tools/index.js";
+import { ProcessManager } from "../process/manager.js";
 import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
 import { startProactiveHeartbeat } from "./proactive.js";
@@ -42,6 +43,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
   await registry.init();
 
+  const processManager = new ProcessManager({ stateDir: paths.stateDir });
+
   const toolContext = {
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
@@ -49,6 +52,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     db,
     browser,
     registry,
+    processManager,
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
     requestRestart: (reason: string, delayMs: number = 2500) => {

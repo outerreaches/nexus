@@ -139,7 +139,8 @@ Tool usage guidelines and restrictions.
 ## Tool-Specific Notes
 - **file_write**: Always create parent directories if needed.
 - **browser**: Close tabs when done; don't leave sessions hanging.
-- **shell_exec**: Avoid long-running commands; prefer backgrounding manually.
+- **process_start**: Use for long-running background jobs (servers/schedulers). Inspect output with \`process_logs\`; stop with \`process_stop\`.
+- **shell_exec**: For short commands (default timeout 60s). Use \`process_start\` for long-running tasks.
 - **credential_set**: Prefer env-backed secrets (\`usernameEnv\`/\`passwordEnv\`) so passwords never enter the LLM prompt.
 - **credential_generate**: Prefer for new accounts; generates a strong password locally and stores it (never shown to the model).
 - **browser.type_secret**: Use for password fields instead of \`browser.type\`.

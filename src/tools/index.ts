@@ -5,6 +5,7 @@ import { browserTool } from "./browser.js";
 import { marketData } from "./markets.js";
 import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
+import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
 import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
@@ -22,6 +23,11 @@ export function getBuiltInTools(): Tool[] {
     webFetch,
     webSearch,
     shellExec,
+    processStart,
+    processList,
+    processStatus,
+    processLogs,
+    processStop,
     browserTool,
     marketData,
     toolsReload,

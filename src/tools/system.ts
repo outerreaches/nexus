@@ -6,7 +6,8 @@ import { defineTool } from "../core/tools.js";
 
 export const shellExec = defineTool({
   name: "shell_exec",
-  description: "Run a shell command on the host (guarded; may be disabled).",
+  description:
+    "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_start.",
   parameters: z.object({
     command: z.string(),
     timeoutMs: z.number().int().positive().default(60_000),
@@ -15,10 +16,19 @@ export const shellExec = defineTool({
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";
     return await new Promise((resolve) => {
       exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err) resolve(`ERROR: ${err.message}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`);
+        if (err) {
+          const anyErr = err as any;
+          const isTimeout =
+            Boolean(anyErr?.killed) &&
+            typeof timeoutMs === "number" &&
+            (String(err.message).toLowerCase().includes("timed out") || anyErr?.code === "ETIMEDOUT");
+          const hint = isTimeout
+            ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_start and inspect with process_logs.`
+            : "\n\nHINT: If this keeps failing with the same command, stop retrying and inspect STDERR (or switch approach).";
+          resolve(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`);
+        }
         else resolve([stdout, stderr].filter(Boolean).join("\n"));
       });
     });
   },
 });
-
