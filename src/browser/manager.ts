@@ -10,6 +10,34 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+function normalizeSmartRef(ref: string): string {
+  return ref.trim();
+}
+
+function isSnapshotRef(ref: string): boolean {
+  return /^e\d+$/.test(ref);
+}
+
+function cssEscape(value: string): string {
+  // Minimal escaping for attribute contains selectors.
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+function expandQueryHints(ref: string): string[] {
+  const q = [ref];
+  const r = ref.toLowerCase();
+  if (/(email|e-mail|mail|user|username|login|identifier)/i.test(r)) {
+    q.push("Email", "Email or phone", "Email address", "Username", "User name", "Phone", "Phone number");
+  }
+  if (/(pass|password)/i.test(r)) {
+    q.push("Password", "Passcode");
+  }
+  if (/(otp|code|mfa|2fa|verification)/i.test(r)) {
+    q.push("Code", "Verification code", "OTP", "2-step verification", "Authenticator code");
+  }
+  return Array.from(new Set(q.map((s) => s.trim()).filter(Boolean)));
+}
+
 async function waitForCdpReady(params: { port: number; timeoutMs: number }): Promise<void> {
   const url = `http://127.0.0.1:${params.port}/json/version`;
   const start = Date.now();
@@ -244,21 +272,79 @@ export class BrowserManager {
     return lines.join("\n");
   }
 
-  async click(ref: string): Promise<string> {
+  async click(ref: string, timeoutMs: number = 10_000): Promise<string> {
     await this.ensureStarted();
     if (!this.activePage) throw new Error("No active page.");
-    const loc = this.activePage.locator(`[data-nexus-ref="${ref}"]`).first();
-    await loc.click({ timeout: 10_000 });
-    return "OK";
+    const r = normalizeSmartRef(ref);
+
+    if (isSnapshotRef(r)) {
+      const loc = this.activePage.locator(`[data-nexus-ref="${r}"]`).first();
+      const count = await loc.count().catch(() => 0);
+      if (count === 0) throw new Error(`Unknown element ref "${r}". Call browser.snapshot and use the [eN] refs.`);
+      await loc.click({ timeout: timeoutMs });
+      return "OK";
+    }
+
+    // Best-effort: treat as visible text for a clickable element.
+    return await this.clickText(r, timeoutMs);
   }
 
-  async type(ref: string, text: string, submit: boolean): Promise<string> {
+  async type(ref: string, text: string, submit: boolean, timeoutMs: number = 10_000): Promise<string> {
     await this.ensureStarted();
     if (!this.activePage) throw new Error("No active page.");
-    const loc = this.activePage.locator(`[data-nexus-ref="${ref}"]`).first();
-    await loc.fill(text, { timeout: 10_000 });
-    if (submit) await loc.press("Enter");
-    return "OK";
+    const r = normalizeSmartRef(ref);
+
+    if (isSnapshotRef(r)) {
+      const loc = this.activePage.locator(`[data-nexus-ref="${r}"]`).first();
+      const count = await loc.count().catch(() => 0);
+      if (count === 0) throw new Error(`Unknown element ref "${r}". Call browser.snapshot and use the [eN] refs.`);
+      await loc.fill(text, { timeout: timeoutMs });
+      if (submit) await loc.press("Enter");
+      return "OK";
+    }
+
+    const perAttemptTimeout = Math.max(800, Math.min(3_000, timeoutMs));
+    const hints = expandQueryHints(r);
+
+    const tryFill = async (loc: any): Promise<boolean> => {
+      try {
+        await loc.first().fill(text, { timeout: perAttemptTimeout });
+        if (submit) await loc.first().press("Enter", { timeout: perAttemptTimeout }).catch(() => {});
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    for (const hint of hints) {
+      // Try common accessibility patterns first.
+      const okLabel = await tryFill(this.activePage.getByLabel(hint, { exact: false }));
+      if (okLabel) return "OK";
+      const okPlaceholder = await tryFill(this.activePage.getByPlaceholder(hint, { exact: false }));
+      if (okPlaceholder) return "OK";
+      const okRole = await tryFill(this.activePage.getByRole("textbox", { name: hint }));
+      if (okRole) return "OK";
+
+      // Attribute contains fallback (works on many login forms).
+      const esc = cssEscape(hint);
+      const attrSel = [
+        `input[id*="${esc}" i]`,
+        `input[name*="${esc}" i]`,
+        `input[aria-label*="${esc}" i]`,
+        `input[placeholder*="${esc}" i]`,
+        `textarea[id*="${esc}" i]`,
+        `textarea[name*="${esc}" i]`,
+        `textarea[aria-label*="${esc}" i]`,
+        `textarea[placeholder*="${esc}" i]`,
+        `[contenteditable="true"][aria-label*="${esc}" i]`,
+      ].join(",");
+      const okAttr = await tryFill(this.activePage.locator(attrSel));
+      if (okAttr) return "OK";
+    }
+
+    throw new Error(
+      `Unable to find an input for "${r}". Use browser.snapshot to get element refs, or call browser.wait then snapshot.`,
+    );
   }
 
   async text(maxChars: number): Promise<string> {

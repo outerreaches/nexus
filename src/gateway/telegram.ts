@@ -1,5 +1,7 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { Hono } from "hono";
-import { Bot, Context } from "grammy";
+import { Bot, Context, InputFile } from "grammy";
 
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
@@ -33,6 +35,63 @@ function joinPublicUrl(publicUrl: string, path: string): string {
   const base = publicUrl.endsWith("/") ? publicUrl : `${publicUrl}/`;
   const p = path.startsWith("/") ? path.slice(1) : path;
   return new URL(p, base).toString();
+}
+
+function normalizeInlineFilePath(line: string): string | null {
+  let s = line.trim();
+  if (!s) return null;
+  // Strip common wrappers
+  s = s.replace(/^`+/, "").replace(/`+$/, "");
+  s = s.replace(/^"+/, "").replace(/"+$/, "");
+  s = s.replace(/^'+/, "").replace(/'+$/, "");
+  if (s.startsWith("sandbox:")) s = s.slice("sandbox:".length);
+  if (s.startsWith("file://")) {
+    try {
+      s = new URL(s).pathname;
+    } catch {
+      // ignore
+    }
+  }
+  if (!s.startsWith("/")) return null;
+  if (!/\.(png|jpg|jpeg|webp)$/i.test(s)) return null;
+  return s;
+}
+
+async function extractTelegramImageAttachments(output: string): Promise<{ text: string; imagePaths: string[] }> {
+  const stateDir = path.resolve(process.env.NEXUS_STATE_DIR ?? "/data/nexus");
+  const lines = output.split(/\r?\n/);
+  const kept: string[] = [];
+  const images: string[] = [];
+
+  for (const line of lines) {
+    const candidate = normalizeInlineFilePath(line);
+    if (!candidate) {
+      kept.push(line);
+      continue;
+    }
+
+    const full = path.resolve(candidate);
+    // Prevent accidental exfiltration of arbitrary files: only allow under stateDir.
+    if (!(full === stateDir || full.startsWith(stateDir + path.sep))) {
+      kept.push(line);
+      continue;
+    }
+
+    try {
+      const st = await fs.stat(full);
+      if (st.isFile()) {
+        images.push(full);
+        continue;
+      }
+    } catch {
+      // fall through
+    }
+
+    kept.push(line);
+  }
+
+  const unique = Array.from(new Set(images));
+  return { text: kept.join("\n").trimEnd(), imagePaths: unique };
 }
 
 export async function startTelegramBot(deps: {
@@ -176,10 +235,22 @@ export async function startTelegramBot(deps: {
         text: cleaned,
       });
 
-      const chunks = splitTelegramMessage(output);
-      deps.log(`telegram: reply chat_id=${chatId} chunks=${chunks.length} chars=${output.length}`);
+      const extracted = await extractTelegramImageAttachments(output);
+      const chunks = splitTelegramMessage(extracted.text);
+      deps.log(
+        `telegram: reply chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`,
+      );
       for (const chunk of chunks) {
+        if (chunk.trim().length === 0) continue;
         await ctx.reply(chunk);
+      }
+      for (const img of extracted.imagePaths) {
+        try {
+          await ctx.replyWithPhoto(new InputFile(img), { caption: path.basename(img) });
+        } catch (e) {
+          deps.log(`telegram: failed to send image ${img}: ${e instanceof Error ? e.message : String(e)}`);
+          await ctx.reply(`(failed to attach image: ${path.basename(img)})`);
+        }
       }
     } catch (err) {
       deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);

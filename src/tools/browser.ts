@@ -155,24 +155,24 @@ export const browserTool = defineTool({
       case "screenshot":
         return await mgr.screenshot({ fileName: args.fileName, fullPage: args.fullPage });
       case "click":
-        return await mgr.click(args.ref!);
+        return await mgr.click(args.ref!, args.timeoutMs);
       case "click_text":
         return await mgr.clickText(args.text!, args.timeoutMs);
       case "type":
-        return await mgr.type(args.ref!, args.text!, args.submit);
+        return await mgr.type(args.ref!, args.text!, args.submit, args.timeoutMs);
       case "type_secret": {
         const value = await getCredentialField({
           stateDir: ctx.stateDir,
           id: args.credentialId!,
           field: args.credentialField!,
         });
-        return await mgr.type(args.ref!, value, args.submit);
+        return await mgr.type(args.ref!, value, args.submit, args.timeoutMs);
       }
       case "type_action": {
         const db = ctx.db as NexusDatabase | undefined;
         if (!db) return "ERROR: database is not available";
         const value = getHumanActionResponseForTyping(db, { id: args.actionId!, nowMs: ctx.nowMs() });
-        return await mgr.type(args.ref!, value, args.submit);
+        return await mgr.type(args.ref!, value, args.submit, args.timeoutMs);
       }
       case "scroll":
         return await mgr.scroll(args.deltaY!);
