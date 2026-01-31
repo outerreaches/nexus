@@ -185,6 +185,21 @@ export class AgentRunner {
         if (status === "error") {
           const next = (repeatedFailures.get(sig) ?? 0) + 1;
           repeatedFailures.set(sig, next);
+
+          // Escalating warnings before hard abort so the agent can self-correct.
+          if (next >= 2 && next < maxSameToolFailures) {
+            const severity = next === 2 ? "WARNING" : "CRITICAL WARNING";
+            const remaining = maxSameToolFailures - next;
+            const escalation =
+              `\n\n--- ${severity} ---\n` +
+              `Tool '${call.name}' has failed ${next} times with identical arguments. ` +
+              `${remaining} more identical failure(s) will abort this run.\n` +
+              `You MUST change your approach: use different arguments, a different tool, or diagnose the error first.\n` +
+              `For periodic/scheduled tasks, prefer job_create over process_start with scripts.\n` +
+              `---`;
+            toolResultMsg.content += escalation;
+          }
+
           if (next >= maxSameToolFailures) {
             const firstLine = truncate(result.split(/\r?\n/)[0] ?? "ERROR", 220);
             const abortText =
@@ -217,7 +232,10 @@ export class AgentRunner {
             };
           }
         } else {
-          repeatedFailures.delete(sig);
+          // Any successful tool call resets ALL failure counters — the agent is
+          // doing productive work between retries (e.g. rewriting a file before
+          // re-running a command).  Budget caps still prevent infinite loops.
+          repeatedFailures.clear();
         }
       }
     }

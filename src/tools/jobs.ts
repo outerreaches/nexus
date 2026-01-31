@@ -40,7 +40,8 @@ function computeNextRunAt(params: { cron: string; timezone: string; afterMs: num
 
 export const jobCreate = defineTool({
   name: "job_create",
-  description: "Create a scheduled job (cron) owned by the current agent.",
+  description:
+    "Create a scheduled job (cron) owned by the current agent. PREFERRED for all periodic tasks (price checks, monitoring, reports). No external scripts needed — specify a task description and cron schedule.",
   parameters: z.object({
     name: z.string().min(1).max(120),
     cron: z.string().min(1).max(120).describe("5-field cron: min hour dom mon dow"),

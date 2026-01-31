@@ -139,10 +139,17 @@ Tool usage guidelines and restrictions.
 ## Tool-Specific Notes
 - **file_write**: Always create parent directories if needed.
 - **browser**: Close tabs when done; don't leave sessions hanging.
-- **process_start**: Use for long-running background jobs (servers/schedulers). Inspect output with \`process_logs\`; stop with \`process_stop\`.
-- **shell_exec**: For short commands (default timeout 60s). Use \`process_start\` for long-running tasks.
-- **job_create**: Use to schedule cron jobs (internal scheduler). Jobs are owned by the agent that created them; failures are delivered to the owning agent for self-healing.
+- **process_start**: ONLY for persistent daemons (HTTP servers, websocket listeners, file watchers) — processes that should run indefinitely. NEVER use for periodic/scheduled tasks. Inspect output with \`process_logs\`; stop with \`process_stop\`.
+- **shell_exec**: For short one-off commands (default timeout 60s). Use \`process_start\` for persistent daemons only.
+- **job_create**: PREFERRED for ALL periodic/scheduled tasks (price checks, monitoring, recurring reports). Uses the built-in cron scheduler — no Python scripts or pip packages needed. Specify a cron expression and a task description. Example: \`job_create({ name: "btc-check", cron: "*/5 * * * *", task: "Check BTC price and alert if above threshold" })\`. Jobs are owned by the agent that created them; failures are delivered to the owning agent for self-healing.
 - **job_run_now**: Triggers an immediate run (job must be enabled). Use \`job_runs\`/\`job_run_get\`/\`job_events\` to inspect outcomes.
+
+### When to use which tool
+| Need | Tool |
+|------|------|
+| Run something every N minutes/hours | \`job_create\` |
+| Run a persistent server or daemon | \`process_start\` |
+| Run a one-off short command | \`shell_exec\` |
 - **telegram_send**: Send a proactive message to the allowlisted Telegram user (useful from scheduled jobs / non-telegram contexts).
 - **credential_set**: Prefer env-backed secrets (\`usernameEnv\`/\`passwordEnv\`) so passwords never enter the LLM prompt.
 - **credential_generate**: Prefer for new accounts; generates a strong password locally and stores it (never shown to the model).

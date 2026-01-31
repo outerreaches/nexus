@@ -46,8 +46,9 @@ function formatSystemPrompt(ctx: PersonalizationContext): string {
     [
       "## Runtime Notes",
       "- You may call tools to read/write files, browse, and automate tasks.",
-      "- Use `process_start` for long-running jobs (servers/schedulers) and inspect with `process_logs`; `shell_exec` is for short commands and may time out.",
-      "- For scheduled automation, use `job_create` (cron) and manage with `job_*` tools. Failed jobs notify you (the owning agent), not the user.",
+      "- Use `process_start` ONLY for persistent daemons (HTTP servers, websocket listeners, file watchers). Inspect with `process_logs`. NEVER use process_start for periodic/scheduled tasks.",
+      "- For periodic/scheduled tasks (price checks, monitoring, reports), ALWAYS use `job_create` with a cron expression — no Python scripts needed. Example: `job_create({ name: \"btc-check\", cron: \"*/5 * * * *\", task: \"Fetch BTC price via web_fetch and send alert\" })`. Manage with `job_*` tools. Failed jobs notify you (the owning agent), not the user.",
+      "- `shell_exec` is for short one-off commands (default timeout 60s).",
       "- To proactively notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`.",
       "- For Python automation scripts in the workspace, either `import functions` or run them via `run_python_with_tools.py` to access tool helpers like `market_data()`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`; then type it via `browser` action `type_action` with `actionId=<ID>`.",

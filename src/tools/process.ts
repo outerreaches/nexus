@@ -10,7 +10,7 @@ async function sleep(ms: number): Promise<void> {
 export const processStart = defineTool({
   name: "process_start",
   description:
-    "Start a long-running process in the background and return an id. Use this instead of shell_exec for daemons/schedulers/servers.",
+    "Start a persistent background daemon (server, watcher) and return an id. For periodic/scheduled tasks, use job_create instead.",
   parameters: z.object({
     command: z.string().min(1).max(4000),
     cwd: z.string().max(2000).optional().describe("Working directory (defaults to stateDir)"),
@@ -27,8 +27,16 @@ export const processStart = defineTool({
       const current = mgr.get(info.id) ?? info;
       if (current.status !== "running") {
         const logs = await mgr.tailLogs({ id: info.id, maxChars: 4000 }).catch(() => "");
-        const hint = `HINT: The process exited immediately. Inspect logs with process_logs and fix the underlying error before restarting.`;
-        return `ERROR: process exited (status=${current.status}, code=${current.exitCode ?? "null"}, signal=${current.signal ?? "null"})\n${hint}\n\n${JSON.stringify(current, null, 2)}\n\nLOGS:\n${logs}`;
+        const baseHint = `HINT: The process exited immediately. Inspect logs with process_logs and fix the underlying error before restarting.`;
+        const isSchedulerPattern = /schedul|cron|periodic|interval|every\s*\d|while\s*(true|True)|time\.sleep|sleep\(/i.test(
+          args.command + "\n" + logs,
+        );
+        const schedulerHint = isSchedulerPattern
+          ? `\nHINT: This looks like a scheduled/periodic task. Use job_create (built-in cron scheduler) instead of process_start with a script. ` +
+            `No pip packages or Python scripts needed. ` +
+            `Example: job_create({ name: "my-task", cron: "*/5 * * * *", task: "Describe what the job should do each run" })`
+          : "";
+        return `ERROR: process exited (status=${current.status}, code=${current.exitCode ?? "null"}, signal=${current.signal ?? "null"})\n${baseHint}${schedulerHint}\n\n${JSON.stringify(current, null, 2)}\n\nLOGS:\n${logs}`;
       }
 
       return JSON.stringify(current, null, 2);
