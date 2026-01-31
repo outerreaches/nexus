@@ -40,6 +40,9 @@ function joinPublicUrl(publicUrl: string, path: string): string {
 function normalizeInlineFilePath(line: string): string | null {
   let s = line.trim();
   if (!s) return null;
+  // Strip common prefixes
+  s = s.replace(/^[-*]\s+/, "");
+  s = s.replace(/^(screenshot|image|path)\s*:\s*/i, "");
   // Strip common wrappers
   s = s.replace(/^`+/, "").replace(/`+$/, "");
   s = s.replace(/^"+/, "").replace(/"+$/, "");
