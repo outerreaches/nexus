@@ -50,6 +50,7 @@ Build + interactive CLI chat:
 docker build -t nexus-agent:dev .
 docker run -it --rm \
   -e OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+  -e NEXUS_ALLOW_SHELL_EXEC=1 \
   -v nexus_data:/data \
   nexus-agent:dev chat
 ```
