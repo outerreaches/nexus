@@ -56,72 +56,96 @@ export async function startTelegramBot(deps: {
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
 
   bot.on("message:text", async (ctx) => {
-    const text = ctx.message?.text ?? "";
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
-    if (!userId || !chatId) return;
+    try {
+      const text = ctx.message?.text ?? "";
+      const userId = ctx.from?.id;
+      const chatId = ctx.chat?.id;
+      if (!userId || !chatId) return;
+      deps.log(`telegram: msg user_id=${userId} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
 
-    const allowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
-    const allowFrom = tg.allowFrom ?? [];
-    const allowed = isTelegramUserAllowed(deps.db, {
-      userId,
-      staticAllowFrom: allowFrom,
-      allowAll,
-    });
-    if (!allowed) {
-      if (tg.pairing.enabled && !isGroupChat(ctx)) {
-        const nowMs = Date.now();
-        const req = createPairingRequest(deps.db, {
-          channel: "telegram",
-          senderKey: String(userId),
-          nowMs,
-          ttlMs: tg.pairing.codeTtlMs,
-          maxPending: tg.pairing.maxPending,
-        });
-        if (req.created && req.code) {
-          deps.log(`telegram: pairing request user_id=${userId} code=${req.code}`);
-          await ctx.reply(
-            [
-              "Pairing required.",
-              "",
-              `Your pairing code: ${req.code}`,
-              "",
-              "Ask the operator to approve it on the host running Nexus:",
-              `nexus pairing approve telegram ${req.code}`,
-              "",
-              "Your messages will be ignored until approved.",
-            ].join("\n"),
-          );
+      const allowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
+      const allowFrom = tg.allowFrom ?? [];
+      const allowed = isTelegramUserAllowed(deps.db, {
+        userId,
+        staticAllowFrom: allowFrom,
+        allowAll,
+      });
+      if (!allowed) {
+        deps.log(`telegram: ignore user_id=${userId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);
+        if (tg.pairing.enabled && !isGroupChat(ctx)) {
+          const nowMs = Date.now();
+          const req = createPairingRequest(deps.db, {
+            channel: "telegram",
+            senderKey: String(userId),
+            nowMs,
+            ttlMs: tg.pairing.codeTtlMs,
+            maxPending: tg.pairing.maxPending,
+          });
+          if (req.created && req.code) {
+            deps.log(`telegram: pairing request user_id=${userId} code=${req.code}`);
+            await ctx.reply(
+              [
+                "Pairing required.",
+                "",
+                `Your pairing code: ${req.code}`,
+                "",
+                "Ask the operator to approve it on the host running Nexus:",
+                `nexus pairing approve telegram ${req.code}`,
+                "",
+                "Your messages will be ignored until approved.",
+              ].join("\n"),
+            );
+          } else if (req.code) {
+            deps.log(`telegram: pairing request already pending user_id=${userId} code=${req.code}`);
+          } else {
+            deps.log(`telegram: pairing request not created user_id=${userId} reason=max_pending`);
+          }
+          return;
         }
+
         return;
       }
 
-      return;
-    }
+      if (isGroupChat(ctx) && tg.requireMentionInGroups) {
+        const mentioned = botUsername ? text.includes(`@${botUsername}`) : false;
+        const invoked = text.startsWith("/nexus") || text.startsWith("/n");
+        if (!mentioned && !invoked) {
+          deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=require_mention`);
+          return;
+        }
+      }
 
-    if (isGroupChat(ctx) && tg.requireMentionInGroups) {
-      const mentioned = botUsername ? text.includes(`@${botUsername}`) : false;
-      const invoked = text.startsWith("/nexus") || text.startsWith("/n");
-      if (!mentioned && !invoked) return;
-    }
+      const cleaned = text
+        .replace(botUsername ? new RegExp(`@${botUsername}\\b`, "g") : /$^/, "")
+        .replace(/^\/nexus\b\s*/i, "")
+        .replace(/^\/n\b\s*/i, "")
+        .trim();
 
-    const cleaned = text
-      .replace(botUsername ? new RegExp(`@${botUsername}\\b`, "g") : /$^/, "")
-      .replace(/^\/nexus\b\s*/i, "")
-      .replace(/^\/n\b\s*/i, "")
-      .trim();
+      if (!cleaned) {
+        deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=empty_text`);
+        return;
+      }
 
-    if (!cleaned) return;
+      deps.log(`telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${cleaned.length}`);
+      const { output } = await deps.agent.handleUserMessage({
+        channel: "telegram",
+        channelKey: String(chatId),
+        agentId: tg.agentId,
+        text: cleaned,
+      });
 
-    const { output } = await deps.agent.handleUserMessage({
-      channel: "telegram",
-      channelKey: String(chatId),
-      agentId: tg.agentId,
-      text: cleaned,
-    });
-
-    for (const chunk of splitTelegramMessage(output)) {
-      await ctx.reply(chunk);
+      const chunks = splitTelegramMessage(output);
+      deps.log(`telegram: reply chat_id=${chatId} chunks=${chunks.length} chars=${output.length}`);
+      for (const chunk of chunks) {
+        await ctx.reply(chunk);
+      }
+    } catch (err) {
+      deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        await ctx.reply("ERROR: internal error (check gateway logs).");
+      } catch {
+        // ignore
+      }
     }
   });
 
