@@ -104,7 +104,7 @@ export async function startTelegramBot(deps: {
   db: NexusDatabase;
   app: Hono;
   log: (msg: string) => void;
-}): Promise<{ stop: () => Promise<void> } | null> {
+}): Promise<{ stop: () => Promise<void>; sendOutput: (chatId: number, output: string) => Promise<void> } | null> {
   const tg = deps.config.channels.telegram;
   if (!tg.enabled) return null;
   const token = tg.token && !isEnvPlaceholder(tg.token) ? tg.token : process.env.TELEGRAM_BOT_TOKEN;
@@ -117,6 +117,24 @@ export async function startTelegramBot(deps: {
   const botUsername = me.username ?? "";
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
+
+  const sendOutput = async (chatId: number, output: string): Promise<void> => {
+    const extracted = await extractTelegramImageAttachments(output);
+    const chunks = splitTelegramMessage(extracted.text);
+    deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);
+    for (const chunk of chunks) {
+      if (chunk.trim().length === 0) continue;
+      await bot.api.sendMessage(chatId, chunk);
+    }
+    for (const img of extracted.imagePaths) {
+      try {
+        await bot.api.sendPhoto(chatId, new InputFile(img), { caption: path.basename(img) });
+      } catch (e) {
+        deps.log(`telegram: failed to send image ${img}: ${e instanceof Error ? e.message : String(e)}`);
+        await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`);
+      }
+    }
+  };
 
   bot.on("message:text", async (ctx) => {
     try {
@@ -203,10 +221,7 @@ export async function startTelegramBot(deps: {
           agentId: tg.agentId,
           text: `Human action ${id} is fulfilled.`,
         });
-        const chunks = splitTelegramMessage(output);
-        for (const chunk of chunks) {
-          await ctx.reply(chunk);
-        }
+        await sendOutput(chatId, output);
         return;
       }
 
@@ -238,23 +253,7 @@ export async function startTelegramBot(deps: {
         text: cleaned,
       });
 
-      const extracted = await extractTelegramImageAttachments(output);
-      const chunks = splitTelegramMessage(extracted.text);
-      deps.log(
-        `telegram: reply chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`,
-      );
-      for (const chunk of chunks) {
-        if (chunk.trim().length === 0) continue;
-        await ctx.reply(chunk);
-      }
-      for (const img of extracted.imagePaths) {
-        try {
-          await ctx.replyWithPhoto(new InputFile(img), { caption: path.basename(img) });
-        } catch (e) {
-          deps.log(`telegram: failed to send image ${img}: ${e instanceof Error ? e.message : String(e)}`);
-          await ctx.reply(`(failed to attach image: ${path.basename(img)})`);
-        }
-      }
+      await sendOutput(chatId, output);
     } catch (err) {
       deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);
       try {
@@ -292,6 +291,7 @@ export async function startTelegramBot(deps: {
       stop: async () => {
         await bot.api.deleteWebhook({ drop_pending_updates: false } as any).catch(() => {});
       },
+      sendOutput,
     };
   }
 
@@ -302,5 +302,6 @@ export async function startTelegramBot(deps: {
     stop: async () => {
       bot.stop();
     },
+    sendOutput,
   };
 }

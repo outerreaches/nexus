@@ -32,6 +32,17 @@ const TelegramChannelSchema = z
   })
   .default({});
 
+const ProactiveSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    agentId: z.string().default("main"),
+    intervalMs: z.number().int().positive().default(15 * 60_000),
+    maxIntervalMs: z.number().int().positive().default(60 * 60_000),
+    jitterMs: z.number().int().min(0).default(5_000),
+    notifyTelegram: z.boolean().default(true),
+  })
+  .default({});
+
 const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
@@ -55,6 +66,7 @@ export const ConfigSchema = z.object({
       telegram: TelegramChannelSchema,
     })
     .default({ telegram: {} }),
+  proactive: ProactiveSchema,
   permissions: z
     .object({
       allowShellExec: z.boolean().default(false),
@@ -122,6 +134,14 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
         permissions: {
           allowShellExec: false,
           allowCodeEdit: true,
+        },
+        proactive: {
+          enabled: false,
+          agentId: "main",
+          intervalMs: 900000,
+          maxIntervalMs: 3600000,
+          jitterMs: 5000,
+          notifyTelegram: true,
         },
       },
       null,

@@ -172,6 +172,17 @@ Nexus uses a workspace-based personalization system inspired by [OpenClaw](https
 | `HEARTBEAT.md` | Optional proactive task checklist |
 | `NOTES.md` | Persistent scratchpad across sessions |
 
+### Proactive Heartbeat (Always-On)
+
+When enabled, the gateway runs periodic **proactive heartbeat ticks** that prompt the agent to review `HEARTBEAT.md` and take small, high-value actions. If there is nothing to do, the agent should respond `IDLE` and the scheduler will back off automatically.
+
+Enable via env (simplest in Docker):
+- `NEXUS_PROACTIVE=1`
+- Optional tuning: `NEXUS_PROACTIVE_INTERVAL_MS`, `NEXUS_PROACTIVE_MAX_INTERVAL_MS`, `NEXUS_PROACTIVE_JITTER_MS`
+- `NEXUS_PROACTIVE_NOTIFY_TELEGRAM=1` sends non-idle outputs to allowlisted Telegram user ids
+
+Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalMs`, etc.
+
 ### First-Time Setup (Onboarding)
 
 When you run `nexus init` for the first time, an interactive onboarding wizard guides you through creating these files with your preferences.

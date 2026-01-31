@@ -9,6 +9,7 @@ import { resolveRuntimePaths } from "../state/paths.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
+import { startProactiveHeartbeat } from "./proactive.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean }): Promise<void> {
   const log = (msg: string) => {
@@ -111,7 +112,18 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
   if (!tg) log("telegram: disabled");
 
+  const proactive = startProactiveHeartbeat({
+    config,
+    workspaceDir: paths.workspaceDir,
+    agent,
+    db,
+    telegram: tg,
+    log,
+  });
+  if (!proactive) log("proactive: disabled");
+
   const stop = async () => {
+    proactive?.stop();
     await tg?.stop();
     await http.stop();
     db.close();

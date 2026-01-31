@@ -20,6 +20,8 @@ services:
       NEXUS_STATE_DIR: /data/nexus
       # Allow shell_exec inside container
       NEXUS_ALLOW_SHELL_EXEC: "1"
+      # Proactive heartbeat scheduler (always-on background ticks)
+      NEXUS_PROACTIVE: "1"
       # Headless browser (Chromium in-container)
       NEXUS_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium
       NEXUS_BROWSER_HEADLESS: "1"
