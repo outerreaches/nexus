@@ -4,7 +4,7 @@ Lightweight, always-on multi-agent assistant (OpenClaw-inspired), starting with:
 - Gateway process (HTTP status + Telegram bot)
 - OpenRouter + OpenAI-compatible local models (LM Studio / Ollama) via a single OpenAI-compat client
 - Self-modifiable prompts via workspace personalization files (SOUL.md, IDENTITY.md, USER.md, etc.)
-- Basic tool loop (file ops, web fetch, guarded shell exec, managed browser, paper trade logging)
+- Basic tool loop (file ops, web search/fetch, guarded shell exec, managed browser, paper trade logging)
 
 ## Quick start
 
@@ -34,6 +34,8 @@ npm run dev -- init --skip-onboarding
 
 4) Edit your config (default location is `~/.nexus/nexus.json`) and set secrets:
 - `OPENROUTER_API_KEY`
+- `BRAVE_API_KEY` (optional; enables `web_search` via Brave)
+- `PERPLEXITY_API_KEY` (optional; enables `web_search` via Perplexity direct)
 - `TELEGRAM_BOT_TOKEN`
 
 5) Start the gateway:
@@ -73,6 +75,14 @@ Environment variables:
 - `NEXUS_BROWSER_REMOTE_CDP_URL` (optional) — connect to an existing browser via CDP (skips launching locally)
 - `NEXUS_BROWSER_HEADLESS=1` (optional)
 - `NEXUS_BROWSER_NO_SANDBOX=1` (optional; mainly for containers)
+
+## Web tools
+
+- `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
+- `web_fetch`: keyless HTTP fetch + basic extraction (timeouts, redirect limits, small cache)
+
+Safety knob:
+- `NEXUS_ALLOW_PRIVATE_WEB_FETCH=1` allows fetching private/loopback hostnames and IPs (disabled by default).
 
 ## Telegram
 

@@ -7,6 +7,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       # Telegram
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      # Web search (optional)
+      BRAVE_API_KEY: ${BRAVE_API_KEY}
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY}
       # Persist state/config/workspace/history
       NEXUS_STATE_DIR: /data/nexus
       # Headless browser (Chromium in-container)

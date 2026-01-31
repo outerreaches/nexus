@@ -6,6 +6,7 @@ import { marketData } from "./markets.js";
 import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
 import { webFetch } from "./web.js";
+import { webSearch } from "./web-search.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
 
@@ -16,6 +17,7 @@ export function getBuiltInTools(): Tool[] {
     fileEdit,
     fileList,
     webFetch,
+    webSearch,
     shellExec,
     browserTool,
     marketData,
