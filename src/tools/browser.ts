@@ -2,6 +2,9 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import type { BrowserManager } from "../browser/manager.js";
+import { getCredentialField } from "../secrets/credentials.js";
+import type { NexusDatabase } from "../storage/database.js";
+import { getHumanActionResponseForTyping } from "../storage/human-actions.js";
 
 const BrowserArgsSchema = z
   .object({
@@ -18,9 +21,13 @@ const BrowserArgsSchema = z
       "text",
       "screenshot",
       "click",
+      "click_text",
       "type",
+      "type_secret",
+      "type_action",
       "scroll",
       "press",
+      "wait",
       "act",
     ]),
     // shared/optional params; validated by action-specific rules below
@@ -37,6 +44,12 @@ const BrowserArgsSchema = z
     key: z.string().optional(),
     index: z.number().int().min(0).optional(),
     kind: z.enum(["click", "type", "press", "scroll"]).optional(),
+    credentialId: z.string().max(64).optional(),
+    credentialField: z.enum(["username", "password"]).optional(),
+    actionId: z.string().max(32).optional(),
+    timeoutMs: z.number().int().positive().default(15_000),
+    waitKind: z.enum(["domcontentloaded", "networkidle", "selector", "text", "url_includes", "title_includes"]).optional(),
+    waitValue: z.string().max(2000).optional(),
   })
   .superRefine((val, ctx) => {
     const requireField = (field: keyof typeof val, message: string) => {
@@ -65,15 +78,33 @@ const BrowserArgsSchema = z
       case "click":
         requireField("ref", "ref is required");
         break;
+      case "click_text":
+        requireField("text", "text is required");
+        break;
       case "type":
         requireField("ref", "ref is required");
         requireField("text", "text is required");
+        break;
+      case "type_secret":
+        requireField("ref", "ref is required");
+        requireField("credentialId", "credentialId is required");
+        requireField("credentialField", "credentialField is required");
+        break;
+      case "type_action":
+        requireField("ref", "ref is required");
+        requireField("actionId", "actionId is required");
         break;
       case "scroll":
         requireField("deltaY", "deltaY is required");
         break;
       case "press":
         requireField("key", "key is required");
+        break;
+      case "wait":
+        requireField("waitKind", "waitKind is required");
+        if (val.waitKind === "selector" || val.waitKind === "text" || val.waitKind === "url_includes" || val.waitKind === "title_includes") {
+          requireField("waitValue", "waitValue is required for this waitKind");
+        }
         break;
       case "act":
         requireField("kind", "kind is required");
@@ -125,12 +156,30 @@ export const browserTool = defineTool({
         return await mgr.screenshot({ fileName: args.fileName, fullPage: args.fullPage });
       case "click":
         return await mgr.click(args.ref!);
+      case "click_text":
+        return await mgr.clickText(args.text!, args.timeoutMs);
       case "type":
         return await mgr.type(args.ref!, args.text!, args.submit);
+      case "type_secret": {
+        const value = await getCredentialField({
+          stateDir: ctx.stateDir,
+          id: args.credentialId!,
+          field: args.credentialField!,
+        });
+        return await mgr.type(args.ref!, value, args.submit);
+      }
+      case "type_action": {
+        const db = ctx.db as NexusDatabase | undefined;
+        if (!db) return "ERROR: database is not available";
+        const value = getHumanActionResponseForTyping(db, { id: args.actionId!, nowMs: ctx.nowMs() });
+        return await mgr.type(args.ref!, value, args.submit);
+      }
       case "scroll":
         return await mgr.scroll(args.deltaY!);
       case "press":
         return await mgr.press(args.key!);
+      case "wait":
+        return await mgr.wait({ kind: args.waitKind!, value: args.waitValue, timeoutMs: args.timeoutMs });
       case "act":
         switch (args.kind) {
           case "click":

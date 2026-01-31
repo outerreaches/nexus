@@ -25,7 +25,7 @@ async function waitForCdpReady(params: { port: number; timeoutMs: number }): Pro
   throw new Error(`Timed out waiting for CDP on ${url}`);
 }
 
-type SnapshotItem = { ref: string; role: string; name: string };
+type SnapshotItem = { ref: string; role: string; tag?: string; type?: string; name: string };
 
 export class BrowserManager {
   private proc: ChildProcess | null = null;
@@ -223,12 +223,13 @@ export class BrowserManager {
         el.setAttribute("data-nexus-ref", ref);
         const tag = el.tagName.toLowerCase();
         const role = el.getAttribute("role") || (tag === "a" ? "link" : tag === "button" ? "button" : tag);
+        const type = tag === "input" ? (el.getAttribute("type") || "text") : undefined;
         const name =
           el.getAttribute("aria-label") ||
           el.getAttribute("alt") ||
           (el as any).placeholder ||
           (el.innerText || el.textContent || "").trim();
-        return { ref, role, name: (name || "").slice(0, 140) };
+        return { ref, role, tag, type, name: (name || "").slice(0, 140) };
       });
 
       return { title: document.title, url: location.href, items };
@@ -236,7 +237,9 @@ export class BrowserManager {
 
     const lines: string[] = [`URL: ${url}`, `TITLE: ${title}`, "", "ELEMENTS:"];
     for (const it of items as SnapshotItem[]) {
-      lines.push(`[${it.ref}] role=${it.role} name="${it.name.replace(/"/g, '\\"')}"`);
+      const typePart = it.type ? ` type=${it.type}` : "";
+      const tagPart = it.tag ? ` tag=${it.tag}` : "";
+      lines.push(`[${it.ref}] role=${it.role}${tagPart}${typePart} name="${it.name.replace(/"/g, '\\"')}"`);
     }
     return lines.join("\n");
   }
@@ -292,5 +295,81 @@ export class BrowserManager {
     if (!this.activePage) throw new Error("No active page.");
     await this.activePage.keyboard.press(key);
     return "OK";
+  }
+
+  async wait(params: {
+    kind: "domcontentloaded" | "networkidle" | "selector" | "text" | "url_includes" | "title_includes";
+    value?: string;
+    timeoutMs: number;
+  }): Promise<string> {
+    await this.ensureStarted();
+    if (!this.activePage) throw new Error("No active page.");
+
+    switch (params.kind) {
+      case "domcontentloaded":
+        await this.activePage.waitForLoadState("domcontentloaded", { timeout: params.timeoutMs });
+        return "OK";
+      case "networkidle":
+        await this.activePage.waitForLoadState("networkidle", { timeout: params.timeoutMs });
+        return "OK";
+      case "selector": {
+        const sel = params.value?.trim();
+        if (!sel) throw new Error("wait selector requires value");
+        await this.activePage.locator(sel).first().waitFor({ timeout: params.timeoutMs });
+        return "OK";
+      }
+      case "text": {
+        const t = params.value?.trim();
+        if (!t) throw new Error("wait text requires value");
+        await this.activePage.getByText(t).first().waitFor({ timeout: params.timeoutMs });
+        return "OK";
+      }
+      case "url_includes": {
+        const part = params.value?.trim();
+        if (!part) throw new Error("wait url_includes requires value");
+        await this.activePage.waitForURL((u) => u.toString().includes(part), { timeout: params.timeoutMs });
+        return "OK";
+      }
+      case "title_includes": {
+        const part = params.value?.trim();
+        if (!part) throw new Error("wait title_includes requires value");
+        const start = Date.now();
+        while (Date.now() - start < params.timeoutMs) {
+          const title = await this.activePage.title().catch(() => "");
+          if (title.includes(part)) return "OK";
+          await sleep(200);
+        }
+        throw new Error(`Timed out waiting for title to include: ${part}`);
+      }
+      default:
+        throw new Error("Unknown wait kind");
+    }
+  }
+
+  async clickText(text: string, timeoutMs: number = 10_000): Promise<string> {
+    await this.ensureStarted();
+    if (!this.activePage) throw new Error("No active page.");
+    const needle = text.trim();
+    if (!needle) throw new Error("clickText requires non-empty text");
+
+    const perAttemptTimeout = Math.max(500, Math.min(3_000, timeoutMs));
+    const candidates = [
+      this.activePage.getByRole("button", { name: needle }),
+      this.activePage.getByRole("link", { name: needle }),
+      this.activePage
+        .locator("button, a, input[type='submit'], [role='button'], [role='link']")
+        .filter({ hasText: needle }),
+    ];
+
+    for (const loc of candidates) {
+      try {
+        await loc.first().click({ timeout: perAttemptTimeout });
+        return "OK";
+      } catch {
+        // try next strategy
+      }
+    }
+
+    throw new Error(`No clickable element found containing text: ${needle}`);
   }
 }

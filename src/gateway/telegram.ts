@@ -5,6 +5,7 @@ import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
+import { fulfillHumanAction } from "../storage/human-actions.js";
 
 function splitTelegramMessage(text: string, maxLen: number = 3900): string[] {
   const chunks: string[] = [];
@@ -103,6 +104,47 @@ export async function startTelegramBot(deps: {
           return;
         }
 
+        return;
+      }
+
+      // Special command: fulfill a pending human action without sending secrets through the LLM.
+      // Usage: /act <ID> <response...>
+      if (/^\/(act|action)\b/i.test(text.trim())) {
+        const parts = text.trim().split(/\s+/);
+        const id = parts[1] ?? "";
+        const response = parts.slice(2).join(" ").trim();
+        if (!id || !response) {
+          await ctx.reply("Usage: /act <ID> <response>");
+          return;
+        }
+
+        deps.log(`telegram: act user_id=${userId} id=${id} response_chars=${response.length}`);
+        const res = fulfillHumanAction(deps.db, {
+          id,
+          responseText: response,
+          respondedByChannel: "telegram",
+          respondedByKey: String(userId),
+          nowMs: Date.now(),
+        });
+
+        if (!res.ok) {
+          await ctx.reply(`ERROR: unable to record action (${res.error ?? "unknown"})`);
+          return;
+        }
+
+        await ctx.reply(`OK: recorded action ${id}`);
+
+        // Nudge the agent to continue (without leaking the secret response).
+        const { output } = await deps.agent.handleUserMessage({
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+          text: `Human action ${id} is fulfilled.`,
+        });
+        const chunks = splitTelegramMessage(output);
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
+        }
         return;
       }
 

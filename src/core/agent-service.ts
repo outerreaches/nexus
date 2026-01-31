@@ -63,7 +63,15 @@ export class AgentService {
         maxToolCalls: this.deps.limits.maxToolCalls,
         maxIterations: this.deps.limits.maxIterations,
       },
-      toolContext: this.deps.toolContext,
+      toolContext: {
+        ...this.deps.toolContext,
+        request: {
+          channel: params.channel,
+          channelKey: params.channelKey,
+          agentId: params.agentId,
+          sessionId,
+        },
+      },
       onLog: onRunnerLog,
     });
 

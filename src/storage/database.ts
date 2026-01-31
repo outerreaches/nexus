@@ -71,6 +71,27 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel_sender ON pairing_requests(channel, sender_key);
+
+    CREATE TABLE IF NOT EXISTS human_actions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      channel TEXT,
+      channel_key TEXT,
+      agent_id TEXT,
+      kind TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      responded_at INTEGER,
+      responded_by_channel TEXT,
+      responded_by_key TEXT,
+      response_text TEXT,
+      metadata_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_human_actions_status_created ON human_actions(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_human_actions_session ON human_actions(session_id, status, created_at);
   `);
 
   try {

@@ -9,6 +9,9 @@ import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
+import { gmailGetMessage, gmailProfile, gmailSearch, gmailSend } from "./gmail.js";
+import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
+import { humanRequest, humanStatus } from "./human-actions.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
@@ -25,5 +28,15 @@ export function getBuiltInTools(): Tool[] {
     gatewayRestart,
     paperTrade,
     portfolioStatus,
+    gmailProfile,
+    gmailSearch,
+    gmailGetMessage,
+    gmailSend,
+    credentialSet,
+    credentialGenerate,
+    credentialList,
+    credentialDelete,
+    humanRequest,
+    humanStatus,
   ];
 }

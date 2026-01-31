@@ -76,6 +76,24 @@ Environment variables:
 - `NEXUS_BROWSER_HEADLESS=1` (optional)
 - `NEXUS_BROWSER_NO_SANDBOX=1` (optional; mainly for containers)
 
+### Password-based logins (credential vault)
+
+If you need the agent to log into websites with a username + password, avoid typing passwords into chat (that would send them to your LLM provider).
+
+Instead:
+1) Put the secret in an env var and start Nexus with it set.
+2) Store it in the local credential vault via `credential_set` using `passwordEnv` / `usernameEnv`.
+3) Use `browser.type_secret` to fill form fields without exposing the password to the model.
+
+If the agent needs to create new accounts autonomously, prefer generating passwords locally via `credential_generate` (the password is never revealed to the model).
+
+Optional at-rest encryption:
+- Set `NEXUS_CREDENTIALS_KEY` to encrypt stored passwords under `stateDir/secrets/credentials.json`.
+
+Convenience actions:
+- `browser` action `click_text` clicks a button/link by visible text.
+- `browser` action `wait` waits for selector/text/url/title/load-state.
+
 ## Web tools
 
 - `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
@@ -92,9 +110,39 @@ Access control options (OpenClaw-style):
   - `nexus pairing list telegram`
   - `nexus pairing approve telegram <CODE>`
 
+Human-action responses (OTP/MFA/etc) without leaking secrets into the LLM:
+- The agent will create a request id via `human_request`.
+- Reply to the bot with: `/act <ID> <your response>` (this stores the response in state and nudges the agent to continue; the secret is not sent through the model).
+
 Delivery modes:
 - `channels.telegram.mode="polling"` (default): simplest, works anywhere.
 - `channels.telegram.mode="webhook"`: requires `channels.telegram.webhookUrl` or `channels.telegram.webhookPublicUrl` and exposes `channels.telegram.webhookPath` on the gateway HTTP server.
+
+## Gmail (OAuth API)
+
+For Gmail, the recommended approach is the official Gmail API (OAuth2), not browser-login automation.
+
+1) Create OAuth credentials (Desktop app) and enable Gmail API in Google Cloud.
+
+2) Set env vars:
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+
+3) Run authorization (stores tokens under `stateDir/gmail/oauth.json`):
+```bash
+nexus gmail auth
+```
+
+Docker auth example:
+```bash
+docker exec -it nexus-nexus-1 nexus gmail auth --listen 0.0.0.0 --port 18790
+```
+
+Agent tools:
+- `gmail_profile`
+- `gmail_search`
+- `gmail_get_message`
+- `gmail_send`
 
 ## Safety knobs
 

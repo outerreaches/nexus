@@ -140,10 +140,15 @@ Tool usage guidelines and restrictions.
 - **file_write**: Always create parent directories if needed.
 - **browser**: Close tabs when done; don't leave sessions hanging.
 - **shell_exec**: Avoid long-running commands; prefer backgrounding manually.
+- **credential_set**: Prefer env-backed secrets (\`usernameEnv\`/\`passwordEnv\`) so passwords never enter the LLM prompt.
+- **credential_generate**: Prefer for new accounts; generates a strong password locally and stores it (never shown to the model).
+- **browser.type_secret**: Use for password fields instead of \`browser.type\`.
+- **human_request**: Use for OTP/MFA/CAPTCHA handoffs; operator responds via Telegram \`/act <ID> ...\`. Avoid asking for secrets in chat.
 
 ## Forbidden Patterns
 - Never run \`rm -rf\` without explicit confirmation.
 - Never commit secrets or API keys to files.
+- Never ask the user to paste passwords into chat.
 - Never send data to external services without user consent.
 `;
 }

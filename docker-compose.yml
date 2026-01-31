@@ -10,6 +10,12 @@ services:
       # Web search (optional)
       BRAVE_API_KEY: ${BRAVE_API_KEY}
       PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY}
+      # Gmail API (optional)
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI}
+      # Credential vault (optional)
+      NEXUS_CREDENTIALS_KEY: ${NEXUS_CREDENTIALS_KEY}
       # Persist state/config/workspace/history
       NEXUS_STATE_DIR: /data/nexus
       # Headless browser (Chromium in-container)
@@ -20,6 +26,8 @@ services:
       - nexus_data:/data
     ports:
       - "18789:18789"
+      # Gmail OAuth callback (used by `nexus gmail auth` inside the container)
+      - "18790:18790"
     command: ["gateway", "--verbose"]
 
 volumes:

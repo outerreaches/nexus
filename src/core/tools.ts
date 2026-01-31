@@ -11,6 +11,7 @@ export type ToolContext = {
   allowShellExec?: boolean;
   allowCodeEdit?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
+  request?: { channel: string; channelKey: string; agentId: string; sessionId: string };
   nowMs: () => number;
   log: (msg: string) => void;
 };
