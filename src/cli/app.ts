@@ -140,6 +140,84 @@ export async function runCli(argv: string[]): Promise<void> {
     });
 
   program
+    .command("tool")
+    .description("Run a single tool and print its output (useful for scripts/automation)")
+    .argument("<name>", "Tool name (e.g. market_data)")
+    .argument("[argsJson]", "Tool args as JSON (or '-' to read JSON from stdin)", "{}")
+    .action(async (name, argsJson) => {
+      const options = program.opts<{ config: string; verbose: boolean }>();
+      const log = (line: string) => {
+        if (!options.verbose) return;
+        process.stderr.write(`[nexus] ${line}\n`);
+      };
+
+      const { ensureConfigExists, loadConfig } = await import("../state/config.js");
+      const { bootstrapState } = await import("../state/bootstrap.js");
+      const { resolveRuntimePaths } = await import("../state/paths.js");
+      const { openDatabase } = await import("../storage/database.js");
+      const { ToolRegistry } = await import("../core/tool-registry.js");
+      const { getBuiltInTools } = await import("../tools/index.js");
+
+      await ensureConfigExists(options.config);
+      const config = await loadConfig(options.config);
+      await bootstrapState(config);
+      const paths = await resolveRuntimePaths(config);
+      const db = await openDatabase(paths.dbPath);
+
+      try {
+        const builtIns = getBuiltInTools();
+        const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
+        await registry.init();
+
+        let raw = String(argsJson ?? "{}").trim();
+        if (raw === "-") {
+          raw = await new Promise<string>((resolve) => {
+            const chunks: Buffer[] = [];
+            process.stdin.on("data", (c) => chunks.push(Buffer.from(c)));
+            process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+          });
+          raw = raw.trim();
+        }
+
+        let parsed: unknown = {};
+        if (raw.length > 0 && raw !== "{}") {
+          try {
+            parsed = JSON.parse(raw);
+          } catch (e) {
+            process.stderr.write(`ERROR: invalid JSON args: ${e instanceof Error ? e.message : String(e)}\n`);
+            process.exitCode = 2;
+            return;
+          }
+        }
+
+        const tool = registry.list().find((t) => t.name === String(name));
+        if (!tool) {
+          process.stderr.write(`ERROR: unknown tool '${String(name)}'\n`);
+          process.exitCode = 2;
+          return;
+        }
+
+        const toolContext = {
+          workspaceDir: paths.workspaceDir,
+          stateDir: paths.stateDir,
+          codeDir: paths.codeDir,
+          db,
+          registry,
+          allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
+          allowCodeEdit: config.permissions.allowCodeEdit,
+          nowMs: () => Date.now(),
+          log,
+        };
+
+        const result = await tool.execute(parsed, toolContext);
+        process.stdout.write(result.trimEnd() + "\n");
+        if (result.startsWith("ERROR:")) process.exitCode = 1;
+      } finally {
+        db.close();
+      }
+    });
+
+  program
     .command("init")
     .description("Create config and bootstrap the Nexus state/workspace")
     .option("--skip-onboarding", "Skip interactive onboarding prompts", false)

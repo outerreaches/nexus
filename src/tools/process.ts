@@ -3,6 +3,10 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import type { ProcessManager } from "../process/manager.js";
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 export const processStart = defineTool({
   name: "process_start",
   description:
@@ -17,7 +21,17 @@ export const processStart = defineTool({
     if (!mgr) return "ERROR: process manager unavailable";
     try {
       const info = await mgr.start({ command: args.command, cwd: args.cwd });
-      return JSON.stringify(info, null, 2);
+
+      // If the process dies immediately, surface it as an error so the agent doesn't assume it's running.
+      await sleep(250);
+      const current = mgr.get(info.id) ?? info;
+      if (current.status !== "running") {
+        const logs = await mgr.tailLogs({ id: info.id, maxChars: 4000 }).catch(() => "");
+        const hint = `HINT: The process exited immediately. Inspect logs with process_logs and fix the underlying error before restarting.`;
+        return `ERROR: process exited (status=${current.status}, code=${current.exitCode ?? "null"}, signal=${current.signal ?? "null"})\n${hint}\n\n${JSON.stringify(current, null, 2)}\n\nLOGS:\n${logs}`;
+      }
+
+      return JSON.stringify(current, null, 2);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
