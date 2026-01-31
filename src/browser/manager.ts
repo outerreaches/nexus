@@ -285,6 +285,13 @@ export class BrowserManager {
       return "OK";
     }
 
+    if (r.toLowerCase().startsWith("css:")) {
+      const sel = r.slice(4).trim();
+      if (!sel) throw new Error("css: selector is empty");
+      await this.activePage.locator(sel).first().click({ timeout: timeoutMs });
+      return "OK";
+    }
+
     // Best-effort: treat as visible text for a clickable element.
     return await this.clickText(r, timeoutMs);
   }
@@ -298,6 +305,15 @@ export class BrowserManager {
       const loc = this.activePage.locator(`[data-nexus-ref="${r}"]`).first();
       const count = await loc.count().catch(() => 0);
       if (count === 0) throw new Error(`Unknown element ref "${r}". Call browser.snapshot and use the [eN] refs.`);
+      await loc.fill(text, { timeout: timeoutMs });
+      if (submit) await loc.press("Enter");
+      return "OK";
+    }
+
+    if (r.toLowerCase().startsWith("css:")) {
+      const sel = r.slice(4).trim();
+      if (!sel) throw new Error("css: selector is empty");
+      const loc = this.activePage.locator(sel).first();
       await loc.fill(text, { timeout: timeoutMs });
       if (submit) await loc.press("Enter");
       return "OK";
