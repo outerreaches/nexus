@@ -5,6 +5,8 @@ services:
     environment:
       # LLM
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      # Telegram
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       # Persist state/config/workspace/history
       NEXUS_STATE_DIR: /data/nexus
       # Headless browser (Chromium in-container)
@@ -19,4 +21,3 @@ services:
 
 volumes:
   nexus_data:
-

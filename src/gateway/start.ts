@@ -109,6 +109,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   });
 
   const tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
+  if (!tg) log("telegram: disabled");
 
   const stop = async () => {
     await tg?.stop();
