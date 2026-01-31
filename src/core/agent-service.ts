@@ -29,7 +29,13 @@ export class AgentService {
     channelKey: string;
     agentId: string;
     text: string;
-  }): Promise<{ sessionId: string; output: string }> {
+  }): Promise<{
+    sessionId: string;
+    output: string;
+    status: "complete" | "failed" | "budget_exhausted";
+    toolCallsUsed: number;
+    iterationsUsed: number;
+  }> {
     return await this.semaphore.withLock(async () => {
       const nowMs = this.deps.toolContext.nowMs();
       const sessionId = getOrCreateSessionId({
@@ -85,7 +91,13 @@ export class AgentService {
       appendMessage({ db: this.deps.db, sessionId, message: msg as ChatMessage, nowMs: this.deps.toolContext.nowMs() });
     }
 
-    return { sessionId, output: result.output };
+    return {
+      sessionId,
+      output: result.output,
+      status: result.status,
+      toolCallsUsed: result.toolCallsUsed,
+      iterationsUsed: result.iterationsUsed,
+    };
     });
   }
 }

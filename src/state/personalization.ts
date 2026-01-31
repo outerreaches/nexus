@@ -141,6 +141,9 @@ Tool usage guidelines and restrictions.
 - **browser**: Close tabs when done; don't leave sessions hanging.
 - **process_start**: Use for long-running background jobs (servers/schedulers). Inspect output with \`process_logs\`; stop with \`process_stop\`.
 - **shell_exec**: For short commands (default timeout 60s). Use \`process_start\` for long-running tasks.
+- **job_create**: Use to schedule cron jobs (internal scheduler). Jobs are owned by the agent that created them; failures are delivered to the owning agent for self-healing.
+- **job_run_now**: Triggers an immediate run (job must be enabled). Use \`job_runs\`/\`job_run_get\`/\`job_events\` to inspect outcomes.
+- **telegram_send**: Send a proactive message to the allowlisted Telegram user (useful from scheduled jobs / non-telegram contexts).
 - **credential_set**: Prefer env-backed secrets (\`usernameEnv\`/\`passwordEnv\`) so passwords never enter the LLM prompt.
 - **credential_generate**: Prefer for new accounts; generates a strong password locally and stores it (never shown to the model).
 - **browser.type_secret**: Use for password fields instead of \`browser.type\`.

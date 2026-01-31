@@ -92,6 +92,70 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
     CREATE INDEX IF NOT EXISTS idx_human_actions_status_created ON human_actions(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_human_actions_session ON human_actions(session_id, status, created_at);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Internal scheduler / jobs
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      owner_agent_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      cron TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      spec_json TEXT NOT NULL DEFAULT '{}',
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER,
+      last_notified_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_agent_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_jobs_next_run ON jobs(enabled, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS job_runs (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      owner_agent_id TEXT NOT NULL,
+      scheduled_for INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      status TEXT NOT NULL,
+      error TEXT,
+      output TEXT,
+      tool_calls_used INTEGER,
+      iterations_used INTEGER,
+      FOREIGN KEY(job_id) REFERENCES jobs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_job_runs_owner ON job_runs(owner_agent_id, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS job_events (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      run_id TEXT,
+      owner_agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      handled_at INTEGER,
+      FOREIGN KEY(job_id) REFERENCES jobs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_job_events_owner ON job_events(owner_agent_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS job_leases (
+      job_id TEXT PRIMARY KEY,
+      lease_id TEXT NOT NULL,
+      leased_until INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
   try {

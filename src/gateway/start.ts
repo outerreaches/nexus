@@ -8,6 +8,7 @@ import { bootstrapState } from "../state/bootstrap.js";
 import { resolveRuntimePaths } from "../state/paths.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { ProcessManager } from "../process/manager.js";
+import { startJobScheduler } from "../scheduler/job-scheduler.js";
 import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
 import { startProactiveHeartbeat } from "./proactive.js";
@@ -53,6 +54,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     browser,
     registry,
     processManager,
+    telegram: undefined as unknown,
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
     requestRestart: (reason: string, delayMs: number = 2500) => {
@@ -109,12 +111,28 @@ export async function startGateway(params: { configPath: string; port?: number; 
         allowShellExec: toolContext.allowShellExec,
         allowCodeEdit: toolContext.allowCodeEdit,
       },
+      scheduler: {
+        enabled: config.scheduler.enabled,
+        tickIntervalMs: config.scheduler.tickIntervalMs,
+        maxRunsPerTick: config.scheduler.maxRunsPerTick,
+        leaseTtlMs: config.scheduler.leaseTtlMs,
+        maxConsecutiveFailures: config.scheduler.maxConsecutiveFailures,
+        notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
+        notifyCooldownMs: config.scheduler.notifyCooldownMs,
+      },
     }),
     log,
   });
 
   const tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
   if (!tg) log("telegram: disabled");
+  if (tg) {
+    toolContext.telegram = {
+      sendOutput: tg.sendOutput,
+      allowFrom: config.channels.telegram.allowFrom ?? [],
+      allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
+    };
+  }
 
   const proactive = startProactiveHeartbeat({
     config,
@@ -126,7 +144,16 @@ export async function startGateway(params: { configPath: string; port?: number; 
   });
   if (!proactive) log("proactive: disabled");
 
+  const scheduler = startJobScheduler({
+    config,
+    agent,
+    db,
+    log,
+  });
+  if (!scheduler) log("scheduler: disabled");
+
   const stop = async () => {
+    scheduler?.stop();
     proactive?.stop();
     await tg?.stop();
     await http.stop();

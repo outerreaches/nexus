@@ -43,6 +43,18 @@ const ProactiveSchema = z
   })
   .default({});
 
+const SchedulerSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    tickIntervalMs: z.number().int().positive().default(15_000),
+    maxRunsPerTick: z.number().int().positive().default(5),
+    leaseTtlMs: z.number().int().positive().default(10 * 60_000),
+    maxConsecutiveFailures: z.number().int().positive().default(5),
+    notifyAgentOnFailure: z.boolean().default(true),
+    notifyCooldownMs: z.number().int().min(0).default(5 * 60_000),
+  })
+  .default({});
+
 const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
@@ -67,6 +79,7 @@ export const ConfigSchema = z.object({
     })
     .default({ telegram: {} }),
   proactive: ProactiveSchema,
+  scheduler: SchedulerSchema,
   permissions: z
     .object({
       allowShellExec: z.boolean().default(false),
@@ -142,6 +155,15 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           maxIntervalMs: 3600000,
           jitterMs: 5000,
           notifyTelegram: true,
+        },
+        scheduler: {
+          enabled: true,
+          tickIntervalMs: 15000,
+          maxRunsPerTick: 5,
+          leaseTtlMs: 600000,
+          maxConsecutiveFailures: 5,
+          notifyAgentOnFailure: true,
+          notifyCooldownMs: 300000,
         },
       },
       null,

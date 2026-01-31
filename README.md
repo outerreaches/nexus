@@ -183,6 +183,23 @@ Enable via env (simplest in Docker):
 
 Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalMs`, etc.
 
+### Internal Scheduler (Cron Jobs)
+
+Nexus includes an internal **cron scheduler** (no external cron or Python scripts required).
+
+Key behavior:
+- Jobs are **owned by the agent that creates them** (important for future multi-agent swarms).
+- When a job run fails, the gateway notifies the **owning agent** (not the user) so it can self-heal and decide whether to notify you.
+
+Tools:
+- `job_create`, `job_list`, `job_get`, `job_update`, `job_pause`, `job_resume`
+- `job_run_now`, `job_runs`, `job_run_get`, `job_events`, `job_delete`
+- `telegram_send` can proactively message the allowlisted user from scheduled jobs
+
+Config/env:
+- Config: `scheduler.*` (enabled, tick interval, failure policy)
+- Env override: `NEXUS_SCHEDULER=0` disables the scheduler
+
 ### First-Time Setup (Onboarding)
 
 When you run `nexus init` for the first time, an interactive onboarding wizard guides you through creating these files with your preferences.

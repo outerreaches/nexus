@@ -13,6 +13,8 @@ import { gatewayRestart } from "./lifecycle.js";
 import { gmailGetMessage, gmailProfile, gmailSearch, gmailSend } from "./gmail.js";
 import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
 import { humanRequest, humanStatus } from "./human-actions.js";
+import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobPause, jobResume, jobRunGet, jobRunNow, jobRuns, jobUpdate } from "./jobs.js";
+import { telegramSend } from "./telegram-send.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
@@ -44,5 +46,17 @@ export function getBuiltInTools(): Tool[] {
     credentialDelete,
     humanRequest,
     humanStatus,
+    telegramSend,
+    jobCreate,
+    jobList,
+    jobGet,
+    jobUpdate,
+    jobPause,
+    jobResume,
+    jobRunNow,
+    jobRuns,
+    jobRunGet,
+    jobEvents,
+    jobDelete,
   ];
 }

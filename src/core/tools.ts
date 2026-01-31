@@ -9,6 +9,7 @@ export type ToolContext = {
   browser?: unknown;
   registry?: unknown;
   processManager?: unknown;
+  telegram?: unknown;
   allowShellExec?: boolean;
   allowCodeEdit?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
