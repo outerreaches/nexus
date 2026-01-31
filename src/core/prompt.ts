@@ -1,43 +1,57 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
-async function readIfExists(filePath: string): Promise<string | null> {
-  try {
-    return await fs.readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
+import { loadPersonalizationContext, type PersonalizationContext } from "../state/personalization.js";
 
 export async function buildSystemPrompt(params: {
   workspaceDir: string;
   agentId?: string;
 }): Promise<string> {
-  const rootSoul = await readIfExists(path.join(params.workspaceDir, "SOUL.md"));
-  const rootAgents = await readIfExists(path.join(params.workspaceDir, "AGENTS.md"));
+  const ctx = await loadPersonalizationContext(params.workspaceDir, params.agentId);
+  return formatSystemPrompt(ctx);
+}
 
-  const agentSoul = params.agentId
-    ? await readIfExists(path.join(params.workspaceDir, "agents", params.agentId, "SOUL.md"))
-    : null;
-  const agentAgents = params.agentId
-    ? await readIfExists(path.join(params.workspaceDir, "agents", params.agentId, "AGENTS.md"))
-    : null;
+function formatSystemPrompt(ctx: PersonalizationContext): string {
+  const sections: string[] = [];
 
-  const parts: string[] = [];
-  if (agentSoul) parts.push(agentSoul.trim());
-  else if (rootSoul) parts.push(rootSoul.trim());
+  // Core identity and personality (SOUL.md)
+  if (ctx.soul) {
+    sections.push(ctx.soul.trim());
+  }
 
-  if (agentAgents) parts.push(agentAgents.trim());
-  else if (rootAgents) parts.push(rootAgents.trim());
+  // Operating instructions (AGENTS.md)
+  if (ctx.agents) {
+    sections.push(ctx.agents.trim());
+  }
 
-  parts.push(
+  // Agent identity metadata (IDENTITY.md)
+  if (ctx.identity) {
+    sections.push(ctx.identity.trim());
+  }
+
+  // User profile context (USER.md)
+  if (ctx.user) {
+    sections.push(ctx.user.trim());
+  }
+
+  // Tool usage guidelines (TOOLS.md)
+  if (ctx.tools) {
+    sections.push(ctx.tools.trim());
+  }
+
+  // Proactive tasks (HEARTBEAT.md) - optional, only if non-empty
+  if (ctx.heartbeat && ctx.heartbeat.trim().length > 50) {
+    sections.push(ctx.heartbeat.trim());
+  }
+
+  // Runtime notes (always appended)
+  sections.push(
     [
       "## Runtime Notes",
       "- You may call tools to read/write files, browse, and automate tasks.",
       "- When you change your own prompts/tools, leave a short note in `NOTES.md`.",
+      `- Current time: ${new Date().toISOString()}`,
     ].join("\n"),
   );
 
-  return parts.filter(Boolean).join("\n\n");
+  return sections.filter(Boolean).join("\n\n---\n\n");
 }
 
+export { loadPersonalizationContext, type PersonalizationContext };

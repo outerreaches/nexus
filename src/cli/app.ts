@@ -133,14 +133,51 @@ export async function runCli(argv: string[]): Promise<void> {
   program
     .command("init")
     .description("Create config and bootstrap the Nexus state/workspace")
-    .action(async () => {
+    .option("--skip-onboarding", "Skip interactive onboarding prompts", false)
+    .action(async (opts) => {
       const options = program.opts<{ config: string }>();
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { bootstrapState } = await import("../state/bootstrap.js");
+      const { resolveRuntimePaths } = await import("../state/paths.js");
+      const { runOnboardingIfNeeded } = await import("../state/onboarding.js");
+
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
       await bootstrapState(config);
+      const paths = await resolveRuntimePaths(config);
+
+      // Run interactive onboarding if this is first time
+      await runOnboardingIfNeeded(paths.workspaceDir, { interactive: !opts.skipOnboarding });
+
       process.stdout.write(`OK: initialized using config ${options.config}\n`);
+    });
+
+  program
+    .command("onboard")
+    .description("Run the interactive onboarding wizard to personalize your agent")
+    .option("--force", "Run onboarding even if files already exist", false)
+    .action(async (opts) => {
+      const options = program.opts<{ config: string }>();
+      const { ensureConfigExists, loadConfig } = await import("../state/config.js");
+      const { bootstrapState } = await import("../state/bootstrap.js");
+      const { resolveRuntimePaths } = await import("../state/paths.js");
+      const { runOnboarding, writeOnboardingFiles, shouldRunOnboarding } = await import("../state/onboarding.js");
+
+      await ensureConfigExists(options.config);
+      const config = await loadConfig(options.config);
+      await bootstrapState(config);
+      const paths = await resolveRuntimePaths(config);
+
+      const needsOnboarding = await shouldRunOnboarding(paths.workspaceDir);
+      if (!needsOnboarding && !opts.force) {
+        process.stdout.write("Personalization files already exist. Use --force to overwrite.\n");
+        return;
+      }
+
+      const result = await runOnboarding(paths.workspaceDir);
+      if (!result.skipped) {
+        await writeOnboardingFiles(paths.workspaceDir, result.identity, result.userProfile);
+      }
     });
 
   program

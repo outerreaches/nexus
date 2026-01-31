@@ -3,7 +3,7 @@
 Lightweight, always-on multi-agent assistant (OpenClaw-inspired), starting with:
 - Gateway process (HTTP status + Telegram bot)
 - OpenRouter + OpenAI-compatible local models (LM Studio / Ollama) via a single OpenAI-compat client
-- Self-modifiable prompts via workspace `SOUL.md` + `AGENTS.md`
+- Self-modifiable prompts via workspace personalization files (SOUL.md, IDENTITY.md, USER.md, etc.)
 - Basic tool loop (file ops, web fetch, guarded shell exec, managed browser, paper trade logging)
 
 ## Quick start
@@ -18,9 +18,18 @@ npm install
 cp .env.example .env
 ```
 
-3) Create config + workspace:
+3) Create config + workspace with interactive onboarding:
 ```bash
 npm run dev -- init
+```
+
+This launches an interactive onboarding wizard that creates personalized configuration files for your agent. You'll be asked for:
+- **Agent identity**: Name, emoji, personality vibe
+- **Your profile**: Name, timezone, context
+
+To skip the interactive prompts and use defaults:
+```bash
+npm run dev -- init --skip-onboarding
 ```
 
 4) Edit your config (default location is `~/.nexus/nexus.json`) and set secrets:
@@ -89,8 +98,45 @@ Drop tools into `~/.nexus/tools/` and call `tools_reload` to load them without r
 - `*.tool.json` (built-in simple types: `shell`, `http`)
 - `*.tool.mjs` (arbitrary JavaScript module; full power)
 
+## Personalization & Soul Files
+
+Nexus uses a workspace-based personalization system inspired by [OpenClaw](https://github.com/openclaw/openclaw). All personalization files live in `~/.nexus/workspace/`:
+
+| File | Purpose |
+|------|---------|
+| `SOUL.md` | Agent persona, philosophy, personality, boundaries |
+| `IDENTITY.md` | Agent name, emoji, avatar, vibe |
+| `USER.md` | Your profile — name, timezone, preferences, context |
+| `AGENTS.md` | Operating instructions, memory strategy, rules |
+| `TOOLS.md` | Tool usage guidelines and restrictions |
+| `HEARTBEAT.md` | Optional proactive task checklist |
+| `NOTES.md` | Persistent scratchpad across sessions |
+
+### First-Time Setup (Onboarding)
+
+When you run `nexus init` for the first time, an interactive onboarding wizard guides you through creating these files with your preferences.
+
+To re-run onboarding later:
+```bash
+npm run dev -- onboard           # Only runs if files don't exist
+npm run dev -- onboard --force   # Overwrites existing files
+```
+
+### Per-Agent Overrides
+
+For multi-agent setups, you can create agent-specific overrides in `~/.nexus/workspace/agents/<agent-id>/`:
+```
+~/.nexus/workspace/
+├── SOUL.md                    # Default for all agents
+├── agents/
+│   ├── researcher/
+│   │   └── SOUL.md            # Override for "researcher" agent
+│   └── coder/
+│       └── SOUL.md            # Override for "coder" agent
+```
+
 ## Full self-modification
 
-- Prompts: edit `~/.nexus/workspace/SOUL.md` and `~/.nexus/workspace/AGENTS.md`.
+- Prompts: edit personalization files in `~/.nexus/workspace/` (SOUL.md, IDENTITY.md, USER.md, etc.).
 - Code edits: `file_*` tools can target `root:"code"` (or absolute paths under the code dir). This is controlled by `permissions.allowCodeEdit` and `codeDir` in config.
 - Restart: call `gateway_restart` after changing code/config.
