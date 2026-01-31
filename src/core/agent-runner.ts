@@ -2,6 +2,49 @@ import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
 
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
+}
+
+function redactForLog(value: unknown, depth: number = 0): unknown {
+  if (depth > 6) return "[max_depth]";
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === "string") {
+    return value.length > 160 ? `[omitted ${value.length} chars]` : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+
+  if (Array.isArray(value)) return value.map((v) => redactForLog(v, depth + 1));
+
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (/(token|api[_-]?key|secret|password|authorization|cookie)/i.test(k)) {
+        out[k] = "[redacted]";
+        continue;
+      }
+      if (/(content|body|replace|text)/i.test(k) && typeof v === "string") {
+        out[k] = `[omitted ${v.length} chars]`;
+        continue;
+      }
+      out[k] = redactForLog(v, depth + 1);
+    }
+    return out;
+  }
+
+  return String(value);
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export type AgentBudget = {
   maxToolCalls: number;
   maxIterations: number;
@@ -44,6 +87,7 @@ export class AgentRunner {
         toolCalls = res.toolCalls;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
         const errorText = `LLM error: ${msg}`;
         const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
         newMessages.push(assistantMsg);
@@ -106,7 +150,7 @@ export class AgentRunner {
           args = {};
         }
 
-        this.deps.onLog?.(`tool:${call.name}`);
+        this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         let result: string;
         try {
           result = await tool.execute(args, this.deps.toolContext);
@@ -114,6 +158,10 @@ export class AgentRunner {
           const msg = err instanceof Error ? err.message : String(err);
           result = `ERROR: ${msg}`;
         }
+
+        const status = result.startsWith("ERROR:") ? "error" : "ok";
+        const errPreview = status === "error" ? ` msg=${safeJson(truncate(result.split(/\r?\n/)[0] ?? "", 200))}` : "";
+        this.deps.onLog?.(`tool_result name=${call.name} id=${call.id} status=${status} chars=${result.length}${errPreview}`);
 
         const toolResultMsg: ChatMessage = {
           role: "tool",

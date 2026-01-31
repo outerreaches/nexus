@@ -71,6 +71,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     toolContext,
     db,
     workspaceDir: paths.workspaceDir,
+    onRunnerLog: params.verbose ? log : undefined,
     limits: {
       maxMessages: 80,
       maxToolCalls: config.limits.maxToolCallsPerRun,

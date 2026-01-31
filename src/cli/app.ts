@@ -27,10 +27,14 @@ export async function runCli(argv: string[]): Promise<void> {
     .description("Simple CLI chat (stores history in SQLite)")
     .argument("[message]", "Message to send (omit for interactive mode)")
     .option("--agent <id>", "Agent id (maps to workspace/agents/<id>/)", "main")
+    .option("--trace", "Show agent events (tool calls, errors, internal logs) in CLI output", false)
     .action(async (message, opts) => {
       const options = program.opts<{ config: string; verbose: boolean }>();
+      const traceEnabled = Boolean(opts.trace);
       const log = (line: string) => {
-        if (options.verbose) process.stdout.write(`[nexus] ${line}\n`);
+        if (!options.verbose && !traceEnabled) return;
+        const out = traceEnabled ? process.stderr : process.stdout;
+        out.write(`[nexus] ${line}\n`);
       };
 
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
@@ -91,6 +95,7 @@ export async function runCli(argv: string[]): Promise<void> {
         toolContext,
         db,
         workspaceDir: paths.workspaceDir,
+        onRunnerLog: traceEnabled || options.verbose ? log : undefined,
         limits: {
           maxMessages: 80,
           maxToolCalls: config.limits.maxToolCallsPerRun,

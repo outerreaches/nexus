@@ -18,6 +18,7 @@ export class AgentService {
       db: NexusDatabase;
       workspaceDir: string;
       limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number };
+      onRunnerLog?: (line: string) => void;
     },
   ) {
     this.semaphore = new Semaphore(deps.limits.maxConcurrent);
@@ -47,6 +48,14 @@ export class AgentService {
 
     const systemPrompt = await buildSystemPrompt({ workspaceDir: this.deps.workspaceDir, agentId: params.agentId });
 
+    const onRunnerLog = this.deps.onRunnerLog
+      ? (line: string) => {
+          this.deps.onRunnerLog?.(
+            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} ${line}`,
+          );
+        }
+      : undefined;
+
     const runner = new AgentRunner({
       llm: this.deps.llm,
       tools: this.deps.getTools(),
@@ -55,6 +64,7 @@ export class AgentService {
         maxIterations: this.deps.limits.maxIterations,
       },
       toolContext: this.deps.toolContext,
+      onLog: onRunnerLog,
     });
 
     const result = await runner.run({
