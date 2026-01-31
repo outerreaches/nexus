@@ -1,0 +1,22 @@
+services:
+  nexus:
+    build: .
+    image: nexus-agent:dev
+    environment:
+      # LLM
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      # Persist state/config/workspace/history
+      NEXUS_STATE_DIR: /data/nexus
+      # Headless browser (Chromium in-container)
+      NEXUS_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium
+      NEXUS_BROWSER_HEADLESS: "1"
+      NEXUS_BROWSER_NO_SANDBOX: "1"
+    volumes:
+      - nexus_data:/data
+    ports:
+      - "18789:18789"
+    command: ["gateway", "--verbose"]
+
+volumes:
+  nexus_data:
+
