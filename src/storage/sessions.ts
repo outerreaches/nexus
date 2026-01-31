@@ -3,6 +3,32 @@ import crypto from "node:crypto";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "./database.js";
 
+function sanitizeHistory(history: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  let openToolCallIds = new Set<string>();
+
+  for (const msg of history) {
+    if (msg.role === "assistant") {
+      out.push(msg);
+      openToolCallIds = new Set((msg.toolCalls ?? []).map((tc) => tc.id).filter(Boolean));
+      continue;
+    }
+
+    if (msg.role === "tool") {
+      if (msg.toolCallId && openToolCallIds.has(msg.toolCallId)) {
+        out.push(msg);
+        openToolCallIds.delete(msg.toolCallId);
+      }
+      continue;
+    }
+
+    out.push(msg);
+    openToolCallIds.clear();
+  }
+
+  return out;
+}
+
 export function getOrCreateSessionId(params: {
   db: NexusDatabase;
   channel: string;
@@ -68,11 +94,12 @@ export function loadRecentHistory(params: {
   sessionId: string;
   maxMessages: number;
 }): ChatMessage[] {
+  const fetchLimit = Math.max(params.maxMessages * 3, params.maxMessages + 50);
   const rows = params.db.db
     .prepare(
       "SELECT role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
     )
-    .all(params.sessionId, params.maxMessages) as {
+    .all(params.sessionId, fetchLimit) as {
     role: string;
     content: string;
     name: string | null;
@@ -80,9 +107,9 @@ export function loadRecentHistory(params: {
     tool_calls_json: string | null;
   }[];
 
-  return rows
+  const history: ChatMessage[] = rows
     .reverse()
-    .map((r) => {
+    .map((r): ChatMessage => {
       if (r.role === "tool") {
         return { role: "tool", content: r.content, name: r.name ?? "", toolCallId: r.tool_call_id ?? "" };
       }
@@ -106,4 +133,11 @@ export function loadRecentHistory(params: {
       }
       return { role: "user", content: r.content };
     });
+
+  const sanitized = sanitizeHistory(history);
+  if (sanitized.length <= params.maxMessages) return sanitized;
+
+  let start = sanitized.length - params.maxMessages;
+  while (start < sanitized.length && sanitized[start]?.role === "tool") start += 1;
+  return sanitized.slice(start);
 }

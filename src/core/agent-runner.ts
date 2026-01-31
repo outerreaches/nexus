@@ -33,10 +33,28 @@ export class AgentRunner {
 
     let toolCallsUsed = 0;
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
-      const { content, toolCalls } = await this.deps.llm.completeChat({
-        messages,
-        tools: this.deps.tools,
-      });
+      let content: string | null;
+      let toolCalls: import("./types.js").ToolCall[];
+      try {
+        const res = await this.deps.llm.completeChat({
+          messages,
+          tools: this.deps.tools,
+        });
+        content = res.content;
+        toolCalls = res.toolCalls;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const errorText = `LLM error: ${msg}`;
+        const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
+        newMessages.push(assistantMsg);
+        return {
+          status: "failed",
+          output: errorText,
+          newMessages,
+          toolCallsUsed,
+          iterationsUsed: iteration + 1,
+        };
+      }
 
       if (toolCalls.length === 0) {
         const finalText = content ?? "";
