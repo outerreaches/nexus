@@ -45,7 +45,25 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       total: agentGraph.length,
     };
     
-    return c.json({ nodes, stats, timestamp: nowMs });
+    // Include table data for live updates
+    const formatAgentRow = (r: AgentRunInfo) => ({
+      status: r.status,
+      agentId: r.agentId,
+      preset: r.preset,
+      channel: `${r.channel}:${r.channelKey}`,
+      task: r.task,
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      toolCallsUsed: r.toolCallsUsed,
+      iterationsUsed: r.iterationsUsed,
+    });
+    
+    const tables = {
+      active: agents.active.map(formatAgentRow),
+      recent: agents.recent.map(formatAgentRow),
+    };
+    
+    return c.json({ nodes, stats, tables, timestamp: nowMs });
   });
   
   app.get("/dashboard", async (c) => {
@@ -677,11 +695,11 @@ function renderDashboard(params: {
         <div class="split">
           <div>
             <h3>Running</h3>
-            ${renderAgentTable(params.agents.active)}
+            <div id="table-active">${renderAgentTable(params.agents.active)}</div>
           </div>
           <div>
             <h3>Recent (${params.agentWindowMinutes}m)</h3>
-            ${renderAgentTable(params.agents.recent)}
+            <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
           </div>
         </div>
       </section>
@@ -733,6 +751,62 @@ function renderDashboard(params: {
       };
       updateStats(agentStats);
       
+      // Helper to escape HTML
+      const escapeHtml = (str) => {
+        if (!str) return '';
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      };
+      
+      // Helper to format time
+      const formatTime = (ms) => {
+        if (!ms) return '-';
+        try { return new Date(ms).toISOString(); } catch { return '-'; }
+      };
+      
+      // Helper to truncate text
+      const truncateText = (text, max) => {
+        if (!text) return '';
+        if (text.length <= max) return text;
+        return text.slice(0, max) + '...';
+      };
+      
+      // Render agent table HTML
+      const renderAgentTableHtml = (rows) => {
+        if (!rows || rows.length === 0) {
+          return '<div class="no-data">No agent runs.</div>';
+        }
+        const header = \`<table>
+          <thead><tr>
+            <th>Status</th><th>Agent</th><th>Preset</th><th>Channel</th>
+            <th>Task</th><th>Started</th><th>Ended</th><th>Budget</th>
+          </tr></thead><tbody>\`;
+        const rowsHtml = rows.map(r => {
+          const budget = (r.toolCallsUsed !== undefined || r.iterationsUsed !== undefined)
+            ? \`\${r.toolCallsUsed ?? '-'} tools / \${r.iterationsUsed ?? '-'} iters\`
+            : '-';
+          const statusClass = r.status.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+          return \`<tr>
+            <td><span class="badge status-\${statusClass}">\${escapeHtml(r.status)}</span></td>
+            <td>\${escapeHtml(r.agentId)}</td>
+            <td>\${escapeHtml(r.preset)}</td>
+            <td>\${escapeHtml(r.channel)}</td>
+            <td>\${escapeHtml(truncateText(r.task, 160))}</td>
+            <td>\${escapeHtml(formatTime(r.startedAt))}</td>
+            <td>\${escapeHtml(r.endedAt ? formatTime(r.endedAt) : '-')}</td>
+            <td>\${escapeHtml(budget)}</td>
+          </tr>\`;
+        }).join('');
+        return header + rowsHtml + '</tbody></table>';
+      };
+      
+      // Update agent tables
+      const updateTables = (tables) => {
+        const activeContainer = document.getElementById('table-active');
+        const recentContainer = document.getElementById('table-recent');
+        if (activeContainer) activeContainer.innerHTML = renderAgentTableHtml(tables.active);
+        if (recentContainer) recentContainer.innerHTML = renderAgentTableHtml(tables.recent);
+      };
+      
       // Pause state (orbital animation)
       let isPaused = false;
       if (pauseBtn) {
@@ -764,6 +838,10 @@ function renderDashboard(params: {
           graphData = data.nodes;
           agentStats = data.stats;
           updateStats(agentStats);
+          
+          if (data.tables) {
+            updateTables(data.tables);
+          }
           
           if (sceneState) {
             updateSceneWithNewData(sceneState, data.nodes);
