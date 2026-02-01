@@ -149,48 +149,11 @@ export class AgentRunner {
       messages.push(toolCallingMsg);
       newMessages.push(toolCallingMsg);
 
-      for (let i = 0; i < toolCalls.length; i++) {
-        const call = toolCalls[i];
-        toolCallsUsed += 1;
-        if (toolCallsUsed > this.deps.budget.maxToolCalls) {
-          return {
-            status: "budget_exhausted",
-            output: "Budget exhausted while executing tools.",
-            newMessages,
-            toolCallsUsed,
-            iterationsUsed: iteration + 1,
-          };
-        }
-
-        const tool = this.deps.tools.find((t) => t.name === call.name);
-        if (!tool) {
-          const msg: ChatMessage = {
-            role: "tool",
-            name: call.name,
-            toolCallId: call.id,
-            content: `ERROR: unknown tool '${call.name}'`,
-          };
-          messages.push(msg);
-          newMessages.push(msg);
-          continue;
-        }
-
-        let args: unknown = {};
-        try {
-          args = OpenAICompatClient.parseToolArgs(call.arguments);
-        } catch {
-          args = {};
-        }
-
-        this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
-        let result: string;
-        try {
-          result = await tool.execute(args, this.deps.toolContext);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          result = `ERROR: ${msg}`;
-        }
-
+      const handleToolResult = (
+        call: import("./types.js").ToolCall,
+        result: string,
+        callIndex: number,
+      ): AgentResult | null => {
         const status = result.startsWith("ERROR:") ? "error" : "ok";
         const errPreview = status === "error" ? ` msg=${safeJson(truncate(result.split(/\r?\n/)[0] ?? "", 200))}` : "";
         this.deps.onLog?.(`tool_result name=${call.name} id=${call.id} status=${status} chars=${result.length}${errPreview}`);
@@ -231,7 +194,7 @@ export class AgentRunner {
               `Last error: ${firstLine}`;
 
             // Ensure every tool_call gets a tool response, even if we abort early.
-            for (let j = i + 1; j < toolCalls.length; j++) {
+            for (let j = callIndex + 1; j < toolCalls.length; j++) {
               const pending = toolCalls[j];
               const pendingMsg: ChatMessage = {
                 role: "tool",
@@ -270,6 +233,115 @@ export class AgentRunner {
           toolResultMsg.content +=
             `\n\n[BUDGET WARNING: ${iterRemain} iterations and ${toolRemain} tool calls remaining. ` +
             `Wrap up or summarize progress soon.]`;
+        }
+
+        return null;
+      };
+
+      for (let i = 0; i < toolCalls.length; i++) {
+        const call = toolCalls[i];
+        if (call.name === "spawn_agent") {
+          let j = i;
+          while (j < toolCalls.length && toolCalls[j]?.name === "spawn_agent") j += 1;
+          const batch = toolCalls.slice(i, j);
+          const remainingBudget = this.deps.budget.maxToolCalls - toolCallsUsed;
+          if (remainingBudget < batch.length) {
+            // Not enough budget to run a full batch concurrently; fall back to sequential handling.
+          } else {
+            const executions: {
+              call: import("./types.js").ToolCall;
+              tool: Tool;
+              args: unknown;
+              promise: Promise<string>;
+            }[] = [];
+
+            for (const batchCall of batch) {
+              toolCallsUsed += 1;
+              const tool = this.deps.tools.find((t) => t.name === batchCall.name);
+              if (!tool) {
+                const msg: ChatMessage = {
+                  role: "tool",
+                  name: batchCall.name,
+                  toolCallId: batchCall.id,
+                  content: `ERROR: unknown tool '${batchCall.name}'`,
+                };
+                messages.push(msg);
+                newMessages.push(msg);
+                continue;
+              }
+
+              let args: unknown = {};
+              try {
+                args = OpenAICompatClient.parseToolArgs(batchCall.arguments);
+              } catch {
+                args = {};
+              }
+
+              this.deps.onLog?.(`tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))}`);
+              const promise = tool
+                .execute(args, this.deps.toolContext)
+                .catch((err) => `ERROR: ${err instanceof Error ? err.message : String(err)}`);
+              executions.push({ call: batchCall, tool, args, promise });
+            }
+
+            const results = await Promise.all(executions.map((e) => e.promise));
+            for (let idx = 0; idx < executions.length; idx++) {
+              const entry = executions[idx];
+              const result = results[idx] ?? "";
+              const abort = handleToolResult(entry.call, result, i + idx);
+              if (abort) {
+                return abort;
+              }
+            }
+
+            i = j - 1;
+            continue;
+          }
+        }
+
+        toolCallsUsed += 1;
+        if (toolCallsUsed > this.deps.budget.maxToolCalls) {
+          return {
+            status: "budget_exhausted",
+            output: "Budget exhausted while executing tools.",
+            newMessages,
+            toolCallsUsed,
+            iterationsUsed: iteration + 1,
+          };
+        }
+
+        const tool = this.deps.tools.find((t) => t.name === call.name);
+        if (!tool) {
+          const msg: ChatMessage = {
+            role: "tool",
+            name: call.name,
+            toolCallId: call.id,
+            content: `ERROR: unknown tool '${call.name}'`,
+          };
+          messages.push(msg);
+          newMessages.push(msg);
+          continue;
+        }
+
+        let args: unknown = {};
+        try {
+          args = OpenAICompatClient.parseToolArgs(call.arguments);
+        } catch {
+          args = {};
+        }
+
+        this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
+        let result: string;
+        try {
+          result = await tool.execute(args, this.deps.toolContext);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          result = `ERROR: ${msg}`;
+        }
+
+        const abort = handleToolResult(call, result, i);
+        if (abort) {
+          return abort;
         }
       }
     }

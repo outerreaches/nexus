@@ -27,6 +27,9 @@ const ORCHESTRATOR: AgentPreset = {
     "spawn_agent",
     "read_from_blackboard",
     "write_to_blackboard",
+    "blackboard_clear",
+    "blackboard_delete",
+    "blackboard_prune",
     "plan_task",
     // Memory & reflection
     "memory_store",

@@ -632,39 +632,35 @@ function renderDashboard(params: {
 
         const roots = [...nodesById.values()].filter((n) => !n.parent_run_id || !nodesById.has(n.parent_run_id));
         
-        // Solar system layout: orchestrators at center, children orbit around them
-        const baseOrbitRadius = 80;
-        const orbitRadiusStep = 50;
+        // Solar system layout: single orchestrator at center, all agents orbit around it
+        const baseOrbitRadius = 90;
+        const orbitRadiusStep = 55;
         
+        // Position all nodes to orbit around center (0,0,0) where the orchestrator will be
         const positionNode = (node, centerX, centerY, centerZ, depth, siblingIndex, siblingCount) => {
           node.depth = depth;
-          if (depth === 0) {
-            // Root nodes (orchestrators) spread across center area
-            const rootSpread = 120;
-            const rootAngle = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2;
-            node.x = siblingCount === 1 ? 0 : Math.cos(rootAngle) * rootSpread * 0.3;
-            node.y = 0;
-            node.z = siblingCount === 1 ? 0 : Math.sin(rootAngle) * rootSpread * 0.3;
-          } else {
-            // Child nodes orbit around their parent
-            const orbitRadius = baseOrbitRadius + (depth - 1) * orbitRadiusStep * 0.5;
-            const angle = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2 + (depth * 0.5);
-            node.x = centerX + Math.cos(angle) * orbitRadius;
-            node.y = centerY - depth * 15; // Slight vertical offset per depth
-            node.z = centerZ + Math.sin(angle) * orbitRadius;
-          }
-          node.orbitAngle = Math.random() * Math.PI * 2;
-          node.orbitSpeed = 0.0003 + Math.random() * 0.0005;
-          node.orbitRadius = depth === 0 ? 0 : Math.sqrt(Math.pow(node.x - centerX, 2) + Math.pow(node.z - centerZ, 2));
+          // All nodes orbit - depth 0 are first-level agents around orchestrator
+          const orbitRadius = baseOrbitRadius + depth * orbitRadiusStep * 0.6;
+          const angleOffset = depth * 0.7; // Stagger angles by depth
+          const angle = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2 + angleOffset;
+          node.x = centerX + Math.cos(angle) * orbitRadius;
+          node.y = centerY - depth * 12;
+          node.z = centerZ + Math.sin(angle) * orbitRadius;
+          
+          node.orbitAngle = angle;
+          node.orbitSpeed = 0.0004 + Math.random() * 0.0003 - depth * 0.00005;
+          node.orbitRadius = orbitRadius;
           node.orbitCenterX = centerX;
+          node.orbitCenterY = centerY;
           node.orbitCenterZ = centerZ;
           
-          // Position children
+          // Position children orbiting around this node
           node.children.forEach((child, idx) => {
             positionNode(child, node.x, node.y, node.z, depth + 1, idx, node.children.length);
           });
         };
         
+        // All roots orbit the center orchestrator
         roots.forEach((root, idx) => positionNode(root, 0, 0, 0, 0, idx, roots.length));
 
         const statusColors = {
@@ -689,20 +685,66 @@ function renderDashboard(params: {
           return new THREE.Line(geometry, material);
         };
 
-        // Add some orbit rings around center
-        [80, 130, 180].forEach((r, i) => scene.add(createOrbitRing(r, -i * 15)));
+        // Add orbit rings around center orchestrator
+        [90, 145, 200].forEach((r, i) => scene.add(createOrbitRing(r, -i * 12)));
 
-        // Create nodes
+        // Create the central orchestrator (always active, always at center)
+        const orchestratorColor = 0x00ff41;
+        const orchestratorRadius = 18;
+        const orchestratorGeometry = new THREE.SphereGeometry(orchestratorRadius, 32, 32);
+        const orchestratorMaterial = new THREE.MeshStandardMaterial({
+          color: orchestratorColor,
+          emissive: orchestratorColor,
+          emissiveIntensity: 0.8,
+          roughness: 0.2,
+          metalness: 0.8,
+        });
+        const orchestratorMesh = new THREE.Mesh(orchestratorGeometry, orchestratorMaterial);
+        orchestratorMesh.position.set(0, 0, 0);
+        scene.add(orchestratorMesh);
+        
+        // Orchestrator glow layers
+        const glowGeometry1 = new THREE.SphereGeometry(orchestratorRadius * 1.6, 32, 32);
+        const glowMaterial1 = new THREE.MeshBasicMaterial({
+          color: orchestratorColor,
+          transparent: true,
+          opacity: 0.12,
+        });
+        const glow1 = new THREE.Mesh(glowGeometry1, glowMaterial1);
+        scene.add(glow1);
+        
+        const glowGeometry2 = new THREE.SphereGeometry(orchestratorRadius * 2.4, 32, 32);
+        const glowMaterial2 = new THREE.MeshBasicMaterial({
+          color: orchestratorColor,
+          transparent: true,
+          opacity: 0.05,
+        });
+        const glow2 = new THREE.Mesh(glowGeometry2, glowMaterial2);
+        scene.add(glow2);
+        
+        // Virtual orchestrator node for tooltip
+        const orchestratorNode = {
+          agent_id: 'ORCHESTRATOR',
+          preset: 'core',
+          status: 'running',
+          started_at: null,
+          ended_at: null,
+          task: 'Central command node - coordinates all agent activity',
+          depth: -1,
+          isOrchestrator: true,
+        };
+        meshToNode.set(orchestratorMesh, orchestratorNode);
+
+        // Create agent nodes
         for (const node of nodesById.values()) {
           const color = statusColors[node.status] ?? 0x00aa2a;
-          const isRoot = node.depth === 0;
-          const radius = isRoot ? 14 : Math.max(5, 10 - node.depth * 1.5);
+          const radius = Math.max(5, 9 - node.depth * 1.2);
           
           const geometry = new THREE.SphereGeometry(radius, 32, 32);
           const material = new THREE.MeshStandardMaterial({
             color,
             emissive: color,
-            emissiveIntensity: isRoot ? 0.6 : 0.3,
+            emissiveIntensity: node.status === 'running' ? 0.5 : 0.25,
             roughness: 0.3,
             metalness: 0.7,
           });
@@ -712,27 +754,34 @@ function renderDashboard(params: {
           scene.add(mesh);
           node.mesh = mesh;
           meshToNode.set(mesh, node);
-          
-          // Add glow effect for root nodes
-          if (isRoot) {
-            const glowGeometry = new THREE.SphereGeometry(radius * 1.8, 32, 32);
-            const glowMaterial = new THREE.MeshBasicMaterial({
-              color,
-              transparent: true,
-              opacity: 0.15,
-            });
-            const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-            glow.position.copy(mesh.position);
-            scene.add(glow);
-            node.glow = glow;
-          }
         }
 
-        // Create connection lines
+        // Connection lines from orchestrator to root agents
         const lineMaterial = new THREE.LineBasicMaterial({ 
           color: 0x00ff41, 
           transparent: true, 
-          opacity: 0.4 
+          opacity: 0.5 
+        });
+        
+        for (const root of roots) {
+          const points = [
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(root.x ?? 0, root.y ?? 0, root.z ?? 0),
+          ];
+          const geometry = new THREE.BufferGeometry().setFromPoints(points);
+          const line = new THREE.Line(geometry, lineMaterial.clone());
+          scene.add(line);
+          root.connectionLine = line;
+          root.orbitCenterX = 0;
+          root.orbitCenterY = 0;
+          root.orbitCenterZ = 0;
+        }
+
+        // Connection lines for child agents (non-root nodes)
+        const childLineMaterial = new THREE.LineBasicMaterial({ 
+          color: 0x00ff41, 
+          transparent: true, 
+          opacity: 0.35
         });
 
         for (const node of nodesById.values()) {
@@ -743,7 +792,7 @@ function renderDashboard(params: {
               new THREE.Vector3(node.x ?? 0, node.y ?? 0, node.z ?? 0),
             ];
             const geometry = new THREE.BufferGeometry().setFromPoints(points);
-            const line = new THREE.Line(geometry, lineMaterial.clone());
+            const line = new THREE.Line(geometry, childLineMaterial.clone());
             scene.add(line);
             node.connectionLine = line;
           }
@@ -829,9 +878,15 @@ function renderDashboard(params: {
           requestAnimationFrame(animate);
           time += 1;
           
-          // Subtle orbital animation for non-root nodes
+          // Orchestrator glow pulse
+          const glowPulse = 1 + Math.sin(time * 0.02) * 0.15;
+          glow1.scale.setScalar(glowPulse);
+          glow2.scale.setScalar(glowPulse * 0.95);
+          orchestratorMesh.scale.setScalar(1 + Math.sin(time * 0.03) * 0.03);
+          
+          // Orbital animation for ALL nodes (including roots)
           for (const node of nodesById.values()) {
-            if (node.depth > 0 && node.mesh && node.orbitRadius > 0) {
+            if (node.mesh && node.orbitRadius > 0) {
               node.orbitAngle += node.orbitSpeed;
               const newX = node.orbitCenterX + Math.cos(node.orbitAngle) * node.orbitRadius;
               const newZ = node.orbitCenterZ + Math.sin(node.orbitAngle) * node.orbitRadius;
@@ -841,12 +896,19 @@ function renderDashboard(params: {
               node.z = newZ;
               
               // Update connection line
-              if (node.connectionLine && node.parent_run_id && nodesById.has(node.parent_run_id)) {
-                const parent = nodesById.get(node.parent_run_id);
+              if (node.connectionLine) {
                 const positions = node.connectionLine.geometry.attributes.position.array;
-                positions[0] = parent.x;
-                positions[1] = parent.y;
-                positions[2] = parent.z;
+                if (node.depth === 0) {
+                  // Root nodes connect to center (orchestrator)
+                  positions[0] = 0;
+                  positions[1] = 0;
+                  positions[2] = 0;
+                } else if (node.parent_run_id && nodesById.has(node.parent_run_id)) {
+                  const parent = nodesById.get(node.parent_run_id);
+                  positions[0] = parent.x;
+                  positions[1] = parent.y;
+                  positions[2] = parent.z;
+                }
                 positions[3] = node.x;
                 positions[4] = node.y;
                 positions[5] = node.z;
@@ -856,7 +918,7 @@ function renderDashboard(params: {
             
             // Pulse effect for running nodes
             if (node.status === 'running' && node.mesh) {
-              const scale = 1 + Math.sin(time * 0.05) * 0.1;
+              const scale = 1 + Math.sin(time * 0.05) * 0.12;
               node.mesh.scale.setScalar(scale);
             }
           }
