@@ -13,6 +13,7 @@ import { startJobScheduler } from "../scheduler/job-scheduler.js";
 import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
 import { startProactiveHeartbeat } from "./proactive.js";
+import { initDataIntake } from "../data-intake/index.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean }): Promise<void> {
   const log = (msg: string) => {
@@ -25,6 +26,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const paths = await resolveRuntimePaths(config);
 
   const db = await openDatabase(paths.dbPath);
+  initDataIntake();
 
   const effectivePort = params.port ?? config.port;
   const cdpPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? effectivePort + 2);
@@ -161,6 +163,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     log,
   });
   if (!scheduler) log("scheduler: disabled");
+
 
   const stop = async () => {
     scheduler?.stop();

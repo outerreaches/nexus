@@ -142,7 +142,7 @@ export async function runCli(argv: string[]): Promise<void> {
   program
     .command("tool")
     .description("Run a single tool and print its output (useful for scripts/automation)")
-    .argument("<name>", "Tool name (e.g. market_data)")
+    .argument("<name>", "Tool name (e.g. query_data)")
     .argument("[argsJson]", "Tool args as JSON (or '-' to read JSON from stdin)", "{}")
     .action(async (name, argsJson) => {
       const options = program.opts<{ config: string; verbose: boolean }>();

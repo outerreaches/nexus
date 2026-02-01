@@ -3,6 +3,9 @@ import { serve } from "@hono/node-server";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager, ManagedProcessInfo } from "../process/manager.js";
 import type { AgentTracker, AgentRunInfo } from "../core/agent-tracker.js";
+import { initDataIntake, listDataSources } from "../data-intake/index.js";
+import { listLatestDataItems } from "../data-intake/store.js";
+import { createIntakeSource, deleteIntakeSource, listIntakeSources, updateIntakeSource } from "../data-intake/source-store.js";
 
 export type GatewayHttpDeps = {
   port: number;
@@ -70,11 +73,20 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const status = await deps.getStatus();
     const nowMs = Date.now();
 
+    initDataIntake();
+    const dataIntakeCatalog = listDataSources().map((source) => ({
+      id: source.id,
+      name: source.name,
+      description: source.description,
+      tags: source.tags,
+    }));
+
     const processWindowMinutes = clampInt(c.req.query("processWindowMinutes"), 5, 24 * 60) ?? 120;
     const agentWindowMinutes = clampInt(c.req.query("agentWindowMinutes"), 10, 24 * 60) ?? 360;
     const jobLimit = clampInt(c.req.query("jobLimit"), 1, 200) ?? 50;
     const runLimit = clampInt(c.req.query("runLimit"), 1, 200) ?? 50;
     const blackboardLimit = clampInt(c.req.query("blackboardLimit"), 1, 200) ?? 50;
+    const dataIntakeLimit = clampInt(c.req.query("dataIntakeLimit"), 1, 200) ?? 50;
 
     const processes = listProcesses(deps.processManager, nowMs, processWindowMinutes * 60_000);
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
@@ -82,6 +94,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const agentGraph = listAgentGraph(deps.db, allowedRunIds);
     const jobs = listJobs(deps.db, jobLimit);
     const jobRuns = listJobRuns(deps.db, runLimit);
+    const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit);
     const blackboard = listBlackboard(deps.db, blackboardLimit);
 
     return c.html(
@@ -95,9 +108,124 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         agentGraph,
         jobs,
         jobRuns,
+        dataIntake,
+        dataIntakeCatalog,
         blackboard,
       }),
     );
+  });
+
+  app.post("/dashboard/data-intake/add", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    initDataIntake();
+    const body = await c.req.parseBody();
+    const sourceId = String(body.sourceId ?? "").trim();
+    const label = String(body.label ?? "").trim() || undefined;
+    const intervalMsRaw = String(body.intervalMs ?? "").trim();
+    const paramsRaw = String(body.paramsJson ?? "").trim();
+    if (!sourceId) return c.text("Missing sourceId", 400);
+    let params: Record<string, unknown> = {};
+    if (paramsRaw) {
+      try {
+        params = JSON.parse(paramsRaw) as Record<string, unknown>;
+      } catch (err) {
+        return c.text(`Invalid params JSON: ${err instanceof Error ? err.message : String(err)}`, 400);
+      }
+    }
+    const intervalMs = intervalMsRaw ? Number(intervalMsRaw) : undefined;
+    if (intervalMsRaw && (!Number.isFinite(intervalMs ?? NaN) || (intervalMs ?? 0) <= 0)) {
+      return c.text("Invalid intervalMs", 400);
+    }
+    createIntakeSource({
+      db: deps.db,
+      sourceId,
+      label,
+      params,
+      intervalMs: intervalMs ?? 15 * 60_000,
+    });
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/data-intake/update", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing id", 400);
+    const enabledRaw = String(body.enabled ?? "").trim();
+    const enabled = enabledRaw ? enabledRaw === "true" : undefined;
+    const intervalMsRaw = String(body.intervalMs ?? "").trim();
+    const intervalMs = intervalMsRaw ? Number(intervalMsRaw) : undefined;
+    if (intervalMsRaw && (!Number.isFinite(intervalMs ?? NaN) || (intervalMs ?? 0) <= 0)) {
+      return c.text("Invalid intervalMs", 400);
+    }
+    const labelRaw = String(body.label ?? "").trim();
+    const paramsRaw = String(body.paramsJson ?? "").trim();
+    let paramsJson: string | undefined;
+    if (paramsRaw) {
+      try {
+        paramsJson = JSON.stringify(JSON.parse(paramsRaw));
+      } catch (err) {
+        return c.text(`Invalid params JSON: ${err instanceof Error ? err.message : String(err)}`, 400);
+      }
+    }
+    updateIntakeSource({
+      db: deps.db,
+      id,
+      enabled,
+      intervalMs,
+      label: labelRaw || undefined,
+      paramsJson,
+    });
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/data-intake/delete", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing id", 400);
+    deleteIntakeSource({ db: deps.db, id });
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/data-intake/schedule", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const jobName = String(body.jobName ?? "").trim();
+    const cron = String(body.cron ?? "").trim();
+    const timezone = String(body.timezone ?? "UTC").trim() || "UTC";
+    if (!jobName) return c.text("Missing jobName", 400);
+    if (!cron) return c.text("Missing cron", 400);
+
+    const { nextCronTimeMs, parseCron, validateTimeZone } = await import("../scheduler/cron.js");
+    const nowMs = Date.now();
+    const next = nextCronTimeMs({
+      schedule: parseCron(cron),
+      afterMs: nowMs,
+      timeZone: validateTimeZone(timezone),
+    });
+    const crypto = await import("node:crypto");
+    const id = `J${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
+    const task = [
+      "Refresh all enabled data intake source instances from storage.",
+      "",
+      "Steps:",
+      "1) Call data_intake_source_list with includeDisabled=false.",
+      "2) For each source instance, call data_intake_run using source_id and params_json.",
+      "3) Report any failures.",
+      "",
+      "Parsing params_json:",
+      "- params_json is a JSON string; parse it to an object before passing to data_intake_run.",
+    ].join("\n");
+    const spec = { mode: "agent_task", task };
+    const owner = "main";
+    deps.db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, owner, `data-intake: ${jobName}`, cron, validateTimeZone(timezone), 1, JSON.stringify(spec), next, nowMs, nowMs);
+
+    return c.redirect("/dashboard");
   });
 
   const server = serve({
@@ -166,6 +294,38 @@ type BlackboardRow = {
   expires_at: number | null;
 };
 
+type DataIntakeRow = {
+  source_id: string;
+  source_name: string;
+  subject: string;
+  value_json: string;
+  collected_at: number;
+  expires_at: number;
+};
+
+type DataIntakePanelState = {
+  enabled: boolean;
+  targets: string[];
+  rows: DataIntakeRow[];
+  sources: {
+    id: string;
+    source_id: string;
+    label: string | null;
+    params_json: string;
+    interval_ms: number;
+    enabled: number;
+    last_run_at: number | null;
+    last_error: string | null;
+  }[];
+};
+
+type DataIntakeCatalogEntry = {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+};
+
 function listProcesses(manager: ProcessManager | undefined, nowMs: number, windowMs: number): ManagedProcessInfo[] {
   if (!manager) return [];
   const cutoff = nowMs - windowMs;
@@ -221,6 +381,31 @@ function listBlackboard(db: NexusDatabase | undefined, limit: number): Blackboar
     .all(limit) as BlackboardRow[];
 }
 
+function listDataIntake(
+  db: NexusDatabase | undefined,
+  nowMs: number,
+  limit: number,
+): DataIntakePanelState {
+  if (!db) return { enabled: true, targets: [], rows: [], sources: [] };
+  const rows = listLatestDataItems({
+    db,
+    includeExpired: false,
+    limit,
+    nowMs,
+  }) as unknown as DataIntakeRow[];
+  const sources = listIntakeSources({ db, includeDisabled: true }).map((row) => ({
+    id: row.id,
+    source_id: row.source_id,
+    label: row.label,
+    params_json: row.params_json,
+    interval_ms: row.interval_ms,
+    enabled: row.enabled,
+    last_run_at: row.last_run_at,
+    last_error: row.last_error,
+  }));
+  return { enabled: true, targets: sources.map((row) => row.source_id), rows, sources };
+}
+
 function renderDashboard(params: {
   status: Record<string, unknown>;
   nowMs: number;
@@ -231,6 +416,8 @@ function renderDashboard(params: {
   agentGraph: AgentRunRow[];
   jobs: JobRow[];
   jobRuns: JobRunRow[];
+  dataIntake: DataIntakePanelState;
+  dataIntakeCatalog: DataIntakeCatalogEntry[];
   blackboard: BlackboardRow[];
 }): string {
   const updatedAt = new Date(params.nowMs).toISOString();
@@ -663,6 +850,56 @@ function renderDashboard(params: {
       ::-webkit-scrollbar-thumb:hover {
         background: var(--muted);
       }
+      form.form-inline {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 16px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        box-shadow: var(--glow);
+      }
+      .inline-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .inline-actions form {
+        margin: 0;
+      }
+      .inline-input {
+        background: #040804;
+        border: 1px solid var(--line);
+        color: var(--text);
+        padding: 4px 6px;
+        font-size: 11px;
+        min-width: 120px;
+      }
+      .inline-edit {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .form-row {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 180px;
+      }
+      .form-row label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .form-row input,
+      .form-row select {
+        background: #040804;
+        border: 1px solid var(--line);
+        color: var(--text);
+        padding: 6px 8px;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -714,6 +951,11 @@ function renderDashboard(params: {
         ${renderJobsTable(params.jobs)}
         <h3>Recent Job Runs</h3>
         ${renderJobRunsTable(params.jobRuns)}
+      </section>
+
+      <section>
+        <h2>Data Intake</h2>
+        ${renderDataIntakeTable(params.dataIntake, params.dataIntakeCatalog)}
       </section>
 
       <section>
@@ -1394,6 +1636,146 @@ function renderJobRunsTable(rows: JobRunRow[]): string {
         .join("")}
     </tbody>
   </table>`;
+}
+
+function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntakeCatalogEntry[]): string {
+  const options = catalog
+    .map((entry) => {
+      const tagText = entry.tags.length > 0 ? ` (${entry.tags.join(", ")})` : "";
+      return `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.name)}${escapeHtml(tagText)}</option>`;
+    })
+    .join("");
+
+  const addForm = `<form method="post" action="/dashboard/data-intake/add" class="form-inline">
+    <div class="form-row">
+      <label>Source</label>
+      <select name="sourceId" required>
+        <option value="">Select source...</option>
+        ${options}
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Label</label>
+      <input type="text" name="label" placeholder="Optional label" />
+    </div>
+    <div class="form-row">
+      <label>Interval (ms)</label>
+      <input type="number" name="intervalMs" min="60000" placeholder="900000" />
+    </div>
+    <div class="form-row">
+      <label>Params (JSON)</label>
+      <input type="text" name="paramsJson" placeholder='{"symbols":["BTC"]}' />
+    </div>
+    <button type="submit" class="graph-btn">Add Source</button>
+  </form>`;
+
+  const scheduleForm = `<form method="post" action="/dashboard/data-intake/schedule" class="form-inline">
+    <div class="form-row">
+      <label>Job Name</label>
+      <input type="text" name="jobName" placeholder="data-intake refresh" required />
+    </div>
+    <div class="form-row">
+      <label>Cron</label>
+      <input type="text" name="cron" placeholder="*/5 * * * *" required />
+    </div>
+    <div class="form-row">
+      <label>Timezone</label>
+      <input type="text" name="timezone" placeholder="UTC" />
+    </div>
+    <button type="submit" class="graph-btn">Create Refresh Job</button>
+  </form>`;
+
+  const sourcesTable = params.sources.length === 0
+    ? `<div class="no-data">No data intake sources configured.</div>`
+    : `<table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>ID</th>
+          <th>Source</th>
+          <th>Label</th>
+          <th>Interval</th>
+          <th>Last Run</th>
+          <th>Error</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${params.sources
+          .map((row) => {
+            const enabled = row.enabled === 1;
+            const toggleLabel = enabled ? "Disable" : "Enable";
+            const toggleValue = enabled ? "false" : "true";
+            const paramsPreview = row.params_json && row.params_json.length > 0 ? row.params_json : "{}";
+            return `<tr>
+              <td><span class="badge ${enabled ? "status-enabled" : "status-disabled"}">${enabled ? "enabled" : "disabled"}</span></td>
+              <td>${escapeHtml(row.id)}</td>
+              <td>${escapeHtml(row.source_id)}</td>
+              <td>${escapeHtml(row.label ?? "-")}</td>
+              <td>${escapeHtml(`${Math.round(row.interval_ms / 60000)}m`)}</td>
+              <td>${escapeHtml(row.last_run_at ? formatTime(row.last_run_at) : "-")}</td>
+              <td>${escapeHtml(row.last_error ? truncate(row.last_error, 80) : "-")}</td>
+              <td>
+                <div class="inline-actions">
+                  <form method="post" action="/dashboard/data-intake/update" class="inline-edit">
+                    <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                    <input type="text" name="label" class="inline-input" placeholder="Label" value="${escapeHtml(row.label ?? "")}" />
+                    <input type="number" name="intervalMs" class="inline-input" min="60000" placeholder="Interval ms" value="${escapeHtml(String(row.interval_ms))}" />
+                    <input type="text" name="paramsJson" class="inline-input" placeholder="Params JSON" value="${escapeHtml(paramsPreview)}" />
+                    <button type="submit" class="graph-btn">Update</button>
+                  </form>
+                  <form method="post" action="/dashboard/data-intake/update">
+                    <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                    <input type="hidden" name="enabled" value="${toggleValue}" />
+                    <button type="submit" class="graph-btn">${toggleLabel}</button>
+                  </form>
+                  <form method="post" action="/dashboard/data-intake/delete">
+                    <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                    <button type="submit" class="graph-btn">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>`;
+
+  const latestTable = params.rows.length === 0
+    ? `<div class="no-data">No recent data intake items found.</div>`
+    : `<h3>Latest Values</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Subject</th>
+            <th>Value</th>
+            <th>Collected</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${params.rows
+            .map((row) => {
+              let valueText = row.value_json;
+              try {
+                valueText = JSON.stringify(JSON.parse(row.value_json));
+              } catch {
+                // keep raw
+              }
+              return `<tr>
+                <td>${escapeHtml(row.source_name || row.source_id)}</td>
+                <td>${escapeHtml(row.subject)}</td>
+                <td>${escapeHtml(truncate(valueText, 120))}</td>
+                <td>${escapeHtml(formatTime(row.collected_at))}</td>
+                <td>${escapeHtml(formatTime(row.expires_at))}</td>
+              </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>`;
+
+  return `${addForm}${scheduleForm}${sourcesTable}${latestTable}`;
 }
 
 function renderBlackboardTable(rows: BlackboardRow[]): string {

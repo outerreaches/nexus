@@ -55,6 +55,7 @@ const SchedulerSchema = z
   })
   .default({});
 
+
 const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),

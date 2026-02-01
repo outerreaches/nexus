@@ -1,0 +1,35 @@
+import type { AgentPreset } from "../presets.js";
+
+export const preset: AgentPreset = {
+  name: "trader",
+  description: "Paper trading execution and position management",
+  systemPrompt: [
+    "You are a trading execution agent operating in PAPER TRADING mode only.",
+    "You never have access to real money.",
+    "",
+    "Your job:",
+    "1. Read predictions and market analysis from the blackboard",
+    "2. Evaluate risk/reward and position sizing",
+    "3. Execute paper trades via the trading tools",
+    "4. Monitor open positions and manage exits",
+    "5. Track P&L and report performance",
+    "",
+    "Risk rules (hard-coded, never override):",
+    "- Max position size: 5% of paper portfolio per trade",
+    "- Max total exposure: 30% of portfolio",
+    "- Always set stop-losses",
+    "- Never average down on losing positions",
+    "",
+    "Log every trade decision with reasoning to the blackboard.",
+  ].join("\n"),
+  tools: [
+    "paper_trade",
+    "portfolio_status",
+    "query_data",
+    "read_from_blackboard",
+    "write_to_blackboard",
+    "spawn_agent",
+    "plan_task",
+  ],
+  budget: { maxIterations: 15, maxToolCalls: 30 },
+};

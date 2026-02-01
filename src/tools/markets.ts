@@ -1,48 +1,92 @@
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { initDataIntake } from "../data-intake/index.js";
+import { listLatestDataItems } from "../data-intake/store.js";
 
-const SymbolToCoinGeckoId: Record<string, string> = {
-  btc: "bitcoin",
-  eth: "ethereum",
-  sol: "solana",
-  usdc: "usd-coin",
-  usdt: "tether",
-};
-
-async function resolveCoinGeckoId(symbol: string): Promise<string | null> {
-  const s = symbol.toLowerCase();
-  if (SymbolToCoinGeckoId[s]) return SymbolToCoinGeckoId[s];
-  const url = `https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`;
-  const res = await fetch(url, { headers: { "User-Agent": "NexusAgent/0.0.1" } });
-  if (!res.ok) return null;
-  const json = (await res.json()) as any;
-  const coins = Array.isArray(json?.coins) ? json.coins : [];
-  const match =
-    coins.find((c: any) => String(c?.symbol ?? "").toLowerCase() === s) ??
-    coins.find((c: any) => String(c?.id ?? "").toLowerCase() === s) ??
-    coins[0];
-  const id = match?.id ? String(match.id) : null;
-  return id;
+function requireDb(ctx: { db?: unknown }) {
+  return ctx.db ?? null;
 }
 
-export const marketData = defineTool({
-  name: "market_data",
-  description: "Fetch simple market data (currently: CoinGecko spot price for common crypto symbols).",
+function buildSubjects(instrument: string, currency: string): string[] {
+  const cleaned = instrument.trim();
+  if (!cleaned) return [];
+  if (cleaned.includes("/")) {
+    return [cleaned.toUpperCase()];
+  }
+  const symbol = cleaned.toUpperCase();
+  const quote = currency.trim().toUpperCase();
+  return [`${symbol}/${quote}`, symbol];
+}
+
+export const queryData = defineTool({
+  name: "query_data",
+  description: [
+    "Query the latest cached data intake record for a subject.",
+    "",
+    "Use this to retrieve recently ingested data across any domain (markets, weather, news, sensors, etc.).",
+    "The tool reads from the normalized data intake store and does not call external APIs directly.",
+    "",
+    "Matching behavior:",
+    "- If the instrument includes a slash (e.g. BTC/USD), it is treated as an exact subject.",
+    "- Otherwise, it will try `${SYMBOL}/${CURRENCY}` first, then `${SYMBOL}`.",
+    "",
+    "Returned fields:",
+    "- instrument, subject, sourceId, sourceName",
+    "- collectedAt, expiresAt",
+    "- value (parsed JSON payload), metadata (parsed JSON)",
+    "- price (if the value payload contains a price field)",
+  ].join("\n"),
   parameters: z.object({
-    instrument: z.string().describe('Symbol like "BTC", "ETH", or pair like "BTC/USD"'),
-    currency: z.string().default("usd").describe('Quote currency, e.g. "usd"'),
+    instrument: z.string().describe('Subject key or symbol like "BTC", "ETH", or "BTC/USD"'),
+    currency: z.string().default("usd").describe('Quote currency for symbol lookup (e.g. "usd")'),
   }),
-  execute: async ({ instrument, currency }) => {
-    const symbol = instrument.includes("/") ? instrument.split("/")[0] : instrument;
-    const id = await resolveCoinGeckoId(symbol);
-    if (!id) return `ERROR: unable to resolve CoinGecko id for ${symbol}`;
-    const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(id)}&vs_currencies=${encodeURIComponent(currency)}`;
-    const res = await fetch(url, { headers: { "User-Agent": "NexusAgent/0.0.1" } });
-    if (!res.ok) return `ERROR: market_data failed: ${res.status} ${res.statusText}`;
-    const json = (await res.json()) as any;
-    const price = json?.[id]?.[currency.toLowerCase()];
-    return JSON.stringify({ instrument, id, currency, price }, null, 2);
+  execute: async ({ instrument, currency }, ctx) => {
+    initDataIntake();
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+
+    const subjects = buildSubjects(instrument, currency);
+    if (subjects.length === 0) return "ERROR: missing instrument";
+
+    for (const subject of subjects) {
+      const rows = listLatestDataItems({
+        db: db as any,
+        subject,
+        limit: 1,
+        includeExpired: false,
+        nowMs: ctx.nowMs(),
+      });
+      const row = rows[0];
+      if (!row) continue;
+      const value = safeJsonParse(row.value_json);
+      const metadata = safeJsonParse(row.metadata_json);
+      const price = value && typeof value === "object" && "price" in value ? (value as any).price : null;
+      return JSON.stringify(
+        {
+          instrument,
+          subject,
+          sourceId: row.source_id,
+          sourceName: row.source_name,
+          collectedAt: row.collected_at,
+          expiresAt: row.expires_at,
+          price,
+          value,
+          metadata,
+        },
+        null,
+        2,
+      );
+    }
+
+    return `ERROR: no data found for ${instrument}`;
   },
 });
 
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}

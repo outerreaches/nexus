@@ -1,5 +1,5 @@
 import { AgentRunner } from "./agent-runner.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
@@ -80,7 +80,18 @@ export class AgentService {
         maxMessages: this.deps.limits.maxMessages,
       });
 
-      const systemPrompt = await buildSystemPrompt({ workspaceDir: this.deps.workspaceDir, agentId: params.agentId });
+      // Resolve preset and filter tools
+      const presetName = params.preset ?? this.deps.defaultPreset;
+      const preset = presetName ? getPreset(presetName) : undefined;
+
+      const systemPrompt = !preset || preset.name === "orchestrator"
+        ? await buildSystemPrompt({ workspaceDir: this.deps.workspaceDir, agentId: params.agentId })
+        : await buildPresetSystemPrompt({
+            workspaceDir: this.deps.workspaceDir,
+            agentId: params.agentId,
+            promptFiles: preset.promptFiles,
+            systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
+          });
 
       const onRunnerLog = this.deps.onRunnerLog
         ? (line: string) => {
@@ -90,9 +101,6 @@ export class AgentService {
           }
         : undefined;
 
-      // Resolve preset and filter tools
-      const presetName = params.preset ?? this.deps.defaultPreset;
-      const preset = presetName ? getPreset(presetName) : undefined;
       const tools = filterToolsByPreset(this.deps.getTools(), preset);
 
       // Resolve budget from preset or global limits

@@ -2,7 +2,7 @@ import type { Tool } from "../core/tools.js";
 
 import { fileEdit, fileEditLines, fileList, fileRead, fileWrite } from "./file-ops.js";
 import { browserTool } from "./browser.js";
-import { marketData } from "./markets.js";
+import { queryData } from "./markets.js";
 import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
 import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
@@ -22,6 +22,20 @@ import { reflect } from "./reflect.js";
 import { planTask } from "./plan.js";
 import { writeToBlackboard, readFromBlackboard, blackboardClear, blackboardDelete, blackboardPrune } from "./blackboard.js";
 import { spawnAgent } from "./spawn-agent.js";
+import {
+  dataIntakeListSources,
+  dataIntakePrune,
+  dataIntakeQuery,
+  dataIntakeRun,
+  dataIntakeScheduleAll,
+  dataIntakeScheduleRefresh,
+} from "./data-intake.js";
+import {
+  dataIntakeSourceAdd,
+  dataIntakeSourceDelete,
+  dataIntakeSourceList,
+  dataIntakeSourceUpdate,
+} from "./data-intake-sources.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
@@ -39,7 +53,7 @@ export function getBuiltInTools(): Tool[] {
     processLogs,
     processStop,
     browserTool,
-    marketData,
+    queryData,
     toolsReload,
     gatewayRestart,
     paperTrade,
@@ -81,6 +95,16 @@ export function getBuiltInTools(): Tool[] {
     blackboardClear,
     blackboardDelete,
     blackboardPrune,
+    dataIntakeListSources,
+    dataIntakeRun,
+    dataIntakeQuery,
+    dataIntakePrune,
+    dataIntakeScheduleRefresh,
+    dataIntakeScheduleAll,
+    dataIntakeSourceList,
+    dataIntakeSourceAdd,
+    dataIntakeSourceUpdate,
+    dataIntakeSourceDelete,
     spawnAgent,
   ];
 }

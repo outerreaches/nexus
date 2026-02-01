@@ -179,6 +179,42 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_memories_agent_key ON memories(agent_id, key);
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Data intake (normalized cache)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS data_items (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      source_name TEXT NOT NULL,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      subject TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      collected_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_data_items_source_subject ON data_items(source_id, subject, collected_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_data_items_tags ON data_items(tags_json, collected_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_data_items_expires ON data_items(expires_at);
+
+    CREATE TABLE IF NOT EXISTS data_intake_sources (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      label TEXT,
+      params_json TEXT NOT NULL DEFAULT '{}',
+      interval_ms INTEGER NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_run_at INTEGER,
+      last_error TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_data_intake_sources_enabled ON data_intake_sources(enabled, source_id);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Blackboard (shared agent communication store)
     -- ───────────────────────────────────────────────────────────────────────
 
@@ -245,6 +281,18 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_expires ON blackboard(expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_data_items_expires ON data_items(expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_data_intake_sources_enabled ON data_intake_sources(enabled, source_id);");
   } catch {
     // already exists
   }

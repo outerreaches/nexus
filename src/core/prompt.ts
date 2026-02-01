@@ -1,4 +1,4 @@
-import { loadPersonalizationContext, type PersonalizationContext } from "../state/personalization.js";
+import { loadPersonalizationContext, readPersonalizationFile, type PersonalizationContext } from "../state/personalization.js";
 import { loadSkills, formatSkillsPromptSection } from "../state/skills.js";
 import { formatPresetsForPrompt } from "./presets.js";
 
@@ -11,6 +11,30 @@ export async function buildSystemPrompt(params: {
     loadSkills(params.workspaceDir, params.agentId),
   ]);
   return formatSystemPrompt(ctx, formatSkillsPromptSection(skills));
+}
+
+export async function buildPresetSystemPrompt(params: {
+  workspaceDir: string;
+  agentId?: string;
+  promptFiles?: string[];
+  systemPrompt?: string;
+}): Promise<string> {
+  const promptFiles = params.promptFiles ?? [];
+  const sections: string[] = [];
+  if (promptFiles.length > 0) {
+    const loaded = await Promise.all(
+      promptFiles.map((filename) => readPersonalizationFile(params.workspaceDir, filename, params.agentId)),
+    );
+    for (const content of loaded) {
+      if (content && content.trim()) {
+        sections.push(content.trim());
+      }
+    }
+  }
+  if (params.systemPrompt?.trim()) {
+    sections.push(params.systemPrompt.trim());
+  }
+  return sections.filter(Boolean).join("\n\n---\n\n");
 }
 
 function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null): string {
@@ -41,11 +65,6 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
     sections.push(ctx.tools.trim());
   }
 
-  // Code guide for self-modification (CODEGUIDE.md)
-  if (ctx.codeguide) {
-    sections.push(ctx.codeguide.trim());
-  }
-
   // Learned skills (from workspace/skills/*/SKILL.md)
   if (skillsSection) {
     sections.push(skillsSection);
@@ -66,6 +85,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- You are the **orchestrator**. For simple questions, answer directly. For complex multi-step tasks, use `spawn_agent` to delegate to specialized workers (coder, researcher, trader, analyst).",
       "- Workers share data via the **Blackboard** (`write_to_blackboard` / `read_from_blackboard`). Workers automatically write their results to the blackboard.",
       "- **Blackboard hygiene**: When switching between unrelated tasks, use `blackboard_clear` or `blackboard_delete` to remove entries that are no longer relevant. Stale data from previous tasks pollutes worker context and can cause hallucinations.",
+      "- For data intake source management (add/remove/update source instances), delegate to the `source_manager` preset. Do not manage sources directly.",
       "- For periodic/scheduled tasks, use `job_create` with a cron expression. Manage with `job_*` tools. Failed jobs notify you (the owning agent).",
       "- Use `memory_store` / `memory_recall` / `memory_search` to persist learnings across sessions. Use `reflect` to extract insights from recent conversations.",
       "- Use `skill_create` to save reusable playbooks for tasks you learn to do well.",

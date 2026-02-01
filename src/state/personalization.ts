@@ -99,9 +99,10 @@ Use \`spawn_agent\` to delegate to these specialists:
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
 | **coder** | File editing, code writing, debugging, shell commands | file_ops, shell_exec, web_fetch |
-| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, browser |
-| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, market_data |
-| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, market_data |
+| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, browser, query_data |
+| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data |
+| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data |
+| **source_manager** | Manage data intake sources (add/update/remove/enable/disable) | data_intake_source_* |
 
 ## Blackboard
 
@@ -247,7 +248,7 @@ src/
     web.ts            # web_fetch
     web-search.ts     # web_search
     browser.ts        # browser (Playwright CDP)
-    markets.ts        # market_data
+    markets.ts        # query_data
     trading.ts        # paper_trade, portfolio_status
     gmail.ts          # gmail_profile, gmail_search, gmail_get_message, gmail_send
     credentials.ts    # credential_set, credential_generate, credential_list, credential_delete
