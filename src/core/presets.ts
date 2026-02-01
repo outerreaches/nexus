@@ -27,6 +27,7 @@ const ORCHESTRATOR: AgentPreset = {
     "spawn_agent",
     "read_from_blackboard",
     "write_to_blackboard",
+    "plan_task",
     // Memory & reflection
     "memory_store",
     "memory_recall",
@@ -91,6 +92,8 @@ const CODER: AgentPreset = {
     "web_fetch",
     "read_from_blackboard",
     "write_to_blackboard",
+    "spawn_agent",
+    "plan_task",
   ],
   budget: { maxIterations: 20, maxToolCalls: 50 },
 };
@@ -102,6 +105,9 @@ const RESEARCHER: AgentPreset = {
     "You are a research specialist working as part of a multi-agent system.",
     "Search the web, read documents, and synthesize findings.",
     "Always cite sources with URLs. Submit structured findings with confidence levels.",
+    "For broad topics, break the task into 2-4 distinct subtopics and spawn sub-agents with focused tasks.",
+    "List the subtopics explicitly before spawning, then spawn all sub-agents up front in one batch (2-4 total) before doing your own research.",
+    "Do not delegate the exact same task text. Synthesize sub-agent results into a single report.",
     "When finished, write your findings to the blackboard.",
   ].join("\n"),
   tools: [
@@ -110,6 +116,8 @@ const RESEARCHER: AgentPreset = {
     "browser",
     "read_from_blackboard",
     "write_to_blackboard",
+    "spawn_agent",
+    "plan_task",
   ],
   budget: { maxIterations: 15, maxToolCalls: 30 },
 };
@@ -142,6 +150,8 @@ const TRADER: AgentPreset = {
     "market_data",
     "read_from_blackboard",
     "write_to_blackboard",
+    "spawn_agent",
+    "plan_task",
   ],
   budget: { maxIterations: 15, maxToolCalls: 30 },
 };
@@ -153,6 +163,9 @@ const ANALYST: AgentPreset = {
     "You are a data analyst working as part of a multi-agent system.",
     "Analyze data from multiple sources, synthesize findings, and produce structured reports.",
     "Include confidence levels and cite sources.",
+    "For broad topics, break the task into 2-4 distinct subtopics and spawn sub-agents with focused tasks.",
+    "List the subtopics explicitly before spawning, then spawn all sub-agents up front in one batch (2-4 total) before doing your own analysis.",
+    "Do not delegate the exact same task text. Synthesize sub-agent results into a single report.",
     "When finished, write your analysis to the blackboard.",
   ].join("\n"),
   tools: [
@@ -161,6 +174,8 @@ const ANALYST: AgentPreset = {
     "market_data",
     "read_from_blackboard",
     "write_to_blackboard",
+    "spawn_agent",
+    "plan_task",
   ],
   budget: { maxIterations: 20, maxToolCalls: 40 },
 };

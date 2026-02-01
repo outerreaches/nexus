@@ -19,7 +19,8 @@ import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.
 import { skillCreate, skillList, skillUpdate } from "./skills.js";
 import { budgetStatus } from "./budget.js";
 import { reflect } from "./reflect.js";
-import { writeToBlackboard, readFromBlackboard } from "./blackboard.js";
+import { planTask } from "./plan.js";
+import { writeToBlackboard, readFromBlackboard, blackboardClear, blackboardDelete, blackboardPrune } from "./blackboard.js";
 import { spawnAgent } from "./spawn-agent.js";
 
 export function getBuiltInTools(): Tool[] {
@@ -74,8 +75,12 @@ export function getBuiltInTools(): Tool[] {
     skillUpdate,
     budgetStatus,
     reflect,
+    planTask,
     writeToBlackboard,
     readFromBlackboard,
+    blackboardClear,
+    blackboardDelete,
+    blackboardPrune,
     spawnAgent,
   ];
 }

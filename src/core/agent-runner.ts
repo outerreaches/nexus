@@ -134,6 +134,17 @@ export class AgentRunner {
         };
       }
 
+      if (!this.deps.toolContext.planState?.completed && toolCalls.some((c) => c.name !== "plan_task")) {
+        const msg: ChatMessage = {
+          role: "assistant",
+          content:
+            "You must call plan_task before using any other tools. Create a plan with complexity, steps, and parallel groups.",
+        };
+        messages.push(msg);
+        newMessages.push(msg);
+        continue;
+      }
+
       const toolCallingMsg: ChatMessage = { role: "assistant", content: content ?? null, toolCalls };
       messages.push(toolCallingMsg);
       newMessages.push(toolCallingMsg);

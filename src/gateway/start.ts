@@ -1,4 +1,5 @@
 import { AgentService } from "../core/agent-service.js";
+import { AgentTracker } from "../core/agent-tracker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
@@ -46,6 +47,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const processManager = new ProcessManager({ stateDir: paths.stateDir });
 
+  const agentTracker = new AgentTracker({ db });
+
   const toolContext = {
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
@@ -54,6 +57,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     browser,
     registry,
     processManager,
+    agentTracker,
     telegram: undefined as unknown,
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
@@ -78,6 +82,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     toolContext,
     db,
     workspaceDir: paths.workspaceDir,
+    agentTracker,
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
     limits: {
@@ -123,6 +128,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
       },
     }),
     log,
+    db,
+    processManager,
+    agentTracker,
   });
 
   const tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });

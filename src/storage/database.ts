@@ -192,14 +192,137 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       content TEXT NOT NULL,
       attachments_json TEXT NOT NULL DEFAULT '[]',
       metadata_json TEXT NOT NULL DEFAULT '{}',
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      last_accessed_at INTEGER,
+      expires_at INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_blackboard_scope ON blackboard(session_scope, created_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Agent run graph (hierarchical swarm tracking)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      run_id TEXT PRIMARY KEY,
+      parent_run_id TEXT,
+      session_id TEXT,
+      agent_id TEXT NOT NULL,
+      preset TEXT NOT NULL,
+      channel TEXT,
+      channel_key TEXT,
+      task TEXT,
+      status TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      tool_calls_used INTEGER,
+      iterations_used INTEGER,
+      output_preview TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_run_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
   `);
 
   try {
     db.exec("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE blackboard ADD COLUMN last_accessed_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE blackboard ADD COLUMN expires_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_expires ON blackboard(expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN parent_run_id TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN session_id TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN agent_id TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN preset TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN channel TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN channel_key TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN task TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN status TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN started_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN ended_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN tool_calls_used INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN iterations_used INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN output_preview TEXT;");
   } catch {
     // already exists
   }

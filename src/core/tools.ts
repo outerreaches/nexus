@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import type { AgentTracker } from "./agent-tracker.js";
 
 export type ToolContext = {
   workspaceDir: string;
@@ -9,11 +10,19 @@ export type ToolContext = {
   browser?: unknown;
   registry?: unknown;
   processManager?: unknown;
+  agentTracker?: AgentTracker;
   telegram?: unknown;
   allowShellExec?: boolean;
   allowCodeEdit?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
-  request?: { channel: string; channelKey: string; agentId: string; sessionId: string };
+  request?: { channel: string; channelKey: string; agentId: string; sessionId: string; runId?: string };
+  planState?: {
+    completed: boolean;
+    complexity: "simple" | "complex";
+    steps: string[];
+    parallelGroups?: string[][];
+    createdAt: number;
+  };
   budgetInfo?: { iterationsUsed: number; maxIterations: number; toolCallsUsed: number; maxToolCalls: number };
   nowMs: () => number;
   log: (msg: string) => void;

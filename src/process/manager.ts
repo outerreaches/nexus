@@ -117,6 +117,8 @@ export class ProcessManager {
 
     if (!rec.child || rec.info.status !== "running") return rec.info;
 
+    const stoppedAt = Date.now();
+
     const signal = params.signal ?? "SIGTERM";
     const killAfterMs = typeof params.killAfterMs === "number" && Number.isFinite(params.killAfterMs) ? params.killAfterMs : 5_000;
 
@@ -138,7 +140,11 @@ export class ProcessManager {
     }
 
     // If it hasn't emitted exit yet, mark stopped.
-    const next: ManagedProcessInfo = { ...rec.info, status: rec.info.status === "running" ? "stopped" : rec.info.status };
+    const next: ManagedProcessInfo = {
+      ...rec.info,
+      status: rec.info.status === "running" ? "stopped" : rec.info.status,
+      endedAt: rec.info.endedAt ?? stoppedAt,
+    };
     rec.info = next;
     return next;
   }
@@ -157,4 +163,3 @@ export class ProcessManager {
     }
   }
 }
-

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
 import { getPreset, getPresetNames } from "../core/presets.js";
+import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -14,7 +15,8 @@ export const spawnAgent = defineTool({
     "The worker runs with a scoped set of tools and its own LLM context. " +
     "Available presets: " + getPresetNames().filter(n => n !== "orchestrator").join(", ") + ". " +
     "Use this to delegate coding, research, trading, or analysis tasks to specialists. " +
-    "The worker's output is returned to you and also written to the Blackboard.",
+    "The worker's output is returned to you and also written to the Blackboard. " +
+    "Note: spawning is depth-limited to prevent infinite delegation.",
   parameters: z.object({
     preset: z
       .string()
@@ -37,6 +39,7 @@ export const spawnAgent = defineTool({
       })
       .optional()
       .describe("Override preset budget limits"),
+    parentRunId: z.string().min(1).optional().describe("Optional parent run id for hierarchical agent graphs"),
   }),
   execute: async (args, ctx) => {
     // Resolve preset
@@ -89,6 +92,8 @@ export const spawnAgent = defineTool({
       }
     }
 
+    const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 3;
+
     // Build worker system prompt
     const systemPrompt = [
       preset.systemPrompt ?? `You are a ${preset.name} agent.`,
@@ -97,6 +102,8 @@ export const spawnAgent = defineTool({
       "## Instructions",
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
+      `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
+      "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
     ].join("\n");
 
     // Resolve budget
@@ -105,6 +112,29 @@ export const spawnAgent = defineTool({
       maxIterations: args.budget?.maxIterations ?? preset.budget?.maxIterations ?? 20,
     };
 
+    const tracker = ctx.agentTracker as AgentTracker | undefined;
+    const parent = ctx.request;
+    const effectiveParentRunId = args.parentRunId ?? parent?.runId ?? null;
+    if (maxDepth >= 0 && effectiveParentRunId && db) {
+      const parentDepth = computeRunDepth(db, effectiveParentRunId);
+      if (parentDepth + 1 > maxDepth) {
+        return `ERROR: max agent depth exceeded (depth=${parentDepth + 1}, max=${maxDepth}).`;
+      }
+      const parentTask = getParentTask(db, effectiveParentRunId);
+      if (parentTask && normalizeTask(parentTask) === normalizeTask(args.task)) {
+        return "ERROR: refusing to spawn a sub-agent with the same task as the parent.";
+      }
+    }
+    const runId = tracker?.startRun({
+      parentRunId: effectiveParentRunId,
+      agentId: parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`,
+      preset: preset.name,
+      channel: parent?.channel ?? "worker",
+      channelKey: parent?.channelKey ?? "worker",
+      sessionId: parent?.sessionId ?? "unknown",
+      task: args.task,
+    });
+
     // Create worker ToolContext (inherit from orchestrator but with worker identity)
     const workerCtx = {
       ...ctx,
@@ -112,6 +142,7 @@ export const spawnAgent = defineTool({
         ? {
             ...ctx.request,
             agentId: `${ctx.request.agentId}:${preset.name}`,
+            runId,
           }
         : undefined,
       // Workers get their own budget info
@@ -150,8 +181,8 @@ export const spawnAgent = defineTool({
         const entryId = crypto.randomUUID();
         db.db
           .prepare(
-            `INSERT INTO blackboard (id, session_scope, type, agent_id, agent_preset, title, content, attachments_json, metadata_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO blackboard (id, session_scope, type, agent_id, agent_preset, title, content, attachments_json, metadata_json, created_at, last_accessed_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             entryId,
@@ -164,7 +195,20 @@ export const spawnAgent = defineTool({
             "[]",
             JSON.stringify({ status: result.status, toolCalls: result.toolCallsUsed, iterations: result.iterationsUsed }),
             ctx.nowMs(),
+            ctx.nowMs(),
+            null,
           );
+      }
+
+      if (runId && tracker) {
+        const preview = result.output.trim().slice(0, 240);
+        tracker.completeRun(runId, {
+          status: result.status,
+          toolCallsUsed: result.toolCallsUsed,
+          iterationsUsed: result.iterationsUsed,
+          outputPreview: preview,
+          endedAt: ctx.nowMs(),
+        });
       }
 
       // Return structured result to orchestrator
@@ -175,10 +219,51 @@ export const spawnAgent = defineTool({
         iterationsUsed: result.iterationsUsed,
       }, null, 2);
     } catch (e) {
+      if (runId && tracker) {
+        tracker.completeRun(runId, {
+          status: "failed",
+          outputPreview: `ERROR: ${e instanceof Error ? e.message : String(e)}`,
+          endedAt: ctx.nowMs(),
+        });
+      }
       return `ERROR: worker agent failed: ${e instanceof Error ? e.message : String(e)}`;
     }
   },
 });
+
+function envInt(name: string): number | null {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.floor(n);
+}
+
+function computeRunDepth(db: NexusDatabase, runId: string): number {
+  let depth = 0;
+  let current: string | null = runId;
+  for (let i = 0; i < 20 && current; i++) {
+    const row = db.db.prepare("SELECT parent_run_id FROM agent_runs WHERE run_id = ?").get(current) as
+      | { parent_run_id: string | null }
+      | undefined;
+    if (!row?.parent_run_id) break;
+    depth += 1;
+    current = row.parent_run_id;
+  }
+  return depth;
+}
+
+function getParentTask(db: NexusDatabase, runId: string): string | null {
+  const row = db.db.prepare("SELECT task FROM agent_runs WHERE run_id = ?").get(runId) as
+    | { task: string | null }
+    | undefined;
+  if (!row?.task) return null;
+  return String(row.task);
+}
+
+function normalizeTask(task: string): string {
+  return task.replace(/\s+/g, " ").trim().toLowerCase();
+}
 
 function safeJsonParse(raw: string): unknown {
   try {
