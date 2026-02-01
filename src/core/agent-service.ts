@@ -8,6 +8,7 @@ import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../stora
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
 import type { AgentTracker } from "./agent-tracker.js";
+import { archiveAndClearBlackboard } from "../tools/blackboard.js";
 
 export class AgentService {
   private readonly semaphore: Semaphore;
@@ -52,6 +53,26 @@ export class AgentService {
         agentId: params.agentId,
         nowMs,
       });
+
+      // Archive and clear blackboard from previous runs so context stays clean
+      try {
+        const archived = await archiveAndClearBlackboard({
+          db: this.deps.db,
+          sessionScope: sessionId,
+          workspaceDir: this.deps.workspaceDir,
+          nowMs,
+        });
+        if (archived > 0) {
+          this.deps.onRunnerLog?.(
+            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} blackboard: archived ${archived} entries`,
+          );
+        }
+      } catch (err) {
+        // Non-critical — don't fail the run if archive fails
+        this.deps.onRunnerLog?.(
+          `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} blackboard: archive failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
       const history = loadRecentHistory({
         db: this.deps.db,

@@ -151,6 +151,8 @@ export const spawnAgent = defineTool({
     // Create worker ToolContext (inherit from orchestrator but with worker identity)
     const workerCtx = {
       ...ctx,
+      // Workers start with a fresh planState — don't inherit parent's completed plan
+      planState: undefined,
       request: ctx.request
         ? {
             ...ctx.request,

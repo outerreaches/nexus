@@ -99,15 +99,23 @@ export const writeToBlackboard = defineTool({
 export const readFromBlackboard = defineTool({
   name: "read_from_blackboard",
   description:
-    "Read entries from the shared Blackboard. Returns text content inline and " +
-    "attachment paths as references (never binary content). Filter by type, " +
-    "agent preset, or keyword search.",
+    "Read entries from the shared Blackboard. Filter by type, agent preset, title, or keyword. " +
+    "Returns full content for entries that fit within the response budget. " +
+    "Entries that exceed the budget are listed as summaries (title + ID) so you can fetch them individually.",
   parameters: z.object({
     type: z.enum(["artifact", "finding", "note", "status"]).optional().describe("Filter by entry type"),
     agentPreset: z.string().optional().describe("Filter by the agent preset that wrote the entry"),
+    title: z.string().optional().describe("Exact title match"),
     keyword: z.string().optional().describe("Search keyword in title and content"),
     ids: z.array(z.string()).optional().describe("Fetch specific entries by ID"),
-    limit: z.number().int().min(1).max(50).default(20).describe("Max entries to return"),
+    limit: z.number().int().min(1).max(50).default(10).describe("Max entries to return"),
+    maxTotalChars: z
+      .number()
+      .int()
+      .min(1000)
+      .max(100000)
+      .default(32000)
+      .describe("Max total chars in response. Entries beyond budget are listed as title-only summaries."),
     refreshTtl: z
       .boolean()
       .default(false)
@@ -123,48 +131,51 @@ export const readFromBlackboard = defineTool({
     db.db.prepare("DELETE FROM blackboard WHERE expires_at IS NOT NULL AND expires_at <= ?").run(nowMs);
 
     const scope = sessionScope(ctx);
+    let rows: Record<string, unknown>[];
 
     // If specific IDs requested, fetch those directly (across any scope for context injection)
     if (args.ids && args.ids.length > 0) {
       const placeholders = args.ids.map(() => "?").join(", ");
-      const rows = db.db
+      rows = db.db
         .prepare(`SELECT * FROM blackboard WHERE id IN (${placeholders}) ORDER BY created_at DESC`)
         .all(...args.ids) as Record<string, unknown>[];
-      touchEntries(db, rows, nowMs, args.refreshTtl);
-      return JSON.stringify(formatEntries(rows), null, 2);
+    } else {
+      // Build filtered query
+      const conditions: string[] = ["session_scope = ?"];
+      const params: unknown[] = [scope];
+
+      if (args.type) {
+        conditions.push("type = ?");
+        params.push(args.type);
+      }
+      if (args.agentPreset) {
+        conditions.push("agent_preset = ?");
+        params.push(args.agentPreset);
+      }
+      if (args.title) {
+        conditions.push("title = ?");
+        params.push(args.title);
+      }
+      if (args.keyword) {
+        conditions.push("(title LIKE ? OR content LIKE ?)");
+        const like = `%${args.keyword}%`;
+        params.push(like, like);
+      }
+
+      conditions.push("(expires_at IS NULL OR expires_at > ?)");
+      params.push(nowMs);
+
+      params.push(args.limit);
+
+      const sql = `SELECT * FROM blackboard WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`;
+      rows = db.db.prepare(sql).all(...params) as Record<string, unknown>[];
     }
-
-    // Build filtered query
-    const conditions: string[] = ["session_scope = ?"];
-    const params: unknown[] = [scope];
-
-    if (args.type) {
-      conditions.push("type = ?");
-      params.push(args.type);
-    }
-    if (args.agentPreset) {
-      conditions.push("agent_preset = ?");
-      params.push(args.agentPreset);
-    }
-    if (args.keyword) {
-      conditions.push("(title LIKE ? OR content LIKE ?)");
-      const like = `%${args.keyword}%`;
-      params.push(like, like);
-    }
-
-    params.push(args.limit);
-
-    conditions.push("(expires_at IS NULL OR expires_at > ?)");
-    params.push(nowMs);
-
-    const sql = `SELECT * FROM blackboard WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`;
-    const rows = db.db.prepare(sql).all(...params) as Record<string, unknown>[];
 
     if (rows.length === 0) return "No blackboard entries found matching the filters.";
 
     touchEntries(db, rows, nowMs, args.refreshTtl);
 
-    return JSON.stringify(formatEntries(rows), null, 2);
+    return formatWithBudget(rows, args.maxTotalChars);
   },
 });
 
@@ -249,32 +260,69 @@ export const blackboardPrune = defineTool({
   },
 });
 
-function formatEntries(
-  rows: Record<string, unknown>[],
-): {
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FormattedEntry = {
   id: string;
   type: string;
   agentPreset: string;
   title: string;
   content: string;
   attachments: unknown[];
-  metadata: unknown;
   createdAt: number;
-  lastAccessedAt: number | null;
-  expiresAt: number | null;
-}[] {
-  return rows.map((r) => ({
-    id: r.id as string,
-    type: r.type as string,
-    agentPreset: r.agent_preset as string,
-    title: r.title as string,
-    content: r.content as string,
-    attachments: safeJsonParse(r.attachments_json as string, []) as unknown[],
-    metadata: safeJsonParse(r.metadata_json as string, {}),
-    createdAt: r.created_at as number,
-    lastAccessedAt: r.last_accessed_at === null || r.last_accessed_at === undefined ? null : Number(r.last_accessed_at),
-    expiresAt: r.expires_at === null || r.expires_at === undefined ? null : Number(r.expires_at),
-  }));
+};
+
+/**
+ * Format entries with a total character budget. Entries are included in full
+ * until the budget is exhausted. Remaining entries are listed as title-only
+ * summaries so the agent knows they exist and can fetch by ID.
+ */
+function formatWithBudget(rows: Record<string, unknown>[], maxTotalChars: number): string {
+  const full: FormattedEntry[] = [];
+  const overflow: { id: string; title: string; type: string; agentPreset: string; chars: number }[] = [];
+  let totalChars = 0;
+
+  for (const r of rows) {
+    const content = String(r.content ?? "");
+    const entry: FormattedEntry = {
+      id: r.id as string,
+      type: r.type as string,
+      agentPreset: r.agent_preset as string,
+      title: r.title as string,
+      content,
+      attachments: safeJsonParse(r.attachments_json as string, []) as unknown[],
+      createdAt: r.created_at as number,
+    };
+
+    // Estimate this entry's JSON size (~overhead + content)
+    const entryChars = content.length + (entry.title?.length ?? 0) + 200;
+
+    if (totalChars + entryChars <= maxTotalChars) {
+      full.push(entry);
+      totalChars += entryChars;
+    } else {
+      overflow.push({
+        id: entry.id,
+        title: entry.title,
+        type: entry.type,
+        agentPreset: entry.agentPreset,
+        chars: content.length,
+      });
+    }
+  }
+
+  const result: { entries: FormattedEntry[]; overflow?: typeof overflow; totalEntries: number } = {
+    entries: full,
+    totalEntries: rows.length,
+  };
+
+  if (overflow.length > 0) {
+    result.overflow = overflow;
+  }
+
+  return JSON.stringify(result, null, 2);
 }
 
 function touchEntries(
@@ -300,6 +348,77 @@ function touchEntries(
     if (!row.id) continue;
     db.db.prepare("UPDATE blackboard SET expires_at = ? WHERE id = ?").run(expiresAt, row.id);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blackboard lifecycle — archive old entries at orchestrator run start
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Archive all blackboard entries for a session to a markdown file, then clear them.
+ * Called at the start of each orchestrator run so context stays clean.
+ * Returns the number of entries archived (0 means nothing to archive).
+ */
+export async function archiveAndClearBlackboard(params: {
+  db: NexusDatabase;
+  sessionScope: string;
+  workspaceDir: string;
+  nowMs: number;
+}): Promise<number> {
+  const { db, sessionScope: scope, workspaceDir, nowMs } = params;
+
+  const rows = db.db
+    .prepare("SELECT * FROM blackboard WHERE session_scope = ? ORDER BY created_at ASC")
+    .all(scope) as Record<string, unknown>[];
+
+  if (rows.length === 0) return 0;
+
+  // Build markdown archive
+  const lines: string[] = [
+    `# Blackboard Archive`,
+    ``,
+    `Session: ${scope}`,
+    `Archived at: ${new Date(nowMs).toISOString()}`,
+    `Entries: ${rows.length}`,
+    ``,
+    `---`,
+    ``,
+  ];
+
+  for (const r of rows) {
+    const attachments = safeJsonParse(String(r.attachments_json ?? "[]"), []) as { path?: string; mimeType?: string }[];
+    lines.push(`## [${r.type}] ${r.title}`);
+    lines.push(``);
+    lines.push(`- **ID**: ${r.id}`);
+    lines.push(`- **Agent**: ${r.agent_id} (${r.agent_preset})`);
+    lines.push(`- **Created**: ${new Date(Number(r.created_at)).toISOString()}`);
+    lines.push(``);
+    lines.push(String(r.content ?? ""));
+    if (attachments.length > 0) {
+      lines.push(``);
+      lines.push(`**Attachments:**`);
+      for (const a of attachments) {
+        lines.push(`- ${a.path ?? "unknown"}${a.mimeType ? ` (${a.mimeType})` : ""}`);
+      }
+    }
+    lines.push(``);
+    lines.push(`---`);
+    lines.push(``);
+  }
+
+  // Write archive file
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const archiveDir = path.join(workspaceDir, ".blackboard-archives");
+  await fs.mkdir(archiveDir, { recursive: true });
+  const timestamp = new Date(nowMs).toISOString().replace(/[:.]/g, "-");
+  const archivePath = path.join(archiveDir, `${timestamp}.md`);
+  await fs.writeFile(archivePath, lines.join("\n"), "utf8");
+
+  // Clear blackboard entries for this session
+  db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scope);
+
+  return rows.length;
 }
 
 function safeJsonParse(raw: string, fallback: unknown): unknown {

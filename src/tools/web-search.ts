@@ -50,6 +50,29 @@ function resolvePerplexityAuth(): { apiKey: string | null; baseUrl: string } {
   return { apiKey: null, baseUrl: OPENROUTER_BASE_URL };
 }
 
+async function braveSearchWithRetry(url: string, apiKey: string, timeoutMs: number, maxRetries = 2): Promise<any> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 1500 * attempt));
+    }
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json", "X-Subscription-Token": apiKey },
+      signal: withTimeout(timeoutMs),
+    });
+    if (res.status === 429 && attempt < maxRetries) {
+      await readResponseText(res);
+      continue;
+    }
+    if (!res.ok) {
+      const detail = await readResponseText(res);
+      throw new Error(`Brave Search API error (${res.status}): ${detail || res.statusText}`);
+    }
+    return await res.json();
+  }
+  throw new Error("Brave Search API rate limited (429) after retries");
+}
+
 async function braveSearch(params: {
   query: string;
   count: number;
@@ -73,21 +96,7 @@ async function braveSearch(params: {
   if (params.freshness) url.searchParams.set("freshness", params.freshness);
 
   const start = Date.now();
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      "X-Subscription-Token": apiKey,
-    },
-    signal: withTimeout(params.timeoutMs),
-  });
-
-  if (!res.ok) {
-    const detail = await readResponseText(res);
-    throw new Error(`Brave Search API error (${res.status}): ${detail || res.statusText}`);
-  }
-
-  const json = (await res.json()) as any;
+  const json = await braveSearchWithRetry(url.toString(), apiKey, params.timeoutMs);
   const resultsRaw = Array.isArray(json?.web?.results) ? json.web.results : [];
   const results = resultsRaw.slice(0, params.count).map((r: any) => ({
     title: String(r?.title ?? ""),
