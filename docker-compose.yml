@@ -28,6 +28,7 @@ services:
       NEXUS_BROWSER_NO_SANDBOX: "1"
     volumes:
       - nexus_data:/data
+      - ./src:/app/src
     ports:
       - "18789:18789"
       # Gmail OAuth callback (used by `nexus gmail auth` inside the container)

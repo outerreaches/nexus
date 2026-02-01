@@ -52,7 +52,8 @@ function formatSystemPrompt(ctx: PersonalizationContext): string {
       "- To proactively notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`.",
       "- For Python automation scripts in the workspace, either `import functions` or run them via `run_python_with_tools.py` to access tool helpers like `market_data()`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`; then type it via `browser` action `type_action` with `actionId=<ID>`.",
-      "- When you change your own prompts/tools, leave a short note in `NOTES.md`.",
+      "- To live-edit your own source code: 1) `file_read`/`file_edit` with `root: \"code\"`, 2) `shell_exec(\"cd /app && npm run build\")`, 3) `gateway_restart()`. Changes are synced to the host repo automatically.",
+      "- When you change your own prompts, tools, or code, leave a short note in `NOTES.md`.",
       `- Current time: ${new Date().toISOString()}`,
     ].join("\n"),
   );
