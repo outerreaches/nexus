@@ -2,6 +2,8 @@ import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
 import { createHash } from "node:crypto";
+import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
+import type { NexusDatabase } from "../storage/database.js";
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -54,6 +56,7 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
 export type AgentBudget = {
   maxToolCalls: number;
   maxIterations: number;
+  maxContextTokens?: number;
 };
 
 export type AgentResult = {
@@ -93,9 +96,55 @@ export class AgentRunner {
     };
     this.deps.toolContext.budgetInfo = budgetInfo;
 
+    const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
+
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       budgetInfo.iterationsUsed = iteration;
       budgetInfo.toolCallsUsed = toolCallsUsed;
+
+      // ── Context compaction ─────────────────────────────────────────────
+      if (maxContextTokens > 0) {
+        const estimated = estimateTotalTokens(messages, this.deps.tools);
+        // Compact when we exceed 85% of the limit
+        if (estimated > maxContextTokens * 0.85) {
+          this.deps.onLog?.(`compaction: estimated ${estimated} tokens (limit ${maxContextTokens}), compacting`);
+          try {
+            const result = await compactContext({
+              messages,
+              tools: this.deps.tools,
+              llm: this.deps.llm,
+              maxContextTokens,
+              onLog: this.deps.onLog,
+            });
+            if (result.compacted) {
+              // Replace the messages array contents in-place
+              messages.length = 0;
+              messages.push(...result.messages);
+              this.deps.onLog?.(
+                `compaction: removed ${result.messagesRemoved} messages, ${result.tokensBefore} → ${result.tokensAfter} tokens`,
+              );
+              // Store summary in memory for cross-session recall
+              if (result.summary) {
+                const db = this.deps.toolContext.db as NexusDatabase | undefined;
+                const agentId = this.deps.toolContext.request?.agentId ?? "main";
+                const sessionId = this.deps.toolContext.request?.sessionId;
+                if (db && sessionId) {
+                  storeCompactionSummary({
+                    db,
+                    agentId,
+                    sessionId,
+                    summary: result.summary,
+                    nowMs: this.deps.toolContext.nowMs(),
+                  });
+                }
+              }
+            }
+          } catch (compErr) {
+            this.deps.onLog?.(`compaction: failed (${compErr instanceof Error ? compErr.message : String(compErr)}), proceeding without`);
+          }
+        }
+      }
+
       let content: string | null;
       let toolCalls: import("./types.js").ToolCall[];
       try {
@@ -134,15 +183,21 @@ export class AgentRunner {
         };
       }
 
-      if (!this.deps.toolContext.planState?.completed && toolCalls.some((c) => c.name !== "plan_task")) {
-        const msg: ChatMessage = {
-          role: "assistant",
-          content:
-            "You must call plan_task before using any other tools. Create a plan with complexity, steps, and parallel groups.",
+      // Soft plan nudge: if plan_task is available but hasn't been called yet,
+      // and the agent is making a complex multi-tool call, inject a hint.
+      // We no longer hard-block tool execution — the plan is advisory.
+      if (
+        !this.deps.toolContext.planState?.completed &&
+        toolCalls.length >= 3 &&
+        toolCalls.every((c) => c.name !== "plan_task") &&
+        this.deps.tools.some((t) => t.name === "plan_task")
+      ) {
+        const nudge: ChatMessage = {
+          role: "system",
+          content: "Tip: consider calling plan_task first for complex multi-step tasks to organize your approach.",
         };
-        messages.push(msg);
-        newMessages.push(msg);
-        continue;
+        messages.push(nudge);
+        newMessages.push(nudge);
       }
 
       const toolCallingMsg: ChatMessage = { role: "assistant", content: content ?? null, toolCalls };

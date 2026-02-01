@@ -115,6 +115,8 @@ async function perplexitySearch(params: {
   }
   const endpoint = `${auth.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const start = Date.now();
+  const now = new Date();
+  const datePrefix = `[Current date: ${now.toISOString().split("T")[0]}, year ${now.getFullYear()}] `;
   const res = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -125,7 +127,7 @@ async function perplexitySearch(params: {
     },
     body: JSON.stringify({
       model: params.model,
-      messages: [{ role: "user", content: params.query }],
+      messages: [{ role: "user", content: datePrefix + params.query }],
       temperature: 0.2,
     }),
     signal: withTimeout(params.timeoutMs),

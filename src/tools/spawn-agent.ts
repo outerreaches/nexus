@@ -92,12 +92,14 @@ export const spawnAgent = defineTool({
       }
     }
 
-    const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 5;
+    const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 4;
 
     // Resolve budget
+    const maxContextTokens = envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? 128_000;
     const budget = {
       maxToolCalls: args.budget?.maxToolCalls ?? preset.budget?.maxToolCalls ?? 50,
       maxIterations: args.budget?.maxIterations ?? preset.budget?.maxIterations ?? 20,
+      maxContextTokens,
     };
 
     const tracker = ctx.agentTracker as AgentTracker | undefined;
@@ -122,11 +124,13 @@ export const spawnAgent = defineTool({
     }
 
     // Build worker system prompt
+    const now = new Date();
     const systemPrompt = [
       preset.systemPrompt ?? `You are a ${preset.name} agent.`,
       contextText,
       "",
       "## Instructions",
+      `Current date and time: ${now.toISOString()} (${now.getFullYear()}). For current events or time-sensitive queries, include the year in searches. For historical topics, use the appropriate time period.`,
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
       isMaxDepth

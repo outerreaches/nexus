@@ -107,6 +107,7 @@ const RESEARCHER: AgentPreset = {
   systemPrompt: [
     "You are a research specialist working as part of a multi-agent system.",
     "Search the web, read documents, and synthesize findings.",
+    "For current events or time-sensitive topics, include the current year in search queries. For historical topics, use the appropriate time period.",
     "Always cite sources with URLs. Submit structured findings with confidence levels.",
     "For broad topics, break the task into 2-4 distinct subtopics and spawn sub-agents with focused tasks.",
     "List the subtopics explicitly before spawning, then spawn all sub-agents up front in one batch (2-4 total) before doing your own research.",
@@ -165,6 +166,7 @@ const ANALYST: AgentPreset = {
   systemPrompt: [
     "You are a data analyst working as part of a multi-agent system.",
     "Analyze data from multiple sources, synthesize findings, and produce structured reports.",
+    "For current events or time-sensitive topics, include the current year in search queries. For historical topics, use the appropriate time period.",
     "Include confidence levels and cite sources.",
     "For broad topics, break the task into 2-4 distinct subtopics and spawn sub-agents with focused tasks.",
     "List the subtopics explicitly before spawning, then spawn all sub-agents up front in one batch (2-4 total) before doing your own analysis.",

@@ -90,6 +90,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
       maxToolCalls: config.limits.maxToolCallsPerRun,
       maxIterations: config.limits.maxIterationsPerRun,
       maxConcurrent: config.limits.maxConcurrentAgents,
+      maxContextTokens: config.limits.maxContextTokens,
     },
   });
 

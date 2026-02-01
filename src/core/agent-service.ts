@@ -19,7 +19,7 @@ export class AgentService {
       toolContext: ToolContext;
       db: NexusDatabase;
       workspaceDir: string;
-      limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number };
+      limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number; maxContextTokens?: number };
       agentTracker?: AgentTracker;
       onRunnerLog?: (line: string) => void;
       /** Default preset name for agents (e.g. "orchestrator"). If unset, all tools are used. */
@@ -78,6 +78,7 @@ export class AgentService {
       const budget = {
         maxToolCalls: preset?.budget?.maxToolCalls ?? this.deps.limits.maxToolCalls,
         maxIterations: preset?.budget?.maxIterations ?? this.deps.limits.maxIterations,
+        maxContextTokens: this.deps.limits.maxContextTokens ?? 0,
       };
 
       // Build tool context — inject LLM reference so spawn_agent can create workers
