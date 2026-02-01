@@ -92,19 +92,7 @@ export const spawnAgent = defineTool({
       }
     }
 
-    const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 3;
-
-    // Build worker system prompt
-    const systemPrompt = [
-      preset.systemPrompt ?? `You are a ${preset.name} agent.`,
-      contextText,
-      "",
-      "## Instructions",
-      "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
-      "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
-      `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
-      "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
-    ].join("\n");
+    const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 5;
 
     // Resolve budget
     const budget = {
@@ -115,8 +103,9 @@ export const spawnAgent = defineTool({
     const tracker = ctx.agentTracker as AgentTracker | undefined;
     const parent = ctx.request;
     const effectiveParentRunId = args.parentRunId ?? parent?.runId ?? null;
+    let parentDepth = 0;
     if (maxDepth >= 0 && effectiveParentRunId && db) {
-      const parentDepth = computeRunDepth(db, effectiveParentRunId);
+      parentDepth = computeRunDepth(db, effectiveParentRunId);
       if (parentDepth + 1 > maxDepth) {
         return `ERROR: max agent depth exceeded (depth=${parentDepth + 1}, max=${maxDepth}).`;
       }
@@ -125,6 +114,26 @@ export const spawnAgent = defineTool({
         return "ERROR: refusing to spawn a sub-agent with the same task as the parent.";
       }
     }
+    const workerDepth = parentDepth + 1;
+    const isMaxDepth = maxDepth >= 0 && workerDepth >= maxDepth;
+
+    if (isMaxDepth) {
+      workerTools.splice(0, workerTools.length, ...workerTools.filter((t) => t.name !== "spawn_agent"));
+    }
+
+    // Build worker system prompt
+    const systemPrompt = [
+      preset.systemPrompt ?? `You are a ${preset.name} agent.`,
+      contextText,
+      "",
+      "## Instructions",
+      "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
+      "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
+      isMaxDepth
+        ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
+        : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
+      "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
+    ].join("\n");
     const runId = tracker?.startRun({
       parentRunId: effectiveParentRunId,
       agentId: parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`,
