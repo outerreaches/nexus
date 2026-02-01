@@ -14,8 +14,9 @@ export const fileRead = defineTool({
     path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
     startLine: z.number().int().positive().optional().describe("1-based start line"),
     endLine: z.number().int().positive().optional().describe("1-based end line (inclusive)"),
+    withLineNumbers: z.boolean().default(false).describe("Prefix lines with 1-based line numbers (e.g., '12: ...')."),
   }),
-  execute: async ({ root, path: inputPath, startLine, endLine }, ctx) => {
+  execute: async ({ root, path: inputPath, startLine, endLine, withLineNumbers }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
     const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
@@ -25,11 +26,16 @@ export const fileRead = defineTool({
       roots: allowedRoots,
     });
     const text = await fs.readFile(fullPath, "utf8");
-    if (!startLine && !endLine) return text;
-    const lines = text.split(/\r?\n/);
+    const wantsRange = Boolean(startLine || endLine || withLineNumbers);
+    if (!wantsRange) return text;
+    const rawLines = text.split(/\r?\n/);
+    const hadTrailingNewline = text.endsWith("\n");
+    const lines = hadTrailingNewline ? rawLines.slice(0, -1) : rawLines;
     const start = Math.max((startLine ?? 1) - 1, 0);
     const end = Math.min((endLine ?? lines.length) - 1, lines.length - 1);
-    return lines.slice(start, end + 1).join("\n");
+    const slice = lines.slice(start, end + 1);
+    if (!withLineNumbers) return slice.join("\n");
+    return slice.map((line, i) => `${start + i + 1}: ${line}`).join("\n");
   },
 });
 
@@ -121,6 +127,52 @@ export const fileEdit = defineTool({
     const idx = text.indexOf(find);
     if (idx === -1) return "ERROR: find text not found";
     const next = text.slice(0, idx) + replace + text.slice(idx + find.length);
+    await fs.writeFile(fullPath, next, "utf8");
+    return "OK";
+  },
+});
+
+export const fileEditLines = defineTool({
+  name: "file_edit_lines",
+  description: "Edit a file by replacing a 1-based line range (inclusive).",
+  parameters: z.object({
+    root: z.enum(["workspace", "state", "code"]).default("workspace"),
+    path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
+    startLine: z.number().int().positive().describe("1-based start line"),
+    endLine: z.number().int().positive().optional().describe("1-based end line (inclusive, defaults to startLine)"),
+    content: z.string().describe("Replacement text (empty string deletes the range)"),
+  }),
+  execute: async ({ root, path: inputPath, startLine, endLine, content }, ctx) => {
+    if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
+    const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
+    const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
+    const fullPath = resolveWithinRoots({
+      inputPath,
+      defaultRoot: baseRoot,
+      roots: allowedRoots,
+    });
+    const text = await fs.readFile(fullPath, "utf8");
+    const rawLines = text.split(/\r?\n/);
+    const hadTrailingNewline = text.endsWith("\n");
+    const newline = text.includes("\r\n") ? "\r\n" : "\n";
+    const lines = hadTrailingNewline ? rawLines.slice(0, -1) : rawLines;
+
+    const startIdx = startLine - 1;
+    const endIdx = (endLine ?? startLine) - 1;
+    if (startIdx < 0 || startIdx >= lines.length) {
+      return `ERROR: startLine out of range (1-${lines.length})`;
+    }
+    if (endIdx < startIdx) {
+      return "ERROR: endLine must be >= startLine";
+    }
+    if (endIdx >= lines.length) {
+      return `ERROR: endLine out of range (1-${lines.length})`;
+    }
+
+    const replacementLines = content.length === 0 ? [] : content.split(/\r?\n/);
+    lines.splice(startIdx, endIdx - startIdx + 1, ...replacementLines);
+    let next = lines.join(newline);
+    if (hadTrailingNewline) next += newline;
     await fs.writeFile(fullPath, next, "utf8");
     return "OK";
   },

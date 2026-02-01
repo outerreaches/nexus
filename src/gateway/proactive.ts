@@ -107,7 +107,7 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
         "Review HEARTBEAT.md and current state. If there is nothing meaningful to do right now, respond with exactly: IDLE",
         "",
         "Rules:",
-        "- It is OK to idle; do not invent work.",
+        "- It is OK to idle if there is nothing going on.",
         "- Avoid long research loops. Prefer one small, high-value action per tick.",
         "- Only ask the operator for action if you are blocked on a specific step (OTP/MFA/CAPTCHA/etc).",
         "- If you do ask, use `human_request` with a short, specific prompt and then stop.",

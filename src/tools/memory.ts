@@ -1,0 +1,157 @@
+import { z } from "zod";
+
+import { defineTool } from "../core/tools.js";
+import type { NexusDatabase } from "../storage/database.js";
+
+function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
+  return (ctx.db as NexusDatabase | undefined) ?? null;
+}
+
+function currentAgentId(ctx: { request?: { agentId: string } }): string {
+  return ctx.request?.agentId ? String(ctx.request.agentId) : "main";
+}
+
+export const memoryStore = defineTool({
+  name: "memory_store",
+  description:
+    "Store a persistent memory (key-value). Upserts: if the key already exists for this agent, the value is updated. Use for facts, observations, preferences, plans, or anything worth remembering across sessions.",
+  parameters: z.object({
+    key: z.string().min(1).max(200).describe("Unique key identifying this memory"),
+    value: z.string().min(1).max(8000).describe("The content to remember"),
+    category: z
+      .enum(["fact", "observation", "preference", "plan"])
+      .default("observation")
+      .describe("Category for organization and filtering"),
+    tags: z.array(z.string().max(50)).max(10).default([]).describe("Optional tags for search"),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const agentId = currentAgentId(ctx);
+    const nowMs = ctx.nowMs();
+
+    try {
+      db.db
+        .prepare(
+          `INSERT INTO memories (agent_id, key, value, category, tags_json, created_at, updated_at, accessed_at, access_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+           ON CONFLICT(agent_id, key) DO UPDATE SET
+             value = excluded.value,
+             category = excluded.category,
+             tags_json = excluded.tags_json,
+             updated_at = excluded.updated_at`,
+        )
+        .run(agentId, args.key, args.value, args.category, JSON.stringify(args.tags), nowMs, nowMs, nowMs);
+
+      return `OK: stored memory "${args.key}" [${args.category}]`;
+    } catch (e) {
+      return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  },
+});
+
+export const memoryRecall = defineTool({
+  name: "memory_recall",
+  description: "Retrieve a specific memory by exact key. Updates access tracking.",
+  parameters: z.object({
+    key: z.string().min(1).max(200),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const agentId = currentAgentId(ctx);
+    const nowMs = ctx.nowMs();
+
+    const row = db.db
+      .prepare("SELECT * FROM memories WHERE agent_id = ? AND key = ?")
+      .get(agentId, args.key) as any;
+
+    if (!row) return `NOT_FOUND: no memory with key "${args.key}"`;
+
+    // Update access tracking
+    db.db
+      .prepare("UPDATE memories SET accessed_at = ?, access_count = access_count + 1 WHERE id = ?")
+      .run(nowMs, row.id);
+
+    return JSON.stringify(
+      {
+        key: row.key,
+        value: row.value,
+        category: row.category,
+        tags: JSON.parse(row.tags_json || "[]"),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        access_count: row.access_count + 1,
+      },
+      null,
+      2,
+    );
+  },
+});
+
+export const memorySearch = defineTool({
+  name: "memory_search",
+  description:
+    "Search memories by keyword (searches key, value, and tags). Optionally filter by category. Returns top N results sorted by relevance (access frequency + recency).",
+  parameters: z.object({
+    query: z.string().min(1).max(200).describe("Search term (case-insensitive substring match)"),
+    category: z
+      .enum(["fact", "observation", "preference", "plan"])
+      .optional()
+      .describe("Filter by category"),
+    limit: z.number().int().min(1).max(50).default(10),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const agentId = currentAgentId(ctx);
+    const pattern = `%${args.query}%`;
+
+    const categoryClause = args.category ? "AND category = ?" : "";
+    const sql = `
+      SELECT key, value, category, tags_json, created_at, updated_at, access_count
+      FROM memories
+      WHERE agent_id = ? AND (key LIKE ? OR value LIKE ? OR tags_json LIKE ?) ${categoryClause}
+      ORDER BY access_count DESC, updated_at DESC
+      LIMIT ?
+    `;
+
+    const params = args.category
+      ? [agentId, pattern, pattern, pattern, args.category, args.limit]
+      : [agentId, pattern, pattern, pattern, args.limit];
+
+    const rows = db.db.prepare(sql).all(...params) as any[];
+
+    if (rows.length === 0) return `No memories found matching "${args.query}"`;
+
+    const results = rows.map((r) => ({
+      key: r.key,
+      value: r.value,
+      category: r.category,
+      tags: JSON.parse(r.tags_json || "[]"),
+      access_count: r.access_count,
+    }));
+
+    return JSON.stringify(results, null, 2);
+  },
+});
+
+export const memoryDelete = defineTool({
+  name: "memory_delete",
+  description: "Delete a memory by key.",
+  parameters: z.object({
+    key: z.string().min(1).max(200),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const agentId = currentAgentId(ctx);
+
+    const result = db.db
+      .prepare("DELETE FROM memories WHERE agent_id = ? AND key = ?")
+      .run(agentId, args.key);
+
+    if (result.changes === 0) return `NOT_FOUND: no memory with key "${args.key}"`;
+    return "OK";
+  },
+});

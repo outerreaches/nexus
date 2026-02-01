@@ -6,6 +6,7 @@ import { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
 import { Semaphore } from "./semaphore.js";
+import { getPreset, type AgentPreset } from "./presets.js";
 
 export class AgentService {
   private readonly semaphore: Semaphore;
@@ -19,6 +20,8 @@ export class AgentService {
       workspaceDir: string;
       limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number };
       onRunnerLog?: (line: string) => void;
+      /** Default preset name for agents (e.g. "orchestrator"). If unset, all tools are used. */
+      defaultPreset?: string;
     },
   ) {
     this.semaphore = new Semaphore(deps.limits.maxConcurrent);
@@ -29,6 +32,8 @@ export class AgentService {
     channelKey: string;
     agentId: string;
     text: string;
+    /** Override preset for this invocation. */
+    preset?: string;
   }): Promise<{
     sessionId: string;
     output: string;
@@ -62,22 +67,35 @@ export class AgentService {
         }
       : undefined;
 
+    // Resolve preset and filter tools
+    const presetName = params.preset ?? this.deps.defaultPreset;
+    const preset = presetName ? getPreset(presetName) : undefined;
+    const tools = filterToolsByPreset(this.deps.getTools(), preset);
+
+    // Resolve budget from preset or global limits
+    const budget = {
+      maxToolCalls: preset?.budget?.maxToolCalls ?? this.deps.limits.maxToolCalls,
+      maxIterations: preset?.budget?.maxIterations ?? this.deps.limits.maxIterations,
+    };
+
+    // Build tool context — inject LLM reference so spawn_agent can create workers
+    const toolContext: ToolContext = {
+      ...this.deps.toolContext,
+      request: {
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+        sessionId,
+      },
+    };
+    // Expose LLM client for spawn_agent tool (not part of ToolContext type, accessed via cast)
+    (toolContext as Record<string, unknown>).__llm = this.deps.llm;
+
     const runner = new AgentRunner({
       llm: this.deps.llm,
-      tools: this.deps.getTools(),
-      budget: {
-        maxToolCalls: this.deps.limits.maxToolCalls,
-        maxIterations: this.deps.limits.maxIterations,
-      },
-      toolContext: {
-        ...this.deps.toolContext,
-        request: {
-          channel: params.channel,
-          channelKey: params.channelKey,
-          agentId: params.agentId,
-          sessionId,
-        },
-      },
+      tools,
+      budget,
+      toolContext,
       onLog: onRunnerLog,
     });
 
@@ -100,4 +118,10 @@ export class AgentService {
     };
     });
   }
+}
+
+function filterToolsByPreset(allTools: Tool[], preset?: AgentPreset): Tool[] {
+  if (!preset) return allTools;
+  const allowed = new Set(preset.tools);
+  return allTools.filter((t) => allowed.has(t.name));
 }

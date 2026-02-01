@@ -1,6 +1,6 @@
 import type { Tool } from "../core/tools.js";
 
-import { fileEdit, fileList, fileRead, fileWrite } from "./file-ops.js";
+import { fileEdit, fileEditLines, fileList, fileRead, fileWrite } from "./file-ops.js";
 import { browserTool } from "./browser.js";
 import { marketData } from "./markets.js";
 import { toolsReload } from "./registry.js";
@@ -15,12 +15,19 @@ import { credentialDelete, credentialGenerate, credentialList, credentialSet } f
 import { humanRequest, humanStatus } from "./human-actions.js";
 import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobPause, jobResume, jobRunGet, jobRunNow, jobRuns, jobUpdate } from "./jobs.js";
 import { telegramSend } from "./telegram-send.js";
+import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
+import { skillCreate, skillList, skillUpdate } from "./skills.js";
+import { budgetStatus } from "./budget.js";
+import { reflect } from "./reflect.js";
+import { writeToBlackboard, readFromBlackboard } from "./blackboard.js";
+import { spawnAgent } from "./spawn-agent.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
     fileRead,
     fileWrite,
     fileEdit,
+    fileEditLines,
     fileList,
     webFetch,
     webSearch,
@@ -58,5 +65,17 @@ export function getBuiltInTools(): Tool[] {
     jobRunGet,
     jobEvents,
     jobDelete,
+    memoryStore,
+    memoryRecall,
+    memorySearch,
+    memoryDelete,
+    skillCreate,
+    skillList,
+    skillUpdate,
+    budgetStatus,
+    reflect,
+    writeToBlackboard,
+    readFromBlackboard,
+    spawnAgent,
   ];
 }

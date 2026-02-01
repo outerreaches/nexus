@@ -83,7 +83,19 @@ export class AgentRunner {
     let toolCallsUsed = 0;
     const repeatedFailures = new Map<string, number>();
     const maxSameToolFailures = 4;
+
+    // Live budget info accessible by tools (e.g. budget_status).
+    const budgetInfo = {
+      iterationsUsed: 0,
+      maxIterations: this.deps.budget.maxIterations,
+      toolCallsUsed: 0,
+      maxToolCalls: this.deps.budget.maxToolCalls,
+    };
+    this.deps.toolContext.budgetInfo = budgetInfo;
+
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
+      budgetInfo.iterationsUsed = iteration;
+      budgetInfo.toolCallsUsed = toolCallsUsed;
       let content: string | null;
       let toolCalls: import("./types.js").ToolCall[];
       try {
@@ -236,6 +248,17 @@ export class AgentRunner {
           // doing productive work between retries (e.g. rewriting a file before
           // re-running a command).  Budget caps still prevent infinite loops.
           repeatedFailures.clear();
+        }
+
+        // Inject low-budget warning when approaching limits.
+        const iterPct = ((iteration + 1) / this.deps.budget.maxIterations) * 100;
+        const toolPct = (toolCallsUsed / this.deps.budget.maxToolCalls) * 100;
+        if (iterPct >= 80 || toolPct >= 80) {
+          const iterRemain = this.deps.budget.maxIterations - iteration - 1;
+          const toolRemain = this.deps.budget.maxToolCalls - toolCallsUsed;
+          toolResultMsg.content +=
+            `\n\n[BUDGET WARNING: ${iterRemain} iterations and ${toolRemain} tool calls remaining. ` +
+            `Wrap up or summarize progress soon.]`;
         }
       }
     }

@@ -156,6 +156,46 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       leased_until INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Agent memory store
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL DEFAULT 'main',
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'observation',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      accessed_at INTEGER NOT NULL,
+      access_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(agent_id, key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memories_agent_category ON memories(agent_id, category);
+    CREATE INDEX IF NOT EXISTS idx_memories_agent_key ON memories(agent_id, key);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Blackboard (shared agent communication store)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS blackboard (
+      id TEXT PRIMARY KEY,
+      session_scope TEXT NOT NULL,
+      type TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      agent_preset TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      attachments_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_blackboard_scope ON blackboard(session_scope, created_at DESC);
   `);
 
   try {

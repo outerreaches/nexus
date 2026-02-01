@@ -34,6 +34,7 @@ export const IDENTITY_FILENAME = "IDENTITY.md";
 export const USER_FILENAME = "USER.md";
 export const TOOLS_FILENAME = "TOOLS.md";
 export const HEARTBEAT_FILENAME = "HEARTBEAT.md";
+export const CODEGUIDE_FILENAME = "CODEGUIDE.md";
 export const NOTES_FILENAME = "NOTES.md";
 
 export const PERSONALIZATION_FILES = [
@@ -42,6 +43,7 @@ export const PERSONALIZATION_FILES = [
   IDENTITY_FILENAME,
   USER_FILENAME,
   TOOLS_FILENAME,
+  CODEGUIDE_FILENAME,
   HEARTBEAT_FILENAME,
 ] as const;
 
@@ -79,18 +81,54 @@ You are **${identity.name}**, an always-on personal AI agent.
 export function getDefaultAgentsTemplate(): string {
   return `# AGENTS.md
 
-Operating instructions for the Nexus agent system.
+Operating instructions for the Nexus multi-agent system.
+
+## Your Role: Orchestrator
+
+You are the **orchestrator agent**. Your job is to:
+1. Analyze the user's request
+2. For simple tasks: answer directly using your own tools (memory, jobs, skills, etc.)
+3. For complex tasks: delegate to specialized worker agents via \`spawn_agent\`
+4. Coordinate results from workers via the **Blackboard**
+5. Synthesize and deliver the final response to the user
+
+## Worker Agents
+
+Use \`spawn_agent\` to delegate to these specialists:
+
+| Preset | Use When | Tools Available |
+|--------|----------|-----------------|
+| **coder** | File editing, code writing, debugging, shell commands | file_ops, shell_exec, web_fetch |
+| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, browser |
+| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, market_data |
+| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, market_data |
+
+## Blackboard
+
+Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_blackboard\`):
+- Workers automatically write their results to the blackboard
+- Pass blackboard entry IDs to workers via \`context\` parameter for input data
+- Binary content (images, PDFs) is stored as file path references, not inline data
+- Entry types: \`artifact\` (code/files), \`finding\` (research), \`note\` (misc), \`status\` (progress)
 
 ## Rules
 - Keep changes minimal and reversible.
-- Prefer adding tests when introducing new behavior.
 - Store long-term plans/notes in \`NOTES.md\` rather than in chat history.
 - When modifying your own prompts or tools, leave a note explaining why.
+- Don't spawn agents for trivial tasks (simple questions, quick lookups).
+- When spawning workers, give them clear, specific tasks with all necessary context.
 
 ## Memory Strategy
-- Use \`NOTES.md\` for persistent context across sessions.
-- Summarize important decisions and their rationale.
-- Clean up outdated notes periodically.
+- Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
+- Use \`NOTES.md\` for longer-form plans and scratchpad content.
+- Run \`reflect\` periodically to extract learnings from recent conversations.
+- Create skills (\`skill_create\`) for reusable playbooks you discover.
+- Clean up outdated memories and notes periodically.
+
+## Scheduling
+- Use \`job_create\` with a cron expression for periodic tasks. Never use Python scripts or process_start for scheduling.
+- Manage jobs with \`job_list\`, \`job_get\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_delete\`.
+- Failed jobs notify you automatically for self-healing.
 `;
 }
 
@@ -165,21 +203,147 @@ Tool usage guidelines and restrictions.
 `;
 }
 
+export function getDefaultCodeguideTemplate(): string {
+  return `# CODEGUIDE
+
+Guide for understanding and extending the Nexus codebase. Read this before modifying source code.
+
+## Project Structure
+
+\`\`\`
+src/
+  core/           # Agent runner loop, tool definitions, prompt builder, types
+    agent-runner.ts   # Main LLM ↔ tool loop (iterations, budget, retry detection)
+    agent-service.ts  # Session management, message persistence, concurrency
+    prompt.ts         # Builds system prompt from personalization files + skills
+    tools.ts          # ToolContext type, defineTool(), Tool type
+    types.ts          # ChatMessage, ToolCall types
+  gateway/        # HTTP server, Telegram bot, proactive heartbeat
+    start.ts          # Boot sequence: DB, LLM, tools, agent, scheduler
+    proactive.ts      # Heartbeat tick system with idle backoff
+    telegram.ts       # Grammy-based Telegram bot
+    http.ts           # Hono HTTP API
+  storage/        # SQLite database and session management
+    database.ts       # Schema definitions (CREATE TABLE IF NOT EXISTS)
+    sessions.ts       # Message history load/append/sanitize
+  scheduler/      # Cron job scheduler with leases and failure backoff
+    job-scheduler.ts  # Tick loop, lease acquisition, job execution
+    cron.ts           # Cron expression parser
+  state/          # Configuration, personalization files, bootstrap
+    config.ts         # Zod-validated JSON5 config (limits, permissions, channels)
+    personalization.ts # SOUL/AGENTS/IDENTITY/USER/TOOLS/CODEGUIDE/HEARTBEAT.md
+    skills.ts         # Skill loader for prompt injection
+    bootstrap.ts      # Workspace directory initialization
+    paths.ts          # Runtime path resolution
+  tools/          # All built-in tool implementations
+    file-ops.ts       # file_read, file_write, file_edit, file_list
+    memory.ts         # memory_store, memory_recall, memory_search, memory_delete
+    skills.ts         # skill_create, skill_list, skill_update
+    budget.ts         # budget_status
+    reflect.ts        # reflect
+    jobs.ts           # job_create, job_list, job_get, job_update, etc.
+    process.ts        # process_start, process_status, process_logs, process_stop
+    system.ts         # shell_exec
+    web.ts            # web_fetch
+    web-search.ts     # web_search
+    browser.ts        # browser (Playwright CDP)
+    markets.ts        # market_data
+    trading.ts        # paper_trade, portfolio_status
+    gmail.ts          # gmail_profile, gmail_search, gmail_get_message, gmail_send
+    credentials.ts    # credential_set, credential_generate, credential_list, credential_delete
+    human-actions.ts  # human_request, human_status
+    telegram-send.ts  # telegram_send
+    lifecycle.ts      # gateway_restart
+    registry.ts       # tools_reload
+    custom.ts         # Custom tool loader (.tool.json, .tool.mjs)
+    index.ts          # getBuiltInTools() — registers all built-in tools
+  llm/            # LLM client (OpenAI-compatible API)
+  browser/        # Browser manager (Playwright)
+  process/        # Background process manager
+  gmail/          # Gmail OAuth + API
+  secrets/        # Credential vault
+\`\`\`
+
+## How to Add a New Tool
+
+1. Create \`src/tools/my-tool.ts\`:
+   \`\`\`typescript
+   import { z } from "zod";
+   import { defineTool } from "../core/tools.js";
+
+   export const myTool = defineTool({
+     name: "my_tool",
+     description: "What this tool does",
+     parameters: z.object({
+       arg1: z.string().describe("Description"),
+     }),
+     execute: async (args, ctx) => {
+       // ctx has: workspaceDir, stateDir, db, browser, processManager, etc.
+       return "OK: result";  // or "ERROR: message" for failures
+     },
+   });
+   \`\`\`
+2. Register in \`src/tools/index.ts\`: import + add to \`getBuiltInTools()\` array.
+3. Build: \`shell_exec("cd /app && npm run build")\`
+4. Restart: \`gateway_restart()\`
+
+## How to Add a Database Table
+
+Add \`CREATE TABLE IF NOT EXISTS\` + indexes to \`src/storage/database.ts\` inside the \`db.exec()\` block.
+All tables use \`INTEGER\` timestamps (milliseconds since epoch). Use \`ctx.nowMs()\` for current time.
+
+## How to Modify the System Prompt
+
+- Edit workspace markdown files: SOUL.md, AGENTS.md, IDENTITY.md, USER.md, TOOLS.md, CODEGUIDE.md, HEARTBEAT.md
+- These are loaded fresh on every message via \`loadPersonalizationContext()\`
+- For runtime notes, edit \`src/core/prompt.ts\` → \`formatSystemPrompt()\`
+- Skills are loaded from \`workspace/skills/*/SKILL.md\` and appended automatically
+
+## Key Patterns
+
+- **Tool return values**: Always return strings. "OK" or "OK: detail" for success. "ERROR: message" for failure. JSON for structured data.
+- **Agent ownership**: Jobs, memories are scoped by \`agent_id\` (from \`ctx.request.agentId\`).
+- **File roots**: \`workspace\` (user data), \`state\` (internal config), \`code\` (source code, gated by \`allowCodeEdit\`).
+- **Custom tools**: Place \`.tool.json\` or \`.tool.mjs\` in \`{stateDir}/tools/\`. Loaded on boot + \`tools_reload\`.
+
+## Build & Deploy Workflow
+
+1. \`file_read\` / \`file_edit\` with \`root: "code"\` to modify TypeScript source
+2. \`shell_exec("cd /app && npm run build")\` to compile
+3. \`gateway_restart()\` to reload — changes are synced to host repo via bind mount
+
+## What NOT to Do
+
+- Don't write Python scripts for scheduling — use \`job_create\`
+- Don't \`pip install\` — the container has no pip packages
+- Don't use \`process_start\` for periodic tasks — use \`job_create\`
+- Don't hardcode secrets in files — use \`credential_set\` / \`credential_generate\`
+- Don't modify the compiled \`dist/\` directory — edit \`src/\` and build
+`;
+}
+
 export function getDefaultHeartbeatTemplate(): string {
   return `# HEARTBEAT
 
-Optional proactive task checklist. The agent can review this periodically.
+Proactive task checklist reviewed on each heartbeat tick.
+
+## Per-Tick Review
+- [ ] If recent conversations had useful learnings, run \`reflect\`
+- [ ] Check memories for stale or contradictory entries (\`memory_search\`)
+- [ ] Check NOTES.md for pending items
 
 ## Daily Tasks
-- [ ] Check NOTES.md for pending items
 - [ ] Review recent session history for unfinished work
+- [ ] Review job health (\`job_list\`, check for disabled/failed jobs)
 
 ## Weekly Tasks
-- [ ] Clean up outdated notes
+- [ ] Clean up outdated notes and memories
 - [ ] Review and update SOUL.md if personality has drifted
+- [ ] Review CODEGUIDE.md accuracy after code changes
 
 ## On-Demand
 - [ ] When idle, suggest improvements to tools or workflows
+- [ ] Create skills for repeated tasks (\`skill_create\`)
 `;
 }
 
@@ -257,6 +421,7 @@ export type PersonalizationContext = {
   identity: string | null;
   user: string | null;
   tools: string | null;
+  codeguide: string | null;
   heartbeat: string | null;
 };
 
@@ -264,14 +429,15 @@ export async function loadPersonalizationContext(
   workspaceDir: string,
   agentId?: string,
 ): Promise<PersonalizationContext> {
-  const [soul, agents, identity, user, tools, heartbeat] = await Promise.all([
+  const [soul, agents, identity, user, tools, codeguide, heartbeat] = await Promise.all([
     readPersonalizationFile(workspaceDir, SOUL_FILENAME, agentId),
     readPersonalizationFile(workspaceDir, AGENTS_FILENAME, agentId),
     readPersonalizationFile(workspaceDir, IDENTITY_FILENAME, agentId),
     readPersonalizationFile(workspaceDir, USER_FILENAME, agentId),
     readPersonalizationFile(workspaceDir, TOOLS_FILENAME, agentId),
+    readPersonalizationFile(workspaceDir, CODEGUIDE_FILENAME, agentId),
     readPersonalizationFile(workspaceDir, HEARTBEAT_FILENAME, agentId),
   ]);
 
-  return { soul, agents, identity, user, tools, heartbeat };
+  return { soul, agents, identity, user, tools, codeguide, heartbeat };
 }

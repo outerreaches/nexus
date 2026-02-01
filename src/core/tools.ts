@@ -14,6 +14,7 @@ export type ToolContext = {
   allowCodeEdit?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
   request?: { channel: string; channelKey: string; agentId: string; sessionId: string };
+  budgetInfo?: { iterationsUsed: number; maxIterations: number; toolCallsUsed: number; maxToolCalls: number };
   nowMs: () => number;
   log: (msg: string) => void;
 };
