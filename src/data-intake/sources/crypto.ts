@@ -52,4 +52,15 @@ export const cryptoSource: DataSource = {
     });
     return results;
   },
+  summarize: (records) => {
+    // Return a simple {token: price} mapping
+    const prices: Record<string, number | null> = {};
+    for (const r of records) {
+      const v = r.value as { id?: string; price?: number | null } | null;
+      if (v?.id) {
+        prices[v.id] = v.price ?? null;
+      }
+    }
+    return { prices };
+  },
 };

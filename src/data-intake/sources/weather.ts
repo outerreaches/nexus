@@ -79,4 +79,34 @@ export const weatherSource: DataSource = {
       };
     });
   },
+  summarize: (records, ctx) => {
+    const nowMs = ctx.nowMs();
+    // Find the record closest to the current hour
+    let closest = records[0];
+    let closestDiff = Infinity;
+    for (const r of records) {
+      const val = r.value as { time?: string } | null;
+      if (val?.time) {
+        const hourMs = new Date(val.time).getTime();
+        const diff = Math.abs(hourMs - nowMs);
+        if (diff < closestDiff) {
+          closestDiff = diff;
+          closest = r;
+        }
+      }
+    }
+    if (!closest) return null;
+    const v = closest.value as Record<string, unknown>;
+    return {
+      current: {
+        time: v.time,
+        temperatureC: v.temperatureC,
+        feelsLikeC: v.feelsLikeC,
+        humidityPercent: v.humidityPercent,
+        precipitationProbability: v.precipitationProbability,
+        windSpeedKmh: v.windSpeedKmh,
+        weatherCode: v.weatherCode,
+      },
+    };
+  },
 };

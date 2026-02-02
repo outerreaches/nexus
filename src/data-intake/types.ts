@@ -33,6 +33,8 @@ export type DataSource = {
   paramsSchema?: z.ZodTypeAny;
   fetch: (params: unknown, ctx: DataIntakeContext) => Promise<unknown>;
   normalize: (raw: unknown, params: unknown, ctx: DataIntakeContext) => Promise<NormalizedRecord[]> | NormalizedRecord[];
+  /** Generate a concise, context-relevant preview from normalized records (for ad-hoc runs) */
+  summarize?: (records: NormalizedRecord[], ctx: DataIntakeContext) => unknown;
 };
 
 export type DataRunResult = {
@@ -42,4 +44,6 @@ export type DataRunResult = {
   skipped: number;
   errors: string[];
   collectedAtMs: number;
+  /** Optional preview of the most relevant data (populated if source has summarize function) */
+  preview?: unknown;
 };

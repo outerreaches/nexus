@@ -146,9 +146,15 @@ export function pruneDataItems(params: {
   nowMs: number;
   maxAgeMs?: number;
   includeUnexpired?: boolean;
+  sourceId?: string;
 }): number {
   const clauses: string[] = [];
   const values: unknown[] = [];
+
+  if (params.sourceId) {
+    clauses.push("source_id = ?");
+    values.push(params.sourceId);
+  }
 
   if (params.maxAgeMs) {
     const cutoff = params.nowMs - params.maxAgeMs;
@@ -166,5 +172,14 @@ export function pruneDataItems(params: {
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const res = params.db.db.prepare(`DELETE FROM data_items ${where}`).run(...values);
+  return res.changes;
+}
+
+/** Delete all data items for a specific source (regardless of expiration) */
+export function deleteDataItemsBySource(params: {
+  db: NexusDatabase;
+  sourceId: string;
+}): number {
+  const res = params.db.db.prepare("DELETE FROM data_items WHERE source_id = ?").run(params.sourceId);
   return res.changes;
 }

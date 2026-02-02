@@ -4,7 +4,7 @@ import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager, ManagedProcessInfo } from "../process/manager.js";
 import type { AgentTracker, AgentRunInfo } from "../core/agent-tracker.js";
 import { initDataIntake, listDataSources } from "../data-intake/index.js";
-import { listLatestDataItemsPerSource } from "../data-intake/store.js";
+import { listLatestDataItemsPerSource, deleteDataItemsBySource } from "../data-intake/store.js";
 import { createIntakeSource, deleteIntakeSource, listIntakeSources, updateIntakeSource } from "../data-intake/source-store.js";
 
 export type GatewayHttpDeps = {
@@ -88,6 +88,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const runLimit = clampInt(c.req.query("runLimit"), 1, 200) ?? 50;
     const blackboardLimit = clampInt(c.req.query("blackboardLimit"), 1, 200) ?? 50;
     const dataIntakeLimit = clampInt(c.req.query("dataIntakeLimit"), 1, 200) ?? 50;
+    const hideOrphanData = c.req.query("hideOrphanData") === "true";
 
     const processes = listProcesses(deps.processManager, nowMs, processWindowMinutes * 60_000);
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
@@ -95,7 +96,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const agentGraph = listAgentGraph(deps.db, allowedRunIds);
     const jobs = listJobs(deps.db, jobLimit);
     const jobRuns = listJobRuns(deps.db, runLimit);
-    const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit);
+    const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);
     const blackboard = listBlackboard(deps.db, blackboardLimit);
 
     return c.html(
@@ -188,6 +189,38 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const id = String(body.id ?? "").trim();
     if (!id) return c.text("Missing id", 400);
     deleteIntakeSource({ db: deps.db, id });
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/data-intake/clean-data", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const sourceId = String(body.sourceId ?? "").trim();
+    if (!sourceId) return c.text("Missing sourceId", 400);
+    const deleted = deleteDataItemsBySource({ db: deps.db, sourceId });
+    deps.log(`data-intake: cleaned ${deleted} items for source ${sourceId}`);
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/data-intake/clean-orphans", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    // Get all source IDs that still exist
+    const sources = listIntakeSources({ db: deps.db, includeDisabled: true });
+    const existingSourceIds = new Set(sources.map((s) => s.source_id));
+    // Get all distinct source IDs in data_items
+    const allDataSourceIds = deps.db.db
+      .prepare("SELECT DISTINCT source_id FROM data_items")
+      .all() as { source_id: string }[];
+    // Delete data for sources that no longer exist
+    let totalDeleted = 0;
+    for (const row of allDataSourceIds) {
+      if (!existingSourceIds.has(row.source_id)) {
+        const deleted = deleteDataItemsBySource({ db: deps.db, sourceId: row.source_id });
+        totalDeleted += deleted;
+        deps.log(`data-intake: cleaned ${deleted} orphan items for source ${row.source_id}`);
+      }
+    }
+    deps.log(`data-intake: cleaned ${totalDeleted} total orphan items`);
     return c.redirect("/dashboard");
   });
 
@@ -327,6 +360,7 @@ type DataIntakePanelState = {
   enabled: boolean;
   targets: string[];
   rows: DataIntakeRow[];
+  hideOrphans: boolean;
   sources: {
     id: string;
     source_id: string;
@@ -405,9 +439,10 @@ function listDataIntake(
   db: NexusDatabase | undefined,
   nowMs: number,
   limit: number,
+  hideOrphans: boolean,
 ): DataIntakePanelState {
-  if (!db) return { enabled: true, targets: [], rows: [], sources: [] };
-  const rows = listLatestDataItemsPerSource({
+  if (!db) return { enabled: true, targets: [], rows: [], sources: [], hideOrphans };
+  let rows = listLatestDataItemsPerSource({
     db,
     includeExpired: false,
     limit,
@@ -423,7 +458,12 @@ function listDataIntake(
     last_run_at: row.last_run_at,
     last_error: row.last_error,
   }));
-  return { enabled: true, targets: sources.map((row) => row.source_id), rows, sources };
+  // Filter orphaned rows if toggle is on
+  if (hideOrphans) {
+    const sourceIds = new Set(sources.map((s) => s.source_id));
+    rows = rows.filter((r) => sourceIds.has(r.source_id));
+  }
+  return { enabled: true, targets: sources.map((row) => row.source_id), rows, sources, hideOrphans };
 }
 
 function renderDashboard(params: {
@@ -1771,7 +1811,11 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
                   </form>
                   <form method="post" action="/dashboard/data-intake/delete">
                     <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
-                    <button type="submit" class="graph-btn">Delete</button>
+                    <button type="submit" class="graph-btn" onclick="return confirm('Delete this source?')">Delete</button>
+                  </form>
+                  <form method="post" action="/dashboard/data-intake/clean-data">
+                    <input type="hidden" name="sourceId" value="${escapeHtml(row.source_id)}" />
+                    <button type="submit" class="graph-btn" onclick="return confirm('Delete all stored data for this source?')">Clean Data</button>
                   </form>
                 </div>
               </td>
@@ -1780,6 +1824,18 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
       .join("")}
       </tbody>
     </table>`;
+
+  const orphanToggle = `<div class="form-inline" style="margin: 1rem 0; display: flex; align-items: center; gap: 1rem;">
+    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+      <input type="checkbox" 
+             ${params.hideOrphans ? "checked" : ""} 
+             onchange="window.location.href='/dashboard?hideOrphanData=' + (this.checked ? 'true' : 'false')" />
+      Hide orphan data (sources that no longer exist)
+    </label>
+    <form method="post" action="/dashboard/data-intake/clean-orphans" style="margin: 0;">
+      <button type="submit" class="graph-btn" onclick="return confirm('Delete all data from sources that no longer exist?')">Clean Orphaned Data</button>
+    </form>
+  </div>`;
 
   const latestTable = params.rows.length === 0
     ? `<div class="no-data">No recent data intake items found.</div>`
@@ -1824,7 +1880,7 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
         </tbody>
       </table>`;
 
-  return `${addForm}${scheduleForm}${sourcesTable}${latestTable}`;
+  return `${addForm}${scheduleForm}${sourcesTable}${orphanToggle}${latestTable}`;
 }
 
 function renderBlackboardTable(rows: BlackboardRow[]): string {

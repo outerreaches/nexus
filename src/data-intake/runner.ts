@@ -53,7 +53,18 @@ export async function runDataSource(
   const storeResult = storeRecords(source, normalized, params, ctx, collectedAtMs, errors, options?.instanceTags);
   stored = storeResult.stored;
   skipped = storeResult.skipped;
-  return { sourceId: source.id, sourceName: source.name, stored, skipped, errors, collectedAtMs };
+
+  // Generate a preview if the source has a summarize function (useful for ad-hoc runs)
+  let preview: unknown;
+  if (source.summarize && normalized.length > 0) {
+    try {
+      preview = source.summarize(normalized, ctx);
+    } catch (err) {
+      errors.push(`Summarize error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { sourceId: source.id, sourceName: source.name, stored, skipped, errors, collectedAtMs, preview };
 }
 
 function storeRecords(
