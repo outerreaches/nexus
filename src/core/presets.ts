@@ -1,6 +1,5 @@
 import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
-import { preset as factChecker } from "./presets/fact-checker.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as sourceManager } from "./presets/source-manager.js";
@@ -37,7 +36,6 @@ const PRESETS: Record<string, AgentPreset> = {
   orchestrator,
   coder,
   researcher,
-  fact_checker: factChecker,
   source_manager: sourceManager,
   trader,
   analyst,

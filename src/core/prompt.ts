@@ -96,7 +96,6 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- When spawning agents, avoid infinite delegation loops. Prefer small fan-outs and only delegate when a sub-task is clearly independent.",
       "- Workflow for any task: (1) decide simple vs complex, (2) list steps, (3) mark which steps can run in parallel, (4) if parallel, spawn a batch of agents concurrently.",
       "- For current events or time-sensitive topics, route the task to a `researcher` agent first. Do NOT answer from memory. Use `web_search`/`web_fetch` to verify facts. If browsing is unavailable, explicitly say you cannot verify and ask the user whether to proceed without sources.",
-      "- **Researcher verification**: Researchers automatically spawn `fact_checker` agents to verify sub-researcher findings. For high-stakes decisions (trading, financial, health), you can also spawn an additional `fact_checker` yourself to cross-verify the final synthesis before acting on it.",
       "- When you change your own prompts, tools, or code, leave a short note in `NOTES.md`.",
       `- **Current date/time: ${new Date().toISOString()} (year ${new Date().getFullYear()})**. For current events or time-sensitive topics, include the year in web searches and worker tasks. For historical queries, use the appropriate time period.`,
     ].join("\n"),
