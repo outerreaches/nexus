@@ -8,6 +8,14 @@ function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
 }
 
+const SymbolToCoinGeckoId: Record<string, string> = {
+  btc: "bitcoin",
+  eth: "ethereum",
+  sol: "solana",
+  usdc: "usd-coin",
+  usdt: "tether",
+};
+
 function buildSubjects(instrument: string, currency: string): string[] {
   const cleaned = instrument.trim();
   if (!cleaned) return [];
@@ -15,8 +23,13 @@ function buildSubjects(instrument: string, currency: string): string[] {
     return [cleaned.toUpperCase()];
   }
   const symbol = cleaned.toUpperCase();
+  const resolved = SymbolToCoinGeckoId[cleaned.toLowerCase()] ?? cleaned;
   const quote = currency.trim().toUpperCase();
-  return [`${symbol}/${quote}`, symbol];
+  return [
+    `${resolved.toUpperCase()}/${quote}`,
+    `${symbol}/${quote}`,
+    symbol,
+  ];
 }
 
 export const queryData = defineTool({

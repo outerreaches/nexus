@@ -4,6 +4,7 @@ import { defineTool } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
 import { getPreset, getPresetNames } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
+import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -130,6 +131,7 @@ export const spawnAgent = defineTool({
       workspaceDir: ctx.workspaceDir,
       promptFiles: preset.promptFiles,
       systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
+      includePresets: true,
     });
     const systemPrompt = [
       basePrompt,
@@ -195,33 +197,6 @@ export const spawnAgent = defineTool({
         history: [],
         userMessage: args.task,
       });
-
-      // Auto-write result to blackboard
-      let entryId: string | null = null;
-      if (db && ctx.request?.sessionId) {
-        const crypto = await import("node:crypto");
-        entryId = crypto.randomUUID();
-        db.db
-          .prepare(
-            `INSERT INTO blackboard (id, session_scope, type, agent_id, agent_preset, title, content, attachments_json, metadata_json, created_at, last_accessed_at, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            entryId,
-            ctx.request.sessionId,
-            "artifact",
-            `${ctx.request.agentId}:${preset.name}`,
-            preset.name,
-            `${preset.name} result: ${args.task.slice(0, 100)}`,
-            result.output,
-            "[]",
-            JSON.stringify({ status: result.status, toolCalls: result.toolCallsUsed, iterations: result.iterationsUsed }),
-            ctx.nowMs(),
-            ctx.nowMs(),
-            null,
-          );
-      }
-
 
       if (runId && tracker) {
         const preview = result.output.trim().slice(0, 240);

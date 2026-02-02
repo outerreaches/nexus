@@ -3,6 +3,11 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
+  systemPrompt: [
+    "You are the orchestrator.",
+    "You manage data intake sources directly using the data_intake_* tools.",
+    "Use data_intake_query only to read stored records.",
+  ].join("\n"),
   tools: [
     // Swarm coordination
     "spawn_agent",
@@ -12,11 +17,15 @@ export const preset: AgentPreset = {
     "blackboard_delete",
     "blackboard_prune",
     "data_intake_list_sources",
-    "data_intake_run",
     "data_intake_query",
-    "data_intake_prune",
-    "data_intake_schedule_refresh",
+    "data_intake_run",
+    "data_intake_source_list",
+    "data_intake_source_add",
+    "data_intake_source_update",
+    "data_intake_source_delete",
     "data_intake_schedule_all",
+    "data_intake_schedule_refresh",
+    "data_intake_prune",
     "plan_task",
     // Memory & reflection
     "memory_store",

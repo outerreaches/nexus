@@ -195,6 +195,17 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS data_item_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      collected_at INTEGER NOT NULL,
+      value_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_data_item_events_source_subject ON data_item_events(source_id, subject, collected_at DESC);
+
     CREATE INDEX IF NOT EXISTS idx_data_items_source_subject ON data_items(source_id, subject, collected_at DESC);
     CREATE INDEX IF NOT EXISTS idx_data_items_tags ON data_items(tags_json, collected_at DESC);
     CREATE INDEX IF NOT EXISTS idx_data_items_expires ON data_items(expires_at);
@@ -287,6 +298,12 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_data_items_expires ON data_items(expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_data_item_events_source_subject ON data_item_events(source_id, subject, collected_at DESC);");
   } catch {
     // already exists
   }

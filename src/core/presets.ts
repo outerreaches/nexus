@@ -2,7 +2,6 @@ import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
-import { preset as sourceManager } from "./presets/source-manager.js";
 import { preset as trader } from "./presets/trader.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +35,6 @@ const PRESETS: Record<string, AgentPreset> = {
   orchestrator,
   coder,
   researcher,
-  source_manager: sourceManager,
   trader,
   analyst,
 };

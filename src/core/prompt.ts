@@ -18,6 +18,7 @@ export async function buildPresetSystemPrompt(params: {
   agentId?: string;
   promptFiles?: string[];
   systemPrompt?: string;
+  includePresets?: boolean;
 }): Promise<string> {
   const promptFiles = params.promptFiles ?? [];
   const sections: string[] = [];
@@ -33,6 +34,9 @@ export async function buildPresetSystemPrompt(params: {
   }
   if (params.systemPrompt?.trim()) {
     sections.push(params.systemPrompt.trim());
+  }
+  if (params.includePresets) {
+    sections.push(formatPresetsForPrompt());
   }
   return sections.filter(Boolean).join("\n\n---\n\n");
 }
@@ -85,7 +89,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- You are the **orchestrator**. For simple questions, answer directly. For complex multi-step tasks, use `spawn_agent` to delegate to specialized workers (coder, researcher, trader, analyst).",
       "- Workers share data via the **Blackboard** (`write_to_blackboard` / `read_from_blackboard`). Workers automatically write their results to the blackboard.",
       "- **Blackboard hygiene**: When switching between unrelated tasks, use `blackboard_clear` or `blackboard_delete` to remove entries that are no longer relevant. Stale data from previous tasks pollutes worker context and can cause hallucinations.",
-      "- For data intake source management (add/remove/update source instances), delegate to the `source_manager` preset. Do not manage sources directly.",
+      "- For data intake source management, use the data_intake_* tools directly (add/update/remove, schedule, run, prune).",
       "- For periodic/scheduled tasks, use `job_create` with a cron expression. Manage with `job_*` tools. Failed jobs notify you (the owning agent).",
       "- Use `memory_store` / `memory_recall` / `memory_search` to persist learnings across sessions. Use `reflect` to extract insights from recent conversations.",
       "- Use `skill_create` to save reusable playbooks for tasks you learn to do well.",

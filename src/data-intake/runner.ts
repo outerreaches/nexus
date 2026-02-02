@@ -66,6 +66,9 @@ function storeRecords(
   const stmt = ctx.db.db.prepare(
     "INSERT INTO data_items (id, source_id, source_name, tags_json, subject, value_json, metadata_json, collected_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
+  const historyStmt = ctx.db.db.prepare(
+    "INSERT INTO data_item_events (source_id, subject, collected_at, value_json, created_at) VALUES (?, ?, ?, ?, ?)",
+  );
 
   let stored = 0;
   let skipped = 0;
@@ -87,13 +90,14 @@ function storeRecords(
     const id = `${source.id}:${record.subject}:${collectedAt}`;
 
     try {
+      const valueJson = JSON.stringify(record.value ?? null);
       stmt.run(
         id,
         source.id,
         source.name,
         JSON.stringify(source.tags ?? []),
         record.subject,
-        JSON.stringify(record.value ?? null),
+        valueJson,
         JSON.stringify({
           ...(record.metadata ?? {}),
           params: params ?? null,
@@ -104,6 +108,7 @@ function storeRecords(
         expiresAt,
         nowMs,
       );
+      historyStmt.run(source.id, record.subject, collectedAt, valueJson, nowMs);
       stored += 1;
     } catch (err) {
       errors.push(`Store error (${record.subject}): ${err instanceof Error ? err.message : String(err)}`);

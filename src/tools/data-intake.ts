@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
@@ -13,14 +11,7 @@ import {
   pruneDataItems,
   runDataSource,
 } from "../data-intake/index.js";
-
-function randomId(prefix: string): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.randomBytes(10);
-  let out = prefix;
-  for (const b of bytes) out += alphabet[b % alphabet.length];
-  return out;
-}
+import { randomId } from "../data-intake/utils.js";
 
 function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
@@ -40,6 +31,7 @@ export const dataIntakeListSources = defineTool({
         id: source.id,
         name: source.name,
         description: source.description,
+        usageNote: source.usageNote,
         tags: source.tags,
         schemaVersion: source.schemaVersion,
         defaultTtlMs: source.defaultTtlMs,
@@ -73,7 +65,7 @@ export const dataIntakeRun = defineTool({
 
 export const dataIntakeQuery = defineTool({
   name: "data_intake_query",
-  description: "Query stored data intake records by source, tag, or subject.",
+  description: "Read-only query for stored data intake records by source, tag, or subject.",
   parameters: z.object({
     sourceId: z.string().min(1).optional(),
     tag: z.string().min(1).optional(),

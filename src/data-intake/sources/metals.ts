@@ -14,9 +14,10 @@ const MetalsParams = z.object({
 });
 
 export const metalsSource: DataSource = {
-  id: "metals.openmetals",
+  id: "metals.openmetalsapi",
   name: "Open Metals Prices",
   description: "Fetch spot prices for metals using openmetalsapi.com",
+  usageNote: "Provide symbols (e.g. XAU, XAG) and base. Example params: { symbols: [\"XAU\", \"XAG\"], base: \"USD\" }.",
   tags: ["metals", "prices", "commodities"],
   schemaVersion: 1,
   defaultTtlMs: 30 * 60_000,

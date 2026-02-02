@@ -17,6 +17,7 @@ export const weatherSource: DataSource = {
   id: "weather.open-meteo",
   name: "Open-Meteo Forecast",
   description: "Fetch hourly temperature + precipitation probability from open-meteo.com",
+  usageNote: "Provide coordinates. Example params: { latitude: 37.7749, longitude: -122.4194 }.",
   tags: ["weather", "forecast"],
   schemaVersion: 1,
   defaultTtlMs: 2 * 60 * 60_000,

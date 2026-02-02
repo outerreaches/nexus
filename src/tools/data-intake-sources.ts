@@ -54,6 +54,7 @@ export const dataIntakeSourceAdd = defineTool({
       label: args.label,
       params: args.params,
       intervalMs,
+      nowMs: ctx.nowMs(),
     });
     return JSON.stringify(row, null, 2);
   },
@@ -80,6 +81,7 @@ export const dataIntakeSourceUpdate = defineTool({
       paramsJson: args.params ? JSON.stringify(args.params) : undefined,
       intervalMs: args.intervalMs,
       enabled: args.enabled,
+      nowMs: ctx.nowMs(),
     });
     if (!row) return "ERROR: source not found";
     return JSON.stringify(row, null, 2);

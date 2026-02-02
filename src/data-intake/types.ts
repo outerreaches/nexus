@@ -26,6 +26,7 @@ export type DataSource = {
   id: string;
   name: string;
   description: string;
+  usageNote?: string;
   tags: string[];
   schemaVersion: number;
   defaultTtlMs: number;

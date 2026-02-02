@@ -1,6 +1,5 @@
-import crypto from "node:crypto";
-
 import type { NexusDatabase } from "../storage/database.js";
+import { randomId } from "./utils.js";
 
 export type DataIntakeSourceRow = {
   id: string;
@@ -14,14 +13,6 @@ export type DataIntakeSourceRow = {
   last_run_at: number | null;
   last_error: string | null;
 };
-
-function randomId(prefix: string): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.randomBytes(10);
-  let out = prefix;
-  for (const b of bytes) out += alphabet[b % alphabet.length];
-  return out;
-}
 
 export function listIntakeSources(params: { db: NexusDatabase; includeDisabled?: boolean }): DataIntakeSourceRow[] {
   const includeDisabled = params.includeDisabled ?? false;
@@ -44,8 +35,9 @@ export function createIntakeSource(params: {
   label?: string;
   params: Record<string, unknown>;
   intervalMs: number;
+  nowMs?: number;
 }): DataIntakeSourceRow {
-  const now = Date.now();
+  const now = params.nowMs ?? Date.now();
   const id = randomId("DIS");
   const intervalMs = Math.max(60_000, params.intervalMs);
   params.db.db
@@ -65,6 +57,7 @@ export function updateIntakeSource(params: {
   enabled?: boolean;
   lastRunAt?: number | null;
   lastError?: string | null;
+  nowMs?: number;
 }): DataIntakeSourceRow | null {
   const existing = getIntakeSource({ db: params.db, id: params.id });
   if (!existing) return null;
@@ -74,7 +67,7 @@ export function updateIntakeSource(params: {
   const nextEnabled = params.enabled === undefined ? existing.enabled : params.enabled ? 1 : 0;
   const nextLastRun = params.lastRunAt === undefined ? existing.last_run_at : params.lastRunAt;
   const nextLastError = params.lastError === undefined ? existing.last_error : params.lastError;
-  const now = Date.now();
+  const now = params.nowMs ?? Date.now();
   params.db.db
     .prepare(
       "UPDATE data_intake_sources SET label = ?, params_json = ?, interval_ms = ?, enabled = ?, updated_at = ?, last_run_at = ?, last_error = ? WHERE id = ?",

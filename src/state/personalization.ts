@@ -99,10 +99,9 @@ Use \`spawn_agent\` to delegate to these specialists:
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
 | **coder** | File editing, code writing, debugging, shell commands | file_ops, shell_exec, web_fetch |
-| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, browser, query_data |
-| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data |
-| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data |
-| **source_manager** | Manage data intake sources (add/update/remove/enable/disable) | data_intake_source_* |
+| **researcher** | Web research, browsing, document analysis | web_search, data_intake_query |
+| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
+| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query |
 
 ## Blackboard
 

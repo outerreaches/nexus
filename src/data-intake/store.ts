@@ -88,11 +88,12 @@ export function listLatestDataItems(params: {
       GROUP BY source_id, subject
     ) latest
     ON d.source_id = latest.source_id AND d.subject = latest.subject AND d.collected_at = latest.latest
+    ${where}
     ORDER BY d.collected_at DESC
     LIMIT ?
   `;
   const stmt = params.db.db.prepare(sql);
-  return stmt.all(...values, params.limit) as DataItemRow[];
+  return stmt.all(...values, ...values, params.limit) as DataItemRow[];
 }
 
 export function pruneDataItems(params: {

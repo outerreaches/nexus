@@ -78,6 +78,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       id: source.id,
       name: source.name,
       description: source.description,
+      usageNote: source.usageNote,
       tags: source.tags,
     }));
 
@@ -142,6 +143,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       label,
       params,
       intervalMs: intervalMs ?? 15 * 60_000,
+      nowMs: Date.now(),
     });
     return c.redirect("/dashboard");
   });
@@ -175,6 +177,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       intervalMs,
       label: labelRaw || undefined,
       paramsJson,
+      nowMs: Date.now(),
     });
     return c.redirect("/dashboard");
   });

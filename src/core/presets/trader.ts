@@ -25,6 +25,7 @@ export const preset: AgentPreset = {
   tools: [
     "paper_trade",
     "portfolio_status",
+    "data_intake_query",
     "query_data",
     "read_from_blackboard",
     "write_to_blackboard",
