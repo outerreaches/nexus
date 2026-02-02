@@ -58,15 +58,11 @@ function createJobForSource(params: {
   const jobId = randomId("J");
   const cron = intervalMsToCron(params.intervalMs);
   const jobName = `data-intake: ${params.label || params.sourceId}`;
-  const task = [
-    `Refresh data intake source instance.`,
-    "",
-    "Call: data_intake_run",
-    `Arguments: { "instanceId": "${params.instanceId}" }`,
-    "",
-    "Report success/failure.",
-  ].join("\n");
-  const spec = { mode: "agent_task", task };
+  const spec = {
+    mode: "tool_call",
+    tool: "data_intake_run",
+    args: { instanceId: params.instanceId },
+  };
 
   params.db.db
     .prepare(

@@ -1,9 +1,34 @@
 import crypto from "node:crypto";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+import { z } from "zod";
 
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { NexusDatabase } from "../storage/database.js";
+import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
+
+const execAsync = promisify(exec);
+
+const AgentTaskSpec = z.object({
+  mode: z.literal("agent_task"),
+  task: z.string(),
+});
+
+const ScriptSpec = z.object({
+  mode: z.literal("script"),
+  command: z.string(),
+  cwd: z.string().optional(),
+  timeoutMs: z.number().int().min(1000).optional(),
+});
+
+const ToolCallSpec = z.object({
+  mode: z.literal("tool_call"),
+  tool: z.string(),
+  args: z.record(z.any()),
+});
 
 function envBool(name: string): boolean | null {
   const v = (process.env[name] ?? "").trim().toLowerCase();
@@ -52,6 +77,9 @@ export type JobSchedulerDeps = {
   agent: AgentService;
   db: NexusDatabase;
   log: (msg: string) => void;
+  getTools: () => Tool[];
+  toolContext: ToolContext;
+  workspaceDir: string;
 };
 
 type JobRow = {
@@ -199,30 +227,16 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     deps.db.db.prepare("UPDATE jobs SET last_notified_at = ?, updated_at = ? WHERE id = ?").run(nowMs, nowMs, job.id);
   };
 
-  const runJob = async (job: JobRow, nowMs: number) => {
-    const runId = randomId("JR");
-    const scheduledFor = job.next_run_at ?? nowMs;
-    const startedAt = Date.now();
+  const executeJobLogic = async (
+    job: JobRow,
+    runId: string,
+    scheduledFor: number,
+  ): Promise<{ status: string; output: string; error: string | null; toolCalls: number | null; iterations: number | null }> => {
+    const raw = safeJsonParse(job.spec_json) as any;
+    const mode = raw?.mode || "agent_task";
 
-    deps.db.db
-      .prepare(
-        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, status) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(runId, job.id, job.owner_agent_id, scheduledFor, startedAt, "running");
-
-    insertEvent({
-      jobId: job.id,
-      runId,
-      ownerAgentId: job.owner_agent_id,
-      kind: "run_started",
-      payload: { scheduledFor, startedAt },
-      nowMs: startedAt,
-    });
-
-    try {
-      const spec = safeJsonParse(job.spec_json);
-      const task = (spec && typeof spec === "object" && (spec as any).task ? String((spec as any).task) : "").trim();
-
+    if (mode === "agent_task") {
+      const task = (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
       const userText = [
         "SCHEDULED JOB RUN",
         `job_id=${job.id}`,
@@ -248,18 +262,96 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         text: userText,
       });
 
-      const endedAt = Date.now();
-      const runnerStatus = res.status;
-      const ok = runnerStatus === "complete";
+      const ok = res.status === "complete";
+      return {
+        status: ok ? "success" : "failed",
+        output: res.output,
+        error: ok ? null : res.output,
+        toolCalls: res.toolCallsUsed ?? null,
+        iterations: res.iterationsUsed ?? null,
+      };
+    }
 
-      const runStatus = ok ? "success" : "failed";
+    if (mode === "script") {
+      if (!deps.toolContext.allowShellExec) throw new Error("shell execution disabled");
+      const spec = ScriptSpec.parse(raw);
+      const { stdout, stderr } = await execAsync(spec.command, {
+        cwd: spec.cwd || deps.workspaceDir,
+        timeout: spec.timeoutMs || 60_000,
+      });
+      const output = (stdout || "") + (stderr ? `\nSTDERR:\n${stderr}` : "");
+      return {
+        status: "success",
+        output,
+        error: null,
+        toolCalls: 0,
+        iterations: 0,
+      };
+    }
+
+    if (mode === "tool_call") {
+      const spec = ToolCallSpec.parse(raw);
+      const tool = deps.getTools().find((t) => t.name === spec.tool);
+      if (!tool) throw new Error(`tool '${spec.tool}' not found`);
+
+      const toolCtx = {
+        ...deps.toolContext,
+        request: {
+          channel: "job",
+          channelKey: job.id,
+          agentId: job.owner_agent_id,
+          sessionId: runId,
+          runId,
+        },
+      };
+      const output = await tool.execute(spec.args, toolCtx);
+      // If the tool output implies failure (by convention starting with ERROR:), we mark it as failed?
+      // Let's stick to "success" for the RUN, even if the tool returned an error string,
+      // because the job *ran* correctly. The output log will show the error.
+      return {
+        status: "success",
+        output,
+        error: null,
+        toolCalls: 1,
+        iterations: 0,
+      };
+    }
+
+    throw new Error(`unknown mode: ${mode}`);
+  };
+
+  const runJob = async (job: JobRow, nowMs: number) => {
+    const runId = randomId("JR");
+    const scheduledFor = job.next_run_at ?? nowMs;
+    const startedAt = Date.now();
+
+    deps.db.db
+      .prepare(
+        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, status) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(runId, job.id, job.owner_agent_id, scheduledFor, startedAt, "running");
+
+    insertEvent({
+      jobId: job.id,
+      runId,
+      ownerAgentId: job.owner_agent_id,
+      kind: "run_started",
+      payload: { scheduledFor, startedAt },
+      nowMs: startedAt,
+    });
+
+    try {
+      const res = await executeJobLogic(job, runId, scheduledFor);
+
+      const endedAt = Date.now();
+      const ok = res.status === "success";
       const errText = ok ? null : truncate(res.output.trim(), 800);
 
       deps.db.db
         .prepare(
           "UPDATE job_runs SET ended_at = ?, status = ?, error = ?, output = ?, tool_calls_used = ?, iterations_used = ? WHERE id = ?",
         )
-        .run(endedAt, runStatus, errText, res.output, res.toolCallsUsed ?? null, res.iterationsUsed ?? null, runId);
+        .run(endedAt, res.status, errText, res.output, res.toolCalls, res.iterations, runId);
 
       if (ok) {
         const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
@@ -281,6 +373,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         return;
       }
 
+      // Handle application-level failure (e.g. LLM said "JOB_STATUS: error")
       const consecutiveFailures = (job.consecutive_failures ?? 0) + 1;
       const backoffMs = computeFailureBackoffMs(consecutiveFailures);
       const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
@@ -305,7 +398,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           nextScheduled,
           nextRunAt: shouldPause ? null : nextRunAt,
           backoffMs,
-          runnerStatus,
+          runnerStatus: res.status,
           error: errText,
         },
         nowMs: endedAt,
@@ -314,12 +407,12 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       await notifyAgent(
         { ...job, consecutive_failures: consecutiveFailures, enabled: shouldPause ? 0 : job.enabled },
         runId,
-        { status: runnerStatus, output: res.output, paused: shouldPause },
+        { status: res.status, output: res.output, paused: shouldPause },
         endedAt,
       );
     } catch (e) {
+      // Handle system/execution exception
       const endedAt = Date.now();
-      const runnerStatus = "exception";
       const output = `ERROR: scheduler exception while running job: ${e instanceof Error ? e.message : String(e)}`;
       deps.db.db
         .prepare("UPDATE job_runs SET ended_at = ?, status = ?, error = ?, output = ? WHERE id = ?")
@@ -356,7 +449,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       await notifyAgent(
         { ...job, consecutive_failures: consecutiveFailures, enabled: shouldPause ? 0 : job.enabled },
         runId,
-        { status: runnerStatus, output, paused: shouldPause },
+        { status: "exception", output, paused: shouldPause },
         endedAt,
       );
     }

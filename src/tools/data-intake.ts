@@ -178,21 +178,13 @@ export const dataIntakeScheduleRefresh = defineTool({
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
     const name = `data-intake: ${args.name}`;
-    const task = [
-      `Run data intake source '${args.sourceId}'.`,
-      "",
-      "Call this tool:",
-      "- data_intake_run",
-      "",
-      "Arguments:",
-      JSON.stringify({ sourceId: args.sourceId, params: args.params }, null, 2),
-      "",
-      "Then report success/failure.",
-    ].join("\n");
-
     const nowMs = ctx.nowMs();
     const id = randomId("J");
-    const spec = { mode: "agent_task", task };
+    const spec = {
+      mode: "tool_call",
+      tool: "data_intake_run",
+      args: { sourceId: args.sourceId, params: args.params },
+    };
     const { nextCronTimeMs, parseCron, validateTimeZone } = await import("../scheduler/cron.js");
     const next = nextCronTimeMs({
       schedule: parseCron(args.cron),

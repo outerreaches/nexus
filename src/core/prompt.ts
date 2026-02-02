@@ -90,7 +90,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- Workers share data via the **Blackboard** (`write_to_blackboard` / `read_from_blackboard`). Workers automatically write their results to the blackboard.",
       "- **Blackboard hygiene**: When switching between unrelated tasks, use `blackboard_clear` or `blackboard_delete` to remove entries that are no longer relevant. Stale data from previous tasks pollutes worker context and can cause hallucinations.",
       "- For data intake source management, use the data_intake_* tools directly (add/update/remove, schedule, run, prune).",
-      "- For periodic/scheduled tasks, use `job_create` with a cron expression. Manage with `job_*` tools. Failed jobs notify you (the owning agent).",
+      "- For periodic/scheduled tasks, use `job_create`. Prefer `mode: \"tool_call\"` (zero token cost) for recurring tool executions or `mode: \"script\"` for maintenance scripts. Use `mode: \"agent_task\"` (default) only when LLM reasoning is required for each run.",
       "- Use `memory_store` / `memory_recall` / `memory_search` to persist learnings across sessions. Use `reflect` to extract insights from recent conversations.",
       "- Use `skill_create` to save reusable playbooks for tasks you learn to do well.",
       "- Use `budget_status` to check remaining iterations/tool calls during complex tasks.",

@@ -161,6 +161,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
     agent,
     db,
     log,
+    getTools: () => registry.list(),
+    toolContext,
+    workspaceDir: paths.workspaceDir,
   });
   if (!scheduler) log("scheduler: disabled");
 

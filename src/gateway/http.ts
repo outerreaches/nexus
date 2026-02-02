@@ -273,6 +273,7 @@ type JobRow = {
   last_run_at: number | null;
   consecutive_failures: number;
   last_failure_at: number | null;
+  spec_json: string;
 };
 
 type JobRunRow = {
@@ -377,7 +378,7 @@ function listJobs(db: NexusDatabase | undefined, limit: number): JobRow[] {
   if (!db) return [];
   return db.db
     .prepare(
-      "SELECT id, owner_agent_id, name, cron, timezone, enabled, next_run_at, last_run_at, consecutive_failures, last_failure_at FROM jobs ORDER BY created_at DESC LIMIT ?",
+      "SELECT id, owner_agent_id, name, cron, timezone, enabled, next_run_at, last_run_at, consecutive_failures, last_failure_at, spec_json FROM jobs ORDER BY created_at DESC LIMIT ?",
     )
     .all(limit) as JobRow[];
 }
@@ -1597,6 +1598,7 @@ function renderJobsTable(rows: JobRow[]): string {
     <thead>
       <tr>
         <th>Status</th>
+        <th>Mode</th>
         <th>ID</th>
         <th>Name</th>
         <th>Cron</th>
@@ -1618,8 +1620,18 @@ function renderJobsTable(rows: JobRow[]): string {
           ? `return confirm('Disable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`
           : `return confirm('Enable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`;
         const deleteConfirm = `return confirm('Permanently delete job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"? This cannot be undone.')`;
+
+        let mode = "agent_task";
+        try {
+          const spec = JSON.parse(j.spec_json || "{}");
+          if (spec.mode) mode = spec.mode;
+        } catch { }
+
+        const modeBadgeClass = mode === "agent_task" ? "status-running" : mode === "tool_call" ? "status-enabled" : "status-complete";
+
         return `<tr>
             <td><span class="badge ${enabled ? "status-enabled" : "status-disabled"}">${enabled ? "enabled" : "disabled"}</span></td>
+            <td><span class="badge ${modeBadgeClass}">${escapeHtml(mode)}</span></td>
             <td>${escapeHtml(j.id)}</td>
             <td>${escapeHtml(j.name)}</td>
             <td>${escapeHtml(j.cron)}</td>

@@ -47,7 +47,11 @@ export const jobCreate = defineTool({
     cron: z.string().min(1).max(120).describe("5-field cron: min hour dom mon dow"),
     timezone: z.string().max(64).default("UTC").describe("IANA timezone, e.g. UTC or America/New_York"),
     enabled: z.boolean().default(true),
-    task: z.string().min(1).max(4000).describe("What the job should do when it runs"),
+    mode: z.enum(["agent_task", "script", "tool_call"]).default("agent_task").describe("Execution mode"),
+    task: z.string().max(4000).optional().describe("For agent_task mode: instructions for the agent"),
+    command: z.string().optional().describe("For script mode: shell command to run"),
+    tool: z.string().optional().describe("For tool_call mode: tool name"),
+    args: z.record(z.any()).optional().describe("For tool_call mode: tool arguments"),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -57,7 +61,18 @@ export const jobCreate = defineTool({
     const nowMs = ctx.nowMs();
     const id = randomId("J");
     const nextRunAt = args.enabled ? computeNextRunAt({ cron: args.cron, timezone: args.timezone, afterMs: nowMs }) : null;
-    const spec = { mode: "agent_task", task: args.task };
+
+    let spec: any = {};
+    if (args.mode === "agent_task") {
+      if (!args.task) return "ERROR: 'task' is required for agent_task mode";
+      spec = { mode: "agent_task", task: args.task };
+    } else if (args.mode === "script") {
+      if (!args.command) return "ERROR: 'command' is required for script mode";
+      spec = { mode: "script", command: args.command };
+    } else if (args.mode === "tool_call") {
+      if (!args.tool) return "ERROR: 'tool' is required for tool_call mode";
+      spec = { mode: "tool_call", tool: args.tool, args: args.args ?? {} };
+    }
 
     try {
       db.db
@@ -133,7 +148,11 @@ export const jobUpdate = defineTool({
     cron: z.string().min(1).max(120).optional(),
     timezone: z.string().max(64).optional(),
     enabled: z.boolean().optional(),
-    task: z.string().min(1).max(4000).optional(),
+    task: z.string().max(4000).optional(),
+    mode: z.enum(["agent_task", "script", "tool_call"]).optional(),
+    command: z.string().optional(),
+    tool: z.string().optional(),
+    args: z.record(z.any()).optional(),
     nextRunAtMs: z.number().int().min(0).optional().describe("Manually set the next run time (epoch ms). Useful for staggering jobs."),
   }),
   execute: async (args, ctx) => {
@@ -162,7 +181,22 @@ export const jobUpdate = defineTool({
     } catch {
       spec = {};
     }
-    if (args.task !== undefined) spec = { ...(spec ?? {}), mode: "agent_task", task: args.task };
+
+    // Merge updates
+    if (args.mode) spec.mode = args.mode;
+    if (args.task !== undefined) spec.task = args.task;
+    if (args.command !== undefined) spec.command = args.command;
+    if (args.tool !== undefined) spec.tool = args.tool;
+    if (args.args !== undefined) spec.args = args.args;
+
+    // Ensure mode defaults if missing
+    if (!spec.mode) spec.mode = "agent_task";
+
+    // Validate
+    if (spec.mode === "agent_task" && !spec.task) return "ERROR: 'task' is required for agent_task mode";
+    if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
+    if (spec.mode === "tool_call" && !spec.tool) return "ERROR: 'tool' is required for tool_call mode";
+
     const specJson = JSON.stringify(spec ?? {});
 
     let nextRunAt: number | null = null;
