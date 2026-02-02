@@ -220,7 +220,8 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_run_at INTEGER,
-      last_error TEXT
+      last_error TEXT,
+      job_id TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_data_intake_sources_enabled ON data_intake_sources(enabled, source_id);
@@ -388,6 +389,12 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("ALTER TABLE agent_runs ADD COLUMN output_preview TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE data_intake_sources ADD COLUMN job_id TEXT;");
   } catch {
     // already exists
   }

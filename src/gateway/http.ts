@@ -224,42 +224,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     return c.redirect("/dashboard");
   });
 
-  app.post("/dashboard/data-intake/schedule", async (c) => {
-    if (!deps.db) return c.text("Database not available", 500);
-    const body = await c.req.parseBody();
-    const jobName = String(body.jobName ?? "").trim();
-    const cron = String(body.cron ?? "").trim();
-    const timezone = String(body.timezone ?? "UTC").trim() || "UTC";
-    if (!jobName) return c.text("Missing jobName", 400);
-    if (!cron) return c.text("Missing cron", 400);
 
-    const { nextCronTimeMs, parseCron, validateTimeZone } = await import("../scheduler/cron.js");
-    const nowMs = Date.now();
-    const next = nextCronTimeMs({
-      schedule: parseCron(cron),
-      afterMs: nowMs,
-      timeZone: validateTimeZone(timezone),
-    });
-    const crypto = await import("node:crypto");
-    const id = `J${crypto.randomBytes(5).toString("hex").toUpperCase()}`;
-    const task = [
-      "Refresh all enabled data intake source instances from storage.",
-      "",
-      "Steps:",
-      "1) Call data_intake_source_list with includeDisabled=false.",
-      "2) For each source instance, call data_intake_run with instanceId set to the instance's id field.",
-      "3) Report any failures.",
-    ].join("\n");
-    const spec = { mode: "agent_task", task };
-    const owner = "main";
-    deps.db.db
-      .prepare(
-        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(id, owner, `data-intake: ${jobName}`, cron, validateTimeZone(timezone), 1, JSON.stringify(spec), next, nowMs, nowMs);
-
-    return c.redirect("/dashboard");
-  });
 
   app.post("/dashboard/jobs/delete", async (c) => {
     if (!deps.db) return c.text("Database not available", 500);
@@ -1749,21 +1714,8 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
     <button type="submit" class="graph-btn">Add Source</button>
   </form>`;
 
-  const scheduleForm = `<form method="post" action="/dashboard/data-intake/schedule" class="form-inline">
-    <div class="form-row">
-      <label>Job Name</label>
-      <input type="text" name="jobName" placeholder="data-intake refresh" required />
-    </div>
-    <div class="form-row">
-      <label>Cron</label>
-      <input type="text" name="cron" placeholder="*/5 * * * *" required />
-    </div>
-    <div class="form-row">
-      <label>Timezone</label>
-      <input type="text" name="timezone" placeholder="UTC" />
-    </div>
-    <button type="submit" class="graph-btn">Create Refresh Job</button>
-  </form>`;
+  /* Manual schedule form removed as jobs are now auto-created per source */
+  const scheduleForm = "";
 
   const sourcesTable = params.sources.length === 0
     ? `<div class="no-data">No data intake sources configured.</div>`
@@ -1774,7 +1726,6 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
           <th>ID</th>
           <th>Source</th>
           <th>Label</th>
-          <th>Interval</th>
           <th>Last Run</th>
           <th>Error</th>
           <th>Actions</th>
@@ -1792,7 +1743,6 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
               <td>${escapeHtml(row.id)}</td>
               <td>${escapeHtml(row.source_id)}</td>
               <td>${escapeHtml(row.label ?? "-")}</td>
-              <td>${escapeHtml(`${Math.round(row.interval_ms / 60000)}m`)}</td>
               <td>${escapeHtml(row.last_run_at ? formatTime(row.last_run_at) : "-")}</td>
               <td>${escapeHtml(row.last_error ? truncate(row.last_error, 80) : "-")}</td>
               <td>
@@ -1800,7 +1750,6 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
                   <form method="post" action="/dashboard/data-intake/update" class="inline-edit">
                     <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
                     <input type="text" name="label" class="inline-input" placeholder="Label" value="${escapeHtml(row.label ?? "")}" />
-                    <input type="number" name="intervalMs" class="inline-input" min="60000" placeholder="Interval ms" value="${escapeHtml(String(row.interval_ms))}" />
                     <input type="text" name="paramsJson" class="inline-input" placeholder="Params JSON" value="${escapeHtml(paramsPreview)}" />
                     <button type="submit" class="graph-btn">Update</button>
                   </form>

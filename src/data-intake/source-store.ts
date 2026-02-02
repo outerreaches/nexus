@@ -12,6 +12,7 @@ export type DataIntakeSourceRow = {
   updated_at: number;
   last_run_at: number | null;
   last_error: string | null;
+  job_id: string | null;
 };
 
 export function listIntakeSources(params: { db: NexusDatabase; includeDisabled?: boolean }): DataIntakeSourceRow[] {
@@ -29,6 +30,53 @@ export function getIntakeSource(params: { db: NexusDatabase; id: string }): Data
   return row ?? null;
 }
 
+/** Convert intervalMs to a simple cron expression (minute-resolution) */
+function intervalMsToCron(intervalMs: number): string {
+  const minutes = Math.max(1, Math.floor(intervalMs / 60_000));
+  if (minutes < 60) {
+    // Every N minutes: */N * * * *
+    return `*/${minutes} * * * *`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    // Every N hours: 0 */N * * *
+    return `0 */${hours} * * *`;
+  }
+  // Daily or longer: once a day at midnight
+  return "0 0 * * *";
+}
+
+/** Create a cron job for this data intake source */
+function createJobForSource(params: {
+  db: NexusDatabase;
+  sourceId: string;
+  instanceId: string;
+  label: string | null;
+  intervalMs: number;
+  nowMs: number;
+}): string {
+  const jobId = randomId("J");
+  const cron = intervalMsToCron(params.intervalMs);
+  const jobName = `data-intake: ${params.label || params.sourceId}`;
+  const task = [
+    `Refresh data intake source instance.`,
+    "",
+    "Call: data_intake_run",
+    `Arguments: { "instanceId": "${params.instanceId}" }`,
+    "",
+    "Report success/failure.",
+  ].join("\n");
+  const spec = { mode: "agent_task", task };
+
+  params.db.db
+    .prepare(
+      "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(jobId, "main", jobName, cron, "UTC", 1, JSON.stringify(spec), params.nowMs, params.nowMs, params.nowMs);
+
+  return jobId;
+}
+
 export function createIntakeSource(params: {
   db: NexusDatabase;
   sourceId: string;
@@ -40,11 +88,22 @@ export function createIntakeSource(params: {
   const now = params.nowMs ?? Date.now();
   const id = randomId("DIS");
   const intervalMs = Math.max(60_000, params.intervalMs);
+
+  // Create the cron job first
+  const jobId = createJobForSource({
+    db: params.db,
+    sourceId: params.sourceId,
+    instanceId: id,
+    label: params.label ?? null,
+    intervalMs,
+    nowMs: now,
+  });
+
   params.db.db
     .prepare(
-      "INSERT INTO data_intake_sources (id, source_id, label, params_json, interval_ms, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+      "INSERT INTO data_intake_sources (id, source_id, label, params_json, interval_ms, enabled, created_at, updated_at, job_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
     )
-    .run(id, params.sourceId, params.label ?? null, JSON.stringify(params.params ?? {}), intervalMs, now, now);
+    .run(id, params.sourceId, params.label ?? null, JSON.stringify(params.params ?? {}), intervalMs, now, now, jobId);
   return params.db.db.prepare("SELECT * FROM data_intake_sources WHERE id = ?").get(id) as DataIntakeSourceRow;
 }
 
@@ -73,10 +132,25 @@ export function updateIntakeSource(params: {
       "UPDATE data_intake_sources SET label = ?, params_json = ?, interval_ms = ?, enabled = ?, updated_at = ?, last_run_at = ?, last_error = ? WHERE id = ?",
     )
     .run(nextLabel, nextParams, nextInterval, nextEnabled, now, nextLastRun, nextLastError, params.id);
+
+  // Sync job enabled state if source has a linked job
+  if (existing.job_id && params.enabled !== undefined) {
+    params.db.db.prepare("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?").run(nextEnabled, now, existing.job_id);
+  }
+
   return getIntakeSource({ db: params.db, id: params.id });
 }
 
 export function deleteIntakeSource(params: { db: NexusDatabase; id: string }): boolean {
+  // Get the source to find the linked job
+  const existing = getIntakeSource({ db: params.db, id: params.id });
+  if (!existing) return false;
+
+  // Delete the linked job if it exists
+  if (existing.job_id) {
+    params.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(existing.job_id);
+  }
+
   const res = params.db.db.prepare("DELETE FROM data_intake_sources WHERE id = ?").run(params.id);
   return res.changes > 0;
 }
