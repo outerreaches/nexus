@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 import { defineTool } from "../core/tools.js";
 import {
@@ -12,6 +13,7 @@ import {
   runDataSource,
 } from "../data-intake/index.js";
 import { randomId } from "../data-intake/utils.js";
+import { validateSourceParams } from "../data-intake/param-negotiation.js";
 
 function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
@@ -19,7 +21,8 @@ function requireDb(ctx: { db?: unknown }) {
 
 export const dataIntakeListSources = defineTool({
   name: "data_intake_list_sources",
-  description: "List available data intake sources. Optionally filter by tag.",
+  description:
+    "List available data intake sources with usage notes and parameter schemas. Optionally filter by tag.",
   parameters: z.object({
     tag: z.string().min(1).optional(),
   }),
@@ -32,6 +35,9 @@ export const dataIntakeListSources = defineTool({
         name: source.name,
         description: source.description,
         usageNote: source.usageNote,
+        paramsSchema: source.paramsSchema
+          ? zodToJsonSchema(source.paramsSchema, { target: "jsonSchema7" })
+          : null,
         tags: source.tags,
         schemaVersion: source.schemaVersion,
         defaultTtlMs: source.defaultTtlMs,
@@ -44,32 +50,78 @@ export const dataIntakeListSources = defineTool({
 
 export const dataIntakeRun = defineTool({
   name: "data_intake_run",
-  description: "Run a data intake source and store normalized results in the local data store.",
+  description:
+    "Run a data intake source and store normalized results. " +
+    "Use instanceId to run a configured source (recommended) — the instance's label will be added as a tag for easy querying. " +
+    "Alternatively, provide sourceId + params directly for ad-hoc runs.",
   parameters: z.object({
-    sourceId: z.string().min(1),
-    params: z.record(z.unknown()).default({}),
+    instanceId: z.string().min(1).optional().describe("ID of a configured data intake source instance"),
+    sourceId: z.string().min(1).optional().describe("Source type ID (e.g., 'weather.open-meteo') for ad-hoc runs"),
+    params: z.record(z.unknown()).optional().describe("Params for ad-hoc runs (ignored if instanceId is provided)"),
   }),
   execute: async (args, ctx) => {
     initDataIntake();
-    const source = getDataSource(args.sourceId);
-    if (!source) return `ERROR: unknown data source '${args.sourceId}'`;
-    const result = await runDataSource(source, args.params, {
-      db: ctx.db as any,
-      nowMs: ctx.nowMs,
-      log: ctx.log,
-      request: ctx.request,
-    });
+    const db = ctx.db as any;
+
+    let sourceId: string;
+    let params: unknown;
+    let instanceTags: string[] = [];
+
+    // If instanceId is provided, look up the configured source
+    if (args.instanceId) {
+      if (!db) return "ERROR: database is not available";
+      const { getIntakeSource } = await import("../data-intake/source-store.js");
+      const instance = getIntakeSource({ db, id: args.instanceId });
+      if (!instance) return `ERROR: unknown instance '${args.instanceId}'`;
+      sourceId = instance.source_id;
+      try {
+        params = JSON.parse(instance.params_json);
+      } catch {
+        params = {};
+      }
+      // Add instance label as a tag for easy querying
+      if (instance.label) {
+        instanceTags.push(instance.label);
+      }
+    } else if (args.sourceId) {
+      sourceId = args.sourceId;
+      params = args.params ?? {};
+    } else {
+      return "ERROR: either instanceId or sourceId must be provided";
+    }
+
+    const source = getDataSource(sourceId);
+    if (!source) return `ERROR: unknown data source '${sourceId}'`;
+    const validation = validateSourceParams(source, params);
+    if (!validation.ok) {
+      return JSON.stringify(validation.response, null, 2);
+    }
+    const result = await runDataSource(
+      source,
+      validation.params,
+      {
+        db,
+        nowMs: ctx.nowMs,
+        log: ctx.log,
+        request: ctx.request,
+      },
+      { instanceTags },
+    );
     return JSON.stringify(result, null, 2);
   },
 });
 
 export const dataIntakeQuery = defineTool({
   name: "data_intake_query",
-  description: "Read-only query for stored data intake records by source, tag, or subject.",
+  description:
+    "Read-only query for stored data intake records. " +
+    "Use 'tag' to query by the source instance label (e.g., 'Innisfil Temperature'). " +
+    "Use 'sourceId' to filter by source type. Use 'subjectLike' for partial subject matches.",
   parameters: z.object({
     sourceId: z.string().min(1).optional(),
     tag: z.string().min(1).optional(),
-    subject: z.string().min(1).optional(),
+    subject: z.string().min(1).optional().describe("Exact subject match"),
+    subjectLike: z.string().min(1).optional().describe("Partial subject match using SQL LIKE (use % as wildcard)"),
     limit: z.number().int().min(1).max(100).default(20),
     includeExpired: z.boolean().default(false),
     latestOnly: z.boolean().default(false),
@@ -83,6 +135,7 @@ export const dataIntakeQuery = defineTool({
       sourceId: args.sourceId,
       tag: args.tag,
       subject: args.subject,
+      subjectLike: args.subjectLike,
       limit: args.limit,
       includeExpired: args.includeExpired,
       nowMs: ctx.nowMs(),

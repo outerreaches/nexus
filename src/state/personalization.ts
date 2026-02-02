@@ -247,7 +247,7 @@ src/
     web.ts            # web_fetch
     web-search.ts     # web_search
     browser.ts        # browser (Playwright CDP)
-    markets.ts        # query_data
+    query-data.ts     # query_data
     trading.ts        # paper_trade, portfolio_status
     gmail.ts          # gmail_profile, gmail_search, gmail_get_message, gmail_send
     credentials.ts    # credential_set, credential_generate, credential_list, credential_delete

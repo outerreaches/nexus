@@ -16,15 +16,17 @@ const CryptoParams = z.object({
 export const cryptoSource: DataSource = {
   id: "crypto.coingecko",
   name: "CoinGecko Spot Prices",
-  description: "Fetch spot prices for crypto ids via CoinGecko",
-  usageNote: "Provide CoinGecko ids (not symbols). Example params: { ids: [\"bitcoin\", \"ethereum\"], currency: \"usd\" }.",
+  description: "Fetch spot prices for CoinGecko ids (one record per token)",
+  usageNote:
+    "Provide CoinGecko ids (not symbols). Each id is stored as a single subject. " +
+    "Example params: { ids: [\"bitcoin\", \"ethereum\", \"solana\"], currency: \"usd\" }.",
   tags: ["crypto", "prices", "markets"],
   schemaVersion: 1,
   defaultTtlMs: 5 * 60_000,
   paramsSchema: CryptoParams,
   fetch: async (params) => {
     const parsed = CryptoParams.parse(params);
-    const ids = parsed.ids.map((id) => id.trim()).filter(Boolean);
+    const ids = parsed.ids.map((id) => id.trim().toLowerCase()).filter(Boolean);
     if (ids.length === 0) throw new Error("No CoinGecko ids provided");
     const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids.join(","))}&vs_currencies=${encodeURIComponent(parsed.currency)}`;
     const res = await fetch(url, { headers: { "User-Agent": "NexusAgent/0.0.1" } });
@@ -35,10 +37,10 @@ export const cryptoSource: DataSource = {
     const parsed = CryptoParams.parse(params);
     const json = raw as { ids: string[]; data: CoinGeckoResponse };
     const results = parsed.ids.map((id) => {
-      const normalizedId = id.trim();
+      const normalizedId = id.trim().toLowerCase();
       const price = normalizedId ? json.data?.[normalizedId]?.[parsed.currency.toLowerCase()] ?? null : null;
       return {
-        subject: `${normalizedId.toUpperCase()}/${parsed.currency.toUpperCase()}`,
+        subject: normalizedId,
         value: {
           id: normalizedId,
           currency: parsed.currency.toUpperCase(),

@@ -2,10 +2,16 @@ import type { DataIntakeContext, DataRunResult, DataSource, NormalizedRecord } f
 
 type StoreResult = { stored: number; skipped: number };
 
+export type RunDataSourceOptions = {
+  /** Additional tags to merge with source.tags (e.g., instance label) */
+  instanceTags?: string[];
+};
+
 export async function runDataSource(
   source: DataSource,
   params: unknown,
   ctx: DataIntakeContext,
+  options?: RunDataSourceOptions,
 ): Promise<DataRunResult> {
   const collectedAtMs = ctx.nowMs();
   const errors: string[] = [];
@@ -44,7 +50,7 @@ export async function runDataSource(
     return { sourceId: source.id, sourceName: source.name, stored, skipped, errors, collectedAtMs };
   }
 
-  const storeResult = storeRecords(source, normalized, params, ctx, collectedAtMs, errors);
+  const storeResult = storeRecords(source, normalized, params, ctx, collectedAtMs, errors, options?.instanceTags);
   stored = storeResult.stored;
   skipped = storeResult.skipped;
   return { sourceId: source.id, sourceName: source.name, stored, skipped, errors, collectedAtMs };
@@ -57,6 +63,7 @@ function storeRecords(
   ctx: DataIntakeContext,
   collectedAtMs: number,
   errors: string[],
+  instanceTags?: string[],
 ): StoreResult {
   if (!ctx.db) {
     errors.push("Storage error: database is not available");
@@ -91,11 +98,12 @@ function storeRecords(
 
     try {
       const valueJson = JSON.stringify(record.value ?? null);
+      const allTags = [...(source.tags ?? []), ...(instanceTags ?? [])];
       stmt.run(
         id,
         source.id,
         source.name,
-        JSON.stringify(source.tags ?? []),
+        JSON.stringify(allTags),
         record.subject,
         valueJson,
         JSON.stringify({

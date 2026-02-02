@@ -5,7 +5,15 @@ import type { DataSource } from "../types.js";
 type WeatherResponse = {
   latitude?: number;
   longitude?: number;
-  hourly?: { time?: string[]; temperature_2m?: number[]; precipitation_probability?: number[] };
+  hourly?: {
+    time?: string[];
+    temperature_2m?: number[];
+    apparent_temperature?: number[];
+    relative_humidity_2m?: number[];
+    precipitation_probability?: number[];
+    wind_speed_10m?: number[];
+    weather_code?: number[];
+  };
 };
 
 const WeatherParams = z.object({
@@ -16,10 +24,10 @@ const WeatherParams = z.object({
 export const weatherSource: DataSource = {
   id: "weather.open-meteo",
   name: "Open-Meteo Forecast",
-  description: "Fetch hourly temperature + precipitation probability from open-meteo.com",
+  description: "Fetch hourly weather forecast (temperature, feels like, humidity, wind, conditions) from open-meteo.com",
   usageNote: "Provide coordinates. Example params: { latitude: 37.7749, longitude: -122.4194 }.",
   tags: ["weather", "forecast"],
-  schemaVersion: 1,
+  schemaVersion: 2,
   defaultTtlMs: 2 * 60 * 60_000,
   paramsSchema: WeatherParams,
   fetch: async (params) => {
@@ -28,7 +36,7 @@ export const weatherSource: DataSource = {
       "https://api.open-meteo.com/v1/forecast",
       `?latitude=${encodeURIComponent(parsed.latitude)}`,
       `&longitude=${encodeURIComponent(parsed.longitude)}`,
-      "&hourly=temperature_2m,precipitation_probability",
+      "&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,wind_speed_10m,weather_code",
       "&timezone=UTC",
     ].join("");
     const res = await fetch(url, { headers: { "User-Agent": "NexusAgent/0.0.1" } });
@@ -38,26 +46,37 @@ export const weatherSource: DataSource = {
   normalize: (raw, params, ctx) => {
     const parsed = WeatherParams.parse(params);
     const json = raw as WeatherResponse;
-    const times = json?.hourly?.time ?? [];
-    const temps = json?.hourly?.temperature_2m ?? [];
-    const precip = json?.hourly?.precipitation_probability ?? [];
-    const subject = `${parsed.latitude},${parsed.longitude}`;
-    const entries = times.map((time, idx) => ({
-      time,
-      temperatureC: temps[idx] ?? null,
-      precipitationProbability: precip[idx] ?? null,
-    }));
-    return [
-      {
-        subject,
+    const hourly = json?.hourly ?? {};
+    const times = hourly.time ?? [];
+    const temps = hourly.temperature_2m ?? [];
+    const feelsLike = hourly.apparent_temperature ?? [];
+    const humidity = hourly.relative_humidity_2m ?? [];
+    const precip = hourly.precipitation_probability ?? [];
+    const wind = hourly.wind_speed_10m ?? [];
+    const codes = hourly.weather_code ?? [];
+    const location = `${parsed.latitude},${parsed.longitude}`;
+    const nowMs = ctx.nowMs();
+
+    return times.map((time, idx) => {
+      const hourMs = new Date(time).getTime();
+      const ttlMs = Math.max(3600_000, hourMs - nowMs + 3600_000);
+
+      return {
+        subject: `${location}@${time}`,
         value: {
-          latitude: parsed.latitude,
-          longitude: parsed.longitude,
-          hourly: entries,
+          location,
+          time,
+          temperatureC: temps[idx] ?? null,
+          feelsLikeC: feelsLike[idx] ?? null,
+          humidityPercent: humidity[idx] ?? null,
+          precipitationProbability: precip[idx] ?? null,
+          windSpeedKmh: wind[idx] ?? null,
+          weatherCode: codes[idx] ?? null,
         },
-        collectedAtMs: ctx.nowMs(),
-        metadata: { provider: "open-meteo" },
-      },
-    ];
+        collectedAtMs: nowMs,
+        ttlMs,
+        metadata: { provider: "open-meteo", latitude: parsed.latitude, longitude: parsed.longitude },
+      };
+    });
   },
 };

@@ -4,7 +4,7 @@ import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager, ManagedProcessInfo } from "../process/manager.js";
 import type { AgentTracker, AgentRunInfo } from "../core/agent-tracker.js";
 import { initDataIntake, listDataSources } from "../data-intake/index.js";
-import { listLatestDataItems } from "../data-intake/store.js";
+import { listLatestDataItemsPerSource } from "../data-intake/store.js";
 import { createIntakeSource, deleteIntakeSource, listIntakeSources, updateIntakeSource } from "../data-intake/source-store.js";
 
 export type GatewayHttpDeps = {
@@ -21,7 +21,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
 
   app.get("/healthz", (c) => c.json({ ok: true }));
   app.get("/status", async (c) => c.json(await deps.getStatus()));
-  
+
   // JSON API for live agent graph updates (used by dashboard for smooth refresh)
   app.get("/api/agents", async (c) => {
     const nowMs = Date.now();
@@ -29,7 +29,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
     const agentGraph = listAgentGraph(deps.db, allowedRunIds);
-    
+
     const nodes = agentGraph.map(({ run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task }) => ({
       run_id,
       parent_run_id,
@@ -40,14 +40,14 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       ended_at,
       task,
     }));
-    
+
     const stats = {
       running: agentGraph.filter((a) => a.status === "running").length,
       complete: agentGraph.filter((a) => a.status === "complete").length,
       failed: agentGraph.filter((a) => a.status === "failed" || a.status === "stopped").length,
       total: agentGraph.length,
     };
-    
+
     // Include table data for live updates
     const formatAgentRow = (r: AgentRunInfo) => ({
       status: r.status,
@@ -60,15 +60,15 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       toolCallsUsed: r.toolCallsUsed,
       iterationsUsed: r.iterationsUsed,
     });
-    
+
     const tables = {
       active: agents.active.map(formatAgentRow),
       recent: agents.recent.map(formatAgentRow),
     };
-    
+
     return c.json({ nodes, stats, tables, timestamp: nowMs });
   });
-  
+
   app.get("/dashboard", async (c) => {
     const status = await deps.getStatus();
     const nowMs = Date.now();
@@ -214,11 +214,8 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       "",
       "Steps:",
       "1) Call data_intake_source_list with includeDisabled=false.",
-      "2) For each source instance, call data_intake_run using source_id and params_json.",
+      "2) For each source instance, call data_intake_run with instanceId set to the instance's id field.",
       "3) Report any failures.",
-      "",
-      "Parsing params_json:",
-      "- params_json is a JSON string; parse it to an object before passing to data_intake_run.",
     ].join("\n");
     const spec = { mode: "agent_task", task };
     const owner = "main";
@@ -228,6 +225,25 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
       )
       .run(id, owner, `data-intake: ${jobName}`, cron, validateTimeZone(timezone), 1, JSON.stringify(spec), next, nowMs, nowMs);
 
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/jobs/delete", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing id", 400);
+    deps.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/jobs/toggle", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    const enabled = body.enabled === "true" ? 1 : 0;
+    if (!id) return c.text("Missing id", 400);
+    deps.db.db.prepare("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?").run(enabled, Date.now(), id);
     return c.redirect("/dashboard");
   });
 
@@ -300,6 +316,7 @@ type BlackboardRow = {
 type DataIntakeRow = {
   source_id: string;
   source_name: string;
+  tags_json: string;
   subject: string;
   value_json: string;
   collected_at: number;
@@ -390,7 +407,7 @@ function listDataIntake(
   limit: number,
 ): DataIntakePanelState {
   if (!db) return { enabled: true, targets: [], rows: [], sources: [] };
-  const rows = listLatestDataItems({
+  const rows = listLatestDataItemsPerSource({
     db,
     includeExpired: false,
     limit,
@@ -426,7 +443,7 @@ function renderDashboard(params: {
   const updatedAt = new Date(params.nowMs).toISOString();
   const statusJson = escapeHtml(JSON.stringify(params.status, null, 2));
   const hasAgents = params.agents.active.length + params.agents.recent.length > 0;
-  
+
   // Compute stats from agent graph
   const agentStats = {
     running: params.agentGraph.filter((a) => a.status === "running").length,
@@ -435,7 +452,7 @@ function renderDashboard(params: {
     total: params.agentGraph.length,
   };
   const agentStatsJson = safeJsonForScript(agentStats);
-  
+
   const agentGraphJson = safeJsonForScript(
     params.agentGraph.map(({ run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task }) => ({
       run_id,
@@ -1515,12 +1532,12 @@ function renderAgentTable(rows: AgentRunInfo[]): string {
     </thead>
     <tbody>
       ${rows
-        .map((r) => {
-          const status = r.status;
-          const budget = r.toolCallsUsed !== undefined || r.iterationsUsed !== undefined
-            ? `${r.toolCallsUsed ?? "-"} tools / ${r.iterationsUsed ?? "-"} iters`
-            : "-";
-          return `<tr>
+      .map((r) => {
+        const status = r.status;
+        const budget = r.toolCallsUsed !== undefined || r.iterationsUsed !== undefined
+          ? `${r.toolCallsUsed ?? "-"} tools / ${r.iterationsUsed ?? "-"} iters`
+          : "-";
+        return `<tr>
             <td><span class="badge status-${escapeClass(status)}">${escapeHtml(status)}</span></td>
             <td>${escapeHtml(r.agentId)}</td>
             <td>${escapeHtml(r.preset)}</td>
@@ -1530,8 +1547,8 @@ function renderAgentTable(rows: AgentRunInfo[]): string {
             <td>${escapeHtml(r.endedAt ? formatTime(r.endedAt) : "-")}</td>
             <td>${escapeHtml(budget)}</td>
           </tr>`;
-        })
-        .join("")}
+      })
+      .join("")}
     </tbody>
   </table>`;
 }
@@ -1552,9 +1569,9 @@ function renderProcessTable(rows: ManagedProcessInfo[]): string {
     </thead>
     <tbody>
       ${rows
-        .map((p) => {
-          const exit = p.exitCode !== null || p.signal ? `${p.exitCode ?? ""} ${p.signal ?? ""}`.trim() : "-";
-          return `<tr>
+      .map((p) => {
+        const exit = p.exitCode !== null || p.signal ? `${p.exitCode ?? ""} ${p.signal ?? ""}`.trim() : "-";
+        return `<tr>
             <td><span class="badge status-${escapeClass(p.status)}">${escapeHtml(p.status)}</span></td>
             <td>${escapeHtml(p.id)}</td>
             <td>${escapeHtml(p.pid !== null ? String(p.pid) : "-")}</td>
@@ -1563,8 +1580,8 @@ function renderProcessTable(rows: ManagedProcessInfo[]): string {
             <td>${escapeHtml(p.endedAt ? formatTime(p.endedAt) : "-")}</td>
             <td>${escapeHtml(exit || "-")}</td>
           </tr>`;
-        })
-        .join("")}
+      })
+      .join("")}
     </tbody>
   </table>`;
 }
@@ -1583,13 +1600,20 @@ function renderJobsTable(rows: JobRow[]): string {
         <th>Next Run</th>
         <th>Last Run</th>
         <th>Failures</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
       ${rows
-        .map((j) => {
-          const enabled = j.enabled === 1;
-          return `<tr>
+      .map((j) => {
+        const enabled = j.enabled === 1;
+        const toggleLabel = enabled ? "Disable" : "Enable";
+        const toggleValue = enabled ? "false" : "true";
+        const toggleConfirm = enabled
+          ? `return confirm('Disable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`
+          : `return confirm('Enable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`;
+        const deleteConfirm = `return confirm('Permanently delete job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"? This cannot be undone.')`;
+        return `<tr>
             <td><span class="badge ${enabled ? "status-enabled" : "status-disabled"}">${enabled ? "enabled" : "disabled"}</span></td>
             <td>${escapeHtml(j.id)}</td>
             <td>${escapeHtml(j.name)}</td>
@@ -1599,9 +1623,22 @@ function renderJobsTable(rows: JobRow[]): string {
             <td>${escapeHtml(j.next_run_at ? formatTime(j.next_run_at) : "-")}</td>
             <td>${escapeHtml(j.last_run_at ? formatTime(j.last_run_at) : "-")}</td>
             <td>${escapeHtml(String(j.consecutive_failures ?? 0))}</td>
+            <td>
+              <div class="inline-actions">
+                <form method="post" action="/dashboard/jobs/toggle" onsubmit="${toggleConfirm}">
+                  <input type="hidden" name="id" value="${escapeHtml(j.id)}" />
+                  <input type="hidden" name="enabled" value="${toggleValue}" />
+                  <button type="submit" class="graph-btn">${toggleLabel}</button>
+                </form>
+                <form method="post" action="/dashboard/jobs/delete" onsubmit="${deleteConfirm}">
+                  <input type="hidden" name="id" value="${escapeHtml(j.id)}" />
+                  <button type="submit" class="graph-btn btn-danger">Delete</button>
+                </form>
+              </div>
+            </td>
           </tr>`;
-        })
-        .join("")}
+      })
+      .join("")}
     </tbody>
   </table>`;
 }
@@ -1623,9 +1660,9 @@ function renderJobRunsTable(rows: JobRunRow[]): string {
     </thead>
     <tbody>
       ${rows
-        .map((r) => {
-          const statusClass = r.status === "success" ? "status-complete" : r.status === "running" ? "status-running" : "status-failed";
-          return `<tr>
+      .map((r) => {
+        const statusClass = r.status === "success" ? "status-complete" : r.status === "running" ? "status-running" : "status-failed";
+        return `<tr>
             <td><span class="badge ${statusClass}">${escapeHtml(r.status)}</span></td>
             <td>${escapeHtml(r.id)}</td>
             <td>${escapeHtml(r.job_id)}</td>
@@ -1635,8 +1672,8 @@ function renderJobRunsTable(rows: JobRunRow[]): string {
             <td>${escapeHtml(r.ended_at ? formatTime(r.ended_at) : "-")}</td>
             <td>${escapeHtml(truncate(r.error ?? "", 120))}</td>
           </tr>`;
-        })
-        .join("")}
+      })
+      .join("")}
     </tbody>
   </table>`;
 }
@@ -1705,12 +1742,12 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
       </thead>
       <tbody>
         ${params.sources
-          .map((row) => {
-            const enabled = row.enabled === 1;
-            const toggleLabel = enabled ? "Disable" : "Enable";
-            const toggleValue = enabled ? "false" : "true";
-            const paramsPreview = row.params_json && row.params_json.length > 0 ? row.params_json : "{}";
-            return `<tr>
+      .map((row) => {
+        const enabled = row.enabled === 1;
+        const toggleLabel = enabled ? "Disable" : "Enable";
+        const toggleValue = enabled ? "false" : "true";
+        const paramsPreview = row.params_json && row.params_json.length > 0 ? row.params_json : "{}";
+        return `<tr>
               <td><span class="badge ${enabled ? "status-enabled" : "status-disabled"}">${enabled ? "enabled" : "disabled"}</span></td>
               <td>${escapeHtml(row.id)}</td>
               <td>${escapeHtml(row.source_id)}</td>
@@ -1739,8 +1776,8 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
                 </div>
               </td>
             </tr>`;
-          })
-          .join("")}
+      })
+      .join("")}
       </tbody>
     </table>`;
 
@@ -1751,6 +1788,7 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
         <thead>
           <tr>
             <th>Source</th>
+            <th>Tags</th>
             <th>Subject</th>
             <th>Value</th>
             <th>Collected</th>
@@ -1759,22 +1797,30 @@ function renderDataIntakeTable(params: DataIntakePanelState, catalog: DataIntake
         </thead>
         <tbody>
           ${params.rows
-            .map((row) => {
-              let valueText = row.value_json;
-              try {
-                valueText = JSON.stringify(JSON.parse(row.value_json));
-              } catch {
-                // keep raw
-              }
-              return `<tr>
+      .map((row) => {
+        let valueText = row.value_json;
+        try {
+          valueText = JSON.stringify(JSON.parse(row.value_json));
+        } catch {
+          // keep raw
+        }
+        let tagsArr: string[] = [];
+        try {
+          tagsArr = JSON.parse(row.tags_json);
+        } catch {
+          // keep empty
+        }
+        const tagsText = tagsArr.length > 0 ? tagsArr.join(", ") : "-";
+        return `<tr>
                 <td>${escapeHtml(row.source_name || row.source_id)}</td>
+                <td>${escapeHtml(tagsText)}</td>
                 <td>${escapeHtml(row.subject)}</td>
                 <td>${escapeHtml(truncate(valueText, 120))}</td>
                 <td>${escapeHtml(formatTime(row.collected_at))}</td>
                 <td>${escapeHtml(formatTime(row.expires_at))}</td>
               </tr>`;
-            })
-            .join("")}
+      })
+      .join("")}
         </tbody>
       </table>`;
 
@@ -1798,8 +1844,8 @@ function renderBlackboardTable(rows: BlackboardRow[]): string {
     </thead>
     <tbody>
       ${rows
-        .map((b) => {
-          return `<tr>
+      .map((b) => {
+        return `<tr>
             <td>${escapeHtml(b.type)}</td>
             <td>${escapeHtml(b.title)}</td>
             <td>${escapeHtml(b.agent_id)}</td>
@@ -1809,8 +1855,8 @@ function renderBlackboardTable(rows: BlackboardRow[]): string {
             <td>${escapeHtml(b.expires_at ? formatTime(b.expires_at) : "-")}</td>
             <td>${escapeHtml(truncate(b.content, 140))}</td>
           </tr>`;
-        })
-        .join("")}
+      })
+      .join("")}
     </tbody>
   </table>`;
 }

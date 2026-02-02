@@ -2,7 +2,7 @@ import type { Tool } from "../core/tools.js";
 
 import { fileEdit, fileEditLines, fileList, fileRead, fileWrite } from "./file-ops.js";
 import { browserTool } from "./browser.js";
-import { queryData } from "./markets.js";
+import { queryData } from "./query-data.js";
 import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
 import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";

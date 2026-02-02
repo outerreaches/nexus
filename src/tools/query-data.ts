@@ -8,14 +8,6 @@ function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
 }
 
-const SymbolToCoinGeckoId: Record<string, string> = {
-  btc: "bitcoin",
-  eth: "ethereum",
-  sol: "solana",
-  usdc: "usd-coin",
-  usdt: "tether",
-};
-
 function buildSubjects(instrument: string, currency: string): string[] {
   const cleaned = instrument.trim();
   if (!cleaned) return [];
@@ -23,13 +15,7 @@ function buildSubjects(instrument: string, currency: string): string[] {
     return [cleaned.toUpperCase()];
   }
   const symbol = cleaned.toUpperCase();
-  const resolved = SymbolToCoinGeckoId[cleaned.toLowerCase()] ?? cleaned;
-  const quote = currency.trim().toUpperCase();
-  return [
-    `${resolved.toUpperCase()}/${quote}`,
-    `${symbol}/${quote}`,
-    symbol,
-  ];
+  return [cleaned.toLowerCase(), symbol];
 }
 
 export const queryData = defineTool({
@@ -42,7 +28,7 @@ export const queryData = defineTool({
     "",
     "Matching behavior:",
     "- If the instrument includes a slash (e.g. BTC/USD), it is treated as an exact subject.",
-    "- Otherwise, it will try `${SYMBOL}/${CURRENCY}` first, then `${SYMBOL}`.",
+    "- Otherwise, it will try the lowercase key and then the uppercase symbol.",
     "",
     "Returned fields:",
     "- instrument, subject, sourceId, sourceName",
