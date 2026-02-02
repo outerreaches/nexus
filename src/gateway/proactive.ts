@@ -14,6 +14,19 @@ export type ProactiveDeps = {
   log: (msg: string) => void;
 };
 
+export type ProactiveStatus = {
+  enabled: boolean;
+  paused?: boolean;
+  agentId?: string;
+  intervalMs?: number;
+  maxIntervalMs?: number;
+  jitterMs?: number;
+  notifyTelegram?: boolean;
+  lastTickAt?: number | null;
+  lastStatus?: "idle" | "ran" | "error" | "no_heartbeat" | "skipped";
+  nextTickAt?: number | null;
+};
+
 function envBool(name: string): boolean | null {
   const v = (process.env[name] ?? "").trim().toLowerCase();
   if (!v) return null;
@@ -59,9 +72,18 @@ async function listTelegramRecipients(db: NexusDatabase, config: NexusConfig): P
   return [...set];
 }
 
-export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void } | null {
+export function startProactiveHeartbeat(
+  deps: ProactiveDeps,
+): { stop: () => void; pause: () => void; resume: () => void; getStatus: () => ProactiveStatus } | null {
   const enabled = envBool("NEXUS_PROACTIVE") ?? deps.config.proactive.enabled;
-  if (!enabled) return null;
+  if (!enabled) {
+    return {
+      stop: () => {},
+      pause: () => {},
+      resume: () => {},
+      getStatus: () => ({ enabled: false, lastTickAt: null, nextTickAt: null }),
+    };
+  }
 
   const agentId = (process.env.NEXUS_PROACTIVE_AGENT_ID ?? deps.config.proactive.agentId ?? "main").trim() || "main";
   const intervalMs = Math.max(5_000, envInt("NEXUS_PROACTIVE_INTERVAL_MS") ?? deps.config.proactive.intervalMs);
@@ -70,20 +92,30 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
   const notifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? deps.config.proactive.notifyTelegram;
 
   let stopped = false;
+  let paused = false;
   let running = false;
   let timer: NodeJS.Timeout | null = null;
   let nextDelayMs = intervalMs;
+  let nextTickAt: number | null = null;
+  let lastTickAt: number | null = null;
+  let lastStatus: ProactiveStatus["lastStatus"] = undefined;
 
   const scheduleNext = (delayMs: number) => {
     if (stopped) return;
     const delay = Math.max(1_000, delayMs) + computeJitter(jitterMs);
+    nextTickAt = Date.now() + delay;
     timer = setTimeout(() => void tick(), delay);
   };
 
   const tick = async () => {
     if (stopped) return;
+    if (paused) {
+      scheduleNext(nextDelayMs);
+      return;
+    }
     if (running) {
       deps.log(`proactive: skip tick (still running) next=${Math.round(nextDelayMs / 1000)}s`);
+      lastStatus = "skipped";
       scheduleNext(nextDelayMs);
       return;
     }
@@ -98,6 +130,8 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
         // No heartbeat content; back off quietly to avoid burning tokens.
         nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.5 + 1_000));
         deps.log(`proactive: no HEARTBEAT.md content; backing off next=${Math.round(nextDelayMs / 1000)}s`);
+        lastTickAt = startMs;
+        lastStatus = "no_heartbeat";
         return;
       }
 
@@ -126,11 +160,15 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
       if (idle) {
         nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.4 + 1_000));
         deps.log(`proactive: idle tookMs=${tookMs} next=${Math.round(nextDelayMs / 1000)}s`);
+        lastTickAt = startMs;
+        lastStatus = "idle";
         return;
       }
 
       nextDelayMs = intervalMs;
       deps.log(`proactive: ran tookMs=${tookMs} outputChars=${res.output.length}`);
+      lastTickAt = startMs;
+      lastStatus = "ran";
 
       if (notifyTelegram && deps.telegram && deps.config.channels.telegram.enabled) {
         const recipients = await listTelegramRecipients(deps.db, deps.config);
@@ -145,6 +183,8 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
     } catch (e) {
       deps.log(`proactive: error ${e instanceof Error ? e.message : String(e)}`);
       nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.6 + 2_000));
+      lastTickAt = startMs;
+      lastStatus = "error";
     } finally {
       running = false;
       scheduleNext(nextDelayMs);
@@ -164,6 +204,25 @@ export function startProactiveHeartbeat(deps: ProactiveDeps): { stop: () => void
       if (timer) clearTimeout(timer);
       timer = null;
     },
+    pause: () => {
+      paused = true;
+      deps.log("proactive: paused");
+    },
+    resume: () => {
+      paused = false;
+      deps.log("proactive: resumed");
+    },
+    getStatus: () => ({
+      enabled: true,
+      paused,
+      agentId,
+      intervalMs,
+      maxIntervalMs,
+      jitterMs,
+      notifyTelegram,
+      lastTickAt,
+      lastStatus,
+      nextTickAt,
+    }),
   };
 }
-

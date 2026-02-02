@@ -1,3 +1,4 @@
+import "../env.js";
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
 import { BrowserManager } from "../browser/manager.js";
@@ -96,6 +97,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
     },
   });
 
+  let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;
+  const getProactiveStatus = () => proactive?.getStatus() ?? { enabled: false, lastTickAt: null, nextTickAt: null };
+
   const http = await startHttpServer({
     port: effectivePort,
     getStatus: async () => ({
@@ -129,6 +133,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
         notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
         notifyCooldownMs: config.scheduler.notifyCooldownMs,
       },
+      proactive: getProactiveStatus(),
     }),
     log,
     db,
@@ -146,7 +151,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     };
   }
 
-  const proactive = startProactiveHeartbeat({
+  proactive = startProactiveHeartbeat({
     config,
     workspaceDir: paths.workspaceDir,
     agent,
@@ -155,6 +160,21 @@ export async function startGateway(params: { configPath: string; port?: number; 
     log,
   });
   if (!proactive) log("proactive: disabled");
+
+  http.app.post("/api/proactive/pause", (c) => {
+    if (proactive) {
+      proactive.pause();
+      return c.json({ ok: true, paused: true });
+    }
+    return c.json({ ok: false, error: "proactive not enabled" }, 400);
+  });
+  http.app.post("/api/proactive/resume", (c) => {
+    if (proactive) {
+      proactive.resume();
+      return c.json({ ok: true, paused: false });
+    }
+    return c.json({ ok: false, error: "proactive not enabled" }, 400);
+  });
 
   const scheduler = startJobScheduler({
     config,

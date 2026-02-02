@@ -296,7 +296,7 @@ export async function startTelegramBot(deps: {
   }
 
   await bot.api.deleteWebhook({ drop_pending_updates: true } as any).catch(() => {});
-  await bot.start({ onStart: () => deps.log("telegram: polling") });
+  bot.start({ onStart: () => deps.log("telegram: polling") });
 
   return {
     stop: async () => {

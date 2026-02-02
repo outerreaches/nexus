@@ -449,6 +449,13 @@ function renderDashboard(params: {
   const updatedAt = new Date(params.nowMs).toISOString();
   const statusJson = escapeHtml(JSON.stringify(params.status, null, 2));
   const hasAgents = params.agents.active.length + params.agents.recent.length > 0;
+  const heartbeat = (params.status as { proactive?: { enabled?: boolean; paused?: boolean; lastTickAt?: number | null; nextTickAt?: number | null; lastStatus?: string } })
+    .proactive ?? { enabled: false };
+  const heartbeatLabel = heartbeat.enabled ? (heartbeat.paused ? "Heartbeat (paused)" : "Heartbeat") : "Heartbeat (disabled)";
+  const heartbeatLast = heartbeat.lastTickAt ? new Date(heartbeat.lastTickAt).toISOString() : "-";
+  const heartbeatNext = heartbeat.nextTickAt ? new Date(heartbeat.nextTickAt).toISOString() : "-";
+  const heartbeatStatus = heartbeat.lastStatus ? String(heartbeat.lastStatus) : "-";
+  const heartbeatPanelClass = heartbeat.enabled ? (heartbeat.paused ? "paused" : "running") : "";
 
   // Compute stats from agent graph
   const agentStats = {
@@ -519,6 +526,10 @@ function renderDashboard(params: {
       @keyframes pulse-glow {
         0%, 100% { text-shadow: var(--glow); }
         50% { text-shadow: var(--glow-strong); }
+      }
+      @keyframes heartbeat-pulse {
+        0%, 100% { box-shadow: 0 0 8px rgba(255, 60, 60, 0.3); }
+        50% { box-shadow: 0 0 16px rgba(255, 60, 60, 0.6), 0 0 24px rgba(255, 60, 60, 0.3); }
       }
       body {
         font-family: 'Share Tech Mono', 'Courier New', monospace;
@@ -894,6 +905,65 @@ function renderDashboard(params: {
       .inline-actions form {
         margin: 0;
       }
+      .heartbeat-panel {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        background: rgba(0, 255, 65, 0.05);
+        box-shadow: var(--glow);
+        font-size: 12px;
+      }
+      .heartbeat-panel.running {
+        border-color: rgba(255, 60, 60, 0.4);
+        background: rgba(255, 60, 60, 0.05);
+        animation: heartbeat-pulse 2s ease-in-out infinite;
+      }
+      .heartbeat-panel.paused {
+        border-color: rgba(255, 180, 0, 0.4);
+        background: rgba(255, 180, 0, 0.05);
+        box-shadow: 0 0 8px rgba(255, 180, 0, 0.3);
+      }
+      .heartbeat-title {
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        font-size: 11px;
+        margin-bottom: 6px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .heartbeat-controls {
+        display: flex;
+        gap: 6px;
+      }
+      .heartbeat-btn {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--text);
+        padding: 2px 8px;
+        font-size: 10px;
+        cursor: pointer;
+        font-family: inherit;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .heartbeat-btn:hover {
+        background: rgba(0, 255, 65, 0.1);
+        border-color: var(--text);
+      }
+      .heartbeat-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .heartbeat-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 4px;
+      }
+      .heartbeat-row:last-child {
+        margin-bottom: 0;
+      }
       .inline-input {
         background: #040804;
         border: 1px solid var(--line);
@@ -964,6 +1034,18 @@ function renderDashboard(params: {
             <h3>Recent (${params.agentWindowMinutes}m)</h3>
             <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
           </div>
+        </div>
+        <div class="heartbeat-panel ${heartbeatPanelClass}" id="heartbeat-panel">
+          <div class="heartbeat-title">
+            <span id="heartbeat-label">${heartbeatLabel}</span>
+            ${heartbeat.enabled ? `<div class="heartbeat-controls">
+              <button class="heartbeat-btn" id="heartbeat-pause" ${heartbeat.paused ? 'style="display:none"' : ""}>Pause</button>
+              <button class="heartbeat-btn" id="heartbeat-resume" ${!heartbeat.paused ? 'style="display:none"' : ""}>Resume</button>
+            </div>` : ""}
+          </div>
+          <div class="heartbeat-row"><span class="muted">Last:</span> <span id="heartbeat-last">${escapeHtml(heartbeatLast)}</span></div>
+          <div class="heartbeat-row"><span class="muted">Next:</span> <span id="heartbeat-next">${escapeHtml(heartbeatNext)}</span></div>
+          <div class="heartbeat-row"><span class="muted">Status:</span> <span id="heartbeat-status">${escapeHtml(heartbeatStatus)}</span></div>
         </div>
       </section>
 
@@ -1082,6 +1164,47 @@ function renderDashboard(params: {
           isPaused = !isPaused;
           pauseBtn.textContent = isPaused ? "Resume" : "Pause";
           pauseBtn.classList.toggle("active", isPaused);
+        });
+      }
+      
+      // Heartbeat pause/resume controls
+      const heartbeatPanel = document.getElementById("heartbeat-panel");
+      const heartbeatPauseBtn = document.getElementById("heartbeat-pause");
+      const heartbeatResumeBtn = document.getElementById("heartbeat-resume");
+      const heartbeatLabel = document.getElementById("heartbeat-label");
+      
+      const updateHeartbeatUI = (paused) => {
+        if (heartbeatPanel) {
+          heartbeatPanel.classList.toggle("running", !paused);
+          heartbeatPanel.classList.toggle("paused", paused);
+        }
+        if (heartbeatLabel) {
+          heartbeatLabel.textContent = paused ? "Heartbeat (paused)" : "Heartbeat";
+        }
+        if (heartbeatPauseBtn) heartbeatPauseBtn.style.display = paused ? "none" : "";
+        if (heartbeatResumeBtn) heartbeatResumeBtn.style.display = paused ? "" : "none";
+      };
+      
+      if (heartbeatPauseBtn) {
+        heartbeatPauseBtn.addEventListener("click", async () => {
+          heartbeatPauseBtn.disabled = true;
+          try {
+            const res = await fetch("/api/proactive/pause", { method: "POST" });
+            if (res.ok) updateHeartbeatUI(true);
+          } finally {
+            heartbeatPauseBtn.disabled = false;
+          }
+        });
+      }
+      if (heartbeatResumeBtn) {
+        heartbeatResumeBtn.addEventListener("click", async () => {
+          heartbeatResumeBtn.disabled = true;
+          try {
+            const res = await fetch("/api/proactive/resume", { method: "POST" });
+            if (res.ok) updateHeartbeatUI(false);
+          } finally {
+            heartbeatResumeBtn.disabled = false;
+          }
         });
       }
       
