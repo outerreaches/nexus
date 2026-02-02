@@ -126,7 +126,7 @@ export const jobGet = defineTool({
 
 export const jobUpdate = defineTool({
   name: "job_update",
-  description: "Update a scheduled job (cron/task/enabled).",
+  description: "Update a scheduled job (cron/task/enabled), or manually set the next run time to stagger execution.",
   parameters: z.object({
     id: z.string().min(1).max(32),
     name: z.string().min(1).max(120).optional(),
@@ -134,6 +134,7 @@ export const jobUpdate = defineTool({
     timezone: z.string().max(64).optional(),
     enabled: z.boolean().optional(),
     task: z.string().min(1).max(4000).optional(),
+    nextRunAtMs: z.number().int().min(0).optional().describe("Manually set the next run time (epoch ms). Useful for staggering jobs."),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -164,7 +165,17 @@ export const jobUpdate = defineTool({
     if (args.task !== undefined) spec = { ...(spec ?? {}), mode: "agent_task", task: args.task };
     const specJson = JSON.stringify(spec ?? {});
 
-    const nextRunAt = enabled ? computeNextRunAt({ cron, timezone, afterMs: nowMs }) : null;
+    let nextRunAt: number | null = null;
+    if (enabled) {
+      if (args.nextRunAtMs !== undefined) {
+        nextRunAt = args.nextRunAtMs;
+      } else {
+        // Recalculate based on Schedule unless we are just updating metadata?
+        // Current behavior: always recalculate on update to ensure it's valid for new params.
+        // If args.nextRunAtMs is NOT provided, we stick to the schedule.
+        nextRunAt = computeNextRunAt({ cron, timezone, afterMs: nowMs });
+      }
+    }
 
     db.db
       .prepare(
