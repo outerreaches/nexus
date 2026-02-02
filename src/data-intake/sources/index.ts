@@ -4,6 +4,7 @@ import { cryptoSource } from "./crypto.js";
 import { metalsSource } from "./metals.js";
 import { rssSource } from "./rss.js";
 import { stocksSource } from "./stocks.js";
+import { yahooStocksSource } from "./stocks-yahoo.js";
 import { weatherSource } from "./weather.js";
 
 export function registerBuiltInSources(): void {
@@ -11,5 +12,6 @@ export function registerBuiltInSources(): void {
   registerDataSource(metalsSource);
   registerDataSource(rssSource);
   registerDataSource(stocksSource);
+  registerDataSource(yahooStocksSource);
   registerDataSource(weatherSource);
 }

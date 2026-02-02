@@ -69,6 +69,40 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     return c.json({ nodes, stats, tables, timestamp: nowMs });
   });
 
+  app.get("/api/job-runs/export.csv", async (c) => {
+    const limit = clampInt(c.req.query("limit"), 1, 10000) ?? 1000;
+    const rows = listJobRuns(deps.db, limit);
+
+    const csvHeader = "id,job_id,owner_agent_id,scheduled_for,started_at,ended_at,status,error,tool_calls_used,iterations_used";
+    const csvRows = rows.map((r) => {
+      const escapeCsv = (s: string | null | undefined) => {
+        if (s == null) return "";
+        const str = String(s);
+        if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      };
+      return [
+        escapeCsv(r.id),
+        escapeCsv(r.job_id),
+        escapeCsv(r.owner_agent_id),
+        r.scheduled_for ?? "",
+        r.started_at ?? "",
+        r.ended_at ?? "",
+        escapeCsv(r.status),
+        escapeCsv(r.error),
+        r.tool_calls_used ?? "",
+        r.iterations_used ?? "",
+      ].join(",");
+    });
+
+    const csv = [csvHeader, ...csvRows].join("\n");
+    c.header("Content-Type", "text/csv");
+    c.header("Content-Disposition", `attachment; filename="job-runs-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return c.body(csv);
+  });
+
   app.get("/dashboard", async (c) => {
     const status = await deps.getStatus();
     const nowMs = Date.now();
@@ -95,7 +129,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
     const agentGraph = listAgentGraph(deps.db, allowedRunIds);
     const jobs = listJobs(deps.db, jobLimit);
-    const jobRuns = listJobRuns(deps.db, runLimit);
+    const runningJobRuns = listRunningJobRuns(deps.db);
     const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);
     const blackboard = listBlackboard(deps.db, blackboardLimit);
 
@@ -109,7 +143,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         agents,
         agentGraph,
         jobs,
-        jobRuns,
+        runningJobRuns,
         dataIntake,
         dataIntakeCatalog,
         blackboard,
@@ -392,6 +426,15 @@ function listJobRuns(db: NexusDatabase | undefined, limit: number): JobRunRow[] 
     .all(limit) as JobRunRow[];
 }
 
+function listRunningJobRuns(db: NexusDatabase | undefined): JobRunRow[] {
+  if (!db) return [];
+  return db.db
+    .prepare(
+      "SELECT id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, tool_calls_used, iterations_used FROM job_runs WHERE status = 'running' ORDER BY started_at DESC",
+    )
+    .all() as JobRunRow[];
+}
+
 function listBlackboard(db: NexusDatabase | undefined, limit: number): BlackboardRow[] {
   if (!db) return [];
   return db.db
@@ -441,7 +484,7 @@ function renderDashboard(params: {
   agents: { active: AgentRunInfo[]; recent: AgentRunInfo[] };
   agentGraph: AgentRunRow[];
   jobs: JobRow[];
-  jobRuns: JobRunRow[];
+  runningJobRuns: JobRunRow[];
   dataIntake: DataIntakePanelState;
   dataIntakeCatalog: DataIntakeCatalogEntry[];
   blackboard: BlackboardRow[];
@@ -719,6 +762,32 @@ function renderDashboard(params: {
       }
       .no-data::before {
         content: '// ';
+      }
+      .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .section-header h3 {
+        margin: 0;
+      }
+      .btn-export {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--text-dim);
+        padding: 4px 10px;
+        font-size: 11px;
+        text-decoration: none;
+        font-family: inherit;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        cursor: pointer;
+      }
+      .btn-export:hover {
+        background: rgba(0, 255, 65, 0.1);
+        border-color: var(--text);
+        color: var(--text);
       }
       .graph-wrap {
         border: 1px solid var(--line);
@@ -1057,8 +1126,11 @@ function renderDashboard(params: {
       <section>
         <h2>Scheduled Jobs</h2>
         ${renderJobsTable(params.jobs)}
-        <h3>Recent Job Runs</h3>
-        ${renderJobRunsTable(params.jobRuns)}
+        <div class="section-header">
+          <h3>Running Jobs</h3>
+          <a href="/api/job-runs/export.csv?limit=1000" class="btn-export" download>Export All Runs (CSV)</a>
+        </div>
+        ${renderJobRunsTable(params.runningJobRuns)}
       </section>
 
       <section>
@@ -1784,7 +1856,7 @@ function renderJobsTable(rows: JobRow[]): string {
 }
 
 function renderJobRunsTable(rows: JobRunRow[]): string {
-  if (rows.length === 0) return `<div class="no-data">No job runs found.</div>`;
+  if (rows.length === 0) return `<div class="no-data">No jobs currently running.</div>`;
   return `<table>
     <thead>
       <tr>
