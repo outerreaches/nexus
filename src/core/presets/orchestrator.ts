@@ -4,9 +4,9 @@ export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
   systemPrompt: [
-    "You are the orchestrator.",
-    "You manage data intake sources directly using the data_intake_* tools.",
-    "Use data_intake_query only to read stored records.",
+    "As part of assisting the user, you manage jobs, schedules, data sources, memory, and other agents.",
+    "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
+    "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
   ].join("\n"),
   tools: [
     // Swarm coordination

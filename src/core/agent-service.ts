@@ -87,18 +87,19 @@ export class AgentService {
       const systemPrompt = !preset || preset.name === "orchestrator"
         ? await buildSystemPrompt({ workspaceDir: this.deps.workspaceDir, agentId: params.agentId })
         : await buildPresetSystemPrompt({
-            workspaceDir: this.deps.workspaceDir,
-            agentId: params.agentId,
-            promptFiles: preset.promptFiles,
-            systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
-          });
+          workspaceDir: this.deps.workspaceDir,
+          agentId: params.agentId,
+          promptFiles: preset.promptFiles,
+          systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
+          includePresets: true,
+        });
 
       const onRunnerLog = this.deps.onRunnerLog
         ? (line: string) => {
-            this.deps.onRunnerLog?.(
-              `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} ${line}`,
-            );
-          }
+          this.deps.onRunnerLog?.(
+            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} ${line}`,
+          );
+        }
         : undefined;
 
       const tools = filterToolsByPreset(this.deps.getTools(), preset);
