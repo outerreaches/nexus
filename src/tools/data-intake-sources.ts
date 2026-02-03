@@ -37,12 +37,17 @@ export const dataIntakeSourceAdd = defineTool({
     "Add a configured data intake source instance (e.g., a new stock ticker or RSS feed). " +
     "Returns the instance ID which you should use with data_intake_run(instanceId) to fetch data. " +
     "The label you provide will be added as a tag, making it easy to query with data_intake_query(tag).",
-  parameters: z.object({
-    sourceId: z.string().min(1),
-    label: z.string().max(120).optional().describe("Human-friendly label (becomes a queryable tag)"),
-    intervalMs: z.number().int().min(60_000).optional(),
-    params: z.record(z.unknown()).default({}),
-  }),
+  // Note: we allow extra top-level keys and treat them as source params.
+  // This makes the tool easier for LLMs to use given source usageNotes like:
+  // "Example params: { symbols: [\"AAPL\"] }" (which models often paste at the top level).
+  parameters: z
+    .object({
+      sourceId: z.string().min(1),
+      label: z.string().max(120).optional().describe("Human-friendly label (becomes a queryable tag)"),
+      intervalMs: z.number().int().min(60_000).optional(),
+      params: z.record(z.unknown()).default({}),
+    })
+    .passthrough(),
   execute: async (args, ctx) => {
     initDataIntake();
     const db = requireDb(ctx);
@@ -52,7 +57,11 @@ export const dataIntakeSourceAdd = defineTool({
       const available = listDataSources().map((s) => s.id).join(", ");
       return `ERROR: unknown source '${args.sourceId}'. Available: ${available}`;
     }
-    const validation = validateSourceParams(source, args.params);
+    const extraParams = Object.fromEntries(
+      Object.entries(args as Record<string, unknown>).filter(([key]) => !["sourceId", "label", "intervalMs", "params"].includes(key)),
+    );
+    const mergedParams = { ...extraParams, ...(args.params ?? {}) };
+    const validation = validateSourceParams(source, mergedParams);
     if (!validation.ok) {
       return JSON.stringify(validation.response, null, 2);
     }
@@ -61,7 +70,7 @@ export const dataIntakeSourceAdd = defineTool({
       db: db as any,
       sourceId: args.sourceId,
       label: args.label,
-      params: args.params,
+      params: mergedParams,
       intervalMs,
       nowMs: ctx.nowMs(),
     });
@@ -77,23 +86,30 @@ export const dataIntakeSourceAdd = defineTool({
 export const dataIntakeSourceUpdate = defineTool({
   name: "data_intake_source_update",
   description: "Update a configured data intake source instance.",
-  parameters: z.object({
-    id: z.string().min(1),
-    label: z.string().max(120).optional(),
-    intervalMs: z.number().int().min(60_000).optional(),
-    params: z.record(z.unknown()).optional(),
-    enabled: z.boolean().optional(),
-  }),
+  // Allow extra keys as convenience params (see data_intake_source_add).
+  parameters: z
+    .object({
+      id: z.string().min(1),
+      label: z.string().max(120).optional(),
+      intervalMs: z.number().int().min(60_000).optional(),
+      params: z.record(z.unknown()).optional(),
+      enabled: z.boolean().optional(),
+    })
+    .passthrough(),
   execute: async (args, ctx) => {
     initDataIntake();
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
-    if (args.params) {
+    const extraParams = Object.fromEntries(
+      Object.entries(args as Record<string, unknown>).filter(([key]) => !["id", "label", "intervalMs", "params", "enabled"].includes(key)),
+    );
+    const mergedParams = args.params || Object.keys(extraParams).length > 0 ? { ...extraParams, ...(args.params ?? {}) } : undefined;
+    if (mergedParams) {
       const existing = getIntakeSource({ db: db as any, id: args.id });
       if (!existing) return "ERROR: source not found";
       const source = getDataSource(existing.source_id);
       if (!source) return `ERROR: unknown source '${existing.source_id}'`;
-      const validation = validateSourceParams(source, args.params);
+      const validation = validateSourceParams(source, mergedParams);
       if (!validation.ok) {
         return JSON.stringify(validation.response, null, 2);
       }
@@ -102,7 +118,7 @@ export const dataIntakeSourceUpdate = defineTool({
       db: db as any,
       id: args.id,
       label: args.label,
-      paramsJson: args.params ? JSON.stringify(args.params) : undefined,
+      paramsJson: mergedParams ? JSON.stringify(mergedParams) : undefined,
       intervalMs: args.intervalMs,
       enabled: args.enabled,
       nowMs: ctx.nowMs(),

@@ -141,12 +141,26 @@ export function deleteIntakeSource(params: { db: NexusDatabase; id: string }): b
   // Get the source to find the linked job
   const existing = getIntakeSource({ db: params.db, id: params.id });
   if (!existing) return false;
+  const jobId = existing.job_id;
 
-  // Delete the linked job if it exists
-  if (existing.job_id) {
-    params.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(existing.job_id);
-  }
+  const tx = params.db.db.transaction(() => {
+    // Delete the source row first to avoid FK issues in databases where data_intake_sources.job_id
+    // has a foreign key to jobs(id).
+    const res = params.db.db.prepare("DELETE FROM data_intake_sources WHERE id = ?").run(params.id);
+    if (res.changes === 0) {
+      throw new Error("Source delete failed");
+    }
 
-  const res = params.db.db.prepare("DELETE FROM data_intake_sources WHERE id = ?").run(params.id);
-  return res.changes > 0;
+    // Delete the linked job if it exists
+    if (jobId) {
+      // Delete events first to be compatible with schemas where job_events.run_id may reference job_runs(id).
+      params.db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(jobId);
+      params.db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(jobId);
+      params.db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(jobId);
+      params.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(jobId);
+    }
+  });
+
+  tx();
+  return true;
 }

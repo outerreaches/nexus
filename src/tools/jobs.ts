@@ -274,6 +274,13 @@ export const jobDelete = defineTool({
     if (!row) return "ERROR: not found";
     const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_delete" });
     if (ownerErr) return ownerErr;
+    const linked = db.db
+      .prepare("SELECT id, source_id, label FROM data_intake_sources WHERE job_id = ? LIMIT 1")
+      .get(args.id) as { id: string; source_id: string; label: string | null } | undefined;
+    if (linked) {
+      const label = linked.label ?? linked.source_id;
+      return `ERROR: job is linked to data intake source '${label}' (instance ${linked.id}). Delete the source instead.`;
+    }
     const tx = db.db.transaction(() => {
       db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(args.id);
       db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(args.id);
@@ -361,4 +368,3 @@ export const jobEvents = defineTool({
     return JSON.stringify(rows, null, 2);
   },
 });
-

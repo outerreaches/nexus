@@ -222,7 +222,12 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const body = await c.req.parseBody();
     const id = String(body.id ?? "").trim();
     if (!id) return c.text("Missing id", 400);
-    deleteIntakeSource({ db: deps.db, id });
+    try {
+      const ok = deleteIntakeSource({ db: deps.db, id });
+      if (!ok) return c.text("Source not found", 404);
+    } catch (err) {
+      return c.text(`Delete failed: ${err instanceof Error ? err.message : String(err)}`, 500);
+    }
     return c.redirect("/dashboard");
   });
 
@@ -265,7 +270,30 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const body = await c.req.parseBody();
     const id = String(body.id ?? "").trim();
     if (!id) return c.text("Missing id", 400);
-    deps.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+    try {
+      // Prevent deleting jobs that back a data intake source (they are managed via the Data Intake panel).
+      const linked = deps.db.db
+        .prepare("SELECT id, source_id, label FROM data_intake_sources WHERE job_id = ? LIMIT 1")
+        .get(id) as { id: string; source_id: string; label: string | null } | undefined;
+      if (linked) {
+        const label = linked.label ?? linked.source_id;
+        return c.text(
+          `Delete failed: job is linked to data intake source '${label}' (instance ${linked.id}). Delete the source from the Data Intake panel instead.`,
+          400,
+        );
+      }
+
+      const tx = deps.db.db.transaction(() => {
+        // Delete events first to be compatible with schemas where job_events.run_id may reference job_runs(id).
+        deps.db!.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(id);
+        deps.db!.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(id);
+        deps.db!.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(id);
+        deps.db!.db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+      });
+      tx();
+    } catch (err) {
+      return c.text(`Delete failed: ${err instanceof Error ? err.message : String(err)}`, 500);
+    }
     return c.redirect("/dashboard");
   });
 
