@@ -9,6 +9,67 @@ import { resolveWithinRoots } from "./path-utils.js";
 const MAX_READ_LINES = 200;
 const MAX_READ_BYTES = 24 * 1024;
 const DIFF_CONTEXT_LINES = 3;
+const FILE_ROOTS = ["workspace", "state", "code"] as const;
+type FileRoot = (typeof FILE_ROOTS)[number];
+const FILE_ROOT_SET = new Set<string>(FILE_ROOTS);
+
+function splitRootPrefix(value: string): { root: FileRoot; path: string } | null {
+  const trimmed = value.trim().replace(/^[\\/]+/, "");
+  if (!trimmed) return null;
+  const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  const maybeRoot = parts[0];
+  if (!FILE_ROOT_SET.has(maybeRoot)) return null;
+  return { root: maybeRoot as FileRoot, path: parts.slice(1).join("/") };
+}
+
+function coerceRootAndPath(input: unknown): unknown {
+  if (!input || typeof input !== "object") return input;
+  const obj = { ...(input as Record<string, unknown>) };
+  const rawRoot = typeof obj.root === "string" ? obj.root.trim() : undefined;
+  const rawPath = typeof obj.path === "string" ? obj.path.trim() : undefined;
+
+  let root: string | undefined = rawRoot;
+  let pathValue: string | undefined = rawPath;
+
+  if (root) {
+    const fromRoot = splitRootPrefix(root);
+    if (fromRoot) {
+      root = fromRoot.root;
+      if (!pathValue || pathValue === "." || pathValue === "") {
+        pathValue = fromRoot.path || undefined;
+      }
+    }
+  }
+
+  const rootIsValid = root ? FILE_ROOT_SET.has(root) : false;
+  if ((!root || !rootIsValid) && pathValue) {
+    const fromPath = splitRootPrefix(pathValue);
+    if (fromPath) {
+      root = fromPath.root;
+      pathValue = fromPath.path || undefined;
+    }
+  }
+
+  if (root) obj.root = root;
+  if (pathValue) obj.path = pathValue;
+  return obj;
+}
+
+function withRootPathCoercion<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T, z.infer<T>, unknown> {
+  return z.preprocess(coerceRootAndPath, schema);
+}
+
+function rootPrefixHint(root: FileRoot, inputPath: string): string | null {
+  const parsed = splitRootPrefix(inputPath);
+  if (!parsed || parsed.root === root) return null;
+  const hintedPath = parsed.path || ".";
+  return `ERROR: path looks rooted. Use root="${parsed.root}" and path="${hintedPath}".`;
+}
+
+function isErrCode(err: unknown, code: string): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && (err as { code?: string }).code === code);
+}
 
 function truncateByBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const buffer = Buffer.from(text, "utf8");
@@ -80,16 +141,19 @@ export const fileRead = defineTool({
   description:
     "Read a text file from the workspace/state/code roots (optionally with line ranges). " +
     `Output is truncated to ${MAX_READ_LINES} lines or ${Math.round(MAX_READ_BYTES / 1024)}KB; ` +
-    "use startLine/endLine or offset/limit to continue.",
-  parameters: z.object({
-    root: z.enum(["workspace", "state", "code"]).default("workspace"),
-    path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
-    startLine: z.number().int().positive().optional().describe("1-based start line"),
-    endLine: z.number().int().positive().optional().describe("1-based end line (inclusive)"),
-    offset: z.number().int().positive().optional().describe("1-based line offset (pi-style)"),
-    limit: z.number().int().positive().optional().describe("Maximum number of lines to read (pi-style)"),
-    withLineNumbers: z.boolean().default(false).describe("Prefix lines with 1-based line numbers (e.g., '12: ...')."),
-  }),
+    "use startLine/endLine or offset/limit to continue. " +
+    "Example: root='code', path='src/core/prompt.ts'.",
+  parameters: withRootPathCoercion(
+    z.object({
+      root: z.enum(FILE_ROOTS).default("workspace"),
+      path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
+      startLine: z.number().int().positive().optional().describe("1-based start line"),
+      endLine: z.number().int().positive().optional().describe("1-based end line (inclusive)"),
+      offset: z.number().int().positive().optional().describe("1-based line offset (pi-style)"),
+      limit: z.number().int().positive().optional().describe("Maximum number of lines to read (pi-style)"),
+      withLineNumbers: z.boolean().default(false).describe("Prefix lines with 1-based line numbers (e.g., '12: ...')."),
+    }),
+  ),
   execute: async (
     { root, path: inputPath, startLine, endLine, offset, limit, withLineNumbers },
     ctx,
@@ -102,7 +166,16 @@ export const fileRead = defineTool({
       defaultRoot: baseRoot,
       roots: allowedRoots,
     });
-    const text = await fs.readFile(fullPath, "utf8");
+    let text: string;
+    try {
+      text = await fs.readFile(fullPath, "utf8");
+    } catch (err) {
+      if (isErrCode(err, "ENOENT") || isErrCode(err, "ENOTDIR")) {
+        const hint = rootPrefixHint(root, inputPath);
+        if (hint) return hint;
+      }
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
     const wantsRange = Boolean(startLine || endLine || withLineNumbers);
     if (!wantsRange) return text;
     const rawLines = text.split(/\r?\n/);
@@ -155,15 +228,17 @@ export const fileWrite = defineTool({
     "Write a text file to the workspace/state/code roots (creates parent dirs). " +
     "Use mode 'create' (default) for new files, 'append' to add to existing files, " +
     "or 'overwrite' to replace existing files entirely. To modify part of a file, use file_edit instead.",
-  parameters: z.object({
-    root: z.enum(["workspace", "state", "code"]).default("workspace"),
-    path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
-    content: z.string().describe("File contents"),
-    mode: z
-      .enum(["create", "overwrite", "append"])
-      .default("create")
-      .describe("'create' fails if file exists, 'overwrite' replaces, 'append' adds to end"),
-  }),
+  parameters: withRootPathCoercion(
+    z.object({
+      root: z.enum(FILE_ROOTS).default("workspace"),
+      path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
+      content: z.string().describe("File contents"),
+      mode: z
+        .enum(["create", "overwrite", "append"])
+        .default("create")
+        .describe("'create' fails if file exists, 'overwrite' replaces, 'append' adds to end"),
+    }),
+  ),
   execute: async ({ root, path: inputPath, content, mode }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -196,13 +271,15 @@ export const fileWrite = defineTool({
 
 export const fileList = defineTool({
   name: "file_list",
-  description: "List files/directories under the workspace/state/code roots.",
-  parameters: z.object({
-    root: z.enum(["workspace", "state", "code"]).default("workspace"),
-    path: z.string().default(".").describe("Directory path (relative to root, or absolute within allowed roots)"),
-    recursive: z.boolean().default(false),
-    maxEntries: z.number().int().positive().default(200),
-  }),
+  description: "List files/directories under the workspace/state/code roots. Example: root='code', path='src'.",
+  parameters: withRootPathCoercion(
+    z.object({
+      root: z.enum(FILE_ROOTS).default("workspace"),
+      path: z.string().default(".").describe("Directory path (relative to root, or absolute within allowed roots)"),
+      recursive: z.boolean().default(false),
+      maxEntries: z.number().int().positive().default(200),
+    }),
+  ),
   execute: async ({ root, path: inputPath, recursive, maxEntries }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -227,7 +304,15 @@ export const fileList = defineTool({
       }
     }
 
-    await walk(fullPath);
+    try {
+      await walk(fullPath);
+    } catch (err) {
+      if (isErrCode(err, "ENOENT") || isErrCode(err, "ENOTDIR")) {
+        const hint = rootPrefixHint(root, inputPath);
+        if (hint) return hint;
+      }
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
     return results.join("\n");
   },
 });
@@ -237,12 +322,14 @@ export const fileEdit = defineTool({
   description:
     "Edit a file by replacing an exact, unique string match (workspace/state/code roots). " +
     "The find text must match exactly and appear only once. Returns a diff of the change.",
-  parameters: z.object({
-    root: z.enum(["workspace", "state", "code"]).default("workspace"),
-    path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
-    find: z.string().describe("Exact text to find"),
-    replace: z.string().describe("Replacement text"),
-  }),
+  parameters: withRootPathCoercion(
+    z.object({
+      root: z.enum(FILE_ROOTS).default("workspace"),
+      path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
+      find: z.string().describe("Exact text to find"),
+      replace: z.string().describe("Replacement text"),
+    }),
+  ),
   execute: async ({ root, path: inputPath, find, replace }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -277,13 +364,15 @@ export const fileEdit = defineTool({
 export const fileEditLines = defineTool({
   name: "file_edit_lines",
   description: "Edit a file by replacing a 1-based line range (inclusive).",
-  parameters: z.object({
-    root: z.enum(["workspace", "state", "code"]).default("workspace"),
-    path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
-    startLine: z.number().int().positive().describe("1-based start line"),
-    endLine: z.number().int().positive().optional().describe("1-based end line (inclusive, defaults to startLine)"),
-    content: z.string().describe("Replacement text (empty string deletes the range)"),
-  }),
+  parameters: withRootPathCoercion(
+    z.object({
+      root: z.enum(FILE_ROOTS).default("workspace"),
+      path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
+      startLine: z.number().int().positive().describe("1-based start line"),
+      endLine: z.number().int().positive().optional().describe("1-based end line (inclusive, defaults to startLine)"),
+      content: z.string().describe("Replacement text (empty string deletes the range)"),
+    }),
+  ),
   execute: async ({ root, path: inputPath, startLine, endLine, content }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];

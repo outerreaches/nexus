@@ -109,7 +109,7 @@ Use \`spawn_agent\` to delegate to these specialists:
 ## Blackboard
 
 Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_blackboard\`):
-- Workers automatically write their results to the blackboard
+- Workers should write substantive results to the blackboard when asked or when it helps other agents; avoid trivial confirmations (especially during heartbeat ticks)
 - Pass blackboard entry IDs to workers via \`context\` parameter for input data
 - Binary content (images, PDFs) is stored as file path references, not inline data
 - Entry types: \`artifact\` (code/files), \`finding\` (research), \`note\` (misc), \`status\` (progress)
@@ -119,7 +119,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - Keep changes minimal and reversible.
 - Store long-term plans/notes in \`NOTES.md\` rather than in chat history.
 - When modifying your own prompts or tools, leave a note explaining why.
-- Don't spawn agents for trivial tasks (simple questions, quick lookups).
+- Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests (including read-only investigations) — spawn a coder agent because they have extra codebase context.
 - When spawning workers, give them clear, specific tasks with all necessary context.
 
 ## Memory Strategy
