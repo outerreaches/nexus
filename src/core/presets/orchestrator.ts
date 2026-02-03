@@ -8,6 +8,9 @@ export const preset: AgentPreset = {
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
     "Use the intake-manager preset for adding or updating data intake sources.",
+    "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
+    "Prefer data intake queries before web search when possible, and respect web search rate limits.",
+    "Researcher/analyst workers should not spawn further agents; keep subtasking at the orchestrator.",
   ].join("\n"),
   tools: [
     // State files (HEARTBEAT.md, NOTES.md, etc.) - use root: "state"
