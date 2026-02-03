@@ -21,7 +21,7 @@ export const spawnAgent = defineTool({
     preset: z
       .string()
       .min(1)
-      .describe("Worker preset name (coder, researcher, trader, analyst)"),
+      .describe("Worker preset name (coder, researcher, trader, analyst, intake-manager)"),
     task: z
       .string()
       .min(1)

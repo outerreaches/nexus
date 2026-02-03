@@ -1,5 +1,6 @@
 import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
+import { preset as intakeManager } from "./presets/intake-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as trader } from "./presets/trader.js";
@@ -37,6 +38,7 @@ const PRESETS: Record<string, AgentPreset> = {
   researcher,
   trader,
   analyst,
+  "intake-manager": intakeManager,
 };
 
 export function getPreset(name: string): AgentPreset | undefined {

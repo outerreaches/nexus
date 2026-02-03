@@ -8,12 +8,84 @@ import {
   listIntakeSources,
   updateIntakeSource,
 } from "../data-intake/source-store.js";
+import type { DataIntakeSourceRow } from "../data-intake/source-store.js";
 import { initDataIntake } from "../data-intake/index.js";
 import { getDataSource, listDataSources } from "../data-intake/registry.js";
 import { validateSourceParams } from "../data-intake/param-negotiation.js";
 
 function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
+}
+
+type RateState = { count: number; resetAt: number };
+
+const RATE_STATE = new Map<string, RateState>();
+const RATE_LIMIT = envInt("NEXUS_INTAKE_ADD_LIMIT") ?? 2;
+const RATE_WINDOW_MS = envInt("NEXUS_INTAKE_ADD_WINDOW_MS") ?? 30 * 60_000;
+const RATE_STATE_MAX = 5000;
+
+function envInt(name: string): number | null {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.floor(n);
+}
+
+function getRateKey(ctx: { request?: { runId?: string; sessionId?: string; channel?: string; channelKey?: string } }): string {
+  const runId = ctx.request?.runId;
+  if (runId) return `run:${runId}`;
+  const sessionId = ctx.request?.sessionId;
+  if (sessionId) return `session:${sessionId}`;
+  const channel = ctx.request?.channel ?? "unknown";
+  const key = ctx.request?.channelKey ?? "unknown";
+  return `channel:${channel}:${key}`;
+}
+
+function cleanupRateState(nowMs: number): void {
+  if (RATE_STATE.size === 0) return;
+  for (const [key, value] of RATE_STATE.entries()) {
+    if (value.resetAt <= nowMs) RATE_STATE.delete(key);
+  }
+  if (RATE_STATE.size <= RATE_STATE_MAX) return;
+  const overflow = RATE_STATE.size - RATE_STATE_MAX;
+  let removed = 0;
+  for (const key of RATE_STATE.keys()) {
+    RATE_STATE.delete(key);
+    removed += 1;
+    if (removed >= overflow) break;
+  }
+}
+
+function checkRateLimit(ctx: { request?: { runId?: string; sessionId?: string; channel?: string; channelKey?: string }; nowMs: () => number }): { ok: true; remaining: number } | { ok: false; retryAt: number } {
+  if (RATE_LIMIT <= 0) return { ok: true, remaining: 0 };
+  const nowMs = ctx.nowMs();
+  cleanupRateState(nowMs);
+  const key = getRateKey(ctx);
+  const entry = RATE_STATE.get(key);
+  if (!entry || entry.resetAt <= nowMs) {
+    const next = { count: 1, resetAt: nowMs + RATE_WINDOW_MS };
+    RATE_STATE.set(key, next);
+    return { ok: true, remaining: Math.max(0, RATE_LIMIT - next.count) };
+  }
+  if (entry.count >= RATE_LIMIT) {
+    return { ok: false, retryAt: entry.resetAt };
+  }
+  entry.count += 1;
+  RATE_STATE.set(key, entry);
+  return { ok: true, remaining: Math.max(0, RATE_LIMIT - entry.count) };
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`);
+  return `{${parts.join(",")}}`;
 }
 
 export const dataIntakeSourceList = defineTool({
@@ -65,6 +137,44 @@ export const dataIntakeSourceAdd = defineTool({
     if (!validation.ok) {
       return JSON.stringify(validation.response, null, 2);
     }
+    const canonicalParams = validation.params as Record<string, unknown>;
+
+    // De-dup existing source instances with identical params.
+    const normalizedNew = stableStringify(canonicalParams);
+    const existing = (db as any).db
+      .prepare("SELECT * FROM data_intake_sources WHERE source_id = ? ORDER BY created_at DESC")
+      .all(args.sourceId) as DataIntakeSourceRow[];
+    for (const row of existing) {
+      let parsed: unknown = {};
+      try {
+        parsed = JSON.parse(row.params_json ?? "{}");
+      } catch {
+        parsed = {};
+      }
+      if (stableStringify(parsed) === normalizedNew) {
+        // Optionally set label if missing.
+        if (args.label && (!row.label || row.label.trim().length === 0)) {
+          updateIntakeSource({
+            db: db as any,
+            id: row.id,
+            label: args.label,
+            nowMs: ctx.nowMs(),
+          });
+        }
+        const result = {
+          ...row,
+          _note: "Deduped: matching source instance already exists.",
+        };
+        return JSON.stringify(result, null, 2);
+      }
+    }
+
+    // Rate limit new source creation to prevent runaway add loops.
+    const rateCheck = checkRateLimit({ request: ctx.request, nowMs: ctx.nowMs });
+    if (!rateCheck.ok) {
+      return `ERROR: rate limit exceeded for data_intake_source_add. Try again after ${new Date(rateCheck.retryAt).toISOString()}.`;
+    }
+
     const intervalMs = args.intervalMs ?? source.defaultTtlMs;
     const row = createIntakeSource({
       db: db as any,

@@ -7,6 +7,7 @@ export const preset: AgentPreset = {
     "As part of assisting the user, you manage jobs, schedules, data sources, memory, and other agents.",
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
+    "Use the intake-manager preset for adding or updating data intake sources.",
   ].join("\n"),
   tools: [
     // State files (HEARTBEAT.md, NOTES.md, etc.) - use root: "state"
