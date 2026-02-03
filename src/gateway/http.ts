@@ -121,6 +121,8 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const jobLimit = clampInt(c.req.query("jobLimit"), 1, 200) ?? 50;
     const runLimit = clampInt(c.req.query("runLimit"), 1, 200) ?? 50;
     const blackboardLimit = clampInt(c.req.query("blackboardLimit"), 1, 200) ?? 50;
+    const blackboardScopeRaw = String(c.req.query("blackboardScope") ?? "").trim();
+    const blackboardScope = blackboardScopeRaw && blackboardScopeRaw !== "all" ? blackboardScopeRaw : null;
     const dataIntakeLimit = clampInt(c.req.query("dataIntakeLimit"), 1, 200) ?? 50;
     const hideOrphanData = c.req.query("hideOrphanData") === "true";
 
@@ -131,7 +133,8 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     const jobs = listJobs(deps.db, jobLimit);
     const runningJobRuns = listRunningJobRuns(deps.db);
     const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);
-    const blackboard = listBlackboard(deps.db, blackboardLimit);
+    const blackboard = listBlackboard(deps.db, blackboardLimit, blackboardScope);
+    const blackboardScopes = listBlackboardScopes(deps.db, 100);
 
     return c.html(
       renderDashboard({
@@ -147,8 +150,27 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         dataIntake,
         dataIntakeCatalog,
         blackboard,
+        blackboardScope: blackboardScopeRaw || "all",
+        blackboardScopes,
+        blackboardLimit,
+        jobLimit,
+        runLimit,
+        dataIntakeLimit,
+        hideOrphanData,
       }),
     );
+  });
+
+  app.post("/dashboard/blackboard/clear", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const scopeRaw = String(body.scope ?? "all").trim();
+    if (!scopeRaw || scopeRaw === "all") {
+      deps.db.db.prepare("DELETE FROM blackboard").run();
+    } else {
+      deps.db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scopeRaw);
+    }
+    return c.redirect("/dashboard");
   });
 
   app.post("/dashboard/data-intake/add", async (c) => {
@@ -463,13 +485,30 @@ function listRunningJobRuns(db: NexusDatabase | undefined): JobRunRow[] {
     .all() as JobRunRow[];
 }
 
-function listBlackboard(db: NexusDatabase | undefined, limit: number): BlackboardRow[] {
+function listBlackboard(db: NexusDatabase | undefined, limit: number, scope?: string | null): BlackboardRow[] {
   if (!db) return [];
+  if (scope) {
+    return db.db
+      .prepare(
+        "SELECT id, session_scope, type, agent_id, agent_preset, title, content, created_at, expires_at FROM blackboard WHERE session_scope = ? ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(scope, limit) as BlackboardRow[];
+  }
   return db.db
     .prepare(
       "SELECT id, session_scope, type, agent_id, agent_preset, title, content, created_at, expires_at FROM blackboard ORDER BY created_at DESC LIMIT ?",
     )
     .all(limit) as BlackboardRow[];
+}
+
+function listBlackboardScopes(db: NexusDatabase | undefined, limit: number): string[] {
+  if (!db) return [];
+  const rows = db.db
+    .prepare(
+      "SELECT session_scope, MAX(created_at) AS last_seen FROM blackboard GROUP BY session_scope ORDER BY last_seen DESC LIMIT ?",
+    )
+    .all(limit) as { session_scope: string }[];
+  return rows.map((r) => r.session_scope);
 }
 
 function listDataIntake(
@@ -508,6 +547,11 @@ function renderDashboard(params: {
   nowMs: number;
   processWindowMinutes: number;
   agentWindowMinutes: number;
+  jobLimit: number;
+  runLimit: number;
+  blackboardLimit: number;
+  dataIntakeLimit: number;
+  hideOrphanData: boolean;
   processes: ManagedProcessInfo[];
   agents: { active: AgentRunInfo[]; recent: AgentRunInfo[] };
   agentGraph: AgentRunRow[];
@@ -516,6 +560,8 @@ function renderDashboard(params: {
   dataIntake: DataIntakePanelState;
   dataIntakeCatalog: DataIntakeCatalogEntry[];
   blackboard: BlackboardRow[];
+  blackboardScope: string;
+  blackboardScopes: string[];
 }): string {
   const updatedAt = new Date(params.nowMs).toISOString();
   const statusJson = escapeHtml(JSON.stringify(params.status, null, 2));
@@ -527,6 +573,25 @@ function renderDashboard(params: {
   const heartbeatNext = heartbeat.nextTickAt ? new Date(heartbeat.nextTickAt).toISOString() : "-";
   const heartbeatStatus = heartbeat.lastStatus ? String(heartbeat.lastStatus) : "-";
   const heartbeatPanelClass = heartbeat.enabled ? (heartbeat.paused ? "paused" : "running") : "";
+  const blackboardScopeValue = params.blackboardScope || "all";
+  const blackboardClearMessage = blackboardScopeValue === "all"
+    ? "Clear ALL blackboard entries?"
+    : `Clear blackboard scope "${blackboardScopeValue}"?`;
+  const blackboardClearConfirm = safeJsonForScript(blackboardClearMessage);
+  const blackboardScopeOptions = Array.from(new Set(["all", ...params.blackboardScopes.filter(Boolean)]))
+    .map((scope) => `<option value="${escapeHtml(scope)}"></option>`)
+    .join("");
+  const dashboardQueryInputs = [
+    ["processWindowMinutes", params.processWindowMinutes],
+    ["agentWindowMinutes", params.agentWindowMinutes],
+    ["jobLimit", params.jobLimit],
+    ["runLimit", params.runLimit],
+    ["blackboardLimit", params.blackboardLimit],
+    ["dataIntakeLimit", params.dataIntakeLimit],
+    ["hideOrphanData", params.hideOrphanData ? "true" : "false"],
+  ]
+    .map(([key, value]) => `<input type="hidden" name="${key}" value="${escapeHtml(String(value))}" />`)
+    .join("");
 
   // Compute stats from agent graph
   const agentStats = {
@@ -994,6 +1059,13 @@ function renderDashboard(params: {
         background: var(--panel);
         box-shadow: var(--glow);
       }
+      form.form-inline.compact {
+        margin: 0;
+        padding: 8px 10px;
+        border: 1px dashed var(--line);
+        background: rgba(0, 0, 0, 0.35);
+        box-shadow: none;
+      }
       .inline-actions {
         display: flex;
         gap: 8px;
@@ -1167,7 +1239,26 @@ function renderDashboard(params: {
       </section>
 
       <section>
-        <h2>Blackboard</h2>
+        <div class="section-header">
+          <h2>Blackboard</h2>
+          <div class="inline-actions">
+            <form method="get" action="/dashboard" class="form-inline compact">
+              <div class="form-row">
+                <label for="blackboard-scope">Scope</label>
+                <input id="blackboard-scope" name="blackboardScope" list="blackboard-scope-list" value="${escapeHtml(blackboardScopeValue)}" placeholder="all" />
+                <datalist id="blackboard-scope-list">${blackboardScopeOptions}</datalist>
+              </div>
+              <div class="form-row">
+                <button type="submit" class="graph-btn">Filter</button>
+              </div>
+              ${dashboardQueryInputs}
+            </form>
+            <form method="post" action="/dashboard/blackboard/clear" class="form-inline compact" onsubmit="return confirm(${blackboardClearConfirm})">
+              <input type="hidden" name="scope" value="${escapeHtml(blackboardScopeValue)}" />
+              <button type="submit" class="graph-btn btn-danger">Clear Scope</button>
+            </form>
+          </div>
+        </div>
         ${renderBlackboardTable(params.blackboard)}
       </section>
 
