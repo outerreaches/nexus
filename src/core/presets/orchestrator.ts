@@ -9,6 +9,12 @@ export const preset: AgentPreset = {
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
   ].join("\n"),
   tools: [
+    // State files (HEARTBEAT.md, NOTES.md, etc.) - use root: "state"
+    "file_read",
+    "file_write",
+    "file_edit",
+    "file_edit_lines",
+    "file_list",
     // Swarm coordination
     "spawn_agent",
     "read_from_blackboard",

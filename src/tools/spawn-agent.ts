@@ -6,7 +6,6 @@ import { getPreset, getPresetNames } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
-import type { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 
 export const spawnAgent = defineTool({
@@ -57,9 +56,7 @@ export const spawnAgent = defineTool({
     const registry = ctx.registry as ToolRegistry | undefined;
     if (!registry) return "ERROR: tool registry not available";
 
-    // We need to get the LLM client. It's not directly on ToolContext, but we can
-    // access it through a convention: the spawn_agent tool stores it on ctx.
-    const llm = (ctx as Record<string, unknown>).__llm as OpenAICompatClient | undefined;
+    const llm = ctx.llm;
     if (!llm) return "ERROR: LLM client not available for worker agents";
 
     const db = ctx.db as NexusDatabase | undefined;
@@ -128,7 +125,7 @@ export const spawnAgent = defineTool({
     // Build worker system prompt
     const now = new Date();
     const basePrompt = await buildPresetSystemPrompt({
-      workspaceDir: ctx.workspaceDir,
+      stateDir: ctx.stateDir,
       promptFiles: preset.promptFiles,
       systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
       includePresets: true,
@@ -139,6 +136,7 @@ export const spawnAgent = defineTool({
       "",
       "## Instructions",
       `Current date and time: ${now.toISOString()} (${now.getFullYear()}). For current events or time-sensitive queries, include the year in searches. For historical topics, use the appropriate time period.`,
+      "We have a large list of verified data sources available via data intake tools. Use them when possible.",
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
       isMaxDepth

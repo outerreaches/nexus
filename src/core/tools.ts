@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTracker } from "./agent-tracker.js";
+import type { OpenAICompatClient } from "../llm/openai-compat.js";
 
 export type ToolContext = {
   workspaceDir: string;
   stateDir: string;
   codeDir: string;
+  llm?: OpenAICompatClient;
   db?: unknown;
   browser?: unknown;
   registry?: unknown;

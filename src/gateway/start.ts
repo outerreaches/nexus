@@ -56,6 +56,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
     codeDir: paths.codeDir,
+    llm,
     db,
     browser,
     registry,
@@ -84,7 +85,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     getTools: () => registry.list(),
     toolContext,
     db,
-    workspaceDir: paths.workspaceDir,
+    stateDir: paths.stateDir,
     agentTracker,
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
@@ -153,7 +154,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   proactive = startProactiveHeartbeat({
     config,
-    workspaceDir: paths.workspaceDir,
+    stateDir: paths.stateDir,
     agent,
     db,
     telegram: tg,

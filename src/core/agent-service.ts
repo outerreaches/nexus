@@ -8,7 +8,6 @@ import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../stora
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
 import type { AgentTracker } from "./agent-tracker.js";
-import { archiveAndClearBlackboard } from "../tools/blackboard.js";
 
 export class AgentService {
   private readonly semaphore: Semaphore;
@@ -19,7 +18,7 @@ export class AgentService {
       getTools: () => Tool[];
       toolContext: ToolContext;
       db: NexusDatabase;
-      workspaceDir: string;
+      stateDir: string;
       limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number; maxContextTokens?: number };
       agentTracker?: AgentTracker;
       onRunnerLog?: (line: string) => void;
@@ -54,25 +53,7 @@ export class AgentService {
         nowMs,
       });
 
-      // Archive and clear blackboard from previous runs so context stays clean
-      try {
-        const archived = await archiveAndClearBlackboard({
-          db: this.deps.db,
-          sessionScope: sessionId,
-          workspaceDir: this.deps.workspaceDir,
-          nowMs,
-        });
-        if (archived > 0) {
-          this.deps.onRunnerLog?.(
-            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} blackboard: archived ${archived} entries`,
-          );
-        }
-      } catch (err) {
-        // Non-critical — don't fail the run if archive fails
-        this.deps.onRunnerLog?.(
-          `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} blackboard: archive failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      // Note: do not auto-archive/clear blackboard here; keep entries available across runs.
 
       const history = loadRecentHistory({
         db: this.deps.db,
@@ -85,9 +66,9 @@ export class AgentService {
       const preset = presetName ? getPreset(presetName) : undefined;
 
       const systemPrompt = !preset || preset.name === "orchestrator"
-        ? await buildSystemPrompt({ workspaceDir: this.deps.workspaceDir, agentId: params.agentId })
+        ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId })
         : await buildPresetSystemPrompt({
-          workspaceDir: this.deps.workspaceDir,
+          stateDir: this.deps.stateDir,
           agentId: params.agentId,
           promptFiles: preset.promptFiles,
           systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
@@ -123,6 +104,7 @@ export class AgentService {
 
       const toolContext: ToolContext = {
         ...this.deps.toolContext,
+        llm: this.deps.llm,
         request: {
           channel: params.channel,
           channelKey: params.channelKey,
@@ -131,8 +113,6 @@ export class AgentService {
           runId,
         },
       };
-      // Expose LLM client for spawn_agent tool (not part of ToolContext type, accessed via cast)
-      (toolContext as Record<string, unknown>).__llm = this.deps.llm;
 
       const runner = new AgentRunner({
         llm: this.deps.llm,

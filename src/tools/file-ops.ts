@@ -6,17 +6,94 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import { resolveWithinRoots } from "./path-utils.js";
 
+const MAX_READ_LINES = 200;
+const MAX_READ_BYTES = 24 * 1024;
+const DIFF_CONTEXT_LINES = 3;
+
+function truncateByBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length <= maxBytes) {
+    return { text, truncated: false };
+  }
+  return { text: buffer.subarray(0, maxBytes).toString("utf8"), truncated: true };
+}
+
+function buildLineDiff(before: string, after: string): string {
+  const beforeLines = before.split(/\r?\n/);
+  const afterLines = after.split(/\r?\n/);
+
+  let start = 0;
+  while (
+    start < beforeLines.length &&
+    start < afterLines.length &&
+    beforeLines[start] === afterLines[start]
+  ) {
+    start += 1;
+  }
+
+  let endBefore = beforeLines.length - 1;
+  let endAfter = afterLines.length - 1;
+  while (endBefore >= start && endAfter >= start && beforeLines[endBefore] === afterLines[endAfter]) {
+    endBefore -= 1;
+    endAfter -= 1;
+  }
+
+  const beforeCount = Math.max(0, endBefore - start + 1);
+  const afterCount = Math.max(0, endAfter - start + 1);
+  if (beforeCount === 0 && afterCount === 0) {
+    return "No changes.";
+  }
+
+  const contextStart = Math.max(0, start - DIFF_CONTEXT_LINES);
+  const contextEnd = Math.min(
+    Math.max(endBefore, endAfter) + DIFF_CONTEXT_LINES,
+    Math.max(beforeLines.length, afterLines.length) - 1,
+  );
+
+  const beforeContextCount = Math.max(0, Math.min(endBefore, contextEnd) - contextStart + 1);
+  const afterContextCount = Math.max(0, Math.min(endAfter, contextEnd) - contextStart + 1);
+
+  const diffLines = [`@@ -${contextStart + 1},${beforeContextCount} +${contextStart + 1},${afterContextCount} @@`];
+
+  for (let i = contextStart; i <= contextEnd; i += 1) {
+    const inBefore = i >= start && i <= endBefore;
+    const inAfter = i >= start && i <= endAfter;
+    if (inBefore) {
+      diffLines.push(`-${beforeLines[i] ?? ""}`);
+    } else if (i < beforeLines.length) {
+      diffLines.push(` ${beforeLines[i] ?? ""}`);
+    }
+  }
+  for (let i = contextStart; i <= contextEnd; i += 1) {
+    if (i >= start && i <= endAfter) {
+      diffLines.push(`+${afterLines[i] ?? ""}`);
+    }
+  }
+
+  const diffText = diffLines.join("\n");
+  const trimmed = truncateByBytes(diffText, 4000);
+  return trimmed.truncated ? `${trimmed.text}\n[diff truncated]` : trimmed.text;
+}
+
 export const fileRead = defineTool({
   name: "file_read",
-  description: "Read a text file from the workspace/state/code roots (optionally with line ranges).",
+  description:
+    "Read a text file from the workspace/state/code roots (optionally with line ranges). " +
+    `Output is truncated to ${MAX_READ_LINES} lines or ${Math.round(MAX_READ_BYTES / 1024)}KB; ` +
+    "use startLine/endLine or offset/limit to continue.",
   parameters: z.object({
     root: z.enum(["workspace", "state", "code"]).default("workspace"),
     path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
     startLine: z.number().int().positive().optional().describe("1-based start line"),
     endLine: z.number().int().positive().optional().describe("1-based end line (inclusive)"),
+    offset: z.number().int().positive().optional().describe("1-based line offset (pi-style)"),
+    limit: z.number().int().positive().optional().describe("Maximum number of lines to read (pi-style)"),
     withLineNumbers: z.boolean().default(false).describe("Prefix lines with 1-based line numbers (e.g., '12: ...')."),
   }),
-  execute: async ({ root, path: inputPath, startLine, endLine, withLineNumbers }, ctx) => {
+  execute: async (
+    { root, path: inputPath, startLine, endLine, offset, limit, withLineNumbers },
+    ctx,
+  ) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
     const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
@@ -31,22 +108,61 @@ export const fileRead = defineTool({
     const rawLines = text.split(/\r?\n/);
     const hadTrailingNewline = text.endsWith("\n");
     const lines = hadTrailingNewline ? rawLines.slice(0, -1) : rawLines;
-    const start = Math.max((startLine ?? 1) - 1, 0);
-    const end = Math.min((endLine ?? lines.length) - 1, lines.length - 1);
-    const slice = lines.slice(start, end + 1);
-    if (!withLineNumbers) return slice.join("\n");
-    return slice.map((line, i) => `${start + i + 1}: ${line}`).join("\n");
+    const resolvedStartLine = startLine ?? offset;
+    const resolvedEndLine = endLine ?? (resolvedStartLine && limit ? resolvedStartLine + limit - 1 : undefined);
+    const start = Math.max((resolvedStartLine ?? 1) - 1, 0);
+    const end = Math.min((resolvedEndLine ?? lines.length) - 1, lines.length - 1);
+    let slice = lines.slice(start, end + 1);
+
+    let truncatedByLines = false;
+    if (slice.length > MAX_READ_LINES) {
+      slice = slice.slice(0, MAX_READ_LINES);
+      truncatedByLines = true;
+    }
+
+    const numbered = withLineNumbers
+      ? slice.map((line, i) => `${start + i + 1}: ${line}`)
+      : slice;
+    let output = numbered.join("\n");
+    const byteTrimmed = truncateByBytes(output, MAX_READ_BYTES);
+    output = byteTrimmed.text;
+
+    if (truncatedByLines || byteTrimmed.truncated) {
+      const shownLines = slice.length;
+      const endLineShown = start + shownLines;
+      const nextStart = endLineShown + 1;
+      const truncationNotes: string[] = [];
+      if (truncatedByLines) {
+        truncationNotes.push(
+          `Showing lines ${start + 1}-${endLineShown} of ${lines.length}. Use startLine=${nextStart} to continue.`,
+        );
+      }
+      if (byteTrimmed.truncated) {
+        truncationNotes.push(
+          `Output truncated to ${Math.round(MAX_READ_BYTES / 1024)}KB. Use a smaller line range to continue.`,
+        );
+      }
+      output += `\n\n[${truncationNotes.join(" ")}]`;
+    }
+
+    return output;
   },
 });
 
 export const fileWrite = defineTool({
   name: "file_write",
-  description: "Write a text file to the workspace/state/code roots (creates parent dirs).",
+  description:
+    "Write a text file to the workspace/state/code roots (creates parent dirs). " +
+    "Use mode 'create' (default) for new files, 'append' to add to existing files, " +
+    "or 'overwrite' to replace existing files entirely. To modify part of a file, use file_edit instead.",
   parameters: z.object({
     root: z.enum(["workspace", "state", "code"]).default("workspace"),
     path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
     content: z.string().describe("File contents"),
-    mode: z.enum(["overwrite", "append"]).default("overwrite"),
+    mode: z
+      .enum(["create", "overwrite", "append"])
+      .default("create")
+      .describe("'create' fails if file exists, 'overwrite' replaces, 'append' adds to end"),
   }),
   execute: async ({ root, path: inputPath, content, mode }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
@@ -58,6 +174,17 @@ export const fileWrite = defineTool({
       roots: allowedRoots,
     });
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
+
+    // Check if file exists for create mode
+    if (mode === "create") {
+      try {
+        await fs.access(fullPath);
+        return `ERROR: file already exists at ${fullPath}. Use file_edit to modify existing files, or mode 'overwrite' to replace entirely.`;
+      } catch {
+        // File doesn't exist, proceed with creation
+      }
+    }
+
     if (mode === "append") {
       await fs.appendFile(fullPath, content, "utf8");
     } else {
@@ -107,7 +234,9 @@ export const fileList = defineTool({
 
 export const fileEdit = defineTool({
   name: "file_edit",
-  description: "Edit a file by replacing the first occurrence of a string (workspace/state/code roots).",
+  description:
+    "Edit a file by replacing an exact, unique string match (workspace/state/code roots). " +
+    "The find text must match exactly and appear only once. Returns a diff of the change.",
   parameters: z.object({
     root: z.enum(["workspace", "state", "code"]).default("workspace"),
     path: z.string().describe("File path (relative to root, or absolute within allowed roots)"),
@@ -123,12 +252,25 @@ export const fileEdit = defineTool({
       defaultRoot: baseRoot,
       roots: allowedRoots,
     });
+    if (find.length === 0) {
+      return "ERROR: find text must be non-empty.";
+    }
     const text = await fs.readFile(fullPath, "utf8");
     const idx = text.indexOf(find);
-    if (idx === -1) return "ERROR: find text not found";
+    if (idx === -1) {
+      return "ERROR: find text not found. Use file_read with withLineNumbers:true, then use file_edit_lines to edit by line range instead. To append new content, use file_write with mode 'append'.";
+    }
+    const occurrences = text.split(find).length - 1;
+    if (occurrences > 1) {
+      return `ERROR: find text is not unique (${occurrences} matches). Provide more context to make it unique.`;
+    }
     const next = text.slice(0, idx) + replace + text.slice(idx + find.length);
+    if (next === text) {
+      return "ERROR: replacement produced no changes. Check the find/replace text for exact matches.";
+    }
     await fs.writeFile(fullPath, next, "utf8");
-    return "OK";
+    const diff = buildLineDiff(text, next);
+    return `OK\n\nDiff:\n${diff}`;
   },
 });
 

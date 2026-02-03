@@ -5,7 +5,7 @@ import type { NexusDatabase } from "../storage/database.js";
 
 export type ProactiveDeps = {
   config: NexusConfig;
-  workspaceDir: string;
+  stateDir: string;
   agent: AgentService;
   db: NexusDatabase;
   telegram?: {
@@ -123,7 +123,7 @@ export function startProactiveHeartbeat(
 
     const startMs = Date.now();
     try {
-      const hb = await readPersonalizationFile(deps.workspaceDir, HEARTBEAT_FILENAME, agentId);
+      const hb = await readPersonalizationFile(deps.stateDir, HEARTBEAT_FILENAME, agentId);
       const hasHeartbeat = Boolean(hb && hb.trim().length > 50);
 
       if (!hasHeartbeat) {
@@ -145,6 +145,7 @@ export function startProactiveHeartbeat(
         "- Avoid long research loops. Prefer one small, high-value action per tick.",
         "- Only ask the operator for action if you are blocked on a specific step (OTP/MFA/CAPTCHA/etc).",
         "- If you do ask, use `human_request` with a short, specific prompt and then stop.",
+        "- When given new standing instructions about heartbeat behavior, append them to HEARTBEAT.md using `file_write` with `mode: \"append\"` and `root: \"state\"`. Only edit or replace existing items if the user explicitly requests a change.",
       ].join("\n");
 
       const res = await deps.agent.handleUserMessage({

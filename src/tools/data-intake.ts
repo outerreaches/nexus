@@ -62,17 +62,44 @@ export const dataIntakeRun = defineTool({
   execute: async (args, ctx) => {
     initDataIntake();
     const db = ctx.db as any;
+    const attemptedAtMs = ctx.nowMs();
 
     let sourceId: string;
     let params: unknown;
     let instanceTags: string[] = [];
+    let instance: { id: string; source_id: string; label: string | null; params_json: string } | null = null;
+    let updateInstanceStatus:
+      | ((next: { lastRunAtMs: number; lastError: string | null }) => void)
+      | null = null;
+
+    const formatErrorForStorage = (errors: string[]): string | null => {
+      if (!errors || errors.length === 0) return null;
+      const first = String(errors[0] ?? "").trim();
+      if (!first) return null;
+      const suffix = errors.length > 1 ? ` (+${errors.length - 1} more)` : "";
+      const msg = `${first}${suffix}`;
+      return msg.length > 2000 ? `${msg.slice(0, 2000)}…` : msg;
+    };
 
     // If instanceId is provided, look up the configured source
     if (args.instanceId) {
       if (!db) return "ERROR: database is not available";
-      const { getIntakeSource } = await import("../data-intake/source-store.js");
-      const instance = getIntakeSource({ db, id: args.instanceId });
+      const { getIntakeSource, updateIntakeSource } = await import("../data-intake/source-store.js");
+      instance = getIntakeSource({ db, id: args.instanceId }) as any;
       if (!instance) return `ERROR: unknown instance '${args.instanceId}'`;
+      updateInstanceStatus = (next) => {
+        try {
+          updateIntakeSource({
+            db,
+            id: instance!.id,
+            lastRunAt: next.lastRunAtMs,
+            lastError: next.lastError,
+            nowMs: ctx.nowMs(),
+          });
+        } catch {
+          // ignore (non-critical)
+        }
+      };
       sourceId = instance.source_id;
       try {
         params = JSON.parse(instance.params_json);
@@ -91,22 +118,38 @@ export const dataIntakeRun = defineTool({
     }
 
     const source = getDataSource(sourceId);
-    if (!source) return `ERROR: unknown data source '${sourceId}'`;
+    if (!source) {
+      updateInstanceStatus?.({ lastRunAtMs: attemptedAtMs, lastError: `Unknown data source '${sourceId}'` });
+      return `ERROR: unknown data source '${sourceId}'`;
+    }
     const validation = validateSourceParams(source, params);
     if (!validation.ok) {
+      updateInstanceStatus?.({
+        lastRunAtMs: attemptedAtMs,
+        lastError: formatErrorForStorage(validation.response.validationErrors) ?? validation.response.message,
+      });
       return JSON.stringify(validation.response, null, 2);
     }
-    const result = await runDataSource(
-      source,
-      validation.params,
-      {
-        db,
-        nowMs: ctx.nowMs,
-        log: ctx.log,
-        request: ctx.request,
-      },
-      { instanceTags },
-    );
+    let result: Awaited<ReturnType<typeof runDataSource>>;
+    try {
+      result = await runDataSource(
+        source,
+        validation.params,
+        {
+          db,
+          nowMs: ctx.nowMs,
+          log: ctx.log,
+          request: ctx.request,
+        },
+        { instanceTags },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateInstanceStatus?.({ lastRunAtMs: attemptedAtMs, lastError: `Run error: ${msg}` });
+      return `ERROR: ${msg}`;
+    }
+
+    updateInstanceStatus?.({ lastRunAtMs: attemptedAtMs, lastError: formatErrorForStorage(result.errors) });
     return JSON.stringify(result, null, 2);
   },
 });

@@ -305,13 +305,12 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         },
       };
       const output = await tool.execute(spec.args, toolCtx);
-      // If the tool output implies failure (by convention starting with ERROR:), we mark it as failed?
-      // Let's stick to "success" for the RUN, even if the tool returned an error string,
-      // because the job *ran* correctly. The output log will show the error.
+      const outputTrimmed = output.trimStart();
+      const isToolError = outputTrimmed.startsWith("ERROR:");
       return {
-        status: "success",
+        status: isToolError ? "failed" : "success",
         output,
-        error: null,
+        error: isToolError ? outputTrimmed : null,
         toolCalls: 1,
         iterations: 0,
       };

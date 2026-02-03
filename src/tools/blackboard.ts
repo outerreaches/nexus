@@ -246,7 +246,7 @@ export const blackboardPrune = defineTool({
         clauses.push("created_at <= ?");
         params.push(cutoff);
       } else {
-        clauses.push("(expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?");
+        clauses.push("((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)");
         params.push(nowMs, cutoff);
       }
     } else {

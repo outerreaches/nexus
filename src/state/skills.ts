@@ -47,13 +47,13 @@ function parseSkillMd(raw: string): SkillEntry | null {
 }
 
 /**
- * Load all skills from `{workspaceDir}/skills/` (or agent-specific override).
+ * Load all skills from `{stateDir}/skills/` (or agent-specific override).
  * Each skill is a directory containing a SKILL.md file.
  */
-export async function loadSkills(workspaceDir: string, agentId?: string): Promise<SkillEntry[]> {
+export async function loadSkills(stateDir: string, agentId?: string): Promise<SkillEntry[]> {
   const dirs = [
-    ...(agentId ? [path.join(workspaceDir, "agents", agentId, "skills")] : []),
-    path.join(workspaceDir, "skills"),
+    ...(agentId ? [path.join(stateDir, "agents", agentId, "skills")] : []),
+    path.join(stateDir, "skills"),
   ];
 
   const skills: SkillEntry[] = [];

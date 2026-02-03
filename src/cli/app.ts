@@ -79,6 +79,7 @@ export async function runCli(argv: string[]): Promise<void> {
         workspaceDir: paths.workspaceDir,
         stateDir: paths.stateDir,
         codeDir: paths.codeDir,
+        llm,
         db,
         browser,
         registry,
@@ -98,7 +99,7 @@ export async function runCli(argv: string[]): Promise<void> {
         getTools: () => registry.list(),
         toolContext,
         db,
-        workspaceDir: paths.workspaceDir,
+        stateDir: paths.stateDir,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
         limits: {
           maxMessages: 80,
@@ -234,7 +235,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const paths = await resolveRuntimePaths(config);
 
       // Run interactive onboarding if this is first time
-      await runOnboardingIfNeeded(paths.workspaceDir, { interactive: !opts.skipOnboarding });
+      await runOnboardingIfNeeded(paths.stateDir, { interactive: !opts.skipOnboarding });
 
       process.stdout.write(`OK: initialized using config ${options.config}\n`);
     });
@@ -255,15 +256,15 @@ export async function runCli(argv: string[]): Promise<void> {
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
 
-      const needsOnboarding = await shouldRunOnboarding(paths.workspaceDir);
+      const needsOnboarding = await shouldRunOnboarding(paths.stateDir);
       if (!needsOnboarding && !opts.force) {
         process.stdout.write("Personalization files already exist. Use --force to overwrite.\n");
         return;
       }
 
-      const result = await runOnboarding(paths.workspaceDir);
+      const result = await runOnboarding(paths.stateDir);
       if (!result.skipped) {
-        await writeOnboardingFiles(paths.workspaceDir, result.identity, result.userProfile);
+        await writeOnboardingFiles(paths.stateDir, result.identity, result.userProfile);
       }
     });
 

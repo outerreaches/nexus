@@ -42,7 +42,7 @@ export const skillCreate = defineTool({
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
 
-    const skillDir = path.join(ctx.workspaceDir, "skills", dirName);
+    const skillDir = path.join(ctx.stateDir, "skills", dirName);
 
     try {
       await fs.access(path.join(skillDir, "SKILL.md"));
@@ -71,7 +71,7 @@ export const skillList = defineTool({
   parameters: z.object({}),
   execute: async (_args, ctx) => {
     const agentId = ctx.request?.agentId;
-    const skills = await loadSkills(ctx.workspaceDir, agentId);
+    const skills = await loadSkills(ctx.stateDir, agentId);
 
     if (skills.length === 0) return "No skills found. Use skill_create to teach yourself new capabilities.";
 
@@ -99,7 +99,7 @@ export const skillUpdate = defineTool({
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
 
-    const skillFile = path.join(ctx.workspaceDir, "skills", dirName, "SKILL.md");
+    const skillFile = path.join(ctx.stateDir, "skills", dirName, "SKILL.md");
 
     let existing: string;
     try {
@@ -110,7 +110,7 @@ export const skillUpdate = defineTool({
 
     // Parse existing
     const agentId = ctx.request?.agentId;
-    const skills = await loadSkills(ctx.workspaceDir, agentId);
+    const skills = await loadSkills(ctx.stateDir, agentId);
     const current = skills.find((s) => s.name === dirName);
     if (!current) return `ERROR: skill "${dirName}" not found or unparseable`;
 

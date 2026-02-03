@@ -8,16 +8,12 @@ import {
   UserProfileSchema,
   SOUL_FILENAME,
   AGENTS_FILENAME,
-  IDENTITY_FILENAME,
   USER_FILENAME,
-  TOOLS_FILENAME,
   HEARTBEAT_FILENAME,
   NOTES_FILENAME,
   getDefaultSoulTemplate,
   getDefaultAgentsTemplate,
-  getDefaultIdentityTemplate,
   getDefaultUserTemplate,
-  getDefaultToolsTemplate,
   getDefaultHeartbeatTemplate,
   getDefaultNotesTemplate,
   personalizationFileExists,
@@ -53,7 +49,7 @@ async function confirm(rl: readline.Interface, question: string, defaultYes = tr
   return normalized === "y" || normalized === "yes";
 }
 
-export async function runOnboarding(workspaceDir: string): Promise<OnboardingResult> {
+export async function runOnboarding(stateDir: string): Promise<OnboardingResult> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   try {
@@ -63,7 +59,7 @@ export async function runOnboarding(workspaceDir: string): Promise<OnboardingRes
     console.log(fmt.bold(fmt.cyan("╰─────────────────────────────────────────╯")));
     console.log();
     console.log(fmt.dim("Let's personalize your agent. You can always edit these files later."));
-    console.log(fmt.dim(`Files will be created in: ${workspaceDir}`));
+    console.log(fmt.dim(`Files will be created in: ${stateDir}`));
     console.log();
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -127,57 +123,51 @@ export async function runOnboarding(workspaceDir: string): Promise<OnboardingRes
 }
 
 export async function writeOnboardingFiles(
-  workspaceDir: string,
+  stateDir: string,
   identity: Identity,
   userProfile: UserProfile,
 ): Promise<void> {
   console.log();
   console.log(fmt.dim("Creating personalization files..."));
 
-  await writePersonalizationFile(workspaceDir, SOUL_FILENAME, getDefaultSoulTemplate(identity));
+  await writePersonalizationFile(stateDir, SOUL_FILENAME, getDefaultSoulTemplate(identity));
   console.log(`  ${fmt.green("✓")} ${SOUL_FILENAME}`);
 
-  await writePersonalizationFile(workspaceDir, AGENTS_FILENAME, getDefaultAgentsTemplate());
+  await writePersonalizationFile(stateDir, AGENTS_FILENAME, getDefaultAgentsTemplate());
   console.log(`  ${fmt.green("✓")} ${AGENTS_FILENAME}`);
 
-  await writePersonalizationFile(workspaceDir, IDENTITY_FILENAME, getDefaultIdentityTemplate(identity));
-  console.log(`  ${fmt.green("✓")} ${IDENTITY_FILENAME}`);
-
-  await writePersonalizationFile(workspaceDir, USER_FILENAME, getDefaultUserTemplate(userProfile));
+  await writePersonalizationFile(stateDir, USER_FILENAME, getDefaultUserTemplate(userProfile));
   console.log(`  ${fmt.green("✓")} ${USER_FILENAME}`);
 
-  await writePersonalizationFile(workspaceDir, TOOLS_FILENAME, getDefaultToolsTemplate());
-  console.log(`  ${fmt.green("✓")} ${TOOLS_FILENAME}`);
-
-  await writePersonalizationFile(workspaceDir, HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
+  await writePersonalizationFile(stateDir, HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
   console.log(`  ${fmt.green("✓")} ${HEARTBEAT_FILENAME}`);
 
-  await writePersonalizationFile(workspaceDir, NOTES_FILENAME, getDefaultNotesTemplate());
+  await writePersonalizationFile(stateDir, NOTES_FILENAME, getDefaultNotesTemplate());
   console.log(`  ${fmt.green("✓")} ${NOTES_FILENAME}`);
 
   console.log();
   console.log(fmt.bold(fmt.green("✓ Onboarding complete!")));
-  console.log(fmt.dim(`  Edit files in ${workspaceDir} to customize further.`));
+  console.log(fmt.dim(`  Edit files in ${stateDir} to customize further.`));
   console.log();
 }
 
-export async function shouldRunOnboarding(workspaceDir: string): Promise<boolean> {
+export async function shouldRunOnboarding(stateDir: string): Promise<boolean> {
   // If SOUL.md doesn't exist, we should run onboarding
-  return !(await personalizationFileExists(workspaceDir, SOUL_FILENAME));
+  return !(await personalizationFileExists(stateDir, SOUL_FILENAME));
 }
 
 export async function runOnboardingIfNeeded(
-  workspaceDir: string,
+  stateDir: string,
   options: { interactive: boolean } = { interactive: true },
 ): Promise<void> {
-  const needsOnboarding = await shouldRunOnboarding(workspaceDir);
+  const needsOnboarding = await shouldRunOnboarding(stateDir);
   if (!needsOnboarding) return;
 
   if (!options.interactive) {
     // Non-interactive: create defaults silently
     const identity = IdentitySchema.parse({});
     const userProfile = UserProfileSchema.parse({});
-    await writeOnboardingFilesQuiet(workspaceDir, identity, userProfile);
+    await writeOnboardingFilesQuiet(stateDir, identity, userProfile);
     return;
   }
 
@@ -185,26 +175,24 @@ export async function runOnboardingIfNeeded(
   if (!process.stdin.isTTY) {
     const identity = IdentitySchema.parse({});
     const userProfile = UserProfileSchema.parse({});
-    await writeOnboardingFilesQuiet(workspaceDir, identity, userProfile);
+    await writeOnboardingFilesQuiet(stateDir, identity, userProfile);
     return;
   }
 
-  const result = await runOnboarding(workspaceDir);
+  const result = await runOnboarding(stateDir);
   if (!result.skipped) {
-    await writeOnboardingFiles(workspaceDir, result.identity, result.userProfile);
+    await writeOnboardingFiles(stateDir, result.identity, result.userProfile);
   }
 }
 
 async function writeOnboardingFilesQuiet(
-  workspaceDir: string,
+  stateDir: string,
   identity: Identity,
   userProfile: UserProfile,
 ): Promise<void> {
-  await writePersonalizationFile(workspaceDir, SOUL_FILENAME, getDefaultSoulTemplate(identity));
-  await writePersonalizationFile(workspaceDir, AGENTS_FILENAME, getDefaultAgentsTemplate());
-  await writePersonalizationFile(workspaceDir, IDENTITY_FILENAME, getDefaultIdentityTemplate(identity));
-  await writePersonalizationFile(workspaceDir, USER_FILENAME, getDefaultUserTemplate(userProfile));
-  await writePersonalizationFile(workspaceDir, TOOLS_FILENAME, getDefaultToolsTemplate());
-  await writePersonalizationFile(workspaceDir, HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
-  await writePersonalizationFile(workspaceDir, NOTES_FILENAME, getDefaultNotesTemplate());
+  await writePersonalizationFile(stateDir, SOUL_FILENAME, getDefaultSoulTemplate(identity));
+  await writePersonalizationFile(stateDir, AGENTS_FILENAME, getDefaultAgentsTemplate());
+  await writePersonalizationFile(stateDir, USER_FILENAME, getDefaultUserTemplate(userProfile));
+  await writePersonalizationFile(stateDir, HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
+  await writePersonalizationFile(stateDir, NOTES_FILENAME, getDefaultNotesTemplate());
 }
