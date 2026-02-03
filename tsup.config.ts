@@ -1,7 +1,10 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: [
+    "src/index.ts",
+    "src/core/isolated-worker.ts", // Worker entry point for process-isolated agents
+  ],
   format: ["esm"],
   platform: "node",
   target: "node22",

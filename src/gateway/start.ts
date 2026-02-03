@@ -1,4 +1,6 @@
 import "../env.js";
+import type { ChildProcess } from "node:child_process";
+
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
 import { BrowserManager } from "../browser/manager.js";
@@ -43,7 +45,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
     config.llm.openaiCompat.apiKey && /^\$\{[A-Z0-9_]+\}$/.test(config.llm.openaiCompat.apiKey)
       ? undefined
       : config.llm.openaiCompat.apiKey;
-  const llm = new OpenAICompatClient({ ...config.llm.openaiCompat, apiKey });
+  const llmConfig = { ...config.llm.openaiCompat, apiKey };
+  const llm = new OpenAICompatClient(llmConfig);
   const builtIns = getBuiltInTools();
   const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
   await registry.init();
@@ -52,16 +55,21 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const agentTracker = new AgentTracker({ db });
 
+  // Track isolated worker child processes for shutdown cleanup
+  const isolatedWorkers = new Set<ChildProcess>();
+
   const toolContext = {
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
     codeDir: paths.codeDir,
     llm,
+    llmConfig,
     db,
     browser,
     registry,
     processManager,
     agentTracker,
+    isolatedWorkers,
     telegram: undefined as unknown,
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
@@ -190,6 +198,16 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
 
   const stop = async () => {
+    // Kill any active isolated worker processes
+    for (const child of isolatedWorkers) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Ignore errors (process may have already exited)
+      }
+    }
+    isolatedWorkers.clear();
+
     scheduler?.stop();
     proactive?.stop();
     await tg?.stop();

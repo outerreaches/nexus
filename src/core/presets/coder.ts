@@ -25,4 +25,5 @@ export const preset: AgentPreset = {
     "plan_task",
   ],
   budget: { maxIterations: 20, maxToolCalls: 50 },
+  isolated: true,
 };

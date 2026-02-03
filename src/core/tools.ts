@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTracker } from "./agent-tracker.js";
@@ -8,6 +10,8 @@ export type ToolContext = {
   stateDir: string;
   codeDir: string;
   llm?: OpenAICompatClient;
+  /** Serializable LLM config for passing to isolated workers. */
+  llmConfig?: { baseUrl: string; apiKey?: string; model: string };
   db?: unknown;
   browser?: unknown;
   registry?: unknown;
@@ -28,6 +32,8 @@ export type ToolContext = {
   budgetInfo?: { iterationsUsed: number; maxIterations: number; toolCallsUsed: number; maxToolCalls: number };
   nowMs: () => number;
   log: (msg: string) => void;
+  /** Active isolated worker child processes (for shutdown cleanup). */
+  isolatedWorkers?: Set<ChildProcess>;
 };
 
 export type ToolDefinition<TParams extends z.ZodTypeAny> = {

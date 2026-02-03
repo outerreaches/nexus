@@ -22,6 +22,8 @@ export interface AgentPreset {
     maxToolCalls?: number;
     maxIterations?: number;
   };
+  /** If true, spawn_agent will fork a child process for crash isolation. */
+  isolated?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

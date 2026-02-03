@@ -1,12 +1,19 @@
+import { fork, type ChildProcess } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { z } from "zod";
 
-import { defineTool } from "../core/tools.js";
+import { defineTool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
-import { getPreset, getPresetNames } from "../core/presets.js";
+import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { NexusDatabase } from "../storage/database.js";
+import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const spawnAgent = defineTool({
   name: "spawn_agent",
@@ -61,11 +68,6 @@ export const spawnAgent = defineTool({
 
     const db = ctx.db as NexusDatabase | undefined;
 
-    // Filter tools by preset whitelist
-    const allTools = registry.list();
-    const allowedNames = new Set(preset.tools);
-    const workerTools = allTools.filter((t) => allowedNames.has(t.name));
-
     // Load blackboard context if entry IDs provided
     let contextText = "";
     if (args.context.length > 0 && db) {
@@ -117,11 +119,6 @@ export const spawnAgent = defineTool({
     const workerDepth = parentDepth + 1;
     const isMaxDepth = maxDepth >= 0 && workerDepth >= maxDepth;
 
-    if (isMaxDepth) {
-      workerTools.splice(0, workerTools.length, ...workerTools.filter((t) => t.name !== "spawn_agent"));
-    }
-
-
     // Build worker system prompt
     const now = new Date();
     const basePrompt = await buildPresetSystemPrompt({
@@ -136,6 +133,12 @@ export const spawnAgent = defineTool({
       "",
       "## Instructions",
       `Current date and time: ${now.toISOString()} (${now.getFullYear()}). For current events or time-sensitive queries, include the year in searches. For historical topics, use the appropriate time period.`,
+      "",
+      "**File system roots:**",
+      `- workspace: ${ctx.workspaceDir} (use root: "workspace" for file tools, or this absolute path for shell commands)`,
+      `- state: ${ctx.stateDir} (config files, HEARTBEAT.md, etc.)`,
+      `- code: ${ctx.codeDir} (source code, if enabled)`,
+      "",
       "We have a large list of verified data sources available via data intake tools. Use them when possible.",
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
@@ -144,9 +147,12 @@ export const spawnAgent = defineTool({
         : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
       "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
     ].join("\n");
+
+    // Start run tracking BEFORE execution (so DB row exists for isolated workers)
+    const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
     const runId = tracker?.startRun({
       parentRunId: effectiveParentRunId,
-      agentId: parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`,
+      agentId,
       preset: preset.name,
       channel: parent?.channel ?? "worker",
       channelKey: parent?.channelKey ?? "worker",
@@ -154,79 +160,297 @@ export const spawnAgent = defineTool({
       task: args.task,
     });
 
-    // Create worker ToolContext (inherit from orchestrator but with worker identity)
-    const workerCtx = {
-      ...ctx,
-      // Workers start with a fresh planState — don't inherit parent's completed plan
-      planState: undefined,
-      request: ctx.request
-        ? {
-            ...ctx.request,
-            agentId: `${ctx.request.agentId}:${preset.name}`,
-            runId,
-          }
-        : undefined,
-      // Workers get their own budget info
-      budgetInfo: {
-        iterationsUsed: 0,
-        maxIterations: budget.maxIterations,
-        toolCallsUsed: 0,
-        maxToolCalls: budget.maxToolCalls,
-      },
-    };
-
-    const log = ctx.log;
-    const onLog = log
-      ? (line: string) => log(`worker[${preset.name}] ${line}`)
-      : undefined;
-
-    // Create and run worker
-    const runner = new AgentRunner({
-      llm,
-      tools: workerTools,
-      budget,
-      toolContext: workerCtx,
-      onLog,
-    });
-
-    try {
-      const result = await runner.run({
+    // Branch: isolated process vs in-process
+    if (preset.isolated) {
+      return runIsolated({
+        ctx,
+        preset,
         systemPrompt,
-        history: [],
-        userMessage: args.task,
+        task: args.task,
+        budget,
+        runId: runId ?? null,
+        effectiveParentRunId,
+        agentId,
+        workerDepth,
+        maxDepth,
+        tracker,
       });
-
-      if (runId && tracker) {
-        const preview = result.output.trim().slice(0, 240);
-        tracker.completeRun(runId, {
-          status: result.status,
-          toolCallsUsed: result.toolCallsUsed,
-          iterationsUsed: result.iterationsUsed,
-          outputPreview: preview,
-          endedAt: ctx.nowMs(),
-        });
-      }
-
-      // Return structured result to orchestrator
-      const returnValue: Record<string, unknown> = {
-        status: result.status,
-        output: result.output,
-        toolCallsUsed: result.toolCallsUsed,
-        iterationsUsed: result.iterationsUsed,
-      };
-      return JSON.stringify(returnValue, null, 2);
-    } catch (e) {
-      if (runId && tracker) {
-        tracker.completeRun(runId, {
-          status: "failed",
-          outputPreview: `ERROR: ${e instanceof Error ? e.message : String(e)}`,
-          endedAt: ctx.nowMs(),
-        });
-      }
-      return `ERROR: worker agent failed: ${e instanceof Error ? e.message : String(e)}`;
+    } else {
+      return runInProcess({
+        ctx,
+        preset,
+        systemPrompt,
+        task: args.task,
+        budget,
+        runId: runId ?? null,
+        workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
+        tracker,
+      });
     }
   },
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-process execution (existing behavior)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runInProcess(params: {
+  ctx: ToolContext;
+  preset: AgentPreset;
+  systemPrompt: string;
+  task: string;
+  budget: { maxToolCalls: number; maxIterations: number; maxContextTokens: number };
+  runId: string | null;
+  workerTools: ReturnType<ToolRegistry["list"]>;
+  tracker: AgentTracker | undefined;
+}): Promise<string> {
+  const { ctx, preset, systemPrompt, task, budget, runId, workerTools, tracker } = params;
+  const llm = ctx.llm!;
+
+  // Create worker ToolContext (inherit from orchestrator but with worker identity)
+  const workerCtx: ToolContext = {
+    ...ctx,
+    // Workers start with a fresh planState — don't inherit parent's completed plan
+    planState: undefined,
+    request: ctx.request
+      ? {
+          ...ctx.request,
+          agentId: `${ctx.request.agentId}:${preset.name}`,
+          runId: runId ?? undefined,
+        }
+      : undefined,
+    // Workers get their own budget info
+    budgetInfo: {
+      iterationsUsed: 0,
+      maxIterations: budget.maxIterations,
+      toolCallsUsed: 0,
+      maxToolCalls: budget.maxToolCalls,
+    },
+  };
+
+  const log = ctx.log;
+  const onLog = log
+    ? (line: string) => log(`worker[${preset.name}] ${line}`)
+    : undefined;
+
+  // Create and run worker
+  const runner = new AgentRunner({
+    llm,
+    tools: workerTools,
+    budget,
+    toolContext: workerCtx,
+    onLog,
+  });
+
+  try {
+    const result = await runner.run({
+      systemPrompt,
+      history: [],
+      userMessage: task,
+    });
+
+    if (runId && tracker) {
+      const preview = result.output.trim().slice(0, 240);
+      tracker.completeRun(runId, {
+        status: result.status,
+        toolCallsUsed: result.toolCallsUsed,
+        iterationsUsed: result.iterationsUsed,
+        outputPreview: preview,
+        endedAt: ctx.nowMs(),
+      });
+    }
+
+    // Return structured result to orchestrator
+    const returnValue: Record<string, unknown> = {
+      status: result.status,
+      output: result.output,
+      toolCallsUsed: result.toolCallsUsed,
+      iterationsUsed: result.iterationsUsed,
+    };
+    return JSON.stringify(returnValue, null, 2);
+  } catch (e) {
+    if (runId && tracker) {
+      tracker.completeRun(runId, {
+        status: "failed",
+        outputPreview: `ERROR: ${e instanceof Error ? e.message : String(e)}`,
+        endedAt: ctx.nowMs(),
+      });
+    }
+    return `ERROR: worker agent failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Isolated process execution (fork child process)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runIsolated(params: {
+  ctx: ToolContext;
+  preset: AgentPreset;
+  systemPrompt: string;
+  task: string;
+  budget: { maxToolCalls: number; maxIterations: number; maxContextTokens: number };
+  runId: string | null;
+  effectiveParentRunId: string | null;
+  agentId: string;
+  workerDepth: number;
+  maxDepth: number;
+  tracker: AgentTracker | undefined;
+}): Promise<string> {
+  const { ctx, preset, systemPrompt, task, budget, runId, effectiveParentRunId, agentId, workerDepth, maxDepth, tracker } = params;
+
+  // Require llmConfig to serialize for the worker
+  if (!ctx.llmConfig) {
+    return "ERROR: llmConfig not available on context (required for isolated workers)";
+  }
+
+  const log = ctx.log;
+  const logWorker = (line: string) => log?.(`worker[${preset.name}] ${line}`);
+
+  // Calculate timeout: maxIterations * 60s, capped at NEXUS_WORKER_TIMEOUT_MS or 30 min
+  const defaultTimeoutMs = 30 * 60 * 1000; // 30 minutes
+  const maxTimeoutMs = envInt("NEXUS_WORKER_TIMEOUT_MS") ?? defaultTimeoutMs;
+  const timeoutMs = Math.min(budget.maxIterations * 60_000, maxTimeoutMs);
+
+  return new Promise<string>((resolve) => {
+    // Path to the compiled worker entry point (relative to dist/)
+    const workerPath = path.resolve(__dirname, "core/isolated-worker.js");
+
+    const child: ChildProcess = fork(workerPath, [], {
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+      env: process.env, // inherit env vars (API keys, etc.)
+    });
+
+    // Track active worker for shutdown cleanup
+    ctx.isolatedWorkers?.add(child);
+
+    let resolved = false;
+    const finish = (resultJson: string) => {
+      if (resolved) return;
+      resolved = true;
+      ctx.isolatedWorkers?.delete(child);
+      resolve(resultJson);
+    };
+
+    // Timeout handler
+    const timer = setTimeout(() => {
+      logWorker(`timeout after ${timeoutMs}ms, killing`);
+      child.kill("SIGKILL");
+      if (runId && tracker) {
+        tracker.completeRun(runId, {
+          status: "failed",
+          outputPreview: "ERROR: worker timed out",
+          endedAt: ctx.nowMs(),
+        });
+      }
+      finish(JSON.stringify({
+        status: "failed",
+        output: "ERROR: worker process timed out",
+        toolCallsUsed: 0,
+        iterationsUsed: 0,
+      }, null, 2));
+    }, timeoutMs);
+
+    // Handle IPC messages from worker
+    child.on("message", (msg: WorkerMessage) => {
+      if (msg.type === "log") {
+        logWorker(msg.line);
+      } else if (msg.type === "result") {
+        clearTimeout(timer);
+        // Note: worker already called completeRun on its own DB connection
+        finish(JSON.stringify(msg.result, null, 2));
+      } else if (msg.type === "error") {
+        clearTimeout(timer);
+        if (runId && tracker) {
+          tracker.completeRun(runId, {
+            status: "failed",
+            outputPreview: `ERROR: ${msg.error}`,
+            endedAt: ctx.nowMs(),
+          });
+        }
+        finish(JSON.stringify({
+          status: "failed",
+          output: `ERROR: worker process failed: ${msg.error}`,
+          toolCallsUsed: 0,
+          iterationsUsed: 0,
+        }, null, 2));
+      }
+    });
+
+    // Handle crash (exit without sending result)
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      ctx.isolatedWorkers?.delete(child);
+      if (!resolved) {
+        const reason = signal ? `killed by ${signal}` : `exited with code ${code}`;
+        logWorker(`crashed: ${reason}`);
+        if (runId && tracker) {
+          tracker.completeRun(runId, {
+            status: "failed",
+            outputPreview: `ERROR: worker ${reason}`,
+            endedAt: ctx.nowMs(),
+          });
+        }
+        finish(JSON.stringify({
+          status: "failed",
+          output: `ERROR: worker process ${reason}`,
+          toolCallsUsed: 0,
+          iterationsUsed: 0,
+        }, null, 2));
+      }
+    });
+
+    // Forward stderr to parent log
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const lines = chunk.toString("utf8").trim().split("\n");
+      for (const line of lines) {
+        logWorker(`[stderr] ${line}`);
+      }
+    });
+
+    // Build and send the task config
+    const config: WorkerConfig = {
+      stateDir: ctx.stateDir,
+      workspaceDir: ctx.workspaceDir,
+      codeDir: ctx.codeDir,
+      dbPath: path.join(ctx.stateDir, "nexus.db"),
+      llmConfig: ctx.llmConfig!,
+      allowShellExec: ctx.allowShellExec ?? false,
+      allowCodeEdit: ctx.allowCodeEdit ?? false,
+      presetName: preset.name,
+      systemPrompt,
+      userMessage: task,
+      budget,
+      parentRunId: effectiveParentRunId,
+      runId,
+      agentId,
+      sessionId: ctx.request?.sessionId ?? "unknown",
+      channel: ctx.request?.channel ?? "worker",
+      channelKey: ctx.request?.channelKey ?? "worker",
+      currentDepth: workerDepth,
+      maxDepth,
+    };
+
+    const taskMsg: ParentMessage = { type: "task", config };
+    child.send(taskMsg);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function filterToolsForPreset(
+  allTools: ReturnType<ToolRegistry["list"]>,
+  preset: AgentPreset,
+  isMaxDepth: boolean,
+): ReturnType<ToolRegistry["list"]> {
+  const allowedNames = new Set(preset.tools);
+  if (isMaxDepth) {
+    allowedNames.delete("spawn_agent");
+  }
+  return allTools.filter((t) => allowedNames.has(t.name));
+}
 
 function envInt(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
