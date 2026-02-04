@@ -99,7 +99,29 @@ export const dataIntakeSourceList = defineTool({
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
     const rows = listIntakeSources({ db: db as any, includeDisabled: args.includeDisabled });
-    return JSON.stringify(rows, null, 2);
+    // Transform DB rows to API-friendly format (params instead of params_json, camelCase keys)
+    const transformed = rows.map((row) => {
+      let params: unknown = {};
+      try {
+        params = JSON.parse(row.params_json || "{}");
+      } catch {
+        params = {};
+      }
+      return {
+        id: row.id,
+        sourceId: row.source_id,
+        label: row.label,
+        params,
+        intervalMs: row.interval_ms,
+        enabled: row.enabled === 1,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        lastRunAt: row.last_run_at,
+        lastError: row.last_error,
+        jobId: row.job_id,
+      };
+    });
+    return JSON.stringify(transformed, null, 2);
   },
 });
 
