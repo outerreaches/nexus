@@ -92,9 +92,10 @@ export const memoryRecall = defineTool({
 export const memorySearch = defineTool({
   name: "memory_search",
   description:
-    "Search memories by keyword (searches key, value, and tags). Optionally filter by category. Returns top N results sorted by relevance (access frequency + recency).",
+    "Search memories by keyword (searches key, value, and tags). Optionally filter by category. " +
+    "If query is empty, returns most recent memories. Results are sorted by relevance (access frequency + recency).",
   parameters: z.object({
-    query: z.string().min(1).max(200).describe("Search term (case-insensitive substring match)"),
+    query: z.string().max(200).default("").describe("Search term (case-insensitive substring match). Empty returns recent memories."),
     category: z
       .enum(["fact", "observation", "preference", "plan"])
       .optional()
@@ -105,7 +106,34 @@ export const memorySearch = defineTool({
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
     const agentId = currentAgentId(ctx);
-    const pattern = `%${args.query}%`;
+    const query = (args.query ?? "").trim();
+    const pattern = `%${query}%`;
+
+    if (!query) {
+      const rows = db.db
+        .prepare(
+          `
+          SELECT key, value, category, tags_json, created_at, updated_at, access_count
+          FROM memories
+          WHERE agent_id = ?
+          ORDER BY updated_at DESC
+          LIMIT ?
+        `,
+        )
+        .all(agentId, args.limit) as any[];
+
+      if (rows.length === 0) return "No memories found.";
+
+      const results = rows.map((r) => ({
+        key: r.key,
+        value: r.value,
+        category: r.category,
+        tags: JSON.parse(r.tags_json || "[]"),
+        access_count: r.access_count,
+      }));
+
+      return JSON.stringify(results, null, 2);
+    }
 
     const categoryClause = args.category ? "AND category = ?" : "";
     const sql = `
