@@ -1,5 +1,8 @@
 import "../env.js";
 import type { ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
 
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
@@ -20,14 +23,42 @@ import { initDataIntake } from "../data-intake/index.js";
 import { ensureSystemJobs } from "../maintenance/system-jobs.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean }): Promise<void> {
+  let logStream: fs.WriteStream | null = null;
+  const stdoutWrite = process.stdout.write.bind(process.stdout);
+  const stderrWrite = process.stderr.write.bind(process.stderr);
+  let teeInstalled = false;
   const log = (msg: string) => {
-    if (params.verbose) process.stdout.write(`[nexus] ${msg}\n`);
+    const line = `[nexus] ${msg}\n`;
+    if (params.verbose) {
+      process.stdout.write(line);
+      return;
+    }
+    if (logStream) logStream.write(line);
   };
 
   await ensureConfigExists(params.configPath);
   const config = await loadConfig(params.configPath);
   await bootstrapState(config);
   const paths = await resolveRuntimePaths(config);
+  try {
+    await fsp.mkdir(paths.stateDir, { recursive: true });
+    logStream = fs.createWriteStream(path.join(paths.stateDir, "gateway.log"), { flags: "a" });
+    if (!teeInstalled) {
+      const makeTee = (baseWrite: typeof process.stdout.write) =>
+        ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+          if (logStream) logStream.write(chunk as string | Uint8Array);
+          return (baseWrite as any)(chunk, encoding, cb);
+        }) as typeof process.stdout.write;
+      process.stdout.write = makeTee(stdoutWrite);
+      process.stderr.write = makeTee(stderrWrite);
+      teeInstalled = true;
+    }
+  } catch (err) {
+    if (params.verbose) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stdout.write(`[nexus] log file error: ${msg}\n`);
+    }
+  }
 
   const db = await openDatabase(paths.dbPath);
   initDataIntake();
@@ -113,6 +144,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const http = await startHttpServer({
     port: effectivePort,
+    stateDir: paths.stateDir,
     getStatus: async () => ({
       ok: true,
       name: "nexus",

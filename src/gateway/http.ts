@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import path from "node:path";
+import fs from "node:fs/promises";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager, ManagedProcessInfo } from "../process/manager.js";
 import type { AgentTracker, AgentRunInfo } from "../core/agent-tracker.js";
@@ -9,6 +11,7 @@ import { createIntakeSource, deleteIntakeSource, listIntakeSources, updateIntake
 
 export type GatewayHttpDeps = {
   port: number;
+  stateDir: string;
   getStatus: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   log: (msg: string) => void;
   db?: NexusDatabase;
@@ -67,6 +70,21 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     };
 
     return c.json({ nodes, stats, tables, timestamp: nowMs });
+  });
+
+  app.get("/api/logs", async (c) => {
+    const maxChars = clampInt(c.req.query("maxChars"), 200, 200_000) ?? 50_000;
+    const logPath = path.join(deps.stateDir, "gateway.log");
+    try {
+      const buf = await fs.readFile(logPath);
+      const text = buf.toString("utf8");
+      return c.text(text.length > maxChars ? text.slice(-maxChars) : text);
+    } catch (err) {
+      if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
+        return c.text("No logs found.");
+      }
+      return c.text(`ERROR: ${err instanceof Error ? err.message : String(err)}`, 500);
+    }
   });
 
   app.get("/api/job-runs/export.csv", async (c) => {
@@ -890,6 +908,54 @@ function renderDashboard(params: {
         margin-bottom: 16px;
         box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.8);
       }
+      .tab-bar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .tab-btn {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--text-dim);
+        padding: 4px 10px;
+        font-size: 11px;
+        text-decoration: none;
+        font-family: inherit;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        cursor: pointer;
+      }
+      .tab-btn.active {
+        background: rgba(0, 255, 65, 0.1);
+        border-color: var(--text);
+        color: var(--text);
+        box-shadow: var(--glow);
+      }
+      .tab-panel {
+        display: none;
+        margin-top: 12px;
+      }
+      .tab-panel.active {
+        display: block;
+      }
+      .log-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      .log-viewer {
+        max-height: 520px;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-size: 11px;
+        color: var(--text-dim);
+        border: 1px solid var(--line);
+        background: #050505;
+        padding: 10px;
+        box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.8);
+      }
       .graph-header {
         display: flex;
         justify-content: space-between;
@@ -1174,47 +1240,69 @@ function renderDashboard(params: {
     </header>
     <main>
       <section>
-        <h2>Agents</h2>
-        <div class="graph-wrap">
-          <div class="graph-header">
-            <span>Hierarchy (last ${params.agentWindowMinutes}m)</span>
-            <span class="muted">Drag to rotate, scroll to zoom</span>
-          </div>
-          <div id="agent-graph" class="graph">
-            <div id="agent-stats" class="graph-stats">
-              <div class="stat-row"><span class="stat-label">Running</span><span id="stat-running" class="stat-value running">0</span></div>
-              <div class="stat-row"><span class="stat-label">Complete</span><span id="stat-complete" class="stat-value">0</span></div>
-              <div class="stat-row"><span class="stat-label">Failed</span><span id="stat-failed" class="stat-value failed">0</span></div>
-              <div class="stat-row"><span class="stat-label">Total</span><span id="stat-total" class="stat-value">0</span></div>
-            </div>
-            <div class="graph-controls">
-              <button id="btn-pause" class="graph-btn">Pause</button>
-            </div>
-            <div id="agent-tooltip" class="agent-tooltip"></div>
-            <div id="refresh-indicator" class="refresh-indicator"></div>
+        <div class="section-header">
+          <h2>Agents</h2>
+          <div class="tab-bar" role="tablist">
+            <button class="tab-btn active" data-tab="agents-view" type="button">Agent View</button>
+            <button class="tab-btn" data-tab="docker-logs" type="button">Docker Logs</button>
           </div>
         </div>
-        <div class="split">
-          <div>
-            <h3>Running</h3>
-            <div id="table-active">${renderAgentTable(params.agents.active)}</div>
+        <div class="tab-panel active" id="tab-agents-view">
+          <div class="graph-wrap">
+            <div class="graph-header">
+              <span>Hierarchy (last ${params.agentWindowMinutes}m)</span>
+              <span class="muted">Drag to rotate, scroll to zoom</span>
+            </div>
+            <div id="agent-graph" class="graph">
+              <div id="agent-stats" class="graph-stats">
+                <div class="stat-row"><span class="stat-label">Running</span><span id="stat-running" class="stat-value running">0</span></div>
+                <div class="stat-row"><span class="stat-label">Complete</span><span id="stat-complete" class="stat-value">0</span></div>
+                <div class="stat-row"><span class="stat-label">Failed</span><span id="stat-failed" class="stat-value failed">0</span></div>
+                <div class="stat-row"><span class="stat-label">Total</span><span id="stat-total" class="stat-value">0</span></div>
+              </div>
+              <div class="graph-controls">
+                <button id="btn-pause" class="graph-btn">Pause</button>
+              </div>
+              <div id="agent-tooltip" class="agent-tooltip"></div>
+              <div id="refresh-indicator" class="refresh-indicator"></div>
+            </div>
           </div>
-          <div>
-            <h3>Recent (${params.agentWindowMinutes}m)</h3>
-            <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
+          <div class="split">
+            <div>
+              <h3>Running</h3>
+              <div id="table-active">${renderAgentTable(params.agents.active)}</div>
+            </div>
+            <div>
+              <h3>Recent (${params.agentWindowMinutes}m)</h3>
+              <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
+            </div>
+          </div>
+          <div class="heartbeat-panel ${heartbeatPanelClass}" id="heartbeat-panel">
+            <div class="heartbeat-title">
+              <span id="heartbeat-label">${heartbeatLabel}</span>
+              ${heartbeat.enabled ? `<div class="heartbeat-controls">
+                <button class="heartbeat-btn" id="heartbeat-pause" ${heartbeat.paused ? 'style="display:none"' : ""}>Pause</button>
+                <button class="heartbeat-btn" id="heartbeat-resume" ${!heartbeat.paused ? 'style="display:none"' : ""}>Resume</button>
+              </div>` : ""}
+            </div>
+            <div class="heartbeat-row"><span class="muted">Last:</span> <span id="heartbeat-last">${escapeHtml(heartbeatLast)}</span></div>
+            <div class="heartbeat-row"><span class="muted">Next:</span> <span id="heartbeat-next">${escapeHtml(heartbeatNext)}</span></div>
+            <div class="heartbeat-row"><span class="muted">Status:</span> <span id="heartbeat-status">${escapeHtml(heartbeatStatus)}</span></div>
           </div>
         </div>
-        <div class="heartbeat-panel ${heartbeatPanelClass}" id="heartbeat-panel">
-          <div class="heartbeat-title">
-            <span id="heartbeat-label">${heartbeatLabel}</span>
-            ${heartbeat.enabled ? `<div class="heartbeat-controls">
-              <button class="heartbeat-btn" id="heartbeat-pause" ${heartbeat.paused ? 'style="display:none"' : ""}>Pause</button>
-              <button class="heartbeat-btn" id="heartbeat-resume" ${!heartbeat.paused ? 'style="display:none"' : ""}>Resume</button>
-            </div>` : ""}
+        <div class="tab-panel" id="tab-docker-logs">
+          <div class="log-controls">
+            <button id="logs-refresh" class="graph-btn" type="button">Refresh</button>
+            <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+              <input id="logs-auto" type="checkbox" checked />
+              Auto refresh
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+              Max chars
+              <input id="logs-max" class="inline-input" type="number" min="200" max="200000" step="1000" value="50000" />
+            </label>
           </div>
-          <div class="heartbeat-row"><span class="muted">Last:</span> <span id="heartbeat-last">${escapeHtml(heartbeatLast)}</span></div>
-          <div class="heartbeat-row"><span class="muted">Next:</span> <span id="heartbeat-next">${escapeHtml(heartbeatNext)}</span></div>
-          <div class="heartbeat-row"><span class="muted">Status:</span> <span id="heartbeat-status">${escapeHtml(heartbeatStatus)}</span></div>
+          <pre id="docker-logs" class="log-viewer">Loading logs…</pre>
         </div>
       </section>
 
@@ -1278,6 +1366,56 @@ function renderDashboard(params: {
       const tooltip = document.getElementById("agent-tooltip");
       const pauseBtn = document.getElementById("btn-pause");
       const refreshIndicator = document.getElementById("refresh-indicator");
+      const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
+      const tabPanels = {
+        "agents-view": document.getElementById("tab-agents-view"),
+        "docker-logs": document.getElementById("tab-docker-logs"),
+      };
+      const logsPanel = tabPanels["docker-logs"];
+      const logsPre = document.getElementById("docker-logs");
+      const logsRefreshBtn = document.getElementById("logs-refresh");
+      const logsAutoToggle = document.getElementById("logs-auto");
+      const logsMaxInput = document.getElementById("logs-max");
+
+      const fetchLogs = async () => {
+        if (!logsPre) return;
+        const maxChars = Math.min(200000, Math.max(200, Number(logsMaxInput?.value ?? 50000) || 50000));
+        try {
+          const res = await fetch("/api/logs?maxChars=" + maxChars);
+          if (!res.ok) {
+            logsPre.textContent = "ERROR: " + res.status;
+            return;
+          }
+          logsPre.textContent = await res.text();
+        } catch (err) {
+          logsPre.textContent = "ERROR: " + (err instanceof Error ? err.message : String(err));
+        }
+      };
+
+      const setActiveTab = (name) => {
+        tabButtons.forEach((btn) => {
+          const isActive = btn.getAttribute("data-tab") === name;
+          btn.classList.toggle("active", isActive);
+        });
+        Object.entries(tabPanels).forEach(([key, panel]) => {
+          if (!panel) return;
+          panel.classList.toggle("active", key === name);
+        });
+        if (name === "docker-logs") {
+          fetchLogs();
+        }
+      };
+
+      tabButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const name = btn.getAttribute("data-tab");
+          if (name) setActiveTab(name);
+        });
+      });
+
+      if (logsRefreshBtn) {
+        logsRefreshBtn.addEventListener("click", fetchLogs);
+      }
       
       // Update stats display
       const updateStats = (stats) => {
@@ -1439,6 +1577,9 @@ function renderDashboard(params: {
         if (refreshCountdown <= 0) {
           refreshCountdown = 5;
           fetchAndUpdate();
+          if (logsAutoToggle?.checked && logsPanel?.classList.contains("active")) {
+            fetchLogs();
+          }
         }
       }, 1000);
       
