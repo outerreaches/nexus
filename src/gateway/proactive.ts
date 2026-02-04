@@ -145,7 +145,7 @@ export function startProactiveHeartbeat(
         "- Avoid long research loops. Prefer one small, high-value action per tick.",
         "- Only ask the operator for action if you are blocked on a specific step (OTP/MFA/CAPTCHA/etc).",
         "- If you do ask, use `human_request` with a short, specific prompt and then stop.",
-        "- Do NOT write heartbeat confirmations to the blackboard. Only write to the blackboard if there is a substantive finding or action that should persist.",
+        "- Do NOT write to the blackboard during heartbeat ticks unless you discovered a new issue, made a change, or created a durable artifact that must persist. Never write \"reviewed\" or confirmation-only notes; if nothing substantive, respond with IDLE.",
         "- When given new standing instructions about heartbeat behavior, append them to HEARTBEAT.md using `file_write` with `mode: \"append\"` and `root: \"state\"`. Only edit or replace existing items if the user explicitly requests a change.",
       ].join("\n");
 
