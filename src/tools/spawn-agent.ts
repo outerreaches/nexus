@@ -357,7 +357,16 @@ async function runIsolated(params: {
         logWorker(msg.line);
       } else if (msg.type === "result") {
         clearTimeout(timer);
-        // Note: worker already called completeRun on its own DB connection
+        if (runId && tracker) {
+          const preview = msg.result.output?.trim?.().slice(0, 240) ?? "";
+          tracker.completeRun(runId, {
+            status: msg.result.status,
+            toolCallsUsed: msg.result.toolCallsUsed,
+            iterationsUsed: msg.result.iterationsUsed,
+            outputPreview: preview,
+            endedAt: ctx.nowMs(),
+          });
+        }
         finish(JSON.stringify(msg.result, null, 2));
       } else if (msg.type === "error") {
         clearTimeout(timer);
