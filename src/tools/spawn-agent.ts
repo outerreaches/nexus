@@ -1,8 +1,11 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, exec, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { z } from "zod";
+
+const execAsync = promisify(exec);
 
 import { defineTool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
@@ -163,6 +166,11 @@ export const spawnAgent = defineTool({
       sessionId: parent?.sessionId ?? "unknown",
       task: args.task,
     });
+
+    // Git checkpoint before coder modifies code (for rollback capability)
+    if (preset.name === "coder" && ctx.allowCodeEdit) {
+      await gitCheckpoint(ctx.codeDir, runId ?? null, ctx.log);
+    }
 
     // Branch: isolated process vs in-process
     if (preset.isolated) {
@@ -536,7 +544,7 @@ function parseBlackboardTitle(task: string, presetName: string): { title: string
     return true;
   });
   const cleanedTask = cleanedLines.join("\n").trim() || task.trim();
-  const title = explicit && explicit.length > 0 ? explicit : defaultBlackboardTitle(presetName, cleanedTask);
+  const title = explicit && (explicit as string).length > 0 ? explicit : defaultBlackboardTitle(presetName, cleanedTask);
   return { title, cleanedTask };
 }
 
@@ -567,4 +575,38 @@ function attachBlackboardTitle(resultJson: string, blackboardTitle: string): str
     // ignore parse errors
   }
   return resultJson;
+}
+
+/**
+ * Create a git checkpoint (commit) before coder agents modify code.
+ * This allows rollback if the agent breaks something.
+ * Only runs if codeDir is a git repository.
+ */
+async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: string) => void): Promise<void> {
+  try {
+    // Check if codeDir is a git repo
+    await execAsync("git rev-parse --git-dir", { cwd: codeDir });
+
+    // Check if there are any changes to commit
+    const { stdout: status } = await execAsync("git status --porcelain", { cwd: codeDir });
+    if (!status.trim()) {
+      log?.("git-checkpoint: no changes to commit");
+      return;
+    }
+
+    // Stage all changes and commit
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const commitMsg = `checkpoint: pre-coder ${timestamp}${runId ? ` (run:${runId.slice(0, 8)})` : ""}`;
+
+    await execAsync("git add -A", { cwd: codeDir });
+    await execAsync(`git commit -m "${commitMsg}" --allow-empty`, { cwd: codeDir });
+
+    log?.(`git-checkpoint: created commit "${commitMsg}"`);
+  } catch (err) {
+    // Not a git repo or git not available - that's fine, skip silently
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("not a git repository") && !msg.includes("command not found")) {
+      log?.(`git-checkpoint: skipped (${msg})`);
+    }
+  }
 }

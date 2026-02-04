@@ -1,0 +1,127 @@
+# Fault-tolerant Nexus deployment with hot standby
+#
+# Usage:
+#   docker-compose -f infra/docker-compose.ha.yml up -d
+#
+# Architecture:
+#   - HAProxy (port 18789) - load balancer with health checks
+#   - nexus-primary - active instance
+#   - nexus-standby - passive instance (--standby mode)
+#   - watchdog - monitors primary, triggers failover if needed
+#
+# The standby instance:
+#   - Responds to health checks
+#   - Does NOT run scheduler, proactive, or telegram
+#   - Can be activated via POST /api/activate
+#
+# Failover scenarios:
+#   1. HAProxy detects primary is unhealthy → routes to standby automatically
+#   2. Watchdog detects primary is unhealthy → activates standby services
+
+version: "3.8"
+
+services:
+  # Load balancer - entry point for all traffic
+  haproxy:
+    image: haproxy:2.9-alpine
+    ports:
+      - "18789:18789"   # Nexus API
+      - "9999:9999"     # HAProxy stats (http://localhost:9999/stats)
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - nexus-primary
+      - nexus-standby
+    restart: unless-stopped
+    networks:
+      - nexus-net
+
+  # Primary Nexus instance (active)
+  nexus-primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: gateway --verbose
+    volumes:
+      # Shared data volume (SQLite WAL handles concurrent access)
+      - nexus-data:/data/nexus
+      # Code directory (for self-editing capability)
+      - nexus-code:/data/code
+      # Workspace
+      - nexus-workspace:/data/workspace
+    environment:
+      - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_CODE_DIR=/data/code
+      - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_BROWSER_HEADLESS=1
+      - NEXUS_BROWSER_NO_SANDBOX=1
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - nexus-net
+
+  # Standby Nexus instance (passive until activated)
+  nexus-standby:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: gateway --verbose --standby
+    volumes:
+      # Same shared volumes as primary
+      - nexus-data:/data/nexus
+      - nexus-code:/data/code
+      - nexus-workspace:/data/workspace
+    environment:
+      - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_CODE_DIR=/data/code
+      - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_BROWSER_HEADLESS=1
+      - NEXUS_BROWSER_NO_SANDBOX=1
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - nexus-net
+
+  # Watchdog - monitors health and triggers failover
+  watchdog:
+    build:
+      context: ./watchdog
+      dockerfile: Dockerfile
+    environment:
+      - PRIMARY_URL=http://nexus-primary:18789
+      - STANDBY_URL=http://nexus-standby:18789
+      - CHECK_INTERVAL=5
+      - FAILURE_THRESHOLD=3
+      - RECOVERY_DELAY=30
+    depends_on:
+      - nexus-primary
+      - nexus-standby
+    restart: unless-stopped
+    networks:
+      - nexus-net
+
+networks:
+  nexus-net:
+    driver: bridge
+
+volumes:
+  nexus-data:
+    driver: local
+  nexus-code:
+    driver: local
+  nexus-workspace:
+    driver: local

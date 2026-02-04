@@ -14,12 +14,14 @@ export async function runCli(argv: string[]): Promise<void> {
     .command("gateway")
     .description("Start the always-on gateway (HTTP + Telegram)")
     .option("--port <port>", "HTTP port (overrides config)", (v) => Number(v))
+    .option("--standby", "Start in standby mode (health checks only, no scheduler/proactive)", false)
     .action(async (opts) => {
       const options = program.opts<{ config: string; verbose: boolean }>();
       await startGateway({
         configPath: options.config,
         port: opts.port,
         verbose: options.verbose,
+        standby: opts.standby,
       });
     });
 

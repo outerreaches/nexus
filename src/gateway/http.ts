@@ -23,6 +23,45 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
   const app = new Hono();
 
   app.get("/healthz", (c) => c.json({ ok: true }));
+
+  // Health check endpoints for fault tolerance / watchdog
+  app.get("/health/live", (c) => {
+    // Liveness: HTTP server is responding
+    return c.json({ ok: true, timestamp: Date.now() });
+  });
+
+  app.get("/health/ready", async (c) => {
+    // Readiness: full system check
+    const checks: Record<string, { ok: boolean; error?: string }> = {};
+    const nowMs = Date.now();
+
+    // Check 1: Database accessible
+    try {
+      if (deps.db) {
+        const stmt = (deps.db as any).prepare("SELECT 1 as test");
+        stmt.get();
+        checks.database = { ok: true };
+      } else {
+        checks.database = { ok: false, error: "no database connection" };
+      }
+    } catch (err) {
+      checks.database = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    // Check 2: No stuck agents (running > 30 minutes)
+    const stuckThresholdMs = 30 * 60 * 1000;
+    const activeAgents = deps.agentTracker?.listActive() ?? [];
+    const stuckAgents = activeAgents.filter((a) => nowMs - a.startedAt > stuckThresholdMs);
+    if (stuckAgents.length > 0) {
+      checks.agents = { ok: false, error: `${stuckAgents.length} stuck agents (>30min)` };
+    } else {
+      checks.agents = { ok: true };
+    }
+
+    const allOk = Object.values(checks).every((c) => c.ok);
+    return c.json({ ok: allOk, checks, timestamp: nowMs }, allOk ? 200 : 503);
+  });
+
   app.get("/status", async (c) => c.json(await deps.getStatus()));
 
   // JSON API for live agent graph updates (used by dashboard for smooth refresh)

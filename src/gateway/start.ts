@@ -22,7 +22,7 @@ import { startProactiveHeartbeat } from "./proactive.js";
 import { initDataIntake } from "../data-intake/index.js";
 import { ensureSystemJobs } from "../maintenance/system-jobs.js";
 
-export async function startGateway(params: { configPath: string; port?: number; verbose: boolean }): Promise<void> {
+export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
   let logStream: fs.WriteStream | null = null;
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   const stderrWrite = process.stderr.write.bind(process.stderr);
@@ -142,6 +142,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;
   const getProactiveStatus = () => proactive?.getStatus() ?? { enabled: false, lastTickAt: null, nextTickAt: null };
 
+  // Standby mode tracking (declared early so getStatus can reference it)
+  let isStandby = params.standby ?? false;
+  const getMode = () => (isStandby ? "standby" : "active");
+
   const http = await startHttpServer({
     port: effectivePort,
     stateDir: paths.stateDir,
@@ -177,6 +181,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
         notifyCooldownMs: config.scheduler.notifyCooldownMs,
       },
       proactive: getProactiveStatus(),
+      mode: getMode(),
     }),
     log,
     db,
@@ -184,25 +189,103 @@ export async function startGateway(params: { configPath: string; port?: number; 
     agentTracker,
   });
 
-  const tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
-  if (!tg) log("telegram: disabled");
-  if (tg) {
-    toolContext.telegram = {
-      sendOutput: tg.sendOutput,
-      allowFrom: config.channels.telegram.allowFrom ?? [],
-      allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
-    };
+  // Track services (tg and scheduler may be started later if in standby mode)
+  let tg: Awaited<ReturnType<typeof startTelegramBot>> = null;
+  let scheduler: ReturnType<typeof startJobScheduler> = null;
+
+  // Function to activate services (used both at startup and via /api/activate)
+  const activateServices = async () => {
+    if (!isStandby) return; // Already active
+    isStandby = false;
+    log("standby: activating services");
+
+    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
+    if (!tg) log("telegram: disabled");
+    if (tg) {
+      toolContext.telegram = {
+        sendOutput: tg.sendOutput,
+        allowFrom: config.channels.telegram.allowFrom ?? [],
+        allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
+      };
+    }
+
+    proactive = startProactiveHeartbeat({
+      config,
+      stateDir: paths.stateDir,
+      agent,
+      db,
+      telegram: tg,
+      log,
+    });
+    if (!proactive) log("proactive: disabled");
+
+    scheduler = startJobScheduler({
+      config,
+      agent,
+      db,
+      log,
+      getTools: () => registry.list(),
+      toolContext,
+      workspaceDir: paths.workspaceDir,
+    });
+    if (!scheduler) log("scheduler: disabled");
+
+    log("standby: services activated");
+  };
+
+  // Start services immediately if not in standby mode
+  if (!isStandby) {
+    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
+    if (!tg) log("telegram: disabled");
+    if (tg) {
+      toolContext.telegram = {
+        sendOutput: tg.sendOutput,
+        allowFrom: config.channels.telegram.allowFrom ?? [],
+        allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
+      };
+    }
+
+    proactive = startProactiveHeartbeat({
+      config,
+      stateDir: paths.stateDir,
+      agent,
+      db,
+      telegram: tg,
+      log,
+    });
+    if (!proactive) log("proactive: disabled");
+
+    scheduler = startJobScheduler({
+      config,
+      agent,
+      db,
+      log,
+      getTools: () => registry.list(),
+      toolContext,
+      workspaceDir: paths.workspaceDir,
+    });
+    if (!scheduler) log("scheduler: disabled");
+  } else {
+    log("standby: started in standby mode (health checks only)");
   }
 
-  proactive = startProactiveHeartbeat({
-    config,
-    stateDir: paths.stateDir,
-    agent,
-    db,
-    telegram: tg,
-    log,
+  // Activation endpoint for failover
+  http.app.post("/api/activate", async (c) => {
+    if (!isStandby) {
+      return c.json({ ok: true, message: "already active" });
+    }
+    try {
+      await activateServices();
+      return c.json({ ok: true, message: "activated" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: msg }, 500);
+    }
   });
-  if (!proactive) log("proactive: disabled");
+
+  http.app.get("/api/mode", (c) => {
+    return c.json({ mode: isStandby ? "standby" : "active" });
+  });
 
   http.app.post("/api/proactive/pause", (c) => {
     if (proactive) {
@@ -218,17 +301,6 @@ export async function startGateway(params: { configPath: string; port?: number; 
     }
     return c.json({ ok: false, error: "proactive not enabled" }, 400);
   });
-
-  const scheduler = startJobScheduler({
-    config,
-    agent,
-    db,
-    log,
-    getTools: () => registry.list(),
-    toolContext,
-    workspaceDir: paths.workspaceDir,
-  });
-  if (!scheduler) log("scheduler: disabled");
 
 
   const stop = async () => {
