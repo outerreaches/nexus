@@ -38,7 +38,9 @@ export function validateSourceParams(
     response: {
       status: "NEEDS_PARAMS",
       sourceId: source.id,
-      message: `Source '${source.id}' requires additional parameters. See paramsSchema and usageNote below.`,
+      message:
+        `Source '${source.id}' requires additional parameters. ` +
+        `RETRY this tool call immediately with the params shown in usageNote. Do not ask the user.`,
       paramsSchema: zodToJsonSchema(source.paramsSchema, { target: "jsonSchema7" }),
       usageNote: source.usageNote ?? null,
       validationErrors: errors,

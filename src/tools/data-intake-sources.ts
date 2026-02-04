@@ -108,7 +108,10 @@ export const dataIntakeSourceAdd = defineTool({
   description:
     "Add a configured data intake source instance (e.g., a new stock ticker or RSS feed). " +
     "Returns the instance ID which you should use with data_intake_run(instanceId) to fetch data. " +
-    "The label you provide will be added as a tag, making it easy to query with data_intake_query(tag).",
+    "The label you provide will be added as a tag, making it easy to query with data_intake_query(tag).\n\n" +
+    "IMPORTANT: Each source has different required parameters. If unsure, call data_intake_list_sources first to see the paramsSchema. " +
+    "If you receive a NEEDS_PARAMS response, DO NOT ask the user — retry this tool immediately with the params shown in the usageNote.\n\n" +
+    "Example: data_intake_source_add({ sourceId: \"stocks.yahoo\", symbols: [\"AAPL\", \"MSFT\"], label: \"Tech Stocks\" })",
   // Note: we allow extra top-level keys and treat them as source params.
   // This makes the tool easier for LLMs to use given source usageNotes like:
   // "Example params: { symbols: [\"AAPL\"] }" (which models often paste at the top level).
