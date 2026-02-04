@@ -125,7 +125,7 @@ export class AgentTracker {
     if (this.recent.length > this.maxRecent) {
       this.recent.length = this.maxRecent;
     }
-    this.pruneDatabase(cutoff);
+    // Note: Database pruning is now handled by the db_maintenance system job (180-day archival)
   }
 
   private get maxRecent(): number {
@@ -190,9 +190,4 @@ export class AgentTracker {
       );
   }
 
-  private pruneDatabase(cutoffMs: number): void {
-    const db = this.opts.db;
-    if (!db) return;
-    db.db.prepare("DELETE FROM agent_runs WHERE ended_at IS NOT NULL AND ended_at < ?").run(cutoffMs);
-  }
 }

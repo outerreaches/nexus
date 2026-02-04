@@ -55,6 +55,14 @@ const SchedulerSchema = z
   })
   .default({});
 
+const MaintenanceSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    archiveRetentionDays: z.number().int().min(30).max(365).default(180),
+    jobRunRetentionDays: z.number().int().min(7).max(180).default(60),
+    ttlCleanupEnabled: z.boolean().default(true),
+  })
+  .default({});
 
 const OpenAICompatProviderSchema = z
   .object({
@@ -81,6 +89,7 @@ export const ConfigSchema = z.object({
     .default({ telegram: {} }),
   proactive: ProactiveSchema,
   scheduler: SchedulerSchema,
+  maintenance: MaintenanceSchema,
   permissions: z
     .object({
       allowShellExec: z.boolean().default(false),
@@ -166,6 +175,12 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           maxConsecutiveFailures: 5,
           notifyAgentOnFailure: true,
           notifyCooldownMs: 300000,
+        },
+        maintenance: {
+          enabled: true,
+          archiveRetentionDays: 180,
+          jobRunRetentionDays: 60,
+          ttlCleanupEnabled: true,
         },
       },
       null,

@@ -271,6 +271,23 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_run_id);
     CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Database maintenance / cleanup tracking
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS cleanup_summaries (
+      id TEXT PRIMARY KEY,
+      table_name TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      rows_affected INTEGER NOT NULL,
+      date_range_start INTEGER,
+      date_range_end INTEGER,
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cleanup_summaries_table ON cleanup_summaries(table_name, created_at DESC);
   `);
 
   try {

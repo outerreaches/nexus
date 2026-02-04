@@ -17,6 +17,7 @@ import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
 import { startProactiveHeartbeat } from "./proactive.js";
 import { initDataIntake } from "../data-intake/index.js";
+import { ensureSystemJobs } from "../maintenance/system-jobs.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean }): Promise<void> {
   const log = (msg: string) => {
@@ -30,6 +31,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const db = await openDatabase(paths.dbPath);
   initDataIntake();
+  ensureSystemJobs({ db, nowMs: Date.now(), log });
 
   const effectivePort = params.port ?? config.port;
   const cdpPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? effectivePort + 2);
