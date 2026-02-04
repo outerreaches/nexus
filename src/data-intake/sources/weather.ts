@@ -25,7 +25,7 @@ export const weatherSource: DataSource = {
   id: "weather.open-meteo",
   name: "Open-Meteo Forecast",
   description: "Fetch hourly weather forecast (temperature, feels like, humidity, wind, conditions) from open-meteo.com",
-  usageNote: "Provide coordinates. Example params: { latitude: 37.7749, longitude: -122.4194 }.",
+  usageNote: "Pass coordinates at top level, e.g.: data_intake_source_add({ sourceId: \"weather.open-meteo\", latitude: 37.7749, longitude: -122.4194 }).",
   tags: ["weather", "forecast"],
   schemaVersion: 2,
   defaultTtlMs: 2 * 60 * 60_000,

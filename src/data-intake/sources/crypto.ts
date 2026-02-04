@@ -18,8 +18,8 @@ export const cryptoSource: DataSource = {
   name: "CoinGecko Spot Prices",
   description: "Fetch spot prices for CoinGecko ids (one record per token)",
   usageNote:
-    "Provide CoinGecko ids (not symbols). Each id is stored as a single subject. " +
-    "Example params: { ids: [\"bitcoin\", \"ethereum\", \"solana\"], currency: \"usd\" }.",
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"crypto.coingecko\", ids: [\"bitcoin\", \"ethereum\"], currency: \"usd\" }). " +
+    "Use CoinGecko ids (not symbols).",
   tags: ["crypto", "prices", "markets"],
   schemaVersion: 1,
   defaultTtlMs: 5 * 60_000,

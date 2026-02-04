@@ -29,7 +29,7 @@ export const rssSource: DataSource = {
   id: "rss.feed",
   name: "RSS Feed",
   description: "Fetch and normalize an RSS feed (each feed URL is a separate source instance)",
-  usageNote: "Provide a feedUrl. Example params: { feedUrl: \"https://example.com/rss.xml\", maxItems: 20 }.",
+  usageNote: "Pass feedUrl at top level, e.g.: data_intake_source_add({ sourceId: \"rss.feed\", feedUrl: \"https://example.com/rss.xml\" }).",
   tags: ["rss", "feeds", "news"],
   schemaVersion: 1,
   defaultTtlMs: 30 * 60_000,

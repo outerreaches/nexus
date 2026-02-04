@@ -20,9 +20,8 @@ export const kalshiSource: DataSource = {
   name: "Kalshi Markets",
   description: "Fetch market data from Kalshi public API",
   usageNote:
-    "Best practice: filter by `eventTicker` or `seriesTicker` when possible to avoid huge result sets. " +
-    "Use small `limit` and page with `cursor`. You can also fetch specific markets via `tickers`. " +
-    "Example params: { limit: 100, status: \"open\" } or { eventTicker: \"FED\", limit: 100 }.",
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"markets.kalshi\", eventTicker: \"FED\", limit: 100, status: \"open\" }). " +
+    "Filter by eventTicker or seriesTicker when possible to avoid huge result sets.",
   tags: ["markets", "prediction", "kalshi"],
   schemaVersion: 1,
   defaultTtlMs: 10 * 60_000,

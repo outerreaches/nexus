@@ -38,10 +38,8 @@ export const polymarketSource: DataSource = {
   name: "Polymarket Markets",
   description: "Fetch market data from Polymarket Gamma API",
   usageNote:
-    "Best practice: start narrow and page. Use `active: true` and a small `limit` (e.g. 20-50), " +
-    "then increase `offset` to page. Use `closed: true` only when explicitly needed. " +
-    "Market fields can be large/varied; prefer filtering by question/slug after ingest via data_intake_query. " +
-    "Example params: { active: true, limit: 50, offset: 0 }.",
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"markets.polymarket\", active: true, limit: 50 }). " +
+    "Best practice: start narrow with small limit, then page with offset. Use closed: true only when needed.",
   tags: ["markets", "prediction", "polymarket"],
   schemaVersion: 1,
   defaultTtlMs: 10 * 60_000,

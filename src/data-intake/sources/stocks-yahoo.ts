@@ -69,7 +69,7 @@ export const yahooStocksSource: DataSource = {
   name: "Yahoo Finance Stocks",
   description: "Fetch stock quotes via Yahoo Finance (unofficial API, no key required)",
   usageNote:
-    "Provide ticker symbols. Example params: { symbols: [\"AAPL\", \"MSFT\"] }. Note: This uses an unofficial API that may break without notice.",
+    "Pass symbols at top level, e.g.: data_intake_source_add({ sourceId: \"stocks.yahoo\", symbols: [\"AAPL\", \"MSFT\"] }). Note: This uses an unofficial API that may break without notice.",
   tags: ["stocks", "prices", "markets", "free"],
   schemaVersion: 1,
   defaultTtlMs: 10 * 60_000,

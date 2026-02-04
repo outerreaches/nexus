@@ -28,7 +28,7 @@ export const twelveDataSource: DataSource = {
   name: "Twelve Data Stocks",
   description: "Fetch stock prices via Twelve Data (price endpoint)",
   usageNote:
-    "Provide ticker symbols. Example params: { symbols: [\"AAPL\", \"MSFT\"], exchange: \"NASDAQ\" }. " +
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"stocks.twelvedata\", symbols: [\"AAPL\", \"MSFT\"] }). " +
     "Requires TWELVEDATA_API_KEY.",
   tags: ["stocks", "prices", "markets"],
   schemaVersion: 1,

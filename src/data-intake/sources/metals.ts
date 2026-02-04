@@ -17,7 +17,7 @@ export const metalsSource: DataSource = {
   id: "metals.openmetalsapi",
   name: "Open Metals Prices",
   description: "Fetch spot prices for metals using openmetalsapi.com",
-  usageNote: "Provide symbols (e.g. XAU, XAG) and base. Example params: { symbols: [\"XAU\", \"XAG\"], base: \"USD\" }.",
+  usageNote: "Pass symbols at top level, e.g.: data_intake_source_add({ sourceId: \"metals.openmetalsapi\", symbols: [\"XAU\", \"XAG\"], base: \"USD\" }).",
   tags: ["metals", "prices", "commodities"],
   schemaVersion: 1,
   defaultTtlMs: 30 * 60_000,

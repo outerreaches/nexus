@@ -155,9 +155,19 @@ export const dataIntakeSourceAdd = defineTool({
       return `ERROR: unknown source '${args.sourceId}'. Available: ${available}`;
     }
     const extraParams = Object.fromEntries(
-      Object.entries(args as Record<string, unknown>).filter(([key]) => !["sourceId", "label", "intervalMs", "params"].includes(key)),
+      Object.entries(args as Record<string, unknown>).filter(([key]) => !["sourceId", "label", "intervalMs", "params", "params_json"].includes(key)),
     );
-    const mergedParams = { ...extraParams, ...(args.params ?? {}) };
+    // Defensive: if agent mistakenly passes params_json (string), parse it
+    let parsedParamsJson: Record<string, unknown> = {};
+    const rawParamsJson = (args as Record<string, unknown>).params_json;
+    if (typeof rawParamsJson === "string") {
+      try {
+        parsedParamsJson = JSON.parse(rawParamsJson) as Record<string, unknown>;
+      } catch {
+        // ignore parse errors
+      }
+    }
+    const mergedParams = { ...extraParams, ...parsedParamsJson, ...(args.params ?? {}) };
     const validation = validateSourceParams(source, mergedParams);
     if (!validation.ok) {
       return JSON.stringify(validation.response, null, 2);
@@ -236,9 +246,21 @@ export const dataIntakeSourceUpdate = defineTool({
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
     const extraParams = Object.fromEntries(
-      Object.entries(args as Record<string, unknown>).filter(([key]) => !["id", "label", "intervalMs", "params", "enabled"].includes(key)),
+      Object.entries(args as Record<string, unknown>).filter(([key]) => !["id", "label", "intervalMs", "params", "params_json", "enabled"].includes(key)),
     );
-    const mergedParams = args.params || Object.keys(extraParams).length > 0 ? { ...extraParams, ...(args.params ?? {}) } : undefined;
+    // Defensive: if agent mistakenly passes params_json (string), parse it
+    let parsedParamsJson: Record<string, unknown> = {};
+    const rawParamsJson = (args as Record<string, unknown>).params_json;
+    if (typeof rawParamsJson === "string") {
+      try {
+        parsedParamsJson = JSON.parse(rawParamsJson) as Record<string, unknown>;
+      } catch {
+        // ignore parse errors
+      }
+    }
+    const mergedParams = args.params || Object.keys(extraParams).length > 0 || Object.keys(parsedParamsJson).length > 0
+      ? { ...extraParams, ...parsedParamsJson, ...(args.params ?? {}) }
+      : undefined;
     if (mergedParams) {
       const existing = getIntakeSource({ db: db as any, id: args.id });
       if (!existing) return "ERROR: source not found";

@@ -18,7 +18,7 @@ export const stocksSource: DataSource = {
   id: "stocks.alphavantage",
   name: "Alpha Vantage Stocks",
   description: "Fetch stock quotes via Alpha Vantage (GLOBAL_QUOTE)",
-  usageNote: "Provide ticker symbols. Example params: { symbols: [\"AAPL\", \"MSFT\"] } (requires ALPHAVANTAGE_API_KEY).",
+  usageNote: "Pass symbols at top level, e.g.: data_intake_source_add({ sourceId: \"stocks.alphavantage\", symbols: [\"AAPL\", \"MSFT\"] }). Requires ALPHAVANTAGE_API_KEY.",
   tags: ["stocks", "prices", "markets"],
   schemaVersion: 1,
   defaultTtlMs: 10 * 60_000,

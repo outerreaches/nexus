@@ -17,7 +17,7 @@ export const cryptoCompareSource: DataSource = {
   name: "CryptoCompare Spot Prices",
   description: "Fetch crypto spot prices via CryptoCompare (pricemulti)",
   usageNote:
-    "Provide crypto symbols and quote currencies. Example params: { symbols: [\"BTC\", \"ETH\"], currencies: [\"USD\", \"EUR\"] }. " +
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"crypto.cryptocompare\", symbols: [\"BTC\", \"ETH\"], currencies: [\"USD\"] }). " +
     "Requires CRYPTOCOMPARE_API_KEY.",
   tags: ["crypto", "prices", "markets"],
   schemaVersion: 1,

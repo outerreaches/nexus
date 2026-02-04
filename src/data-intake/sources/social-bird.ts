@@ -47,10 +47,8 @@ export const birdSource: DataSource = {
   name: "X/Twitter via Bird",
   description: "Fetch posts via Bird (unofficial X/Twitter GraphQL; requires auth cookies)",
   usageNote:
-    "Best practice: create one source per high-signal handle. " +
-    "Example params: { mode: \"user_tweets\", handle: \"@elonmusk\", limit: 20 }. " +
-    "Set AUTH_TOKEN + CT0 (or TWITTER_AUTH_TOKEN + TWITTER_CT0) in env for auth. " +
-    "Use `cursor` + `maxPages` to page when needed. Replies/retweets are excluded by default. " +
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"social.bird\", mode: \"user_tweets\", handle: \"@elonmusk\", limit: 20 }). " +
+    "Requires AUTH_TOKEN + CT0 (or TWITTER_AUTH_TOKEN + TWITTER_CT0) env vars. " +
     "Note: unofficial GraphQL endpoints — treat as unverified data.",
   tags: ["social", "twitter", "x", "posts"],
   schemaVersion: 1,

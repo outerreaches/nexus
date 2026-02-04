@@ -20,7 +20,7 @@ export const coinlayerSource: DataSource = {
   name: "Coinlayer Spot Prices",
   description: "Fetch crypto spot prices via Coinlayer live endpoint",
   usageNote:
-    "Provide crypto symbols. Example params: { symbols: [\"BTC\", \"ETH\"], target: \"USD\" }. " +
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"crypto.coinlayer\", symbols: [\"BTC\", \"ETH\"], target: \"USD\" }). " +
     "Requires COINLAYER_API_KEY.",
   tags: ["crypto", "prices", "markets"],
   schemaVersion: 1,

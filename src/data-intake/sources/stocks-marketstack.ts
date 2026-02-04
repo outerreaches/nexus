@@ -45,8 +45,8 @@ export const marketstackSource: DataSource = {
   name: "Marketstack Stocks",
   description: "Fetch latest stock data via Marketstack (EOD or intraday latest)",
   usageNote:
-    "Provide ticker symbols. Example params: { symbols: [\"AAPL\", \"MSFT\"], dataType: \"eod\" }. " +
-    "Requires MARKETSTACK_API_KEY. Use dataType: \"intraday\" for intraday latest if your plan supports it.",
+    "Pass params at top level, e.g.: data_intake_source_add({ sourceId: \"stocks.marketstack\", symbols: [\"AAPL\", \"MSFT\"] }). " +
+    "Requires MARKETSTACK_API_KEY. Use dataType: \"intraday\" for intraday if your plan supports it.",
   tags: ["stocks", "prices", "markets"],
   schemaVersion: 1,
   defaultTtlMs: 10 * 60_000,
