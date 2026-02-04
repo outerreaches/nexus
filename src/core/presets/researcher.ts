@@ -31,6 +31,7 @@ export const preset: AgentPreset = {
     "````",
     "",
     "## Rules",
+    "- If the task includes a `Blackboard title:` line, use that exact string as the blackboard entry title.",
     "- If citations are required by the task, only present factual claims with a source URL you have fetched.",
     "- If a search returns no results, say so explicitly. Do NOT fabricate information.",
     "- If `web_search` returns a rate-limit (HTTP 429), stop searching, summarize what you have, and report the limitation.",

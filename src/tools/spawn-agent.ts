@@ -119,6 +119,8 @@ export const spawnAgent = defineTool({
     const workerDepth = parentDepth + 1;
     const isMaxDepth = maxDepth >= 0 && workerDepth >= maxDepth;
 
+    const { title: blackboardTitle, cleanedTask } = parseBlackboardTitle(args.task, preset.name);
+
     // Build worker system prompt
     const now = new Date();
     const basePrompt = await buildPresetSystemPrompt({
@@ -140,6 +142,8 @@ export const spawnAgent = defineTool({
       `- code: ${ctx.codeDir} (source code, if enabled)`,
       "",
       "We have a large list of verified data sources available via data intake tools. Use them when possible.",
+      `Blackboard title: ${blackboardTitle}`,
+      "When writing your primary result to the blackboard, use the exact Blackboard title above.",
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
       isMaxDepth
@@ -166,7 +170,7 @@ export const spawnAgent = defineTool({
         ctx,
         preset,
         systemPrompt,
-        task: args.task,
+        task: cleanedTask,
         budget,
         runId: runId ?? null,
         effectiveParentRunId,
@@ -174,19 +178,20 @@ export const spawnAgent = defineTool({
         workerDepth,
         maxDepth,
         tracker,
-      });
-    } else {
-      return runInProcess({
-        ctx,
-        preset,
-        systemPrompt,
-        task: args.task,
-        budget,
-        runId: runId ?? null,
-        workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
-        tracker,
+        blackboardTitle,
       });
     }
+    return runInProcess({
+      ctx,
+      preset,
+      systemPrompt,
+      task: cleanedTask,
+      budget,
+      runId: runId ?? null,
+      workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
+      tracker,
+      blackboardTitle,
+    });
   },
 });
 
@@ -203,8 +208,9 @@ async function runInProcess(params: {
   runId: string | null;
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
+  blackboardTitle: string;
 }): Promise<string> {
-  const { ctx, preset, systemPrompt, task, budget, runId, workerTools, tracker } = params;
+  const { ctx, preset, systemPrompt, task, budget, runId, workerTools, tracker, blackboardTitle } = params;
   const llm = ctx.llm!;
 
   // Create worker ToolContext (inherit from orchestrator but with worker identity)
@@ -266,6 +272,7 @@ async function runInProcess(params: {
       output: result.output,
       toolCallsUsed: result.toolCallsUsed,
       iterationsUsed: result.iterationsUsed,
+      blackboardTitle,
     };
     return JSON.stringify(returnValue, null, 2);
   } catch (e) {
@@ -296,8 +303,22 @@ async function runIsolated(params: {
   workerDepth: number;
   maxDepth: number;
   tracker: AgentTracker | undefined;
+  blackboardTitle: string;
 }): Promise<string> {
-  const { ctx, preset, systemPrompt, task, budget, runId, effectiveParentRunId, agentId, workerDepth, maxDepth, tracker } = params;
+  const {
+    ctx,
+    preset,
+    systemPrompt,
+    task,
+    budget,
+    runId,
+    effectiveParentRunId,
+    agentId,
+    workerDepth,
+    maxDepth,
+    tracker,
+    blackboardTitle,
+  } = params;
 
   // Require llmConfig to serialize for the worker
   if (!ctx.llmConfig) {
@@ -329,7 +350,7 @@ async function runIsolated(params: {
       if (resolved) return;
       resolved = true;
       ctx.isolatedWorkers?.delete(child);
-      resolve(resultJson);
+      resolve(attachBlackboardTitle(resultJson, blackboardTitle));
     };
 
     // Timeout handler
@@ -501,4 +522,49 @@ function safeJsonParse(raw: string): unknown {
   } catch {
     return [];
   }
+}
+
+function parseBlackboardTitle(task: string, presetName: string): { title: string; cleanedTask: string } {
+  const lines = task.split(/\r?\n/);
+  let explicit: string | null = null;
+  const cleanedLines = lines.filter((line) => {
+    const match = line.match(/^\s*Blackboard title\s*:\s*(.+)\s*$/i);
+    if (match) {
+      explicit = match[1].trim();
+      return false;
+    }
+    return true;
+  });
+  const cleanedTask = cleanedLines.join("\n").trim() || task.trim();
+  const title = explicit && explicit.length > 0 ? explicit : defaultBlackboardTitle(presetName, cleanedTask);
+  return { title, cleanedTask };
+}
+
+function defaultBlackboardTitle(presetName: string, task: string): string {
+  const normalized = task.replace(/\s+/g, " ").trim();
+  const prefix = presetName === "researcher" || presetName === "analyst"
+    ? "Finding: "
+    : presetName === "coder"
+      ? "Summary: "
+      : presetName === "trader"
+        ? "Trade: "
+        : "Result: ";
+  const maxBaseLen = Math.max(20, 200 - prefix.length);
+  const base = normalized.length > maxBaseLen
+    ? normalized.slice(0, maxBaseLen - 1).trimEnd() + "…"
+    : normalized;
+  return prefix + (base || "Untitled task");
+}
+
+function attachBlackboardTitle(resultJson: string, blackboardTitle: string): string {
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      parsed.blackboardTitle = blackboardTitle;
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return resultJson;
 }
