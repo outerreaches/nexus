@@ -204,7 +204,7 @@ else
     echo ""
     echo "NFS mounts:"
     mount | grep "/data/code" || true
-  VMSCRIPT
+VMSCRIPT
 
   # Step 15: Setup port forwarding
   log "Setting up port forwarding..."
