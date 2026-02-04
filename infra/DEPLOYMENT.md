@@ -27,10 +27,10 @@ This guide sets up Nexus on a host workstation with:
 │                                                                              │
 │  /sync/Nexus/ ←── Syncthing (host)                                          │
 │       │                                                                      │
-│       ▼ (virtiofs mount)                                                     │
+│       ▼ (NFS mount)                                                          │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                    Linux VM (4GB RAM, 2 vCPU)                          │  │
-│  │  /data/code/Nexus/ ← mounted from host                                 │  │
+│  │  /data/code/      ← NFS from host (/sync/Nexus)                        │  │
 │  │  /data/nexus/      ← state, database                                   │  │
 │  │  /data/workspace/  ← agent workspace                                   │  │
 │  │                                                                        │  │
@@ -101,6 +101,24 @@ systemctl --user status syncthing
 2. Go to **Actions → Settings → GUI**
    - Set GUI Listen Address to `0.0.0.0:8384` (to access from laptop)
 3. Note down the **Device ID** (Actions → Show ID)
+
+### 1.4 Configure NFS Export (Host)
+
+```bash
+# Install NFS server
+sudo apt install -y nfs-kernel-server
+
+# Sync directory to export
+SYNC_DIR=/home/$USER/sync/Nexus
+
+# Host IP on libvirt network (usually 192.168.122.1)
+HOST_IP=$(ip -4 addr show virbr0 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+')
+
+# Add export (only once)
+echo "$SYNC_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+```
 
 ---
 
@@ -180,6 +198,9 @@ cd ~/vm-configs
 # Get your SSH public key
 cat ~/.ssh/id_ed25519.pub  # or id_rsa.pub
 
+# NOTE: Update the NFS host IP + sync path in the cloud-init file below.
+# The libvirt default host IP is usually 192.168.122.1 and the sync path is /home/$USER/sync/Nexus.
+
 # Create cloud-init config
 cat > cloud-init.yaml << 'EOF'
 #cloud-config
@@ -196,11 +217,14 @@ packages:
   - docker-compose-v2
   - git
   - curl
+  - nfs-common
 runcmd:
   - systemctl enable docker
   - usermod -aG docker nexus
   - mkdir -p /data/{code,nexus,workspace}
   - chown -R nexus:nexus /data
+  - echo "192.168.122.1:/home/YOUR_USERNAME/sync/Nexus /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
+  - mount -a || true
 EOF
 
 # Edit to add your actual SSH key
@@ -223,7 +247,7 @@ cloud-localds ~/vm-configs/cloud-init.iso ~/vm-configs/cloud-init.yaml
 ### 3.4 Create and Start VM
 
 ```bash
-# Create VM with virtiofs for shared folder
+# Create VM (NFS mount configured via cloud-init)
 sudo virt-install \
   --name nexus-vm \
   --memory 4096 \
@@ -234,8 +258,6 @@ sudo virt-install \
   --network network=default \
   --graphics none \
   --console pty,target_type=serial \
-  --memorybacking source.type=memfd,access.mode=shared \
-  --filesystem source.dir=/home/$USER/sync/Nexus,target.dir=nexus-code,driver.type=virtiofs \
   --import \
   --noautoconsole
 
@@ -253,14 +275,14 @@ echo "VM IP: $VM_IP"
 # SSH into VM
 ssh nexus@$VM_IP
 
-# Mount the shared folder
+# Ensure NFS mount is active (configured via cloud-init)
 sudo mkdir -p /data/code
-echo 'nexus-code /data/code virtiofs defaults 0 0' | sudo tee -a /etc/fstab
-sudo mount -a
+sudo mount -a || true
 
 # Verify mount
 ls /data/code/
 # Should show Nexus files
+mount | grep "/data/code" || true
 
 # Create other directories
 sudo mkdir -p /data/{nexus,workspace}

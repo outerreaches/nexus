@@ -25,7 +25,7 @@ VM_MEMORY="4096"  # 4GB
 VM_CPUS="2"
 VM_DISK_SIZE="20G"
 SYNC_DIR="$HOME/sync/Nexus"
-VM_CONFIG_DIR="$HOME/vm-configs"
+VM_CONFIG_DIR="/var/lib/libvirt/boot"  # Use libvirt-accessible directory
 CLOUD_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 
 log "Starting Nexus VM setup..."
@@ -43,7 +43,8 @@ sudo apt install -y \
   syncthing \
   socat \
   curl \
-  jq
+  jq \
+  nfs-kernel-server
 
 # Step 2: Configure user groups
 log "Configuring user groups..."
@@ -58,7 +59,8 @@ systemctl --user enable --now syncthing
 # Step 4: Create directories
 log "Creating directories..."
 mkdir -p "$SYNC_DIR"
-mkdir -p "$VM_CONFIG_DIR"
+sudo mkdir -p "$VM_CONFIG_DIR"
+sudo chown $USER:$USER "$VM_CONFIG_DIR"
 
 # Step 5: Download cloud image
 log "Downloading Ubuntu cloud image..."
@@ -79,7 +81,20 @@ else
   SSH_KEY=$(cat ~/.ssh/id_ed25519.pub)
 fi
 
-# Step 7: Create cloud-init config
+# Step 7: Set up NFS export on host
+log "Setting up NFS export for shared folder..."
+# Get host IP on libvirt network
+HOST_IP=$(ip -4 addr show virbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' || echo "192.168.122.1")
+
+# Add NFS export for sync directory
+NFS_EXPORT="$SYNC_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)"
+if ! grep -q "$SYNC_DIR" /etc/exports 2>/dev/null; then
+  echo "$NFS_EXPORT" | sudo tee -a /etc/exports
+  sudo exportfs -ra
+  sudo systemctl enable --now nfs-kernel-server
+fi
+
+# Step 8: Create cloud-init config
 log "Creating cloud-init configuration..."
 cat > "$VM_CONFIG_DIR/cloud-init.yaml" << EOF
 #cloud-config
@@ -96,18 +111,21 @@ packages:
   - docker-compose-v2
   - git
   - curl
+  - nfs-common
 runcmd:
   - systemctl enable docker
   - usermod -aG docker nexus
   - mkdir -p /data/{code,nexus,workspace}
   - chown -R nexus:nexus /data
+  - echo "$HOST_IP:$SYNC_DIR /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
+  - mount -a || true
 EOF
 
-# Step 8: Create cloud-init ISO
+# Step 9: Create cloud-init ISO
 log "Creating cloud-init ISO..."
 cloud-localds "$VM_CONFIG_DIR/cloud-init.iso" "$VM_CONFIG_DIR/cloud-init.yaml"
 
-# Step 9: Create VM disk
+# Step 10: Create VM disk
 log "Creating VM disk..."
 if [ -f /var/lib/libvirt/images/nexus-vm.qcow2 ]; then
   warn "VM disk already exists. Skipping creation."
@@ -118,7 +136,7 @@ else
     /var/lib/libvirt/images/nexus-vm.qcow2 "$VM_DISK_SIZE"
 fi
 
-# Step 10: Check if VM already exists
+# Step 11: Check if VM already exists
 if virsh list --all | grep -q "$VM_NAME"; then
   warn "VM '$VM_NAME' already exists."
   read -p "Delete and recreate? (y/N) " -n 1 -r
@@ -136,7 +154,7 @@ if virsh list --all | grep -q "$VM_NAME"; then
   fi
 fi
 
-# Step 11: Create VM
+# Step 12: Create VM
 log "Creating VM..."
 sudo virt-install \
   --name "$VM_NAME" \
@@ -148,8 +166,6 @@ sudo virt-install \
   --network network=default \
   --graphics none \
   --console pty,target_type=serial \
-  --memorybacking source.type=memfd,access.mode=shared \
-  --filesystem "source.dir=$SYNC_DIR,target.dir=nexus-code,driver.type=virtiofs" \
   --import \
   --noautoconsole
 
@@ -177,19 +193,18 @@ else
   # Step 14: Configure VM
   log "Configuring VM..."
   ssh -o StrictHostKeyChecking=no "nexus@$VM_IP" << 'VMSCRIPT'
-    # Mount virtiofs share
-    sudo mkdir -p /data/code
-    echo 'nexus-code /data/code virtiofs defaults 0 0' | sudo tee -a /etc/fstab
-    sudo mount -a
-
-    # Create other directories
-    sudo mkdir -p /data/{nexus,workspace}
+    # Ensure mount points exist (NFS mount configured via cloud-init)
+    sudo mkdir -p /data/code /data/nexus /data/workspace
+    sudo mount -a || true
     sudo chown -R nexus:nexus /data
 
     # Verify
     echo "Mounted directories:"
     ls -la /data/
-VMSCRIPT
+    echo ""
+    echo "NFS mounts:"
+    mount | grep "/data/code" || true
+  VMSCRIPT
 
   # Step 15: Setup port forwarding
   log "Setting up port forwarding..."
