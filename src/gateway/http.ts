@@ -913,6 +913,10 @@ function renderDashboard(params: {
         gap: 8px;
         flex-wrap: wrap;
       }
+      .section-header .tab-bar {
+        margin-left: auto;
+        justify-content: flex-end;
+      }
       .tab-btn {
         background: transparent;
         border: 1px solid var(--line);
@@ -937,6 +941,9 @@ function renderDashboard(params: {
       }
       .tab-panel.active {
         display: block;
+      }
+      .graph-wrap .tab-panel {
+        margin-top: 0;
       }
       .log-controls {
         display: flex;
@@ -1243,12 +1250,12 @@ function renderDashboard(params: {
         <div class="section-header">
           <h2>Agents</h2>
           <div class="tab-bar" role="tablist">
-            <button class="tab-btn active" data-tab="agents-view" type="button">Agent View</button>
+            <button class="tab-btn active" data-tab="agents-view" type="button">Agents</button>
             <button class="tab-btn" data-tab="docker-logs" type="button">Docker Logs</button>
           </div>
         </div>
-        <div class="tab-panel active" id="tab-agents-view">
-          <div class="graph-wrap">
+        <div class="graph-wrap">
+          <div class="tab-panel active" id="tab-agents-view">
             <div class="graph-header">
               <span>Hierarchy (last ${params.agentWindowMinutes}m)</span>
               <span class="muted">Drag to rotate, scroll to zoom</span>
@@ -1267,42 +1274,46 @@ function renderDashboard(params: {
               <div id="refresh-indicator" class="refresh-indicator"></div>
             </div>
           </div>
-          <div class="split">
-            <div>
-              <h3>Running</h3>
-              <div id="table-active">${renderAgentTable(params.agents.active)}</div>
+          <div class="tab-panel" id="tab-docker-logs">
+            <div class="graph-header">
+              <span>Docker Logs (gateway.log)</span>
+              <span class="muted">Tail</span>
             </div>
-            <div>
-              <h3>Recent (${params.agentWindowMinutes}m)</h3>
-              <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
+            <div class="log-controls">
+              <button id="logs-refresh" class="graph-btn" type="button">Refresh</button>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                <input id="logs-auto" type="checkbox" checked />
+                Auto refresh
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                Max chars
+                <input id="logs-max" class="inline-input" type="number" min="200" max="200000" step="1000" value="50000" />
+              </label>
             </div>
-          </div>
-          <div class="heartbeat-panel ${heartbeatPanelClass}" id="heartbeat-panel">
-            <div class="heartbeat-title">
-              <span id="heartbeat-label">${heartbeatLabel}</span>
-              ${heartbeat.enabled ? `<div class="heartbeat-controls">
-                <button class="heartbeat-btn" id="heartbeat-pause" ${heartbeat.paused ? 'style="display:none"' : ""}>Pause</button>
-                <button class="heartbeat-btn" id="heartbeat-resume" ${!heartbeat.paused ? 'style="display:none"' : ""}>Resume</button>
-              </div>` : ""}
-            </div>
-            <div class="heartbeat-row"><span class="muted">Last:</span> <span id="heartbeat-last">${escapeHtml(heartbeatLast)}</span></div>
-            <div class="heartbeat-row"><span class="muted">Next:</span> <span id="heartbeat-next">${escapeHtml(heartbeatNext)}</span></div>
-            <div class="heartbeat-row"><span class="muted">Status:</span> <span id="heartbeat-status">${escapeHtml(heartbeatStatus)}</span></div>
+            <pre id="docker-logs" class="log-viewer">Loading logs…</pre>
           </div>
         </div>
-        <div class="tab-panel" id="tab-docker-logs">
-          <div class="log-controls">
-            <button id="logs-refresh" class="graph-btn" type="button">Refresh</button>
-            <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
-              <input id="logs-auto" type="checkbox" checked />
-              Auto refresh
-            </label>
-            <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
-              Max chars
-              <input id="logs-max" class="inline-input" type="number" min="200" max="200000" step="1000" value="50000" />
-            </label>
+        <div class="split">
+          <div>
+            <h3>Running</h3>
+            <div id="table-active">${renderAgentTable(params.agents.active)}</div>
           </div>
-          <pre id="docker-logs" class="log-viewer">Loading logs…</pre>
+          <div>
+            <h3>Recent (${params.agentWindowMinutes}m)</h3>
+            <div id="table-recent">${renderAgentTable(params.agents.recent)}</div>
+          </div>
+        </div>
+        <div class="heartbeat-panel ${heartbeatPanelClass}" id="heartbeat-panel">
+          <div class="heartbeat-title">
+            <span id="heartbeat-label">${heartbeatLabel}</span>
+            ${heartbeat.enabled ? `<div class="heartbeat-controls">
+              <button class="heartbeat-btn" id="heartbeat-pause" ${heartbeat.paused ? 'style="display:none"' : ""}>Pause</button>
+              <button class="heartbeat-btn" id="heartbeat-resume" ${!heartbeat.paused ? 'style="display:none"' : ""}>Resume</button>
+            </div>` : ""}
+          </div>
+          <div class="heartbeat-row"><span class="muted">Last:</span> <span id="heartbeat-last">${escapeHtml(heartbeatLast)}</span></div>
+          <div class="heartbeat-row"><span class="muted">Next:</span> <span id="heartbeat-next">${escapeHtml(heartbeatNext)}</span></div>
+          <div class="heartbeat-row"><span class="muted">Status:</span> <span id="heartbeat-status">${escapeHtml(heartbeatStatus)}</span></div>
         </div>
       </section>
 
