@@ -774,15 +774,8 @@ function renderDashboard(params: {
         background: linear-gradient(180deg, #0d120d 0%, #0a0a0a 100%);
         box-shadow: 0 2px 20px rgba(0, 255, 65, 0.1);
       }
-      .header-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 8px;
-      }
       h1 {
-        margin: 0;
+        margin: 0 0 8px;
         font-size: 28px;
         text-transform: uppercase;
         letter-spacing: 4px;
@@ -799,6 +792,9 @@ function renderDashboard(params: {
         text-shadow: var(--glow);
       }
       .mode-pill {
+        float: right;
+        display: inline-block;
+        margin-left: 12px;
         font-size: 11px;
         letter-spacing: 2px;
         text-transform: uppercase;
@@ -1314,11 +1310,11 @@ function renderDashboard(params: {
   </head>
   <body>
     <header>
-      <div class="header-row">
-        <h1>Nexus Dashboard</h1>
-        <div class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</div>
+      <h1>Nexus Dashboard</h1>
+      <div class="meta">
+        Updated ${escapeHtml(updatedAt)} · Auto-refresh 15s
+        <span class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</span>
       </div>
-      <div class="meta">Updated ${escapeHtml(updatedAt)} · Auto-refresh 15s</div>
     </header>
     <main>
       <section>
