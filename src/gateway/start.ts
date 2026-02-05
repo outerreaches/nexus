@@ -3,6 +3,8 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
 
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
@@ -146,6 +148,87 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let isStandby = params.standby ?? false;
   const getMode = () => (isStandby ? "standby" : "active");
 
+  // Active lease (prevents dual-active containers)
+  const leaseKey = "gateway_active";
+  const leaseHolderId = `${os.hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
+  const leaseTtlMs = Math.max(10_000, envInt("NEXUS_ACTIVE_LEASE_TTL_MS") ?? 45_000);
+  const leaseRenewMs = Math.max(5_000, Math.floor(leaseTtlMs / 3));
+  let leaseHeld = false;
+  let leaseExpiresAt: number | null = null;
+  let leaseTimer: NodeJS.Timeout | null = null;
+
+  const acquireActiveLease = (nowMs: number): { ok: boolean; holderId?: string; expiresAt?: number } => {
+    const expiresAt = nowMs + leaseTtlMs;
+    const tx = db.db.transaction(() => {
+      const row = db.db.prepare("SELECT holder_id, expires_at FROM gateway_leases WHERE key = ?").get(leaseKey) as
+        | { holder_id: string; expires_at: number }
+        | undefined;
+      if (!row) {
+        db.db
+          .prepare(
+            "INSERT INTO gateway_leases (key, holder_id, created_at, renewed_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(leaseKey, leaseHolderId, nowMs, nowMs, expiresAt);
+        return { ok: true, holderId: leaseHolderId, expiresAt };
+      }
+      if (row.expires_at <= nowMs || row.holder_id === leaseHolderId) {
+        db.db
+          .prepare("UPDATE gateway_leases SET holder_id = ?, renewed_at = ?, expires_at = ? WHERE key = ?")
+          .run(leaseHolderId, nowMs, expiresAt, leaseKey);
+        return { ok: true, holderId: leaseHolderId, expiresAt };
+      }
+      return { ok: false, holderId: row.holder_id, expiresAt: row.expires_at };
+    });
+    return tx();
+  };
+
+  const renewActiveLease = (nowMs: number): boolean => {
+    const res = db.db
+      .prepare("UPDATE gateway_leases SET renewed_at = ?, expires_at = ? WHERE key = ? AND holder_id = ?")
+      .run(nowMs, nowMs + leaseTtlMs, leaseKey, leaseHolderId);
+    if (res.changes > 0) {
+      leaseHeld = true;
+      leaseExpiresAt = nowMs + leaseTtlMs;
+      return true;
+    }
+    return false;
+  };
+
+  const releaseActiveLease = () => {
+    try {
+      db.db.prepare("DELETE FROM gateway_leases WHERE key = ? AND holder_id = ?").run(leaseKey, leaseHolderId);
+    } catch {
+      // ignore
+    }
+    leaseHeld = false;
+    leaseExpiresAt = null;
+  };
+
+  const startLeaseRenewal = (deactivate: (reason?: string) => Promise<void>) => {
+    if (leaseTimer) clearInterval(leaseTimer);
+    leaseTimer = setInterval(() => {
+      if (!leaseHeld) return;
+      const ok = renewActiveLease(Date.now());
+      if (!ok) {
+        leaseHeld = false;
+        leaseExpiresAt = null;
+        void deactivate("lost active lease");
+      }
+    }, leaseRenewMs);
+  };
+
+  const ensureActiveLease = (
+    deactivate: (reason?: string) => Promise<void>,
+  ): { ok: boolean; holderId?: string; expiresAt?: number } => {
+    const res = acquireActiveLease(Date.now());
+    if (res.ok) {
+      leaseHeld = true;
+      leaseExpiresAt = res.expiresAt ?? null;
+      startLeaseRenewal(deactivate);
+    }
+    return res;
+  };
+
   const http = await startHttpServer({
     port: effectivePort,
     stateDir: paths.stateDir,
@@ -182,6 +265,14 @@ export async function startGateway(params: { configPath: string; port?: number; 
       },
       proactive: getProactiveStatus(),
       mode: getMode(),
+      activeLease: {
+        key: leaseKey,
+        holderId: leaseHolderId,
+        held: leaseHeld,
+        expiresAt: leaseExpiresAt,
+        ttlMs: leaseTtlMs,
+        renewMs: leaseRenewMs,
+      },
     }),
     log,
     db,
@@ -193,12 +284,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let tg: Awaited<ReturnType<typeof startTelegramBot>> = null;
   let scheduler: ReturnType<typeof startJobScheduler> = null;
 
-  // Function to activate services (used both at startup and via /api/activate)
-  const activateServices = async () => {
-    if (!isStandby) return; // Already active
-    isStandby = false;
-    log("standby: activating services");
-
+  const startServices = async () => {
     tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
     if (!tg) log("telegram: disabled");
     if (tg) {
@@ -229,54 +315,76 @@ export async function startGateway(params: { configPath: string; port?: number; 
       workspaceDir: paths.workspaceDir,
     });
     if (!scheduler) log("scheduler: disabled");
+  };
 
-    log("standby: services activated");
+  const deactivateServices = async (reason?: string) => {
+    if (reason) log(`standby: ${reason}`);
+    if (leaseTimer) {
+      clearInterval(leaseTimer);
+      leaseTimer = null;
+    }
+    releaseActiveLease();
+    scheduler?.stop();
+    scheduler = null;
+    proactive?.stop();
+    proactive = null;
+    await tg?.stop();
+    tg = null;
+    toolContext.telegram = undefined as unknown;
+    isStandby = true;
+  };
+
+  const activateServices = async (): Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> => {
+    if (!isStandby) return { ok: true, already: true };
+    const lease = ensureActiveLease(deactivateServices);
+    if (!lease.ok) return { ok: false, holderId: lease.holderId, expiresAt: lease.expiresAt };
+    isStandby = false;
+    log("standby: activating services");
+    try {
+      await startServices();
+      log("standby: services activated");
+      return { ok: true };
+    } catch (err) {
+      await deactivateServices("activation failed");
+      throw err;
+    }
   };
 
   // Start services immediately if not in standby mode
   if (!isStandby) {
-    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
-    if (!tg) log("telegram: disabled");
-    if (tg) {
-      toolContext.telegram = {
-        sendOutput: tg.sendOutput,
-        allowFrom: config.channels.telegram.allowFrom ?? [],
-        allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
-      };
+    const lease = ensureActiveLease(deactivateServices);
+    if (!lease.ok) {
+      isStandby = true;
+      log(`standby: active lease held by ${lease.holderId ?? "unknown"}; staying standby`);
+    } else {
+      try {
+        await startServices();
+        log("standby: services activated");
+      } catch (err) {
+        await deactivateServices("activation failed");
+        throw err;
+      }
     }
-
-    proactive = startProactiveHeartbeat({
-      config,
-      stateDir: paths.stateDir,
-      agent,
-      db,
-      telegram: tg,
-      log,
-    });
-    if (!proactive) log("proactive: disabled");
-
-    scheduler = startJobScheduler({
-      config,
-      agent,
-      db,
-      log,
-      getTools: () => registry.list(),
-      toolContext,
-      workspaceDir: paths.workspaceDir,
-    });
-    if (!scheduler) log("scheduler: disabled");
   } else {
     log("standby: started in standby mode (health checks only)");
   }
 
   // Activation endpoint for failover
   http.app.post("/api/activate", async (c) => {
-    if (!isStandby) {
-      return c.json({ ok: true, message: "already active" });
-    }
     try {
-      await activateServices();
-      return c.json({ ok: true, message: "activated" });
+      const res = await activateServices();
+      if (res.ok) {
+        return c.json({ ok: true, message: res.already ? "already active" : "activated" });
+      }
+      return c.json(
+        {
+          ok: false,
+          error: "active lease already held",
+          holderId: res.holderId ?? null,
+          expiresAt: res.expiresAt ?? null,
+        },
+        409,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, error: msg }, 500);
@@ -302,7 +410,6 @@ export async function startGateway(params: { configPath: string; port?: number; 
     return c.json({ ok: false, error: "proactive not enabled" }, 400);
   });
 
-
   const stop = async () => {
     // Kill any active isolated worker processes
     for (const child of isolatedWorkers) {
@@ -314,9 +421,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     }
     isolatedWorkers.clear();
 
-    scheduler?.stop();
-    proactive?.stop();
-    await tg?.stop();
+    await deactivateServices("shutdown");
     await http.stop();
     db.close();
   };
@@ -333,4 +438,11 @@ export async function startGateway(params: { configPath: string; port?: number; 
   });
 
   log("gateway: started");
+}
+
+function envInt(key: string): number | null {
+  const raw = process.env[key];
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.trunc(value) : null;
 }

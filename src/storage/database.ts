@@ -158,6 +158,20 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     );
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Gateway active lease (HA mode)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS gateway_leases (
+      key TEXT PRIMARY KEY,
+      holder_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      renewed_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_leases_expires ON gateway_leases(expires_at);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Agent memory store
     -- ───────────────────────────────────────────────────────────────────────
 

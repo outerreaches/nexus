@@ -622,6 +622,9 @@ function renderDashboard(params: {
 }): string {
   const updatedAt = new Date(params.nowMs).toISOString();
   const statusJson = escapeHtml(JSON.stringify(params.status, null, 2));
+  const modeRaw = String((params.status as { mode?: string }).mode ?? "unknown").toLowerCase();
+  const modeLabel = modeRaw === "active" ? "ACTIVE" : modeRaw === "standby" ? "STANDBY" : modeRaw.toUpperCase();
+  const modeClass = modeRaw === "active" ? "active" : modeRaw === "standby" ? "standby" : "unknown";
   const hasAgents = params.agents.active.length + params.agents.recent.length > 0;
   const heartbeat = (params.status as { proactive?: { enabled?: boolean; paused?: boolean; lastTickAt?: number | null; nextTickAt?: number | null; lastStatus?: string } })
     .proactive ?? { enabled: false };
@@ -771,8 +774,15 @@ function renderDashboard(params: {
         background: linear-gradient(180deg, #0d120d 0%, #0a0a0a 100%);
         box-shadow: 0 2px 20px rgba(0, 255, 65, 0.1);
       }
+      .header-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 8px;
+      }
       h1 {
-        margin: 0 0 8px;
+        margin: 0;
         font-size: 28px;
         text-transform: uppercase;
         letter-spacing: 4px;
@@ -787,6 +797,29 @@ function renderDashboard(params: {
         text-transform: uppercase;
         letter-spacing: 2px;
         text-shadow: var(--glow);
+      }
+      .mode-pill {
+        font-size: 11px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #050805;
+        box-shadow: 0 0 12px rgba(0, 255, 65, 0.08);
+      }
+      .mode-pill.active {
+        color: var(--ok);
+        border-color: rgba(0, 255, 65, 0.6);
+        box-shadow: 0 0 16px rgba(0, 255, 65, 0.35);
+      }
+      .mode-pill.standby {
+        color: var(--warn);
+        border-color: rgba(255, 184, 0, 0.6);
+        box-shadow: 0 0 16px rgba(255, 184, 0, 0.3);
+      }
+      .mode-pill.unknown {
+        color: var(--muted);
       }
       .meta {
         color: var(--muted);
@@ -1281,7 +1314,10 @@ function renderDashboard(params: {
   </head>
   <body>
     <header>
-      <h1>Nexus Dashboard</h1>
+      <div class="header-row">
+        <h1>Nexus Dashboard</h1>
+        <div class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</div>
+      </div>
       <div class="meta">Updated ${escapeHtml(updatedAt)} · Auto-refresh 15s</div>
     </header>
     <main>
