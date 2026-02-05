@@ -2,7 +2,7 @@
 
 This guide sets up Nexus on a host workstation with:
 - Linux VM for isolation (QEMU/KVM)
-- Two-way code sync with laptop (Syncthing)
+- Local Git remote on the host host
 - Fault-tolerant deployment (optional HA mode)
 - Self-editing capability for the agent
 
@@ -18,19 +18,20 @@ This guide sets up Nexus on a host workstation with:
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           laptop (Development)                              │
-│  ~/Workspace/Nexus/ ←──── Syncthing ────→ host                           │
+│  ~/Workspace/Nexus/ ──── git push ───→ host (bare repo)                  │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                     host (Ubuntu 24.04)                         │
 │                                                                              │
-│  /sync/Nexus/ ←── Syncthing (host)                                          │
+│  ~/git/nexus.git (bare repo)                                                │
+│  /home/$USER/code/Nexus (working tree)                                      │
 │       │                                                                      │
 │       ▼ (NFS mount)                                                          │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                    Linux VM (4GB RAM, 2 vCPU)                          │  │
-│  │  /data/code/      ← NFS from host (/sync/Nexus)                        │  │
+│  │  /data/code/      ← NFS from host (/home/$USER/code/Nexus)             │  │
 │  │  /data/nexus/      ← state, database                                   │  │
 │  │  /data/workspace/  ← agent workspace                                   │  │
 │  │                                                                        │  │
@@ -76,103 +77,57 @@ sudo systemctl enable --now libvirtd
 exit
 ```
 
-### 1.2 Install Syncthing on Host
+### 1.2 Set up Local Git Remote (Host)
 
 ```bash
 ssh user@host
 
-# Install Syncthing
-sudo apt install -y syncthing
+# Create a bare repo to receive pushes
+mkdir -p ~/git
+git init --bare ~/git/nexus.git
 
-# Enable as user service
-systemctl --user enable syncthing
-systemctl --user start syncthing
-
-# Create sync directory
-mkdir -p /home/$USER/sync/Nexus
-
-# Check Syncthing is running
-systemctl --user status syncthing
+# Create a working tree that the VM will mount via NFS
+mkdir -p ~/code
+git clone ~/git/nexus.git ~/code/Nexus
 ```
 
-### 1.3 Configure Syncthing (Host)
-
-1. Access Syncthing web UI: `http://host:8384`
-2. Go to **Actions → Settings → GUI**
-   - Set GUI Listen Address to `0.0.0.0:8384` (to access from laptop)
-3. Note down the **Device ID** (Actions → Show ID)
-
-### 1.4 Configure NFS Export (Host)
+### 1.3 Configure NFS Export (Host)
 
 ```bash
 # Install NFS server
 sudo apt install -y nfs-kernel-server
 
-# Sync directory to export
-SYNC_DIR=/home/$USER/sync/Nexus
+# Code directory to export
+CODE_DIR=/home/$USER/code/Nexus
 
 # Host IP on libvirt network (usually 192.168.122.1)
 HOST_IP=$(ip -4 addr show virbr0 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+')
 
 # Add export (only once)
-echo "$SYNC_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+echo "$CODE_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
 sudo exportfs -ra
 sudo systemctl enable --now nfs-kernel-server
 ```
 
 ---
 
-## Phase 2: laptop Syncthing Setup
+## Phase 2: laptop Git Setup
 
-### 2.1 Install Syncthing
+### 2.1 Add host Remote and Push
 
 ```bash
 # On laptop
-brew install syncthing
-brew services start syncthing
+cd ~/Workspace/Nexus
+git remote add host ssh://user@host/~/git/nexus.git
+git push host main
 ```
 
-### 2.2 Configure Syncthing (laptop)
-
-1. Open `http://localhost:8384`
-2. **Add Remote Device:**
-   - Click "Add Remote Device"
-   - Paste host's Device ID
-   - Name it "host"
-   - Save
-
-3. **Share Nexus folder:**
-   - Click "Add Folder"
-   - Folder Label: `Nexus`
-   - Folder Path: `/Users/YOUR_USERNAME/Workspace/Nexus`
-   - Share with: host
-   - Under **Ignore Patterns**, add:
-     ```
-     node_modules
-     dist
-     .git/objects
-     *.log
-     .env
-     nexus.db*
-     ```
-   - Save
-
-4. **On host Syncthing UI:**
-   - Accept the device pairing request
-   - Accept the folder share, set path to `/home/YOUR_USERNAME/sync/Nexus`
-
-### 2.3 Verify Sync
+### 2.2 Pull on host Working Tree
 
 ```bash
-# On laptop - create test file
-echo "test" > ~/Workspace/Nexus/sync-test.txt
-
-# Wait a few seconds, then on host
-ssh user@host "cat ~/sync/Nexus/sync-test.txt"
-# Should output: test
-
-# Clean up
-rm ~/Workspace/Nexus/sync-test.txt
+# On host host
+cd ~/code/Nexus
+git pull
 ```
 
 ---
@@ -198,8 +153,8 @@ cd ~/vm-configs
 # Get your SSH public key
 cat ~/.ssh/id_ed25519.pub  # or id_rsa.pub
 
-# NOTE: Update the NFS host IP + sync path in the cloud-init file below.
-# The libvirt default host IP is usually 192.168.122.1 and the sync path is /home/$USER/sync/Nexus.
+# NOTE: Update the NFS host IP + code path in the cloud-init file below.
+# The libvirt default host IP is usually 192.168.122.1 and the code path is /home/$USER/code/Nexus.
 
 # Create cloud-init config
 cat > cloud-init.yaml << 'EOF'
@@ -223,7 +178,7 @@ runcmd:
   - usermod -aG docker nexus
   - mkdir -p /data/{code,nexus,workspace}
   - chown -R nexus:nexus /data
-  - echo "192.168.122.1:/home/YOUR_USERNAME/sync/Nexus /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
+  - echo "192.168.122.1:/home/YOUR_USERNAME/code/Nexus /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
   - mount -a || true
 EOF
 
@@ -487,11 +442,17 @@ curl http://host-tailscale-hostname:18789/health/live
 
 ## Phase 6: Maintenance
 
-### 6.1 Update Nexus Code
-
-Code changes sync automatically via Syncthing. To apply:
+### 6.1 Update Nexus Code (Git → host)
 
 ```bash
+# On laptop
+cd ~/Workspace/Nexus
+git push host main
+
+# On host host (working tree)
+cd ~/code/Nexus
+git pull
+
 # On VM
 cd ~/nexus-deploy
 docker compose build
@@ -519,9 +480,9 @@ cd ~/Workspace/Nexus
 git log --oneline -10  # Find the good commit
 git reset --hard HEAD~1  # Or specific commit hash
 
-# Syncthing will sync the rollback to host
-# Then rebuild on VM
-ssh nexus@host-vm "cd ~/nexus-deploy && docker compose build && docker compose up -d"
+# Push rollback to host, then rebuild on VM
+git push host main
+ssh nexus@host-vm "cd ~/code/Nexus && git pull && cd ~/nexus-deploy && docker compose build && docker compose up -d"
 ```
 
 ### 6.4 VM Snapshots
@@ -548,17 +509,6 @@ cp /data/nexus/nexus.db /data/nexus/nexus.db.backup.$(date +%Y%m%d)
 ---
 
 ## Troubleshooting
-
-### Syncthing not syncing
-
-```bash
-# Check Syncthing status on both machines
-systemctl --user status syncthing  # Linux
-brew services list | grep syncthing  # macOS
-
-# Check for conflicts
-ls ~/Workspace/Nexus/*.sync-conflict*
-```
 
 ### VM won't start
 
@@ -601,10 +551,9 @@ virsh domifaddr nexus-vm
 |-----------|----------|--------|
 | Nexus API | VM container | `http://host:18789` |
 | Dashboard | VM container | `http://host:18789/dashboard` |
-| Syncthing (laptop) | localhost | `http://localhost:8384` |
-| Syncthing (host) | host | `http://host:8384` |
 | VM console | host | `virsh console nexus-vm` |
-| Code sync | both | `~/Workspace/Nexus` ↔ `/data/code` |
+| host bare repo | host | `~/git/nexus.git` |
+| Working tree | host | `~/code/Nexus` |
 
 | Command | Purpose |
 |---------|---------|
