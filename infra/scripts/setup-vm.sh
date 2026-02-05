@@ -24,7 +24,6 @@ VM_NAME="nexus-vm"
 VM_MEMORY="4096"  # 4GB
 VM_CPUS="2"
 VM_DISK_SIZE="20G"
-SYNC_DIR="$HOME/sync/Nexus"
 VM_CONFIG_DIR="/var/lib/libvirt/boot"  # Use libvirt-accessible directory
 CLOUD_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 
@@ -40,11 +39,9 @@ sudo apt install -y \
   bridge-utils \
   virtinst \
   cloud-image-utils \
-  syncthing \
   socat \
   curl \
-  jq \
-  nfs-kernel-server
+  jq
 
 # Step 2: Configure user groups
 log "Configuring user groups..."
@@ -54,11 +51,9 @@ sudo usermod -aG kvm $USER
 # Step 3: Start services
 log "Starting services..."
 sudo systemctl enable --now libvirtd
-systemctl --user enable --now syncthing
 
 # Step 4: Create directories
 log "Creating directories..."
-mkdir -p "$SYNC_DIR"
 sudo mkdir -p "$VM_CONFIG_DIR"
 sudo chown $USER:$USER "$VM_CONFIG_DIR"
 
@@ -81,20 +76,7 @@ else
   SSH_KEY=$(cat ~/.ssh/id_ed25519.pub)
 fi
 
-# Step 7: Set up NFS export on host
-log "Setting up NFS export for shared folder..."
-# Get host IP on libvirt network
-HOST_IP=$(ip -4 addr show virbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' || echo "192.168.122.1")
-
-# Add NFS export for sync directory
-NFS_EXPORT="$SYNC_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)"
-if ! grep -q "$SYNC_DIR" /etc/exports 2>/dev/null; then
-  echo "$NFS_EXPORT" | sudo tee -a /etc/exports
-  sudo exportfs -ra
-  sudo systemctl enable --now nfs-kernel-server
-fi
-
-# Step 8: Create cloud-init config
+# Step 7: Create cloud-init config
 log "Creating cloud-init configuration..."
 cat > "$VM_CONFIG_DIR/cloud-init.yaml" << EOF
 #cloud-config
@@ -111,21 +93,18 @@ packages:
   - docker-compose-v2
   - git
   - curl
-  - nfs-common
 runcmd:
   - systemctl enable docker
   - usermod -aG docker nexus
   - mkdir -p /data/{code,nexus,workspace}
   - chown -R nexus:nexus /data
-  - echo "$HOST_IP:$SYNC_DIR /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
-  - mount -a || true
 EOF
 
-# Step 9: Create cloud-init ISO
+# Step 8: Create cloud-init ISO
 log "Creating cloud-init ISO..."
 cloud-localds "$VM_CONFIG_DIR/cloud-init.iso" "$VM_CONFIG_DIR/cloud-init.yaml"
 
-# Step 10: Create VM disk
+# Step 9: Create VM disk
 log "Creating VM disk..."
 if [ -f /var/lib/libvirt/images/nexus-vm.qcow2 ]; then
   warn "VM disk already exists. Skipping creation."
@@ -136,7 +115,7 @@ else
     /var/lib/libvirt/images/nexus-vm.qcow2 "$VM_DISK_SIZE"
 fi
 
-# Step 11: Check if VM already exists
+# Step 10: Check if VM already exists
 if virsh list --all | grep -q "$VM_NAME"; then
   warn "VM '$VM_NAME' already exists."
   read -p "Delete and recreate? (y/N) " -n 1 -r
@@ -154,7 +133,7 @@ if virsh list --all | grep -q "$VM_NAME"; then
   fi
 fi
 
-# Step 12: Create VM
+# Step 11: Create VM
 log "Creating VM..."
 sudo virt-install \
   --name "$VM_NAME" \
@@ -193,17 +172,13 @@ else
   # Step 14: Configure VM
   log "Configuring VM..."
   ssh -o StrictHostKeyChecking=no "nexus@$VM_IP" << 'VMSCRIPT'
-    # Ensure mount points exist (NFS mount configured via cloud-init)
+    # Ensure mount points exist
     sudo mkdir -p /data/code /data/nexus /data/workspace
-    sudo mount -a || true
     sudo chown -R nexus:nexus /data
 
     # Verify
     echo "Mounted directories:"
     ls -la /data/
-    echo ""
-    echo "NFS mounts:"
-    mount | grep "/data/code" || true
 VMSCRIPT
 
   # Step 15: Setup port forwarding
@@ -234,12 +209,13 @@ log "VM setup complete!"
 echo "======================================"
 echo ""
 echo "Next steps:"
-echo "1. Configure Syncthing on your laptop to sync with this host"
-echo "   - host Syncthing UI: http://$(hostname):8384"
-echo "   - Sync folder: $SYNC_DIR"
+echo "1. Push code to the host bare repo from your laptop"
+echo "   git remote add host ssh://user@host/~/git/nexus.git"
+echo "   git push host main"
 echo ""
-echo "2. After code syncs, SSH into VM and deploy Nexus:"
+echo "2. After code is pushed, SSH into VM and clone the repo:"
 echo "   ssh nexus@$VM_IP"
+echo "   git clone ssh://user@host/~/git/nexus.git /data/code"
 echo "   # Then follow deployment guide"
 echo ""
 echo "3. VM management commands:"

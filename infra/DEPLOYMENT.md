@@ -26,12 +26,11 @@ This guide sets up Nexus on a host workstation with:
 │                     host (Ubuntu 24.04)                         │
 │                                                                              │
 │  ~/git/nexus.git (bare repo)                                                │
-│  /home/$USER/code/Nexus (working tree)                                      │
 │       │                                                                      │
-│       ▼ (NFS mount)                                                          │
+│       ▼ (git clone / pull)                                                   │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                    Linux VM (4GB RAM, 2 vCPU)                          │  │
-│  │  /data/code/      ← NFS from host (/home/$USER/code/Nexus)             │  │
+│  │  /data/code/      ← git clone from host (SSH)                          │  │
 │  │  /data/nexus/      ← state, database                                   │  │
 │  │  /data/workspace/  ← agent workspace                                   │  │
 │  │                                                                        │  │
@@ -85,28 +84,6 @@ ssh user@host
 # Create a bare repo to receive pushes
 mkdir -p ~/git
 git init --bare ~/git/nexus.git
-
-# Create a working tree that the VM will mount via NFS
-mkdir -p ~/code
-git clone ~/git/nexus.git ~/code/Nexus
-```
-
-### 1.3 Configure NFS Export (Host)
-
-```bash
-# Install NFS server
-sudo apt install -y nfs-kernel-server
-
-# Code directory to export
-CODE_DIR=/home/$USER/code/Nexus
-
-# Host IP on libvirt network (usually 192.168.122.1)
-HOST_IP=$(ip -4 addr show virbr0 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+')
-
-# Add export (only once)
-echo "$CODE_DIR 192.168.122.0/24(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
-sudo exportfs -ra
-sudo systemctl enable --now nfs-kernel-server
 ```
 
 ---
@@ -125,9 +102,8 @@ git push host main
 ### 2.2 Pull on host Working Tree
 
 ```bash
-# On host host
-cd ~/code/Nexus
-git pull
+# On VM (first time clone)
+git clone ssh://user@host/~/git/nexus.git /data/code
 ```
 
 ---
@@ -153,9 +129,6 @@ cd ~/vm-configs
 # Get your SSH public key
 cat ~/.ssh/id_ed25519.pub  # or id_rsa.pub
 
-# NOTE: Update the NFS host IP + code path in the cloud-init file below.
-# The libvirt default host IP is usually 192.168.122.1 and the code path is /home/$USER/code/Nexus.
-
 # Create cloud-init config
 cat > cloud-init.yaml << 'EOF'
 #cloud-config
@@ -172,14 +145,11 @@ packages:
   - docker-compose-v2
   - git
   - curl
-  - nfs-common
 runcmd:
   - systemctl enable docker
   - usermod -aG docker nexus
   - mkdir -p /data/{code,nexus,workspace}
   - chown -R nexus:nexus /data
-  - echo "192.168.122.1:/home/YOUR_USERNAME/code/Nexus /data/code nfs defaults,_netdev 0 0" >> /etc/fstab
-  - mount -a || true
 EOF
 
 # Edit to add your actual SSH key
@@ -202,7 +172,7 @@ cloud-localds ~/vm-configs/cloud-init.iso ~/vm-configs/cloud-init.yaml
 ### 3.4 Create and Start VM
 
 ```bash
-# Create VM (NFS mount configured via cloud-init)
+# Create VM
 sudo virt-install \
   --name nexus-vm \
   --memory 4096 \
@@ -230,15 +200,6 @@ echo "VM IP: $VM_IP"
 # SSH into VM
 ssh nexus@$VM_IP
 
-# Ensure NFS mount is active (configured via cloud-init)
-sudo mkdir -p /data/code
-sudo mount -a || true
-
-# Verify mount
-ls /data/code/
-# Should show Nexus files
-mount | grep "/data/code" || true
-
 # Create other directories
 sudo mkdir -p /data/{nexus,workspace}
 sudo chown -R nexus:nexus /data
@@ -246,6 +207,9 @@ sudo chown -R nexus:nexus /data
 # Verify Docker works
 docker --version
 docker compose version
+
+# Clone code from host host
+git clone ssh://user@host/~/git/nexus.git /data/code
 ```
 
 ---
@@ -449,11 +413,9 @@ curl http://host-tailscale-hostname:18789/health/live
 cd ~/Workspace/Nexus
 git push host main
 
-# On host host (working tree)
-cd ~/code/Nexus
-git pull
-
 # On VM
+cd /data/code
+git pull
 cd ~/nexus-deploy
 docker compose build
 docker compose up -d
@@ -482,7 +444,7 @@ git reset --hard HEAD~1  # Or specific commit hash
 
 # Push rollback to host, then rebuild on VM
 git push host main
-ssh nexus@host-vm "cd ~/code/Nexus && git pull && cd ~/nexus-deploy && docker compose build && docker compose up -d"
+ssh nexus@host-vm "cd /data/code && git pull && cd ~/nexus-deploy && docker compose build && docker compose up -d"
 ```
 
 ### 6.4 VM Snapshots
@@ -553,7 +515,7 @@ virsh domifaddr nexus-vm
 | Dashboard | VM container | `http://host:18789/dashboard` |
 | VM console | host | `virsh console nexus-vm` |
 | host bare repo | host | `~/git/nexus.git` |
-| Working tree | host | `~/code/Nexus` |
+| VM code dir | VM | `/data/code` |
 
 | Command | Purpose |
 |---------|---------|
