@@ -18,8 +18,6 @@
 #   1. HAProxy detects primary is unhealthy → routes to standby automatically
 #   2. Watchdog detects primary is unhealthy → activates standby services
 
-version: "3.8"
-
 services:
   # Load balancer - entry point for all traffic
   haproxy:
@@ -43,12 +41,12 @@ services:
       dockerfile: Dockerfile
     command: gateway --verbose
     volumes:
-      # Shared data volume (SQLite WAL handles concurrent access)
-      - nexus-data:/data/nexus
+      # Persistent host state (reuse existing DB/backups/config)
+      - /data/nexus:/data/nexus
       # Host git working tree (required for git checkpoints/self-editing)
       - /data/code:/data/code
-      # Workspace
-      - nexus-workspace:/data/workspace
+      # Persistent workspace
+      - /data/workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
@@ -74,10 +72,10 @@ services:
       dockerfile: Dockerfile
     command: gateway --verbose --standby
     volumes:
-      # Same shared volumes as primary
-      - nexus-data:/data/nexus
+      # Same bind mounts as primary
+      - /data/nexus:/data/nexus
       - /data/code:/data/code
-      - nexus-workspace:/data/workspace
+      - /data/workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
@@ -117,9 +115,3 @@ services:
 networks:
   nexus-net:
     driver: bridge
-
-volumes:
-  nexus-data:
-    driver: local
-  nexus-workspace:
-    driver: local
