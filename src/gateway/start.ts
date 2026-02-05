@@ -23,6 +23,9 @@ import { startTelegramBot } from "./telegram.js";
 import { startProactiveHeartbeat } from "./proactive.js";
 import { initDataIntake } from "../data-intake/index.js";
 import { ensureSystemJobs } from "../maintenance/system-jobs.js";
+import { runBackup } from "../maintenance/db-backup.js";
+import { sendHANotification } from "./ha-notifications.js";
+import { randomId } from "../data-intake/utils.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
   let logStream: fs.WriteStream | null = null;
@@ -408,6 +411,91 @@ export async function startGateway(params: { configPath: string; port?: number; 
       return c.json({ ok: true, paused: false });
     }
     return c.json({ ok: false, error: "proactive not enabled" }, 400);
+  });
+
+  // Deactivation endpoint for graceful shutdown
+  http.app.post("/api/deactivate", async (c) => {
+    try {
+      if (isStandby) {
+        return c.json({ ok: true, message: "already standby" });
+      }
+
+      const nowMs = Date.now();
+      const instanceId = leaseHolderId;
+
+      await deactivateServices("requested via /api/deactivate");
+
+      // Record HA event
+      db.db
+        .prepare(
+          "INSERT INTO ha_events (id, event_type, source, from_instance, to_instance, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(randomId("HA"), "deactivate", "api", instanceId, null, JSON.stringify({ reason: "manual" }), nowMs);
+
+      return c.json({ ok: true, message: "deactivated" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: msg }, 500);
+    }
+  });
+
+  // Manual backup endpoint
+  http.app.post("/api/backup", async (c) => {
+    try {
+      const nowMs = Date.now();
+      const result = await runBackup({
+        db,
+        stateDir: paths.stateDir,
+        backupType: "manual",
+        nowMs,
+        log,
+      });
+
+      if (result.status === "failed") {
+        // Send notification on failure
+        await sendHANotification(
+          { config, db, telegram: tg, log },
+          { type: "backup_failure", details: { error: result.error, backupId: result.id } },
+        );
+      }
+
+      return c.json({ ok: result.status === "completed", backup: result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: msg }, 500);
+    }
+  });
+
+  // HA event endpoint (called by watchdog)
+  http.app.post("/api/ha/event", async (c) => {
+    try {
+      const body = (await c.req.json()) as { event: string; from?: string; to?: string; reason?: string; details?: unknown };
+      const nowMs = Date.now();
+
+      // Record event in database
+      const eventId = randomId("HA");
+      db.db
+        .prepare(
+          "INSERT INTO ha_events (id, event_type, source, from_instance, to_instance, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(eventId, body.event, "watchdog", body.from ?? null, body.to ?? null, JSON.stringify({ reason: body.reason, ...((body.details as object) ?? {}) }), nowMs);
+
+      // Send Telegram notification
+      if (tg) {
+        await sendHANotification(
+          { config, db, telegram: tg, log },
+          {
+            type: body.event as "failover" | "failback",
+            details: { from: body.from, to: body.to, reason: body.reason, ...((body.details as object) ?? {}) },
+          },
+        );
+      }
+
+      return c.json({ ok: true, eventId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: msg }, 500);
+    }
   });
 
   const stop = async () => {

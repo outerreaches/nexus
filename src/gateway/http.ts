@@ -32,7 +32,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
 
   app.get("/health/ready", async (c) => {
     // Readiness: full system check
-    const checks: Record<string, { ok: boolean; error?: string }> = {};
+    const checks: Record<string, { ok: boolean; error?: string; details?: unknown }> = {};
     const nowMs = Date.now();
 
     // Check 1: Database accessible
@@ -55,7 +55,69 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     if (stuckAgents.length > 0) {
       checks.agents = { ok: false, error: `${stuckAgents.length} stuck agents (>30min)` };
     } else {
-      checks.agents = { ok: true };
+      checks.agents = { ok: true, details: { active: activeAgents.length } };
+    }
+
+    // Check 3: Scheduler status (from status object)
+    try {
+      const status = await deps.getStatus();
+      const schedulerEnabled = (status.scheduler as { enabled?: boolean })?.enabled ?? false;
+      const mode = status.mode as string;
+      if (mode === "active" && !schedulerEnabled) {
+        checks.scheduler = { ok: false, error: "scheduler disabled while active" };
+      } else {
+        checks.scheduler = { ok: true, details: { enabled: schedulerEnabled, mode } };
+      }
+
+      // Check 4: Proactive heartbeat status
+      const proactive = status.proactive as { enabled?: boolean; paused?: boolean; lastTickAt?: number; maxIntervalMs?: number } | undefined;
+      if (proactive?.enabled && !proactive?.paused) {
+        const lastTickAge = proactive.lastTickAt ? nowMs - proactive.lastTickAt : null;
+        const maxHeartbeatAge = (proactive.maxIntervalMs ?? 300000) * 3;
+        if (lastTickAge !== null && lastTickAge > maxHeartbeatAge) {
+          checks.proactive = { ok: false, error: `heartbeat stale (${Math.round(lastTickAge / 1000)}s ago)` };
+        } else {
+          checks.proactive = { ok: true, details: { lastTickAge: lastTickAge ? Math.round(lastTickAge / 1000) : null } };
+        }
+      } else {
+        checks.proactive = { ok: true, details: { enabled: proactive?.enabled ?? false, paused: proactive?.paused ?? false } };
+      }
+    } catch {
+      checks.scheduler = { ok: true, details: { status: "unknown" } };
+      checks.proactive = { ok: true, details: { status: "unknown" } };
+    }
+
+    // Check 5: Memory usage
+    const memUsage = process.memoryUsage();
+    const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+    const memoryThresholdMB = Number(process.env.NEXUS_MEMORY_THRESHOLD_MB) || 2048;
+    if (heapUsedMB > memoryThresholdMB) {
+      checks.memory = { ok: false, error: `heap usage ${heapUsedMB}MB exceeds threshold ${memoryThresholdMB}MB` };
+    } else {
+      checks.memory = { ok: true, details: { heapUsedMB, thresholdMB: memoryThresholdMB } };
+    }
+
+    // Check 6: Database backup age
+    try {
+      if (deps.db) {
+        const lastBackup = deps.db.db
+          .prepare("SELECT completed_at FROM db_backups WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1")
+          .get() as { completed_at: number } | undefined;
+        const maxBackupAgeMs = 48 * 60 * 60 * 1000; // 48 hours
+        if (lastBackup) {
+          const backupAgeMs = nowMs - lastBackup.completed_at;
+          if (backupAgeMs > maxBackupAgeMs) {
+            checks.backup = { ok: false, error: `backup too old (${Math.round(backupAgeMs / 3600000)}h ago)` };
+          } else {
+            checks.backup = { ok: true, details: { ageHours: Math.round(backupAgeMs / 3600000) } };
+          }
+        } else {
+          // No backups yet - this is ok for new installations
+          checks.backup = { ok: true, details: { status: "no backups yet" } };
+        }
+      }
+    } catch {
+      checks.backup = { ok: true, details: { status: "not configured" } };
     }
 
     const allOk = Object.values(checks).every((c) => c.ok);
@@ -214,6 +276,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         runLimit,
         dataIntakeLimit,
         hideOrphanData,
+        db: deps.db,
       }),
     );
   });
@@ -619,6 +682,7 @@ function renderDashboard(params: {
   blackboard: BlackboardRow[];
   blackboardScope: string;
   blackboardScopes: string[];
+  db?: NexusDatabase;
 }): string {
   const updatedAt = new Date(params.nowMs).toISOString();
   const statusJson = escapeHtml(JSON.stringify(params.status, null, 2));
@@ -674,6 +738,22 @@ function renderDashboard(params: {
       task,
     })),
   );
+
+  // HA section data
+  const leaseInfo = (params.status as { activeLease?: { key: string; holderId: string; held: boolean; expiresAt: number | null; ttlMs: number; renewMs: number } }).activeLease ?? {
+    key: "gateway_active",
+    holderId: "unknown",
+    held: false,
+    expiresAt: null,
+    ttlMs: 45000,
+    renewMs: 15000,
+  };
+  const haEvents = listHAEvents(params.db, 20);
+  const lastBackup = getLastBackup(params.db);
+  const backupAgeMs = lastBackup?.completed_at ? params.nowMs - lastBackup.completed_at : null;
+  const backupAgeHours = backupAgeMs ? Math.round(backupAgeMs / 3600000) : null;
+  const backupStatus = lastBackup?.status ?? "none";
+  const backupStatusClass = backupStatus === "completed" ? "enabled" : backupStatus === "failed" ? "failed" : "disabled";
 
   return `<!doctype html>
 <html lang="en">
@@ -1430,6 +1510,50 @@ function renderDashboard(params: {
           </div>
         </div>
         ${renderBlackboardTable(params.blackboard)}
+      </section>
+
+      <section>
+        <div class="section-header">
+          <h2>High Availability</h2>
+          <div class="inline-actions">
+            <form method="post" action="/api/activate" class="form-inline compact" onsubmit="return confirm('Activate this instance and take over as primary?')">
+              <button type="submit" class="graph-btn" ${modeRaw === "active" ? "disabled" : ""}>Activate</button>
+            </form>
+            <form method="post" action="/api/deactivate" class="form-inline compact" onsubmit="return confirm('Deactivate this instance and go to standby mode?')">
+              <button type="submit" class="graph-btn btn-danger" ${modeRaw === "standby" ? "disabled" : ""}>Deactivate</button>
+            </form>
+            <form method="post" action="/api/backup" class="form-inline compact">
+              <button type="submit" class="graph-btn">Backup Now</button>
+            </form>
+          </div>
+        </div>
+        <div class="split">
+          <div>
+            <h3>Instance Status</h3>
+            <table>
+              <tbody>
+                <tr><td>Mode</td><td><span class="badge status-${modeClass}">${escapeHtml(modeLabel)}</span></td></tr>
+                <tr><td>Lease Holder</td><td>${escapeHtml(truncate(leaseInfo.holderId, 40))}</td></tr>
+                <tr><td>Lease Held</td><td>${leaseInfo.held ? "Yes" : "No"}</td></tr>
+                <tr><td>Lease Expires</td><td>${leaseInfo.expiresAt ? escapeHtml(formatTime(leaseInfo.expiresAt)) : "-"}</td></tr>
+                <tr><td>Lease TTL</td><td>${Math.round(leaseInfo.ttlMs / 1000)}s</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h3>Backup Status</h3>
+            <table>
+              <tbody>
+                <tr><td>Last Backup</td><td>${lastBackup?.completed_at ? escapeHtml(formatTime(lastBackup.completed_at)) : "Never"}</td></tr>
+                <tr><td>Backup Age</td><td>${backupAgeHours !== null ? backupAgeHours + "h" : "-"}</td></tr>
+                <tr><td>Size</td><td>${lastBackup ? Math.round(lastBackup.size_bytes / 1024) + " KB" : "-"}</td></tr>
+                <tr><td>Status</td><td><span class="badge status-${backupStatusClass}">${escapeHtml(backupStatus)}</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <h3>Recent Events</h3>
+        ${renderHAEventsTable(haEvents)}
       </section>
 
       <section>
@@ -2433,6 +2557,76 @@ function safeJsonForScript(value: unknown): string {
     .replace(/>/g, "\\u003e")
     .replace(/\u2028/g, "\\\\u2028")
     .replace(/\u2029/g, "\\\\u2029");
+}
+
+type HAEventRow = {
+  id: string;
+  event_type: string;
+  source: string;
+  from_instance: string | null;
+  to_instance: string | null;
+  details_json: string;
+  created_at: number;
+};
+
+type BackupRow = {
+  id: string;
+  filename: string;
+  completed_at: number | null;
+  size_bytes: number;
+  status: string;
+  backup_type: string;
+};
+
+function listHAEvents(db: NexusDatabase | undefined, limit: number): HAEventRow[] {
+  if (!db) return [];
+  try {
+    return db.db
+      .prepare("SELECT id, event_type, source, from_instance, to_instance, details_json, created_at FROM ha_events ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as HAEventRow[];
+  } catch {
+    return [];
+  }
+}
+
+function getLastBackup(db: NexusDatabase | undefined): BackupRow | null {
+  if (!db) return null;
+  try {
+    return db.db
+      .prepare("SELECT id, filename, completed_at, size_bytes, status, backup_type FROM db_backups WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1")
+      .get() as BackupRow | undefined ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function renderHAEventsTable(events: HAEventRow[]): string {
+  if (events.length === 0) return `<div class="no-data">No HA events recorded.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Event</th>
+        <th>Source</th>
+        <th>From</th>
+        <th>To</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${events
+        .map((e) => {
+          const eventClass = e.event_type === "failover" ? "running" : e.event_type === "failback" ? "complete" : "enabled";
+          return `<tr>
+            <td>${escapeHtml(formatTime(e.created_at))}</td>
+            <td><span class="badge status-${eventClass}">${escapeHtml(e.event_type)}</span></td>
+            <td>${escapeHtml(e.source)}</td>
+            <td>${escapeHtml(e.from_instance ?? "-")}</td>
+            <td>${escapeHtml(e.to_instance ?? "-")}</td>
+          </tr>`;
+        })
+        .join("")}
+    </tbody>
+  </table>`;
 }
 
 function escapeClass(value: string): string {

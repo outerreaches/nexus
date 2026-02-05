@@ -475,6 +475,155 @@ cp /data/nexus/nexus.db /data/nexus/nexus.db.backup.$(date +%Y%m%d)
 
 ---
 
+## Phase 7: High Availability Setup (Optional)
+
+This section covers deploying Nexus in a fault-tolerant primary/standby configuration with automatic failover.
+
+### 7.1 HA Architecture Overview
+
+```
+                    ┌─────────────┐
+                    │   HAProxy   │ :18789 (external)
+                    │ Load Balancer│
+                    └──────┬──────┘
+                           │
+           ┌───────────────┴───────────────┐
+           │                               │
+    ┌──────▼──────┐                ┌───────▼─────┐
+    │   Primary   │                │   Standby   │
+    │  (active)   │                │  (passive)  │
+    │ :18789      │                │ :18789      │
+    └──────┬──────┘                └───────┬─────┘
+           │                               │
+           └───────────┬───────────────────┘
+                       │
+              ┌────────▼────────┐
+              │  Shared Volume  │
+              │  /data/nexus    │
+              │  (SQLite + WAL) │
+              └─────────────────┘
+                       │
+              ┌────────▼────────┐
+              │    Watchdog     │
+              │ (monitors both) │
+              └─────────────────┘
+```
+
+**Key Components:**
+- **Primary**: Holds active lease, runs Telegram bot, scheduler, proactive heartbeat
+- **Standby**: Health checks only, ready to take over
+- **HAProxy**: Routes traffic, automatic health-based failover
+- **Watchdog**: Monitors primary, triggers activation of standby on failure
+- **Shared Volume**: Both instances share the same SQLite database (WAL mode)
+
+### 7.2 Configuration
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXUS_ACTIVE_LEASE_TTL_MS` | 45000 | Active lease lifetime (ms) |
+| `PRIMARY_URL` | http://nexus-primary:18789 | Primary instance URL |
+| `STANDBY_URL` | http://nexus-standby:18789 | Standby instance URL |
+| `CHECK_INTERVAL` | 5 | Seconds between health checks |
+| `FAILURE_THRESHOLD` | 3 | Consecutive failures before failover |
+| `RECOVERY_DELAY` | 30 | Seconds to wait after failover |
+| `DEACTIVATE_TIMEOUT` | 5 | Seconds to wait for graceful deactivate |
+| `ENABLE_FAILBACK` | false | Auto-restore original primary when healthy |
+| `FAILBACK_THRESHOLD` | 3 | Consecutive healthy checks before failback |
+
+### 7.3 Deployment
+
+```bash
+# On VM - use HA compose file
+cd ~/nexus-deploy
+docker compose -f docker-compose.ha.yml up -d
+
+# Verify both instances
+curl http://localhost:18789/api/mode      # Should return active
+curl http://localhost:18790/api/mode      # Should return standby (direct port)
+
+# Check HAProxy stats
+curl http://localhost:9999/stats
+```
+
+### 7.4 Testing Failover
+
+```bash
+# 1. Verify primary is active
+curl http://localhost:18789/api/mode
+# Expected: {"mode":"active"}
+
+# 2. Check lease holder
+curl http://localhost:18789/status | jq '.activeLease'
+
+# 3. Stop primary container to trigger failover
+docker stop nexus-primary
+
+# 4. Watch watchdog logs
+docker logs -f watchdog
+
+# 5. After ~15-20 seconds, verify standby activated
+curl http://localhost:18789/api/mode
+# Expected: {"mode":"active"} (now served by standby)
+
+# 6. Restart original primary
+docker start nexus-primary
+
+# 7. Original primary enters standby mode
+docker logs nexus-primary | grep standby
+# Expected: "standby: active lease held by ..."
+```
+
+### 7.5 Manual Failover
+
+```bash
+# Gracefully deactivate current primary
+curl -X POST http://localhost:18789/api/deactivate
+# Expected: {"ok":true,"message":"deactivated"}
+
+# Activate standby instance
+curl -X POST http://standby-host:18789/api/activate
+# Expected: {"ok":true,"message":"activated"}
+```
+
+### 7.6 Monitoring
+
+**Dashboard:** Visit `/dashboard` to see:
+- Mode indicator (ACTIVE/STANDBY)
+- Lease status (holder, expiration)
+- Recent HA events
+- Backup status
+
+**Health Endpoints:**
+- `/health/live` - Liveness probe (HTTP server responding)
+- `/health/ready` - Readiness probe (database, scheduler, backups healthy)
+- `/status` - Full system status including lease info
+
+**Telegram Notifications:** Configure `channels.telegram.enabled` to receive alerts for:
+- Failover events
+- Failback events
+- Backup failures
+
+### 7.7 Failback (Optional)
+
+When enabled, the watchdog automatically restores the original primary after it recovers:
+
+```bash
+# Enable failback in docker-compose.ha.yml
+ENABLE_FAILBACK=true
+FAILBACK_THRESHOLD=3  # Healthy checks before failback
+
+# Flow:
+# 1. Original primary crashes → standby activates
+# 2. Original primary restarts → enters standby mode
+# 3. Watchdog monitors original primary health
+# 4. After 3 consecutive healthy checks → initiates failback
+# 5. Current primary deactivated, original primary activated
+```
+
+---
+
 ## Troubleshooting
 
 ### VM won't start

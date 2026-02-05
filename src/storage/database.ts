@@ -172,6 +172,43 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_gateway_leases_expires ON gateway_leases(expires_at);
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Database backups (tracking)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS db_backups (
+      id TEXT PRIMARY KEY,
+      filename TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      backup_type TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_db_backups_created ON db_backups(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_db_backups_status ON db_backups(status, created_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- HA events (failover/failback tracking)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS ha_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      from_instance TEXT,
+      to_instance TEXT,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ha_events_created ON ha_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ha_events_type ON ha_events(event_type, created_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Agent memory store
     -- ───────────────────────────────────────────────────────────────────────
 

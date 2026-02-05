@@ -15,6 +15,17 @@ type SystemJobSpec = {
 
 const SYSTEM_JOBS: SystemJobSpec[] = [
   {
+    id: "SYS_DB_BACKUP",
+    name: "System: Database Backup",
+    cron: "0 2 * * *", // Daily at 2am UTC (before maintenance)
+    timezone: "UTC",
+    spec: {
+      mode: "tool_call",
+      tool: "db_backup",
+      args: { action: "run" },
+    },
+  },
+  {
     id: "SYS_DB_MAINTENANCE",
     name: "System: Database Maintenance",
     cron: "0 3 * * *", // Daily at 3am UTC

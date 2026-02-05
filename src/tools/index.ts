@@ -22,6 +22,7 @@ import { reflect } from "./reflect.js";
 import { planTask } from "./plan.js";
 import { writeToBlackboard, readFromBlackboard, blackboardClear, blackboardDelete, blackboardPrune } from "./blackboard.js";
 import { dbMaintenance } from "./db-maintenance.js";
+import { dbBackup } from "./db-backup.js";
 import { spawnAgent } from "./spawn-agent.js";
 import {
   dataIntakeListSources,
@@ -108,5 +109,6 @@ export function getBuiltInTools(): Tool[] {
     dataIntakeSourceDelete,
     spawnAgent,
     dbMaintenance,
+    dbBackup,
   ];
 }
