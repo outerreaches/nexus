@@ -4,6 +4,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     chromium \
     ca-certificates \
+    curl \
     fonts-liberation \
     git \
     python3 \
