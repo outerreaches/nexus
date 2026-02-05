@@ -45,8 +45,8 @@ services:
     volumes:
       # Shared data volume (SQLite WAL handles concurrent access)
       - nexus-data:/data/nexus
-      # Code directory (for self-editing capability)
-      - nexus-code:/data/code
+      # Host git working tree (required for git checkpoints/self-editing)
+      - /data/code:/data/code
       # Workspace
       - nexus-workspace:/data/workspace
     environment:
@@ -76,7 +76,7 @@ services:
     volumes:
       # Same shared volumes as primary
       - nexus-data:/data/nexus
-      - nexus-code:/data/code
+      - /data/code:/data/code
       - nexus-workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
@@ -120,8 +120,6 @@ networks:
 
 volumes:
   nexus-data:
-    driver: local
-  nexus-code:
     driver: local
   nexus-workspace:
     driver: local

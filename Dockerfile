@@ -5,6 +5,7 @@ RUN apt-get update \
     chromium \
     ca-certificates \
     fonts-liberation \
+    git \
     python3 \
     python3-pip \
     python3-venv \
