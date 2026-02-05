@@ -154,6 +154,11 @@ EOF
 
 # Edit to add your actual SSH key
 nano cloud-init.yaml
+
+# NOTE: libvirt can't read files under /home/$USER by default.
+# Copy the ISO into /var/lib/libvirt/boot for use with virt-install:
+#   sudo cp ~/vm-configs/cloud-init.iso /var/lib/libvirt/boot/nexus-cloud-init.iso
+#   sudo chmod 644 /var/lib/libvirt/boot/nexus-cloud-init.iso
 ```
 
 ### 3.3 Create VM Disk
@@ -172,13 +177,13 @@ cloud-localds ~/vm-configs/cloud-init.iso ~/vm-configs/cloud-init.yaml
 ### 3.4 Create and Start VM
 
 ```bash
-# Create VM
+# Create VM (use cloud-init ISO from /var/lib/libvirt/boot)
 sudo virt-install \
   --name nexus-vm \
   --memory 4096 \
   --vcpus 2 \
   --disk /var/lib/libvirt/images/nexus-vm.qcow2 \
-  --disk ~/vm-configs/cloud-init.iso,device=cdrom \
+  --disk /var/lib/libvirt/boot/nexus-cloud-init.iso,device=cdrom \
   --os-variant ubuntu24.04 \
   --network network=default \
   --graphics none \
@@ -272,7 +277,7 @@ OPENROUTER_API_KEY=your_api_key_here
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # Other settings
-TZ=America/Los_Angeles
+TZ=America/New_York
 EOF
 
 # Edit with your actual keys
