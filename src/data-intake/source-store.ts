@@ -46,6 +46,10 @@ function intervalMsToCron(intervalMs: number): string {
   return "0 0 * * *";
 }
 
+function sourceJobName(sourceId: string, label: string | null): string {
+  return `data-intake: ${label || sourceId}`;
+}
+
 /** Create a cron job for this data intake source */
 function createJobForSource(params: {
   db: NexusDatabase;
@@ -57,7 +61,7 @@ function createJobForSource(params: {
 }): string {
   const jobId = randomId("J");
   const cron = intervalMsToCron(params.intervalMs);
-  const jobName = `data-intake: ${params.label || params.sourceId}`;
+  const jobName = sourceJobName(params.sourceId, params.label);
   const spec = {
     mode: "tool_call",
     tool: "data_intake_run",
@@ -73,6 +77,42 @@ function createJobForSource(params: {
   return jobId;
 }
 
+function syncJobForSource(params: {
+  db: NexusDatabase;
+  jobId: string;
+  sourceId: string;
+  label: string | null;
+  intervalMs: number;
+  enabled: number;
+  nowMs: number;
+  resetNextRun: boolean;
+}): void {
+  const cron = intervalMsToCron(params.intervalMs);
+  const jobName = sourceJobName(params.sourceId, params.label);
+  params.db.db
+    .prepare(
+      `UPDATE jobs
+       SET name = ?, cron = ?, enabled = ?,
+           next_run_at = CASE
+             WHEN ? = 0 THEN NULL
+             WHEN ? = 1 THEN ?
+             ELSE next_run_at
+           END,
+           updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      jobName,
+      cron,
+      params.enabled,
+      params.enabled,
+      params.resetNextRun ? 1 : 0,
+      params.nowMs,
+      params.nowMs,
+      params.jobId,
+    );
+}
+
 export function createIntakeSource(params: {
   db: NexusDatabase;
   sourceId: string;
@@ -84,23 +124,27 @@ export function createIntakeSource(params: {
   const now = params.nowMs ?? Date.now();
   const id = randomId("DIS");
   const intervalMs = Math.max(60_000, params.intervalMs);
-
-  // Create the cron job first
-  const jobId = createJobForSource({
-    db: params.db,
-    sourceId: params.sourceId,
-    instanceId: id,
-    label: params.label ?? null,
-    intervalMs,
-    nowMs: now,
-  });
-
-  params.db.db
-    .prepare(
-      "INSERT INTO data_intake_sources (id, source_id, label, params_json, interval_ms, enabled, created_at, updated_at, job_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
-    )
-    .run(id, params.sourceId, params.label ?? null, JSON.stringify(params.params ?? {}), intervalMs, now, now, jobId);
-  return params.db.db.prepare("SELECT * FROM data_intake_sources WHERE id = ?").get(id) as DataIntakeSourceRow;
+  const jobId = params.db.db.transaction(() => {
+    const createdJobId = createJobForSource({
+      db: params.db,
+      sourceId: params.sourceId,
+      instanceId: id,
+      label: params.label ?? null,
+      intervalMs,
+      nowMs: now,
+    });
+    params.db.db
+      .prepare(
+        "INSERT INTO data_intake_sources (id, source_id, label, params_json, interval_ms, enabled, created_at, updated_at, job_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+      )
+      .run(id, params.sourceId, params.label ?? null, JSON.stringify(params.params ?? {}), intervalMs, now, now, createdJobId);
+    return createdJobId;
+  })();
+  const row = params.db.db.prepare("SELECT * FROM data_intake_sources WHERE id = ?").get(id) as DataIntakeSourceRow | undefined;
+  if (!row) {
+    throw new Error(`failed to create intake source ${id} (job ${jobId})`);
+  }
+  return row;
 }
 
 export function updateIntakeSource(params: {
@@ -123,16 +167,28 @@ export function updateIntakeSource(params: {
   const nextLastRun = params.lastRunAt === undefined ? existing.last_run_at : params.lastRunAt;
   const nextLastError = params.lastError === undefined ? existing.last_error : params.lastError;
   const now = params.nowMs ?? Date.now();
-  params.db.db
-    .prepare(
-      "UPDATE data_intake_sources SET label = ?, params_json = ?, interval_ms = ?, enabled = ?, updated_at = ?, last_run_at = ?, last_error = ? WHERE id = ?",
-    )
-    .run(nextLabel, nextParams, nextInterval, nextEnabled, now, nextLastRun, nextLastError, params.id);
+  const shouldResetNextRun = params.intervalMs !== undefined || (params.enabled !== undefined && nextEnabled === 1);
 
-  // Sync job enabled state if source has a linked job
-  if (existing.job_id && params.enabled !== undefined) {
-    params.db.db.prepare("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?").run(nextEnabled, now, existing.job_id);
-  }
+  params.db.db.transaction(() => {
+    params.db.db
+      .prepare(
+        "UPDATE data_intake_sources SET label = ?, params_json = ?, interval_ms = ?, enabled = ?, updated_at = ?, last_run_at = ?, last_error = ? WHERE id = ?",
+      )
+      .run(nextLabel, nextParams, nextInterval, nextEnabled, now, nextLastRun, nextLastError, params.id);
+
+    if (existing.job_id) {
+      syncJobForSource({
+        db: params.db,
+        jobId: existing.job_id,
+        sourceId: existing.source_id,
+        label: nextLabel,
+        intervalMs: nextInterval,
+        enabled: nextEnabled,
+        nowMs: now,
+        resetNextRun: shouldResetNextRun,
+      });
+    }
+  })();
 
   return getIntakeSource({ db: params.db, id: params.id });
 }

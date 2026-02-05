@@ -7,6 +7,16 @@ export type OpenAICompatConfig = {
   model: string;
 };
 
+const DEFAULT_HTTP_TIMEOUT_MS = 120_000;
+
+function envInt(name: string): number | null {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.floor(parsed);
+}
+
 type OpenAIChatMessage =
   | { role: "system"; content: string }
   | { role: "user"; content: string }
@@ -82,21 +92,37 @@ export class OpenAICompatClient {
         parameters: t.jsonSchema,
       },
     }));
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: this.config.model,
-        messages: toOpenAIMessages(params.messages),
-        tools,
-        tool_choice: "auto",
-        temperature: params.temperature ?? 0.2,
-      }),
-    });
+    const timeoutMs = Math.max(
+      1000,
+      envInt("NEXUS_LLM_HTTP_TIMEOUT_MS") ?? envInt("NEXUS_LLM_TIMEOUT_MS") ?? DEFAULT_HTTP_TIMEOUT_MS,
+    );
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: this.config.model,
+          messages: toOpenAIMessages(params.messages),
+          tools,
+          tool_choice: "auto",
+          temperature: params.temperature ?? 0.2,
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(`LLM request timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");

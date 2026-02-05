@@ -1,4 +1,5 @@
 import { fork, exec, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -17,6 +18,19 @@ import type { NexusDatabase } from "../storage/database.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function resolveIsolatedWorkerPath(): string {
+  const candidates = [
+    path.resolve(__dirname, "../core/isolated-worker.js"),
+    path.resolve(__dirname, "../core/isolated-worker.ts"),
+    path.resolve(process.cwd(), "dist/core/isolated-worker.js"),
+    path.resolve(process.cwd(), "src/core/isolated-worker.ts"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`isolated worker entry not found (tried: ${candidates.join(", ")})`);
+}
 
 export const spawnAgent = defineTool({
   name: "spawn_agent",
@@ -340,11 +354,19 @@ async function runIsolated(params: {
   const defaultTimeoutMs = 30 * 60 * 1000; // 30 minutes
   const maxTimeoutMs = envInt("NEXUS_WORKER_TIMEOUT_MS") ?? defaultTimeoutMs;
   const timeoutMs = Math.min(budget.maxIterations * 60_000, maxTimeoutMs);
+  let workerPath: string;
+  try {
+    workerPath = resolveIsolatedWorkerPath();
+  } catch (err) {
+    return JSON.stringify({
+      status: "failed",
+      output: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+      toolCallsUsed: 0,
+      iterationsUsed: 0,
+    }, null, 2);
+  }
 
   return new Promise<string>((resolve) => {
-    // Path to the compiled worker entry point (relative to dist/)
-    const workerPath = path.resolve(__dirname, "core/isolated-worker.js");
-
     const child: ChildProcess = fork(workerPath, [], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       env: process.env, // inherit env vars (API keys, etc.)

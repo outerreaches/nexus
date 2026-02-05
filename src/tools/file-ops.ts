@@ -176,15 +176,13 @@ export const fileRead = defineTool({
       }
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
-    const wantsRange = Boolean(startLine || endLine || withLineNumbers);
-    if (!wantsRange) return text;
     const rawLines = text.split(/\r?\n/);
     const hadTrailingNewline = text.endsWith("\n");
     const lines = hadTrailingNewline ? rawLines.slice(0, -1) : rawLines;
-    const resolvedStartLine = startLine ?? offset;
-    const resolvedEndLine = endLine ?? (resolvedStartLine && limit ? resolvedStartLine + limit - 1 : undefined);
-    const start = Math.max((resolvedStartLine ?? 1) - 1, 0);
-    const end = Math.min((resolvedEndLine ?? lines.length) - 1, lines.length - 1);
+    const resolvedStartLine = startLine ?? offset ?? 1;
+    const resolvedEndLine = endLine ?? (limit ? resolvedStartLine + limit - 1 : lines.length);
+    const start = Math.max(resolvedStartLine - 1, 0);
+    const end = Math.min(resolvedEndLine - 1, lines.length - 1);
     let slice = lines.slice(start, end + 1);
 
     let truncatedByLines = false;
@@ -198,6 +196,9 @@ export const fileRead = defineTool({
       : slice;
     let output = numbered.join("\n");
     const byteTrimmed = truncateByBytes(output, MAX_READ_BYTES);
+    if (!startLine && !endLine && !offset && !limit && !withLineNumbers && !truncatedByLines && !byteTrimmed.truncated) {
+      return text;
+    }
     output = byteTrimmed.text;
 
     if (truncatedByLines || byteTrimmed.truncated) {

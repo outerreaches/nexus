@@ -38,7 +38,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     // Check 1: Database accessible
     try {
       if (deps.db) {
-        const stmt = (deps.db as any).prepare("SELECT 1 as test");
+        const stmt = deps.db.db.prepare("SELECT 1 as test");
         stmt.get();
         checks.database = { ok: true };
       } else {
@@ -103,21 +103,67 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         const lastBackup = deps.db.db
           .prepare("SELECT completed_at FROM db_backups WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1")
           .get() as { completed_at: number } | undefined;
+        const latestBackup = deps.db.db
+          .prepare("SELECT status, created_at, completed_at, error FROM db_backups ORDER BY created_at DESC LIMIT 1")
+          .get() as { status: string; created_at: number; completed_at: number | null; error: string | null } | undefined;
+        const recentBackups = deps.db.db
+          .prepare("SELECT status FROM db_backups ORDER BY created_at DESC LIMIT 20")
+          .all() as { status: string }[];
+        const maxFailureStreak = Math.max(1, Number(process.env.NEXUS_BACKUP_FAILURE_STREAK_THRESHOLD) || 3);
+        let failureStreak = 0;
+        for (const row of recentBackups) {
+          if (row.status === "failed") failureStreak += 1;
+          else break;
+        }
         const maxBackupAgeMs = 48 * 60 * 60 * 1000; // 48 hours
-        if (lastBackup) {
-          const backupAgeMs = nowMs - lastBackup.completed_at;
-          if (backupAgeMs > maxBackupAgeMs) {
-            checks.backup = { ok: false, error: `backup too old (${Math.round(backupAgeMs / 3600000)}h ago)` };
+        if (!latestBackup) {
+          checks.backup = { ok: true, details: { status: "no backups yet" } };
+        } else if (!lastBackup) {
+          if (latestBackup.status === "running") {
+            checks.backup = {
+              ok: true,
+              details: {
+                status: "running",
+                startedAt: latestBackup.created_at,
+              },
+            };
           } else {
-            checks.backup = { ok: true, details: { ageHours: Math.round(backupAgeMs / 3600000) } };
+            checks.backup = {
+              ok: false,
+              error: "no successful backups yet",
+              details: { latestStatus: latestBackup.status, failureStreak, latestError: latestBackup.error },
+            };
           }
         } else {
-          // No backups yet - this is ok for new installations
-          checks.backup = { ok: true, details: { status: "no backups yet" } };
+          const backupAgeMs = nowMs - lastBackup.completed_at;
+          if (failureStreak >= maxFailureStreak) {
+            checks.backup = {
+              ok: false,
+              error: `${failureStreak} consecutive backup failures`,
+              details: {
+                latestStatus: latestBackup.status,
+                ageHours: Math.round(backupAgeMs / 3600000),
+                threshold: maxFailureStreak,
+              },
+            };
+          } else if (backupAgeMs > maxBackupAgeMs) {
+            checks.backup = { ok: false, error: `backup too old (${Math.round(backupAgeMs / 3600000)}h ago)` };
+          } else {
+            checks.backup = {
+              ok: true,
+              details: {
+                ageHours: Math.round(backupAgeMs / 3600000),
+                latestStatus: latestBackup.status,
+                failureStreak,
+              },
+            };
+          }
         }
+      } else {
+        checks.backup = { ok: false, error: "no database connection" };
       }
-    } catch {
-      checks.backup = { ok: true, details: { status: "not configured" } };
+    } catch (err) {
+      checks.backup = { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 
     const allOk = Object.values(checks).every((c) => c.ok);

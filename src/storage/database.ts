@@ -12,6 +12,8 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 10000");
+  db.pragma("foreign_keys = ON");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (

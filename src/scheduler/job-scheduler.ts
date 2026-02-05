@@ -67,6 +67,13 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
 }
 
+function parseJobStatusMarker(output: string): "ok" | "error" | null {
+  const matches = [...output.matchAll(/^\s*JOB_STATUS:\s*(ok|error)\s*$/gim)];
+  if (matches.length === 0) return null;
+  const marker = matches[matches.length - 1]?.[1]?.toLowerCase();
+  return marker === "ok" || marker === "error" ? marker : null;
+}
+
 function computeFailureBackoffMs(consecutiveFailures: number): number {
   const minutes = Math.min(60, Math.max(1, 2 ** Math.max(0, consecutiveFailures - 1)));
   return minutes * 60_000;
@@ -262,7 +269,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         text: userText,
       });
 
-      const ok = res.status === "complete";
+      const marker = parseJobStatusMarker(res.output);
+      const ok = marker ? marker === "ok" : res.status === "complete";
       return {
         status: ok ? "success" : "failed",
         output: res.output,
