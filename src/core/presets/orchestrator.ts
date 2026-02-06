@@ -73,6 +73,8 @@ export const preset: AgentPreset = {
     "credential_delete",
     // Lifecycle
     "gateway_restart",
+    "ha_deploy_request",
+    "ha_deploy_status",
     "tools_reload",
     // Gmail (orchestrator can check/send email directly)
     "gmail_profile",

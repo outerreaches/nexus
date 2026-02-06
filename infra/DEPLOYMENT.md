@@ -580,6 +580,36 @@ Notes:
 - On failure after switchover, the script re-activates the previous slot and checks out `last_good_sha`.
 - Rollout state is persisted in `/data/nexus/deploy-state.env`.
 
+### 7.3.2 Host Deployer (Fully Automated)
+
+To automate deploys from agent-generated commit SHAs without host CLI steps, run the host deployer daemon:
+
+```bash
+# On VM (one-time install)
+sudo cp /data/code/infra/systemd/nexus-ha-deployer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexus-ha-deployer
+
+# Verify
+systemctl status nexus-ha-deployer --no-pager
+/data/code/infra/scripts/ha-deployer.sh status
+```
+
+The daemon watches `/data/nexus/deploy-queue/pending` and processes requests by running:
+- `infra/scripts/ha-rollout.sh deploy <commitSha>`
+- `infra/scripts/ha-rollout.sh finalize <commitSha>` (if requested)
+
+Queue directories:
+- Pending: `/data/nexus/deploy-queue/pending`
+- Processing: `/data/nexus/deploy-queue/processing`
+- Completed: `/data/nexus/deploy-queue/done`
+- Failed: `/data/nexus/deploy-queue/failed`
+- Logs: `/data/nexus/deploy-queue/logs`
+
+From agent/orchestrator:
+- Queue request with `ha_deploy_request({ commitSha: "<sha>", finalize: true })`
+- Check progress with `ha_deploy_status()`
+
 ### 7.4 Testing Failover
 
 ```bash
