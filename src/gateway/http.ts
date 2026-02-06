@@ -34,6 +34,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     // Readiness: full system check
     const checks: Record<string, { ok: boolean; error?: string; details?: unknown }> = {};
     const nowMs = Date.now();
+    let mode = "unknown";
 
     // Check 1: Database accessible
     try {
@@ -62,7 +63,15 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     try {
       const status = await deps.getStatus();
       const schedulerEnabled = (status.scheduler as { enabled?: boolean })?.enabled ?? false;
-      const mode = status.mode as string;
+      mode = (status.mode as string) || "unknown";
+
+      // In HA mode, only the active instance should be considered ready for traffic.
+      if (mode !== "active") {
+        checks.role = { ok: false, error: `instance mode=${mode}` };
+      } else {
+        checks.role = { ok: true, details: { mode } };
+      }
+
       if (mode === "active" && !schedulerEnabled) {
         checks.scheduler = { ok: false, error: "scheduler disabled while active" };
       } else {
@@ -83,6 +92,7 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
         checks.proactive = { ok: true, details: { enabled: proactive?.enabled ?? false, paused: proactive?.paused ?? false } };
       }
     } catch {
+      checks.role = { ok: false, error: "status unavailable" };
       checks.scheduler = { ok: true, details: { status: "unknown" } };
       checks.proactive = { ok: true, details: { status: "unknown" } };
     }

@@ -53,6 +53,7 @@ services:
       - NEXUS_WORKSPACE_DIR=/data/workspace
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
+      - NEXUS_HA_PEER_URL=http://nexus-standby:18789
     env_file:
       - ../.env
     healthcheck:
@@ -82,6 +83,7 @@ services:
       - NEXUS_WORKSPACE_DIR=/data/workspace
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
+      - NEXUS_HA_PEER_URL=http://nexus-primary:18789
     env_file:
       - ../.env
     healthcheck:

@@ -95,6 +95,20 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   // Track isolated worker child processes for shutdown cleanup
   const isolatedWorkers = new Set<ChildProcess>();
+  const scheduleProcessRestart = (reason: string, delayMs: number = 2500) => {
+    log(`restart: ${reason}`);
+    setTimeout(() => {
+      try {
+        process.kill(process.pid, "SIGTERM");
+      } catch (err) {
+        log(`restart: failed to signal SIGTERM: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(0);
+      }
+    }, delayMs);
+  };
+  let requestRestartImpl = (reason: string, delayMs: number = 2500) => {
+    scheduleProcessRestart(reason, delayMs);
+  };
 
   const toolContext = {
     workspaceDir: paths.workspaceDir,
@@ -112,15 +126,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
     requestRestart: (reason: string, delayMs: number = 2500) => {
-      log(`restart: ${reason}`);
-      setTimeout(() => {
-        try {
-          process.kill(process.pid, "SIGTERM");
-        } catch (err) {
-          log(`restart: failed to signal SIGTERM: ${err instanceof Error ? err.message : String(err)}`);
-          process.exit(0);
-        }
-      }, delayMs);
+      requestRestartImpl(reason, delayMs);
     },
     nowMs: () => Date.now(),
     log,
@@ -352,6 +358,122 @@ export async function startGateway(params: { configPath: string; port?: number; 
       throw err;
     }
   };
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const restartPeerUrl = normalizeHttpBaseUrl(process.env.NEXUS_HA_PEER_URL ?? "");
+  let restartInProgress = false;
+
+  const fetchText = async (url: string, init: RequestInit, timeoutMs: number): Promise<{ ok: boolean; status: number; text: string }> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      const text = await res.text();
+      return { ok: res.ok, status: res.status, text };
+    } catch (err) {
+      return { ok: false, status: 0, text: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const tryActivatePeer = async (peerUrl: string, timeoutMs: number, retryMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts += 1;
+      const res = await fetchText(`${peerUrl}/api/activate`, { method: "POST" }, Math.min(8000, retryMs * 4));
+      if (res.ok) {
+        log(`restart: peer activate ok attempt=${attempts}`);
+        return true;
+      }
+      if (attempts === 1 || attempts % 5 === 0) {
+        log(`restart: peer activate pending attempt=${attempts} status=${res.status} detail=${truncateLine(res.text)}`);
+      }
+      await sleep(retryMs);
+    }
+    return false;
+  };
+
+  const waitPeerReady = async (peerUrl: string, timeoutMs: number, retryMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts += 1;
+      const res = await fetchText(`${peerUrl}/health/ready`, { method: "GET" }, Math.min(8000, retryMs * 4));
+      if (res.ok) {
+        log(`restart: peer ready attempt=${attempts}`);
+        return true;
+      }
+      if (attempts === 1 || attempts % 5 === 0) {
+        log(`restart: peer not ready attempt=${attempts} status=${res.status}`);
+      }
+      await sleep(retryMs);
+    }
+    return false;
+  };
+
+  requestRestartImpl = (reason: string, delayMs: number = 2500) => {
+    if (restartInProgress) {
+      log(`restart: already in progress; ignoring duplicate request (${reason})`);
+      return;
+    }
+    restartInProgress = true;
+    void (async () => {
+      try {
+        if (!restartPeerUrl) {
+          scheduleProcessRestart(reason, delayMs);
+          return;
+        }
+
+        const handoffDelayMs = Math.max(0, delayMs);
+        const activateTimeoutMs = Math.max(5_000, envInt("NEXUS_HA_RESTART_ACTIVATE_TIMEOUT_MS") ?? 30_000);
+        const readyTimeoutMs = Math.max(5_000, envInt("NEXUS_HA_RESTART_READY_TIMEOUT_MS") ?? 45_000);
+        const retryMs = Math.max(250, envInt("NEXUS_HA_RESTART_RETRY_MS") ?? 1000);
+
+        log(`restart: handoff begin reason=${reason} peer=${restartPeerUrl}`);
+        if (handoffDelayMs > 0) {
+          await sleep(handoffDelayMs);
+        }
+
+        const peerLive = await fetchText(`${restartPeerUrl}/health/live`, { method: "GET" }, Math.min(8000, retryMs * 4));
+        if (!peerLive.ok) {
+          log(`restart: peer not reachable for handoff; using local restart status=${peerLive.status}`);
+          scheduleProcessRestart(reason, 250);
+          return;
+        }
+
+        if (!isStandby) {
+          await deactivateServices(`restart handoff (${reason})`);
+        } else {
+          log("restart: instance already standby before handoff");
+        }
+
+        const activated = await tryActivatePeer(restartPeerUrl, activateTimeoutMs, retryMs);
+        if (!activated) {
+          log("restart: handoff failed (peer activation timeout); falling back to local restart");
+          scheduleProcessRestart(reason, 250);
+          return;
+        }
+
+        const ready = await waitPeerReady(restartPeerUrl, readyTimeoutMs, retryMs);
+        if (!ready) {
+          log("restart: handoff failed (peer readiness timeout); falling back to local restart");
+          scheduleProcessRestart(reason, 250);
+          return;
+        }
+
+        log("restart: handoff complete; terminating local process");
+        scheduleProcessRestart(reason, 250);
+      } catch (err) {
+        log(`restart: handoff error: ${err instanceof Error ? err.message : String(err)}`);
+        scheduleProcessRestart(reason, 250);
+      } finally {
+        setTimeout(() => {
+          restartInProgress = false;
+        }, 1000);
+      }
+    })();
+  };
 
   // Start services immediately if not in standby mode
   if (!isStandby) {
@@ -533,4 +655,25 @@ function envInt(key: string): number | null {
   if (!raw) return null;
   const value = Number(raw);
   return Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
+function normalizeHttpBaseUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function truncateLine(value: string, maxLen: number = 140): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, maxLen)}...`;
 }
