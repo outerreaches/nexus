@@ -547,6 +547,39 @@ curl http://localhost:18790/api/mode      # Should return standby (direct port)
 curl http://localhost:9999/stats
 ```
 
+### 7.3.1 Rolling Deploy (Recommended)
+
+Use the rollout helper to update one slot at a time with automatic rollback on failure.
+
+```bash
+cd /data/code
+git pull
+
+# Show active/inactive slots + rollout state
+infra/scripts/ha-rollout.sh status
+
+# Deploy current HEAD (or pass an explicit commit SHA)
+infra/scripts/ha-rollout.sh deploy HEAD
+
+# Optional but recommended: refresh the inactive slot to match the new version
+infra/scripts/ha-rollout.sh finalize HEAD
+```
+
+Rollback commands:
+
+```bash
+# Roll back to last-good recorded commit
+infra/scripts/ha-rollout.sh rollback
+
+# Roll back to a specific commit
+infra/scripts/ha-rollout.sh rollback <commit-sha>
+```
+
+Notes:
+- `deploy` requires a clean git working tree in `/data/code`.
+- On failure after switchover, the script re-activates the previous slot and checks out `last_good_sha`.
+- Rollout state is persisted in `/data/nexus/deploy-state.env`.
+
 ### 7.4 Testing Failover
 
 ```bash

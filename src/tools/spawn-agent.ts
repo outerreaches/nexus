@@ -1,5 +1,6 @@
 import { fork, exec, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -187,8 +188,9 @@ export const spawnAgent = defineTool({
     }
 
     // Branch: isolated process vs in-process
+    let workerResult: string;
     if (preset.isolated) {
-      return runIsolated({
+      workerResult = await runIsolated({
         ctx,
         preset,
         systemPrompt,
@@ -202,18 +204,37 @@ export const spawnAgent = defineTool({
         tracker,
         blackboardTitle,
       });
+    } else {
+      workerResult = await runInProcess({
+        ctx,
+        preset,
+        systemPrompt,
+        task: cleanedTask,
+        budget,
+        runId: runId ?? null,
+        workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
+        tracker,
+        blackboardTitle,
+      });
     }
-    return runInProcess({
-      ctx,
-      preset,
-      systemPrompt,
-      task: cleanedTask,
-      budget,
-      runId: runId ?? null,
-      workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
-      tracker,
-      blackboardTitle,
-    });
+
+    // Ensure coder changes are validated and committed for reliable rollouts.
+    if (preset.name === "coder" && ctx.allowCodeEdit && ctx.codeDir) {
+      const parsed = parseWorkerResult(workerResult);
+      if (parsed?.status === "complete") {
+        const git = await finalizeCoderGit({
+          codeDir: ctx.codeDir,
+          runId: runId ?? null,
+          log: ctx.log,
+        });
+        if (!git.ok) {
+          return `ERROR: coder git finalize failed: ${git.error}`;
+        }
+        workerResult = attachGitFinalize(workerResult, git.meta);
+      }
+    }
+
+    return workerResult;
   },
 });
 
@@ -599,6 +620,29 @@ function attachBlackboardTitle(resultJson: string, blackboardTitle: string): str
   return resultJson;
 }
 
+function attachGitFinalize(resultJson: string, meta: Record<string, unknown>): string {
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      parsed.git = meta;
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return resultJson;
+}
+
+function parseWorkerResult(raw: string): { status?: string } | null {
+  try {
+    const parsed = JSON.parse(raw) as { status?: string };
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Create a git checkpoint (commit) before coder agents modify code.
  * This allows rollback if the agent breaks something.
@@ -631,4 +675,106 @@ async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: 
       log?.(`git-checkpoint: skipped (${msg})`);
     }
   }
+}
+
+async function finalizeCoderGit(params: {
+  codeDir: string;
+  runId: string | null;
+  log?: (msg: string) => void;
+}): Promise<{ ok: true; meta: Record<string, unknown> } | { ok: false; error: string }> {
+  const { codeDir, runId, log } = params;
+  try {
+    await execAsync("git rev-parse --git-dir", { cwd: codeDir });
+  } catch {
+    return { ok: true, meta: { enabled: false, reason: "git unavailable" } };
+  }
+
+  const { stdout: statusBefore } = await execAsync("git status --porcelain", { cwd: codeDir });
+  if (!statusBefore.trim()) {
+    return { ok: true, meta: { enabled: true, changed: false, committed: false } };
+  }
+
+  const scripts = await readPackageScripts(codeDir);
+  const checks: Record<string, string> = {
+    typecheck: "skipped",
+    build: "skipped",
+  };
+
+  if (scripts.typecheck) {
+    try {
+      await execAsync("npm run typecheck", { cwd: codeDir, timeout: 10 * 60_000, maxBuffer: 2 * 1024 * 1024 });
+      checks.typecheck = "passed";
+    } catch (err) {
+      return { ok: false, error: `typecheck failed: ${summarizeExecError(err)}` };
+    }
+  }
+
+  if (scripts.build) {
+    try {
+      await execAsync("npm run build", { cwd: codeDir, timeout: 10 * 60_000, maxBuffer: 3 * 1024 * 1024 });
+      checks.build = "passed";
+    } catch (err) {
+      return { ok: false, error: `build failed: ${summarizeExecError(err)}` };
+    }
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const commitMsg = `coder: apply changes ${timestamp}${runId ? ` (run:${runId.slice(0, 8)})` : ""}`;
+  const escapedMsg = commitMsg.replace(/"/g, '\\"');
+
+  try {
+    await execAsync("git add -A", { cwd: codeDir });
+    await execAsync(`git commit -m "${escapedMsg}"`, { cwd: codeDir, maxBuffer: 1024 * 1024 });
+    const { stdout: shaRaw } = await execAsync("git rev-parse HEAD", { cwd: codeDir });
+    const commitSha = shaRaw.trim();
+    log?.(`git-finalize: committed ${commitSha.slice(0, 12)}`);
+    return {
+      ok: true,
+      meta: {
+        enabled: true,
+        changed: true,
+        committed: true,
+        commitSha,
+        checks,
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: `commit failed: ${summarizeExecError(err)}` };
+  }
+}
+
+async function readPackageScripts(codeDir: string): Promise<Record<string, string>> {
+  const pkgPath = path.join(codeDir, "package.json");
+  try {
+    const raw = await readFile(pkgPath, "utf8");
+    const parsed = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+    if (!parsed || typeof parsed !== "object" || !parsed.scripts || typeof parsed.scripts !== "object") {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed.scripts)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function summarizeExecError(err: unknown): string {
+  const anyErr = err as { message?: string; stdout?: string; stderr?: string; code?: number };
+  const parts: string[] = [];
+  if (typeof anyErr.code === "number") parts.push(`exit=${anyErr.code}`);
+  const stderr = truncateInline(anyErr.stderr ?? "", 240);
+  const stdout = truncateInline(anyErr.stdout ?? "", 160);
+  if (stderr) parts.push(stderr);
+  if (!stderr && stdout) parts.push(stdout);
+  if (parts.length === 0 && anyErr.message) parts.push(truncateInline(anyErr.message, 240));
+  return parts.join(" | ") || "unknown command failure";
+}
+
+function truncateInline(value: string, maxLen: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean.length > maxLen ? `${clean.slice(0, maxLen)}...` : clean;
 }
