@@ -190,10 +190,9 @@ service_post() {
   compose exec -T "$service" sh -lc "curl -fsS --max-time 10 -X POST http://localhost:18789${path}" >/dev/null
 }
 
-detect_slots() {
-  local primary_mode standby_mode
-  primary_mode="$(service_mode nexus-primary)"
-  standby_mode="$(service_mode nexus-standby)"
+set_slots_from_modes() {
+  local primary_mode="$1"
+  local standby_mode="$2"
 
   if [ "$primary_mode" = "active" ] && [ "$standby_mode" != "active" ]; then
     ACTIVE_SLOT="nexus-primary"
@@ -205,8 +204,78 @@ detect_slots() {
     INACTIVE_SLOT="nexus-primary"
     return 0
   fi
+  return 1
+}
 
-  fail "unable to determine active slot (primary=${primary_mode}, standby=${standby_mode})"
+try_activate_slot() {
+  local slot="$1"
+  local timeout="$2"
+  local started now
+  started="$(date +%s)"
+  while true; do
+    if compose exec -T "$slot" sh -lc "curl -fsS --max-time 8 -X POST http://localhost:18789/api/activate" >/dev/null 2>&1; then
+      wait_for_service_http "$slot" "/health/ready" "$READY_TIMEOUT" || return 1
+      return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - started)) -ge "$timeout" ]; then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+recover_slot_state() {
+  local primary_mode standby_mode
+  primary_mode="$(service_mode nexus-primary)"
+  standby_mode="$(service_mode nexus-standby)"
+
+  if set_slots_from_modes "$primary_mode" "$standby_mode"; then
+    return 0
+  fi
+
+  if [ "$primary_mode" = "standby" ] && [ "$standby_mode" = "standby" ]; then
+    warn "both slots are standby; attempting bootstrap activation"
+    if try_activate_slot "nexus-primary" "$READY_TIMEOUT"; then
+      log "bootstrap activation succeeded on nexus-primary"
+      return 0
+    fi
+    warn "bootstrap activation on nexus-primary failed; trying nexus-standby"
+    if try_activate_slot "nexus-standby" "$READY_TIMEOUT"; then
+      log "bootstrap activation succeeded on nexus-standby"
+      return 0
+    fi
+    return 1
+  fi
+
+  if [ "$primary_mode" = "active" ] && [ "$standby_mode" = "active" ]; then
+    warn "both slots report active; attempting to demote nexus-standby"
+    service_post "nexus-standby" "/api/deactivate" || true
+    sleep 2
+    return 0
+  fi
+
+  return 1
+}
+
+detect_slots() {
+  local primary_mode standby_mode
+  primary_mode="$(service_mode nexus-primary)"
+  standby_mode="$(service_mode nexus-standby)"
+  if set_slots_from_modes "$primary_mode" "$standby_mode"; then
+    return 0
+  fi
+
+  if ! recover_slot_state; then
+    fail "unable to determine active slot (primary=${primary_mode}, standby=${standby_mode})"
+  fi
+
+  primary_mode="$(service_mode nexus-primary)"
+  standby_mode="$(service_mode nexus-standby)"
+  if set_slots_from_modes "$primary_mode" "$standby_mode"; then
+    return 0
+  fi
+  fail "unable to determine active slot after recovery (primary=${primary_mode}, standby=${standby_mode})"
 }
 
 build_slot() {
