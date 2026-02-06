@@ -532,20 +532,40 @@ This section covers deploying Nexus in a fault-tolerant primary/standby configur
 | `ENABLE_FAILBACK` | false | Auto-restore original primary when healthy |
 | `FAILBACK_THRESHOLD` | 3 | Consecutive healthy checks before failback |
 
+### 7.2.1 Required HA Paths and Files
+
+The HA stack in `infra/docker-compose.ha.yml` assumes:
+- Code checkout: `/data/code`
+- State/DB: `/data/nexus`
+- Workspace: `/data/workspace`
+- Env file: `/data/code/.env` (because `env_file: ../.env` is resolved from `/data/code/infra`)
+
+If your env file is still in `~/nexus-deploy/.env`, create a one-time link:
+
+```bash
+ln -sf ~/nexus-deploy/.env /data/code/.env
+```
+
 ### 7.3 Deployment
 
 ```bash
-# On VM - use HA compose file
-cd ~/nexus-deploy
-docker compose -f docker-compose.ha.yml up -d
+# On VM - use a fixed compose project name to avoid parallel stacks
+cd /data/code
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
 
-# Verify both instances
-curl http://localhost:18789/api/mode      # Should return active
-curl http://localhost:18790/api/mode      # Should return standby (direct port)
+# Verify services and HA proxy endpoints
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml ps
+curl -s http://localhost:18789/api/mode
+curl -s http://localhost:18789/health/live
+curl -s http://localhost:18789/health/ready
 
 # Check HAProxy stats
-curl http://localhost:9999/stats
+curl -s http://localhost:9999/stats | head
 ```
+
+Notes:
+- Always use `-p infra` with the HA compose file. Omitting it can leave an old stack running and cause port conflicts.
+- The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
 
 ### 7.3.1 Rolling Deploy (Recommended)
 
@@ -579,6 +599,7 @@ Notes:
 - `deploy` requires a clean git working tree in `/data/code`.
 - On failure after switchover, the script re-activates the previous slot and checks out `last_good_sha`.
 - Rollout state is persisted in `/data/nexus/deploy-state.env`.
+- If both slots are accidentally in standby mode, the script attempts bootstrap activation before failing.
 
 ### 7.3.2 Host Deployer (Fully Automated)
 
@@ -610,6 +631,22 @@ From agent/orchestrator:
 - Queue request with `ha_deploy_request({ commitSha: "<sha>", finalize: true })`
 - Check progress with `ha_deploy_status()`
 
+### 7.3.3 Self-Modification Deploy Flow
+
+Typical flow when the agent edits its own code:
+1. Coder agent modifies files in `/data/code`, commits, and pushes to host remote.
+2. VM working tree is updated (`git pull` on `/data/code`), or already at that commit.
+3. Orchestrator queues deploy with `ha_deploy_request(commitSha, finalize=true)`.
+4. Host deployer runs `ha-rollout deploy <sha>` on inactive slot first.
+5. Traffic switches only after candidate slot passes liveness/readiness and smoke checks.
+6. If deploy fails, rollout automatically re-activates prior slot and restores `last_good_sha`.
+7. If deploy succeeds, `ha-rollout finalize <sha>` refreshes the inactive slot to the same version.
+
+Operational behavior:
+- Only the active slot handles Telegram/scheduler/proactive jobs.
+- Standby slot intentionally does not process channel traffic.
+- If both slots report standby, run `infra/scripts/ha-rollout.sh status`; recovery is attempted automatically during deploy/finalize/rollback.
+
 ### 7.4 Testing Failover
 
 ```bash
@@ -621,20 +658,20 @@ curl http://localhost:18789/api/mode
 curl http://localhost:18789/status | jq '.activeLease'
 
 # 3. Stop primary container to trigger failover
-docker stop nexus-primary
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml stop nexus-primary
 
 # 4. Watch watchdog logs
-docker logs -f watchdog
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs -f watchdog
 
 # 5. After ~15-20 seconds, verify standby activated
 curl http://localhost:18789/api/mode
 # Expected: {"mode":"active"} (now served by standby)
 
 # 6. Restart original primary
-docker start nexus-primary
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml start nexus-primary
 
 # 7. Original primary enters standby mode
-docker logs nexus-primary | grep standby
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs --tail=100 nexus-primary | grep standby
 # Expected: "standby: active lease held by ..."
 ```
 
@@ -722,6 +759,97 @@ sudo journalctl -u nexus-forward -f
 virsh domifaddr nexus-vm
 ```
 
+### HA: Port 18789 already allocated
+
+Symptom:
+- `Bind for 0.0.0.0:18789 failed: port is already allocated`
+
+Cause:
+- An older non-HA stack (often project `nexus-deploy`) is still bound to host port `18789`.
+
+Fix:
+
+```bash
+docker ps --filter "publish=18789" --format "table {{.ID}}\t{{.Names}}\t{{.Ports}}"
+
+# If legacy stack is running:
+cd ~/nexus-deploy
+docker compose down
+
+# Start HA stack with explicit project name
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d
+```
+
+### HA: env file `/data/code/.env` not found
+
+Symptom:
+- `env file /data/code/.env not found: stat /data/code/.env: no such file or directory`
+
+Cause:
+- `infra/docker-compose.ha.yml` uses `env_file: ../.env`, so Compose resolves it to `/data/code/.env`.
+
+Fix:
+
+```bash
+ln -sf ~/nexus-deploy/.env /data/code/.env
+# or:
+cp ~/nexus-deploy/.env /data/code/.env
+```
+
+### HA: `ha-rollout` cannot determine active slot
+
+Symptom:
+- `ERROR: unable to determine active slot (primary=standby, standby=standby)`
+
+Cause:
+- Both slots ended up in standby mode (or both active) after manual operations or interrupted restarts.
+
+Fix:
+
+```bash
+cd /data/code
+infra/scripts/ha-rollout.sh status
+
+# Re-run deploy/finalize/rollback; script now attempts automatic slot recovery
+infra/scripts/ha-rollout.sh deploy HEAD
+```
+
+### HA: Dashboard returns 503 (`<NOSRV>`) while containers are up
+
+Symptoms:
+- HAProxy logs show `Layer7 wrong status` and backend has no available server.
+- `curl` inside Nexus containers fails with `exec: "curl": executable file not found`.
+
+Cause:
+- Containers were built from an older image missing runtime tools used by health checks.
+
+Fix:
+
+```bash
+cd /data/code
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml ps
+```
+
+### HA: State/data appears missing after switching to HA compose
+
+Symptoms:
+- Dashboard loads but jobs, intakes, blackboard history look empty.
+
+Cause:
+- Stack was started with fresh named volumes instead of bind mounts to `/data/nexus` and `/data/workspace`.
+
+Fix:
+
+```bash
+# Confirm expected host paths contain prior state
+ls -lah /data/nexus | head
+ls -lah /data/workspace | head
+
+# Confirm current HA compose uses host bind mounts (not named volumes)
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep -E '/data/nexus|/data/workspace|/data/code'
+```
+
 ---
 
 ## Quick Reference
@@ -742,3 +870,8 @@ virsh domifaddr nexus-vm
 | `virsh snapshot-create-as nexus-vm NAME` | Create snapshot |
 | `docker compose logs -f` | View Nexus logs |
 | `docker compose restart` | Restart Nexus |
+| `infra/scripts/ha-rollout.sh status` | Show active/inactive HA slots + rollout state |
+| `infra/scripts/ha-rollout.sh deploy HEAD` | Roll out current commit to inactive slot and switch |
+| `infra/scripts/ha-rollout.sh finalize HEAD` | Rebuild standby slot to match active commit |
+| `infra/scripts/ha-rollout.sh rollback` | Roll back to recorded last-good commit |
+| `infra/scripts/ha-deployer.sh status` | Show deploy queue counts (pending/processing/done/failed) |

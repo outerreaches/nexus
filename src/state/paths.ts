@@ -34,12 +34,14 @@ export async function resolveRuntimePaths(config: {
   codeDir?: string;
 }): Promise<RuntimePaths> {
   const stateDir = path.resolve(expandHome(config.stateDir ?? getDefaultStateDir()));
-  const workspaceDir = path.resolve(expandHome(config.workspaceDir ?? path.join(stateDir, "workspace")));
+  const workspaceDefault = process.env.NEXUS_WORKSPACE_DIR ?? path.join(stateDir, "workspace");
+  const workspaceDir = path.resolve(expandHome(config.workspaceDir ?? workspaceDefault));
   const codeDirRaw = config.codeDir;
+  const codeDirDefault = process.env.NEXUS_CODE_DIR ?? (await inferCodeDir());
   const codeDir =
     codeDirRaw && /^\$\{[A-Z0-9_]+\}$/.test(codeDirRaw)
-      ? await inferCodeDir()
-      : path.resolve(expandHome(codeDirRaw ?? (await inferCodeDir())));
+      ? path.resolve(expandHome(codeDirDefault))
+      : path.resolve(expandHome(codeDirRaw ?? codeDirDefault));
   const dbPath = path.join(stateDir, "nexus.db");
   return RuntimePathsSchema.parse({ stateDir, workspaceDir, codeDir, dbPath });
 }

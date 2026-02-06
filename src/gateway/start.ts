@@ -64,6 +64,14 @@ export async function startGateway(params: { configPath: string; port?: number; 
       process.stdout.write(`[nexus] log file error: ${msg}\n`);
     }
   }
+  log(`paths: state=${paths.stateDir} workspace=${paths.workspaceDir} code=${paths.codeDir}`);
+  const envCodeDir = process.env.NEXUS_CODE_DIR;
+  if (envCodeDir) {
+    const resolvedEnvCodeDir = path.resolve(envCodeDir);
+    if (resolvedEnvCodeDir !== paths.codeDir) {
+      log(`paths: WARN codeDir mismatch env=${resolvedEnvCodeDir} resolved=${paths.codeDir}`);
+    }
+  }
 
   const db = await openDatabase(paths.dbPath);
   initDataIntake();
