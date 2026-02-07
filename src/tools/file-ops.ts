@@ -242,6 +242,12 @@ export const fileWrite = defineTool({
   ),
   execute: async ({ root, path: inputPath, content, mode }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
+    if (root === "code" && !ctx.allowCodeWrite) {
+      return (
+        "ERROR: code root is read-only in this runtime. " +
+        "Submit a code change request for host-side apply/deploy instead of writing directly."
+      );
+    }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
     const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
     const fullPath = resolveWithinRoots({
@@ -333,6 +339,12 @@ export const fileEdit = defineTool({
   ),
   execute: async ({ root, path: inputPath, find, replace }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
+    if (root === "code" && !ctx.allowCodeWrite) {
+      return (
+        "ERROR: code root is read-only in this runtime. " +
+        "Submit a code change request for host-side apply/deploy instead of editing directly."
+      );
+    }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
     const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
     const fullPath = resolveWithinRoots({
@@ -376,6 +388,12 @@ export const fileEditLines = defineTool({
   ),
   execute: async ({ root, path: inputPath, startLine, endLine, content }, ctx) => {
     if (root === "code" && !ctx.allowCodeEdit) return "ERROR: code root is disabled by policy";
+    if (root === "code" && !ctx.allowCodeWrite) {
+      return (
+        "ERROR: code root is read-only in this runtime. " +
+        "Submit a code change request for host-side apply/deploy instead of editing directly."
+      );
+    }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
     const baseRoot = root === "workspace" ? ctx.workspaceDir : root === "state" ? ctx.stateDir : ctx.codeDir;
     const fullPath = resolveWithinRoots({

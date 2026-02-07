@@ -88,6 +88,7 @@ export async function runCli(argv: string[]): Promise<void> {
         processManager,
         allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
         allowCodeEdit: config.permissions.allowCodeEdit,
+        allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
         requestRestart: (reason: string, delayMs: number = 2500) => {
           log(`restart: ${reason}`);
           setTimeout(() => process.exit(0), delayMs);
@@ -208,6 +209,7 @@ export async function runCli(argv: string[]): Promise<void> {
           registry,
           allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
           allowCodeEdit: config.permissions.allowCodeEdit,
+          allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
           nowMs: () => Date.now(),
           log,
         };

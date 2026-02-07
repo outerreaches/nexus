@@ -133,6 +133,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     telegram: undefined as unknown,
     allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
     allowCodeEdit: config.permissions.allowCodeEdit,
+    allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
     requestRestart: (reason: string, delayMs: number = 2500) => {
       requestRestartImpl(reason, delayMs);
     },

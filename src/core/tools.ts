@@ -20,6 +20,7 @@ export type ToolContext = {
   telegram?: unknown;
   allowShellExec?: boolean;
   allowCodeEdit?: boolean;
+  allowCodeWrite?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
   request?: { channel: string; channelKey: string; agentId: string; sessionId: string; runId?: string };
   planState?: {

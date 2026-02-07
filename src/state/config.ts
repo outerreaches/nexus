@@ -94,6 +94,7 @@ export const ConfigSchema = z.object({
     .object({
       allowShellExec: z.boolean().default(false),
       allowCodeEdit: z.boolean().default(true),
+      allowCodeWrite: z.boolean().default(false),
     })
     .default({}),
   limits: z
@@ -158,6 +159,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
         permissions: {
           allowShellExec: false,
           allowCodeEdit: true,
+          allowCodeWrite: false,
         },
         proactive: {
           enabled: false,

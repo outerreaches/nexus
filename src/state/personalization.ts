@@ -101,7 +101,7 @@ Use \`spawn_agent\` to delegate to these specialists:
 
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
-| **coder** | File editing, code writing, debugging, shell commands | file_ops, shell_exec, web_fetch |
+| **coder** | Codebase analysis, change payload preparation, debugging | file_ops, shell_exec, web_fetch |
 | **researcher** | Web research, browsing, document analysis | web_search, data_intake_query |
 | **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
 | **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query |
@@ -124,13 +124,13 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 
 ## Code Change → Deploy Workflow
 
-When a coder agent modifies code:
-1. The coder edits files, runs typecheck/build, and returns results.
-2. \`finalizeCoderGit\` automatically commits the changes and returns a \`commitSha\` in the result (under \`git.commitSha\`).
-3. **You (the orchestrator) must deploy**: call \`ha_deploy_request\` with the \`commitSha\` from the coder result.
-4. Check status with \`ha_deploy_status\` if needed.
+For code changes:
+1. Spawn a coder to inspect patterns under \`root="code"\` and prepare a structured change payload.
+2. The coder should return: \`title\`, \`summary\`, \`validate[]\`, and \`changeSet\` (ops or patch).
+3. Submit the change with \`code_change_request_create\`.
+4. Track progress with \`code_change_request_status\` and report success/failure to the user.
 
-**Important**: Do NOT tell the coder to commit or deploy — it's automatic. Do NOT use \`gateway_restart\` as a deploy mechanism. Always extract \`git.commitSha\` from the coder result and call \`ha_deploy_request\`.
+**Important**: Do NOT use \`gateway_restart\` as a deploy mechanism. Do not use legacy deploy queue tools.
 
 ## Memory Strategy
 - Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
@@ -185,17 +185,16 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 
 1. **Locate the correct repo root** in \`root="code"\` (must contain \`package.json\` + \`src/\`).
 2. **Read before editing** (\`file_read\` with line ranges).
-3. **Make minimal changes** (\`file_edit\` or \`file_edit_lines\`).
-4. **Typecheck + build** (\`shell_exec\`: \`npm run typecheck\` then \`npm run build\`).
-5. **Report completion** — write results to blackboard and return.
+3. **Prepare minimal change operations** (\`changeSet.ops\` or \`changeSet.patch\`) instead of writing into \`root="code"\`.
+4. **Define host validations** (\`validate[]\`, typically \`npm run typecheck\` and \`npm run build\`).
+5. **Write the payload to blackboard** so the orchestrator can call \`code_change_request_create\`.
 
-### IMPORTANT: Do NOT commit or deploy
+### IMPORTANT: Code Root Is Read-Only
 
 - **Do NOT run \`git add\`, \`git commit\`, or \`git push\`.**
-  The system automatically runs typecheck, build, and commit after you finish (via \`finalizeCoderGit\`).
-  If you commit manually, the automatic finalize finds "no changes" and the orchestrator never gets the commit SHA it needs for deployment.
-- **Do NOT call \`ha_deploy_request\`, \`gateway_restart\`, or write deploy queue files.**
-  The orchestrator handles deployment after receiving your results.
+- **Do NOT call \`gateway_restart\` for deploys.**
+- **Do NOT write directly to \`root="code"\` unless explicitly allowed by policy.**
+  Use structured change requests handled by the host worker.
 - **Do NOT create test scripts in the code directory.** Use \`root="workspace"\` for scratch files.
 
 If changes "disappear" after a restart, you probably edited the image filesystem (\`/app\`) instead of a persistent mounted code directory.
@@ -384,9 +383,9 @@ Prefer \`file_write mode="append"\` when adding standing instructions to avoid c
 
 ## Troubleshooting Self-Mod
 
-- **Edits don’t persist**: you edited \`/app\` (image FS). Configure \`codeDir\` to a mounted git working tree.
+- **Edits fail with read-only errors**: expected in this mode. Return a \`changeSet\` payload and let orchestrator submit \`code_change_request_create\`.
 - **Can’t find files**: verify \`file_list root="code" path="."\` includes \`package.json\`.
-- **Build succeeds but behavior unchanged**: you built the wrong directory. Run \`shell_exec("pwd")\` and ensure you’re in the repo root.
+- **Behavior unchanged after request**: check \`code_change_request_status\` for failure message and \`logFile\`.
 - **HA oddities**: confirm only one instance is active (dashboard HA section + \`/status.activeLease\`).
 `;
 }

@@ -1,5 +1,5 @@
 [Unit]
-Description=Nexus HA Host Deployer Queue Worker
+Description=Nexus Host Change Worker
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -10,11 +10,11 @@ WorkingDirectory=/data/code
 Environment=CODE_DIR=/data/code
 Environment=STATE_DIR=/data/nexus
 Environment=POLL_INTERVAL=5
-Environment=PUSH_AFTER_DEPLOY=1
-Environment=PUSH_REMOTE=host
-Environment=PUSH_BRANCH=main
-Environment=PUSH_REQUIRED=0
-ExecStart=/data/code/infra/scripts/ha-deployer.sh daemon
+Environment=COMPOSE_PROJECT=infra
+Environment=COMPOSE_FILE=/data/code/infra/docker-compose.ha.yml
+Environment=API_URL=http://localhost:18789
+Environment=CHANGE_WORKER_DRY_RUN=0
+ExecStart=/data/code/infra/scripts/change-worker.sh daemon
 Restart=always
 RestartSec=3
 

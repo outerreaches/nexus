@@ -71,9 +71,11 @@ export const preset: AgentPreset = {
     "credential_generate",
     "credential_list",
     "credential_delete",
-    // Lifecycle
-    "ha_deploy_request",
-    "ha_deploy_status",
+    // Host-owned code apply/deploy
+    "code_change_request_create",
+    "code_change_request_status",
+    "code_change_request_list",
+    "code_change_request_cancel",
     "tools_reload",
     // Gmail (orchestrator can check/send email directly)
     "gmail_profile",

@@ -21,6 +21,7 @@ export type WorkerConfig = {
   // Permissions
   allowShellExec: boolean;
   allowCodeEdit: boolean;
+  allowCodeWrite: boolean;
 
   // Preset
   presetName: string;

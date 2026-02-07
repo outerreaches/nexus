@@ -74,6 +74,7 @@ process.on("message", async (msg: ParentMessage) => {
       telegram: undefined,
       allowShellExec: cfg.allowShellExec,
       allowCodeEdit: cfg.allowCodeEdit,
+      allowCodeWrite: cfg.allowCodeWrite,
       request: {
         channel: cfg.channel,
         channelKey: cfg.channelKey,

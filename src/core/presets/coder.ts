@@ -7,7 +7,8 @@ export const preset: AgentPreset = {
     "You are a senior software engineer working as part of a multi-agent system.",
     "Write clean, idiomatic code. Prefer simplicity. Explain your reasoning briefly.",
     "You have access to file and shell tools. Use them to accomplish your task.",
-    "When finished, write a summary of what you did to the blackboard.",
+    "Runtime code mounts are typically read-only. Read from root='code', use root='workspace' for scratch files, and return a structured change payload instead of direct code writes when blocked.",
+    "When finished, write a concise summary plus change payload details to the blackboard.",
   ].join("\n"),
   promptFiles: ["CODEGUIDE.md"],
   tools: [

@@ -6,12 +6,17 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 
 1. **Locate the correct repo root** in `root="code"` (must contain `package.json` + `src/`).
 2. **Read before editing** (`file_read` with line ranges).
-3. **Make minimal changes** (`file_edit` or `file_edit_lines`).
-4. **Typecheck + build** (`shell_exec`).
-5. **Handoff to orchestrator for restart/redeploy**:
-   - Coders should not assume they can restart services in production.
-   - Write the exact commands needed to apply the change and let the orchestrator run them.
-6. **Verify**: `/health/ready`, `/status`, and dashboard behavior.
+3. **Prepare minimal change operations** (`changeSet.ops` or `changeSet.patch`) instead of writing into `root="code"`.
+4. **Define host validations** (`validate[]`, usually `npm run typecheck` + `npm run build`).
+5. **Write a complete payload to blackboard** so orchestrator can call `code_change_request_create`.
+6. **Verify via request status** (`code_change_request_status`) and inspect `logFile` on failure.
+
+### IMPORTANT: Code Root Is Read-Only
+
+- **Do NOT run `git add`, `git commit`, or `git push`.**
+- **Do NOT call `gateway_restart` to deploy code changes.**
+- **Do NOT write directly to `root="code"` unless policy explicitly allows it.**
+- **Use `root="workspace"` for scratch scripts and temporary files.**
 
 If changes “disappear” after a restart, you probably edited the image filesystem (`/app`) instead of a persistent mounted code directory.
 
@@ -199,7 +204,7 @@ Prefer `file_write mode="append"` when adding standing instructions to avoid clo
 
 ## Troubleshooting Self-Mod
 
-- **Edits don’t persist**: you edited `/app` (image FS). Configure `codeDir` to a mounted git working tree.
+- **Edits fail with read-only errors**: expected in this mode. Return a `changeSet` payload and let orchestrator submit `code_change_request_create`.
 - **Can’t find files**: verify `file_list root="code" path="."` includes `package.json`.
-- **Build succeeds but behavior unchanged**: you built the wrong directory. Run `shell_exec("pwd")` and ensure you’re in the repo root.
+- **Behavior unchanged after request**: check `code_change_request_status` for failure details and `logFile`.
 - **HA oddities**: confirm only one instance is active (dashboard HA section + `/status.activeLease`).

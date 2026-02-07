@@ -566,6 +566,7 @@ curl -s http://localhost:9999/stats | head
 Notes:
 - Always use `-p infra` with the HA compose file. Omitting it can leave an old stack running and cause port conflicts.
 - The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
+- `/data/code` is mounted read-only in containers; host worker applies code changes on VM and redeploys safely.
 
 ### 7.3.1 Rolling Deploy (Recommended)
 
@@ -601,77 +602,73 @@ Notes:
 - Rollout state is persisted in `/data/nexus/deploy-state.env`.
 - If both slots are accidentally in standby mode, the script attempts bootstrap activation before failing.
 
-### 7.3.2 Host Deployer (Fully Automated)
+### 7.3.2 Host Change Worker (Fully Automated)
 
-To automate deploys from agent-generated commit SHAs without host CLI steps, run the host deployer daemon:
+To automate self-modification safely with host-owned git/deploy, run the host change worker:
 
 ```bash
 # On VM (one-time install)
-sudo cp /data/code/infra/systemd/nexus-ha-deployer.service /etc/systemd/system/
+sudo systemctl disable --now nexus-ha-deployer 2>/dev/null || true
+sudo cp /data/code/infra/systemd/nexus-change-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now nexus-ha-deployer
+sudo systemctl enable --now nexus-change-worker
 
 # Verify
-systemctl status nexus-ha-deployer --no-pager
-/data/code/infra/scripts/ha-deployer.sh status
+systemctl status nexus-change-worker --no-pager
+/data/code/infra/scripts/change-worker.sh status
 ```
 
-The daemon watches `/data/nexus/deploy-queue/pending` and processes requests by running:
-- `infra/scripts/ha-rollout.sh deploy <commitSha>`
-- `infra/scripts/ha-rollout.sh finalize <commitSha>` (if requested)
-- `git push <remote> <commitSha>:refs/heads/<branch>` (after successful deploy/finalize)
-
-Default publish settings:
-- `PUSH_AFTER_DEPLOY=1` (enabled)
-- `PUSH_REMOTE=host`
-- `PUSH_BRANCH=main`
-- `PUSH_REQUIRED=0` (if `1`, request is marked failed when publish fails)
-
-Optional systemd override for publish settings:
-
-```bash
-sudo systemctl edit nexus-ha-deployer
-```
-
-```ini
-[Service]
-Environment=PUSH_AFTER_DEPLOY=1
-Environment=PUSH_REMOTE=host
-Environment=PUSH_BRANCH=main
-Environment=PUSH_REQUIRED=1
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart nexus-ha-deployer
-```
+The worker watches `/data/nexus/change-queue/pending` and processes `code_change_request_create` requests:
+1. Verify clean host git tree and `baseSha == HEAD`.
+2. Apply `changeSet` to `/data/code`.
+3. Run `validate[]` commands.
+4. Rebuild/recreate inactive slot (candidate) and wait for readiness.
+5. Commit and push to `host/main`.
+6. Promote candidate to active.
+7. Rebuild old active slot as standby.
 
 Queue directories:
-- Pending: `/data/nexus/deploy-queue/pending`
-- Processing: `/data/nexus/deploy-queue/processing`
-- Completed: `/data/nexus/deploy-queue/done`
-- Failed: `/data/nexus/deploy-queue/failed`
-- Logs: `/data/nexus/deploy-queue/logs`
+- Pending: `/data/nexus/change-queue/pending`
+- Processing: `/data/nexus/change-queue/processing`
+- Completed: `/data/nexus/change-queue/done`
+- Failed: `/data/nexus/change-queue/failed`
+- Logs: `/data/nexus/change-queue/logs`
 
 From agent/orchestrator:
-- Queue request with `ha_deploy_request({ commitSha: "<sha>", finalize: true })`
-- Check progress with `ha_deploy_status()` (includes `message` and `logFile` for completed/failed runs)
+- Submit request with `code_change_request_create(...)`.
+- Track with `code_change_request_status(...)`.
+
+#### Dry-Run Mode
+
+Set `CHANGE_WORKER_DRY_RUN=1` in the systemd unit to test safely.
+
+Dry-run still does:
+- apply `changeSet`
+- run `validate[]`
+- rebuild and readiness-check inactive slot
+
+Dry-run does **not**:
+- commit
+- push
+- promote active slot
+- rebuild final standby slot
+
+After dry-run, the worker resets host git to `baseSha` and restores candidate slot.
 
 ### 7.3.3 Self-Modification Deploy Flow
 
-Typical flow when the agent edits its own code:
-1. Coder agent modifies files in `/data/code` and commits.
-2. Orchestrator queues deploy with `ha_deploy_request(commitSha, finalize=true)`.
-3. Host deployer runs `ha-rollout deploy <sha>` on inactive slot first.
-4. Traffic switches only after candidate slot passes liveness/readiness and smoke checks.
-5. If deploy fails, rollout automatically re-activates prior slot and restores `last_good_sha`.
-6. If deploy succeeds, `ha-rollout finalize <sha>` refreshes the inactive slot to the same version.
-7. Host deployer pushes the deployed commit from VM to host (`PUSH_REMOTE/PUSH_BRANCH`).
+Typical flow for autonomous code changes:
+1. Orchestrator spawns coder to inspect current code and produce a structured change payload.
+2. Orchestrator submits `code_change_request_create` with `changeSet` + `validate[]`.
+3. Host worker applies change on host repo and boots the inactive slot first.
+4. If inactive slot is healthy, host worker commits/pushes and promotes it to active.
+5. Host worker rebuilds old active slot so both instances run the same commit.
+6. If candidate boot fails before promotion, worker resets repo to `baseSha` and restores the candidate slot from git.
 
 Operational behavior:
 - Only the active slot handles Telegram/scheduler/proactive jobs.
 - Standby slot intentionally does not process channel traffic.
-- If both slots report standby, run `infra/scripts/ha-rollout.sh status`; recovery is attempted automatically during deploy/finalize/rollback.
+- If both slots report standby, worker attempts bootstrap activation on `nexus-primary` before failing slot detection.
 
 ### 7.4 Testing Failover
 
@@ -900,4 +897,4 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep 
 | `infra/scripts/ha-rollout.sh deploy HEAD` | Roll out current commit to inactive slot and switch |
 | `infra/scripts/ha-rollout.sh finalize HEAD` | Rebuild standby slot to match active commit |
 | `infra/scripts/ha-rollout.sh rollback` | Roll back to recorded last-good commit |
-| `infra/scripts/ha-deployer.sh status` | Show deploy queue counts (pending/processing/done/failed) |
+| `infra/scripts/change-worker.sh status` | Show change queue counts (pending/processing/done/failed) |

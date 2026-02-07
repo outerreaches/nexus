@@ -43,8 +43,8 @@ services:
     volumes:
       # Persistent host state (reuse existing DB/backups/config)
       - /data/nexus:/data/nexus
-      # Host git working tree (required for git checkpoints/self-editing)
-      - /data/code:/data/code
+      # Host code tree for read-only pattern inspection in-agent
+      - /data/code:/data/code:ro
       # Persistent workspace
       - /data/workspace:/data/workspace
     environment:
@@ -75,7 +75,7 @@ services:
     volumes:
       # Same bind mounts as primary
       - /data/nexus:/data/nexus
-      - /data/code:/data/code
+      - /data/code:/data/code:ro
       - /data/workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
