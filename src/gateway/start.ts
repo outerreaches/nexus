@@ -681,6 +681,11 @@ export async function startGateway(params: { configPath: string; port?: number; 
     process.exit(0);
   });
 
+  // Start accepting HTTP requests only after all routes are registered.
+  // Hono's SmartRouter finalises on first request, so no routes can be
+  // added after the first health-check arrives.
+  http.listen();
+
   log("gateway: started");
 }
 

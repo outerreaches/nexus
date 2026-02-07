@@ -19,7 +19,7 @@ export type GatewayHttpDeps = {
   agentTracker?: AgentTracker;
 };
 
-export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: () => Promise<void>; app: Hono }> {
+export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: () => Promise<void>; listen: () => void; app: Hono }> {
   const app = new Hono();
 
   app.get("/healthz", (c) => c.json({ ok: true }));
@@ -505,17 +505,20 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
     return c.redirect("/dashboard");
   });
 
-  const server = serve({
-    fetch: app.fetch,
-    port: deps.port,
-  });
-
-  deps.log(`http: listening on :${deps.port}`);
+  let server: ReturnType<typeof serve> | null = null;
 
   return {
+    listen: () => {
+      server = serve({
+        fetch: app.fetch,
+        port: deps.port,
+      });
+      deps.log(`http: listening on :${deps.port}`);
+    },
     stop: async () => {
+      if (!server) return;
       await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
+        server!.close((err) => (err ? reject(err) : resolve()));
       });
     },
     app,
