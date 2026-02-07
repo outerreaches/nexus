@@ -411,30 +411,36 @@ curl http://host-tailscale-hostname:18789/health/live
 
 ## Phase 6: Maintenance
 
-### 6.1 Update Nexus Code (Git → host)
+### 6.1 Update Nexus Code
+
+**From laptop (manual push):**
 
 ```bash
-# On laptop
 cd ~/Workspace/Nexus
 git push host main
 
-# On VM
-cd /data/code
-git pull
-cd ~/nexus-deploy
-docker compose build
-docker compose up -d
+# On VM — pull and rebuild both containers
+cd /data/code && git pull
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
 ```
+
+**From agent (automated):** The coder agent deploys via `ha_deploy` tool. See Section 7.3.2 for the full automated flow. No manual intervention needed.
 
 ### 6.2 View Logs
 
 ```bash
-# On VM
-docker compose logs -f nexus
+# HA stack logs (all services)
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs -f
 
-# Or on host via SSH
-ssh nexus@$(virsh domifaddr nexus-vm | grep -oE '192\.168\.[0-9]+\.[0-9]+') \
-  "cd ~/nexus-deploy && docker compose logs -f"
+# Specific service
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs -f nexus-primary
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs -f nexus-standby
+
+# ha-deployer daemon logs
+sudo journalctl -u ha-deployer -f
+
+# Deploy state
+cat /data/nexus/deploy-state.env
 ```
 
 ### 6.3 Rollback Agent Code Changes
@@ -442,14 +448,18 @@ ssh nexus@$(virsh domifaddr nexus-vm | grep -oE '192\.168\.[0-9]+\.[0-9]+') \
 If the agent breaks the code:
 
 ```bash
-# On laptop (where git repo is authoritative)
+# On VM
+cd /data/code
+infra/scripts/ha-rollout.sh rollback          # Roll back to last-good commit
+infra/scripts/ha-rollout.sh rollback <sha>    # Roll back to specific commit
+
+# Or from laptop (nuclear option)
 cd ~/Workspace/Nexus
 git log --oneline -10  # Find the good commit
-git reset --hard HEAD~1  # Or specific commit hash
-
-# Push rollback to host, then rebuild on VM
-git push host main
-ssh nexus@host-vm "cd /data/code && git pull && cd ~/nexus-deploy && docker compose build && docker compose up -d"
+git push --force host main
+# Then on VM:
+cd /data/code && git fetch && git reset --hard host/main
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
 ```
 
 ### 6.4 VM Snapshots
@@ -569,9 +579,9 @@ Notes:
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
 - Deploys should still be performed from the VM host using `ha-rollout.sh apply-local`.
 
-### 7.3.1 Rolling Deploy (Recommended)
+### 7.3.1 Rolling Deploy (Manual)
 
-Use the rollout helper to update one slot at a time with automatic rollback on failure.
+Use the rollout helper directly for manual deploys:
 
 ```bash
 cd /data/code
@@ -583,14 +593,11 @@ infra/scripts/ha-rollout.sh status
 # Deploy current HEAD (or pass an explicit commit SHA)
 infra/scripts/ha-rollout.sh deploy HEAD
 
-# Optional but recommended: refresh the inactive slot to match the new version
+# Refresh the inactive slot to match the new version
 infra/scripts/ha-rollout.sh finalize HEAD
 
 # Deploy local uncommitted changes safely:
 # canary inactive slot -> switch + smoke -> host commit -> refresh standby
-infra/scripts/ha-rollout.sh apply-local "Describe change"
-
-# Optional: also push after successful local apply
 infra/scripts/ha-rollout.sh apply-local "Describe change" host main
 ```
 
@@ -610,20 +617,58 @@ Notes:
 - Rollout state is persisted in `/data/nexus/deploy-state.env`.
 - If both slots are accidentally in standby mode, the script attempts bootstrap activation before failing.
 
-### 7.3.2 Self-Modification Deploy Flow
+### 7.3.2 Self-Modification Deploy Flow (Automated)
 
-Typical flow for autonomous code changes:
-1. Coder edits files directly in `/data/code` and runs validation (`npm run typecheck`, `npm run build`).
-2. Host runs `infra/scripts/ha-rollout.sh apply-local "<message>"`.
-3. Script rebuilds inactive slot first and verifies health.
-4. If healthy, script switches traffic, runs smoke checks, then commits host git.
-5. Script rebuilds previous active slot as standby.
-6. If canary boot fails before promotion, script restores git to previous HEAD and keeps previous active slot serving.
+The coder agent deploys autonomously via `ha_deploy` tool + host-side `ha-deployer` daemon.
 
-Operational behavior:
+**Components:**
+- `src/tools/ha-deploy.ts` — In-container tool: writes trigger file, polls for result
+- `infra/scripts/ha-deployer.sh` — Host-side daemon: watches for triggers, runs ha-rollout.sh
+- `infra/systemd/ha-deployer.service` — Systemd unit for ha-deployer daemon
+- `src/core/agent-service.ts` — Writes deploy-ack after orchestrator finishes
+- `src/core/isolated-worker.ts` — Auto-triggers deploy if coder skips it
+
+**Deploy sequence:**
+
+```
+1. Coder agent: edit → typecheck → build → ha_deploy action='apply'
+2. ha_deploy writes /data/nexus/deploy-trigger.json
+3. ha-deployer daemon (host) picks up trigger, runs:
+     ha-rollout.sh apply-local "<commit message>" host main
+4. apply-local: build standby with new code → health check → switch traffic → commit+push
+5. ha_deploy polls deploy-state.env, sees success, returns OK to coder
+6. Coder writes results to blackboard, returns to orchestrator
+7. Orchestrator finishes full request cycle (including Telegram reply)
+8. agent-service writes /data/nexus/deploy-ack
+9. ha-deployer sees ack, runs finalize to rebuild old primary with new code
+10. Both containers now running latest code
+```
+
+**Safeguards:**
+- **Auto-deploy**: If the coder edits code + builds but skips `ha_deploy`, the isolated worker auto-triggers it after the agent run completes.
+- **Finalize ack protocol**: ha-deployer writes `finalize-pending` and waits for `deploy-ack` before rebuilding the old primary. This ensures the orchestrator's full request cycle (including Telegram reply) completes before the container is killed.
+- **Ack timeout**: If deploy-ack doesn't arrive within 10 minutes, ha-deployer proceeds with finalize anyway (safety net for crashed agents).
+- **Git blocking**: Mutating git commands (`add`, `commit`, `push`, `reset`, etc.) are blocked in the coder's `shell_exec` for the code repo. The host daemon handles all git operations.
+
+**ha-deployer systemd service setup:**
+
+```bash
+# On VM host
+sudo cp /data/code/infra/systemd/ha-deployer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ha-deployer
+
+# Check status/logs
+sudo systemctl status ha-deployer
+sudo journalctl -u ha-deployer -f
+```
+
+**Operational behavior:**
 - Only the active slot handles Telegram/scheduler/proactive jobs.
 - Standby slot intentionally does not process channel traffic.
+- The old primary stays alive (with old code) until the orchestrator acks.
 - If both slots report standby, rollout attempts bootstrap activation before failing slot detection.
+- Deploy lock (`/data/nexus/ha-rollout.lock`) prevents the watchdog from triggering failover during a deploy.
 
 ### 7.4 Testing Failover
 
@@ -846,10 +891,23 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep 
 | `virsh start nexus-vm` | Start VM |
 | `virsh shutdown nexus-vm` | Graceful shutdown |
 | `virsh snapshot-create-as nexus-vm NAME` | Create snapshot |
-| `docker compose logs -f` | View Nexus logs |
-| `docker compose restart` | Restart Nexus |
+| `docker compose -p infra -f /data/code/infra/docker-compose.ha.yml logs -f` | View HA stack logs |
+| `docker compose -p infra -f /data/code/infra/docker-compose.ha.yml ps` | Show container status |
+| `sudo journalctl -u ha-deployer -f` | View deploy daemon logs |
+| `cat /data/nexus/deploy-state.env` | Check deploy state |
 | `infra/scripts/ha-rollout.sh status` | Show active/inactive HA slots + rollout state |
 | `infra/scripts/ha-rollout.sh deploy HEAD` | Roll out current commit to inactive slot and switch |
 | `infra/scripts/ha-rollout.sh apply-local "msg"` | Roll out local working-tree changes, then commit on host |
-| `infra/scripts/ha-rollout.sh finalize HEAD` | Rebuild standby slot to match active commit |
+| `infra/scripts/ha-rollout.sh finalize` | Rebuild standby slot to match active commit |
 | `infra/scripts/ha-rollout.sh rollback` | Roll back to recorded last-good commit |
+
+**Deploy trigger files** (in `/data/nexus/`):
+
+| File | Written by | Purpose |
+|------|-----------|---------|
+| `deploy-trigger.json` | ha_deploy tool (container) | Requests a deploy |
+| `deploy-trigger.processing.json` | ha-deployer (host) | Deploy in progress |
+| `deploy-state.env` | ha-rollout.sh (host) | Last deploy result |
+| `finalize-pending` | ha-deployer (host) | Waiting for orchestrator ack |
+| `deploy-ack` | agent-service (container) | Orchestrator finished, safe to rebuild |
+| `ha-rollout.lock` | ha-rollout.sh (host) | Deploy lock (prevents watchdog failover) |

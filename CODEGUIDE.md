@@ -29,8 +29,11 @@ infra/scripts/ha-rollout.sh apply-local "<commit message>" host main
 2. Verify candidate health (`/health/live`).
 3. Commit + push on host.
 4. Switch traffic to candidate, run smoke checks.
-5. Old active left running as standby (rebuilt separately by ha-deployer after result is written).
-6. If candidate fails, old active keeps serving and coder gets the error.
+5. Old active stays alive (old code) until orchestrator finishes full request cycle.
+6. Orchestrator writes `deploy-ack` → ha-deployer runs `finalize` to rebuild old active with new code.
+7. If candidate fails, old active keeps serving and coder gets the error.
+
+**Note:** If `ha_deploy` is not called after code edits + build, the isolated worker auto-triggers it.
 
 ---
 
