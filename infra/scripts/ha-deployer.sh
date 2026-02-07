@@ -3,6 +3,9 @@
 # Watches for /data/nexus/deploy-trigger.json written by the ha_deploy tool
 # inside a container, then runs ha-rollout.sh apply-local on the host.
 #
+# After apply-local succeeds (state file written, agent can read result),
+# runs ha-rollout.sh finalize to rebuild the old active as standby.
+#
 # Run as systemd service (see infra/systemd/ha-deployer.service) or manually:
 #   ./infra/scripts/ha-deployer.sh
 #
@@ -45,7 +48,15 @@ process_trigger() {
   log "processing deploy: msg='${msg}' remote=${remote} branch=${branch}"
 
   if "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch"; then
-    log "deploy succeeded"
+    log "deploy succeeded — rebuilding standby with new code"
+    # apply-local wrote deploy-state.env. The agent inside the old active
+    # container can now read the result. Rebuild the old active (now standby)
+    # so it has the new code for failover readiness.
+    if "$ROLLOUT_SCRIPT" finalize; then
+      log "standby rebuilt successfully"
+    else
+      warn "standby rebuild failed (non-fatal — active is serving new code)"
+    fi
   else
     warn "deploy failed (exit $?)"
   fi

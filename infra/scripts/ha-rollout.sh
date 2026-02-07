@@ -6,9 +6,10 @@
 #                                       On failure, auto-rollback to last-good commit.
 #   apply-local [<msg>] [<remote>] [<branch>]
 #                                       Deploy current local working-tree changes:
-#                                       build canary -> health check -> commit on host ->
-#                                       switch traffic -> smoke -> push -> refresh standby.
-#                                       If canary fails pre-switch, restore git to previous HEAD.
+#                                       build candidate (standby) -> health check -> commit ->
+#                                       switch traffic -> smoke -> push.
+#                                       Old active left running as standby (rebuilt on next deploy).
+#                                       If candidate fails, old active keeps serving.
 #   rollback [<target-ref>]             Force rollback to a known commit (default: last-good).
 #   finalize [<target-ref>]             Rebuild only inactive slot at target commit (no switchover).
 #   status                              Show HA slot modes and rollout state.
@@ -586,73 +587,25 @@ cmd_apply_local() {
     fi
   fi
 
-  # Phase 5: Rebuild standby (always, even if push failed)
-  if ! build_slot "$old_active"; then
-    LAST_GOOD_SHA="$new_sha"
-    LAST_DEPLOY_SHA="$new_sha"
-    LAST_STATUS="applied_local_standby_build_failed"
-    LAST_ACTIVE_SLOT="$candidate"
-    LAST_DEPLOY_PID=""
-    LAST_UPDATED_AT="$(date +%s)"
-    write_state
-    fail "apply-local succeeded on active slot, but standby rebuild failed"
-  fi
-  if ! recreate_slot "$old_active"; then
-    LAST_GOOD_SHA="$new_sha"
-    LAST_DEPLOY_SHA="$new_sha"
-    LAST_STATUS="applied_local_standby_recreate_failed"
-    LAST_ACTIVE_SLOT="$candidate"
-    LAST_DEPLOY_PID=""
-    LAST_UPDATED_AT="$(date +%s)"
-    write_state
-    fail "apply-local succeeded on active slot, but standby recreate failed"
-  fi
-  if ! wait_for_service_http "$old_active" "/health/live" "$LIVE_TIMEOUT"; then
-    LAST_GOOD_SHA="$new_sha"
-    LAST_DEPLOY_SHA="$new_sha"
-    LAST_STATUS="applied_local_standby_live_failed"
-    LAST_ACTIVE_SLOT="$candidate"
-    LAST_DEPLOY_PID=""
-    LAST_UPDATED_AT="$(date +%s)"
-    write_state
-    fail "apply-local succeeded on active slot, but standby is not live"
-  fi
-
-  standby_mode="$(service_mode "$old_active")"
-  case "$standby_mode" in
-    standby|active) ;;
-    *)
-      LAST_GOOD_SHA="$new_sha"
-      LAST_DEPLOY_SHA="$new_sha"
-      LAST_STATUS="applied_local_standby_mode_unexpected"
-      LAST_ACTIVE_SLOT="$candidate"
-      LAST_DEPLOY_PID=""
-      LAST_UPDATED_AT="$(date +%s)"
-      write_state
-      fail "apply-local succeeded on active slot, but standby mode is unexpected (${standby_mode})"
-      ;;
-  esac
-
-  if [ "$push_failed" = "1" ]; then
-    LAST_GOOD_SHA="$new_sha"
-    LAST_DEPLOY_SHA="$new_sha"
-    LAST_STATUS="applied_local_push_failed"
-    LAST_ACTIVE_SLOT="$candidate"
-    LAST_DEPLOY_PID=""
-    LAST_UPDATED_AT="$(date +%s)"
-    write_state
-    warn "apply-local deployed and standby rebuilt, but push to ${target_remote}/${target_branch} failed"
-    log "apply-local complete (push failed): active=${candidate} commit=${new_sha}"
-    return 0
-  fi
+  # Old active container is left running in standby mode (old code).
+  # It will be rebuilt as the candidate on the next deploy. This avoids
+  # killing the container where the coder agent may still be running.
+  log "old active (${old_active}) left running as standby — will be rebuilt on next deploy"
 
   LAST_GOOD_SHA="$new_sha"
   LAST_DEPLOY_SHA="$new_sha"
-  LAST_STATUS="applied_local"
   LAST_ACTIVE_SLOT="$candidate"
   LAST_DEPLOY_PID=""
   LAST_UPDATED_AT="$(date +%s)"
-  write_state
+
+  if [ "$push_failed" = "1" ]; then
+    LAST_STATUS="applied_local_push_failed"
+    write_state
+    warn "apply-local complete but push to ${target_remote}/${target_branch} failed"
+  else
+    LAST_STATUS="applied_local"
+    write_state
+  fi
 
   log "apply-local complete: active=${candidate} commit=${new_sha}"
 }

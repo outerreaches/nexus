@@ -6,16 +6,26 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 
+function parseStateValue(content: string, key: string): string | undefined {
+  for (const line of content.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0 && line.slice(0, eq) === key) return line.slice(eq + 1);
+  }
+}
+
 /**
  * ha_deploy — writes a deploy-trigger file to the shared volume for the
- * host-side ha-deployer daemon. Returns immediately (the deploy will replace
- * this container, so polling is not possible).
+ * host-side ha-deployer daemon, then polls deploy-state.env for completion.
+ *
+ * The old active container is NOT rebuilt during deploy (only the standby is),
+ * so this container stays alive and can safely poll for the result.
  */
 export const haDeploy = defineTool({
   name: "ha_deploy",
   description:
     "Trigger an HA deploy of the current code in /data/code. " +
-    "action='apply' writes a deploy trigger for the host daemon (build candidate → health check → commit → failover → rebuild standby). " +
+    "action='apply' writes a deploy trigger, then polls until the host daemon completes " +
+    "(build candidate → health check → commit → switch traffic). " +
     "action='status' returns current deploy state.",
   parameters: z.object({
     action: z.enum(["apply", "status"]),
@@ -25,8 +35,15 @@ export const haDeploy = defineTool({
       .describe("Commit message for the deploy. If omitted, a timestamped message is used."),
     remote: z.string().default("host").describe("Git push remote"),
     branch: z.string().default("main").describe("Git push branch"),
+    timeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(3_600_000)
+      .default(600_000)
+      .describe("Max time to wait for deploy completion (ms)"),
   }),
-  execute: async ({ action, commitMessage, remote, branch }, ctx) => {
+  execute: async ({ action, commitMessage, remote, branch, timeoutMs }, ctx) => {
     const stateDir = ctx.stateDir;
     const stateFile = path.join(stateDir, "deploy-state.env");
     const triggerFile = path.join(stateDir, "deploy-trigger.json");
@@ -65,9 +82,32 @@ export const haDeploy = defineTool({
     writeFileSync(triggerFile, JSON.stringify(trigger, null, 2) + "\n");
     ctx.log(`deploy trigger written: ${trigger.id}`);
 
-    // Return immediately — do NOT poll. The deploy will rebuild this container,
-    // so polling would be interrupted by SIGTERM. The host daemon handles the
-    // rest (build → health check → commit → switchover → rebuild standby).
-    return `OK: deploy trigger written (id=${trigger.id}). The host daemon will build, health-check, commit, and switch traffic. Use action='status' to check progress after restart.`;
+    // Read initial state for comparison
+    const initialState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+
+    // Poll for completion. The old active container is NOT killed during deploy
+    // (only the standby gets rebuilt), so polling is safe.
+    const deadline = Date.now() + timeoutMs;
+    const pollMs = 5_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, pollMs));
+
+      // If trigger file is gone and state changed, deploy completed (or failed)
+      if (!existsSync(triggerFile) && !existsSync(processingFile)) {
+        const newState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+        if (newState !== initialState) {
+          const status = parseStateValue(newState, "LAST_STATUS");
+          if (status && status.startsWith("applied_local")) {
+            return `OK: deploy completed (status=${status})\n\n${newState.trim()}`;
+          }
+          if (status && (status.includes("fail") || status.includes("rollback"))) {
+            return `ERROR: deploy failed (status=${status})\n\n${newState.trim()}`;
+          }
+          return `OK: deploy state changed (status=${status})\n\n${newState.trim()}`;
+        }
+      }
+    }
+
+    return "ERROR: deploy timed out waiting for host daemon. Is ha-deployer.service running?";
   },
 });

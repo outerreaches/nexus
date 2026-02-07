@@ -8,8 +8,7 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 2. **Read before editing** (`file_read` with line ranges / `withLineNumbers`).
 3. **Apply minimal direct edits** to `root="code"` (`file_edit`, `file_edit_lines`, `file_write`).
 4. **Typecheck + build** (`shell_exec`).
-5. **Deploy** using `ha_deploy` (`action="apply"`). This writes a trigger for the host daemon.
-6. **Wait** for deploy completion (the tool polls automatically).
+5. **Deploy** using `ha_deploy` (`action="apply"`). This writes a trigger for the host daemon and polls for the result. The host daemon builds the standby with new code, health-checks it, commits, and switches traffic. This container stays alive throughout.
 
 ## IMPORTANT: Deployment Boundaries
 
@@ -26,12 +25,12 @@ infra/scripts/ha-rollout.sh apply-local "<commit message>" host main
 ```
 
 `apply-local` flow:
-1. Build/recreate inactive slot with current working-tree changes.
+1. Build/recreate standby slot with current working-tree changes.
 2. Verify candidate health (`/health/live`).
 3. Commit + push on host.
 4. Switch traffic to candidate, run smoke checks.
-5. Rebuild previous active slot as standby.
-6. If canary fails, restore git checkout to previous HEAD and keep old active serving.
+5. Old active left running as standby (rebuilt separately by ha-deployer after result is written).
+6. If candidate fails, old active keeps serving and coder gets the error.
 
 ---
 
