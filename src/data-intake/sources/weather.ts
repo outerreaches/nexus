@@ -2,6 +2,21 @@ import { z } from "zod";
 
 import type { DataSource } from "../types.js";
 
+/**
+ * Open-Meteo Weather Forecast Source
+ *
+ * This data source fetches hourly weather forecast data from the Open-Meteo API
+ * (https://api.open-meteo.com). For a given latitude/longitude, it retrieves:
+ *   - Temperature (°C)
+ *   - "Feels like" temperature (°C)
+ *   - Relative humidity (%)
+ *   - Precipitation probability (%)
+ *   - Wind speed (km/h)
+ *   - Weather condition codes (WMO codes)
+ *
+ * Each data item represents one hourly forecast with all above metrics,
+ * tagged with location and timestamp. Records have TTL based on forecast hour.
+ */
 type WeatherResponse = {
   latitude?: number;
   longitude?: number;
