@@ -39,6 +39,7 @@ API_PORT="${API_PORT:-18789}"
 LIVE_TIMEOUT="${LIVE_TIMEOUT:-90}"
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 
 LAST_GOOD_SHA=""
 LAST_DEPLOY_SHA=""
@@ -316,14 +317,14 @@ detect_slots() {
 
 build_slot() {
   local service="$1"
-  log "building ${service}"
-  compose build "$service"
+  log "building ${service} (timeout=${BUILD_TIMEOUT}s)"
+  timeout "$BUILD_TIMEOUT" compose build "$service"
 }
 
 recreate_slot() {
   local service="$1"
-  log "recreating ${service}"
-  compose up -d --no-deps --force-recreate "$service"
+  log "recreating ${service} (timeout=${BUILD_TIMEOUT}s)"
+  timeout "$BUILD_TIMEOUT" compose up -d --no-deps --force-recreate "$service"
 }
 
 switch_to_slot() {
@@ -518,6 +519,7 @@ cmd_apply_local() {
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 
+  # Phase 1: Build candidate and verify it's healthy
   if ! build_slot "$candidate"; then
     rollback_after_failure "build failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed during build"
@@ -530,16 +532,8 @@ cmd_apply_local() {
     rollback_after_failure "candidate liveness failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed waiting for candidate live health"
   fi
-  switched=1
-  if ! switch_to_slot "$old_active" "$candidate"; then
-    rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
-    fail "apply-local failed during switchover"
-  fi
-  if ! run_smoke_checks; then
-    rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
-    fail "apply-local failed during smoke checks"
-  fi
 
+  # Phase 2: Commit the code now that we know it builds and boots
   if [ -z "$commit_message" ]; then
     commit_message="ha-rollout: apply local changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
@@ -555,21 +549,28 @@ cmd_apply_local() {
   fi
   new_sha="$(current_head_sha)"
 
+  # Phase 3: Switch traffic to the candidate
+  switched=1
+  if ! switch_to_slot "$old_active" "$candidate"; then
+    rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during switchover"
+  fi
+  if ! run_smoke_checks; then
+    rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during smoke checks"
+  fi
+
+  # Phase 4: Push to remote (non-fatal — standby rebuild always proceeds)
+  local push_failed=0
   if [ -n "$target_remote" ]; then
     log "pushing commit ${new_sha} to ${target_remote}/${target_branch}"
     if ! git -C "$CODE_DIR" push "$target_remote" "HEAD:${target_branch}" >/dev/null; then
-      warn "push failed for ${target_remote}/${target_branch}"
-      LAST_GOOD_SHA="$new_sha"
-      LAST_DEPLOY_SHA="$new_sha"
-      LAST_STATUS="applied_local_push_failed"
-      LAST_ACTIVE_SLOT="$candidate"
-      LAST_DEPLOY_PID=""
-      LAST_UPDATED_AT="$(date +%s)"
-      write_state
-      fail "apply-local deployed and committed, but push failed"
+      warn "push failed for ${target_remote}/${target_branch} — will continue with standby rebuild"
+      push_failed=1
     fi
   fi
 
+  # Phase 5: Rebuild standby (always, even if push failed)
   if ! build_slot "$old_active"; then
     LAST_GOOD_SHA="$new_sha"
     LAST_DEPLOY_SHA="$new_sha"
@@ -615,6 +616,19 @@ cmd_apply_local() {
       fail "apply-local succeeded on active slot, but standby mode is unexpected (${standby_mode})"
       ;;
   esac
+
+  if [ "$push_failed" = "1" ]; then
+    LAST_GOOD_SHA="$new_sha"
+    LAST_DEPLOY_SHA="$new_sha"
+    LAST_STATUS="applied_local_push_failed"
+    LAST_ACTIVE_SLOT="$candidate"
+    LAST_DEPLOY_PID=""
+    LAST_UPDATED_AT="$(date +%s)"
+    write_state
+    warn "apply-local deployed and standby rebuilt, but push to ${target_remote}/${target_branch} failed"
+    log "apply-local complete (push failed): active=${candidate} commit=${new_sha}"
+    return 0
+  fi
 
   LAST_GOOD_SHA="$new_sha"
   LAST_DEPLOY_SHA="$new_sha"
@@ -718,6 +732,14 @@ cmd_rollback() {
   LAST_ACTIVE_SLOT="$candidate"
   LAST_UPDATED_AT="$(date +%s)"
   write_state
+
+  # Restore branch to avoid detached HEAD after rollback to a SHA
+  local current_branch
+  current_branch="$(git -C "$CODE_DIR" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ -z "$current_branch" ]; then
+    log "restoring HEAD to main branch after rollback"
+    git -C "$CODE_DIR" checkout main >/dev/null 2>&1 || warn "could not restore to main branch"
+  fi
 
   log "rollback complete: active=${candidate} commit=${target_sha}"
 }

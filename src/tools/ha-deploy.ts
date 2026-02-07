@@ -1,78 +1,108 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
-import { truncateShellOutput } from "./system.js";
 
+/**
+ * ha_deploy — writes a deploy-trigger file to the shared volume for the
+ * host-side ha-deployer daemon, then polls deploy-state.env for completion.
+ */
 export const haDeploy = defineTool({
   name: "ha_deploy",
   description:
-    "Run HA rollout operations through infra/scripts/ha-rollout.sh. " +
-    "Use action='apply_local' after code changes; use action='status' to inspect slots/state.",
+    "Trigger an HA deploy of the current code in /data/code. " +
+    "action='apply' writes a deploy trigger for the host daemon (build candidate → health check → commit → failover → rebuild standby). " +
+    "action='status' returns current deploy state.",
   parameters: z.object({
-    action: z.enum(["status", "deploy", "apply_local", "rollback", "finalize"]),
-    targetRef: z
-      .string()
-      .optional()
-      .describe("Git ref/commit for deploy/finalize/rollback. Defaults: deploy/finalize=HEAD, rollback=last-good"),
+    action: z.enum(["apply", "status"]),
     commitMessage: z
       .string()
       .optional()
-      .describe("Commit message for apply_local. If omitted, a timestamped message is used."),
-    remote: z.string().default("host").describe("Push remote for apply_local"),
-    branch: z.string().default("main").describe("Push branch for apply_local"),
-    timeoutMs: z.number().int().positive().max(3_600_000).default(900_000),
+      .describe("Commit message for the deploy. If omitted, a timestamped message is used."),
+    remote: z.string().default("host").describe("Git push remote"),
+    branch: z.string().default("main").describe("Git push branch"),
+    timeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(3_600_000)
+      .default(900_000)
+      .describe("Max time to wait for deploy completion (ms)"),
   }),
-  execute: async ({ action, targetRef, commitMessage, remote, branch, timeoutMs }, ctx) => {
-    if (!ctx.allowShellExec) return "ERROR: ha_deploy is disabled by policy (shell_exec unavailable)";
+  execute: async ({ action, commitMessage, remote, branch, timeoutMs }, ctx) => {
+    const stateDir = ctx.stateDir;
+    const stateFile = path.join(stateDir, "deploy-state.env");
+    const triggerFile = path.join(stateDir, "deploy-trigger.json");
+    const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
 
-    const scriptPath = path.join(ctx.codeDir, "infra", "scripts", "ha-rollout.sh");
-    if (!existsSync(scriptPath)) {
-      return `ERROR: rollout script not found at ${scriptPath}`;
+    if (action === "status") {
+      const lines: string[] = [];
+      if (existsSync(stateFile)) {
+        lines.push(readFileSync(stateFile, "utf-8").trim());
+      } else {
+        lines.push("(no deploy-state.env found)");
+      }
+      if (existsSync(triggerFile)) lines.push("\ndeploy-trigger: pending");
+      else if (existsSync(processingFile)) lines.push("\ndeploy-trigger: processing");
+      else lines.push("\ndeploy-trigger: none");
+      return lines.join("\n");
     }
 
-    const args: string[] = [];
-    switch (action) {
-      case "status":
-        args.push("status");
-        break;
-      case "deploy":
-        args.push("deploy", targetRef?.trim() || "HEAD");
-        break;
-      case "finalize":
-        args.push("finalize", targetRef?.trim() || "HEAD");
-        break;
-      case "rollback":
-        args.push("rollback");
-        if (targetRef?.trim()) args.push(targetRef.trim());
-        break;
-      case "apply_local": {
-        const msg = commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
-        args.push("apply-local", msg, remote, branch);
-        break;
+    // action === "apply"
+    if (existsSync(triggerFile) || existsSync(processingFile)) {
+      return "ERROR: A deploy is already pending or in progress. Use action='status' to check.";
+    }
+
+    const msg =
+      commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
+
+    const trigger = {
+      id: randomUUID(),
+      commitMessage: msg,
+      remote,
+      branch,
+      requestedAt: new Date(ctx.nowMs()).toISOString(),
+    };
+
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(triggerFile, JSON.stringify(trigger, null, 2) + "\n");
+    ctx.log(`deploy trigger written: ${trigger.id}`);
+
+    // Read initial state for comparison
+    const initialState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+
+    // Poll for completion
+    const deadline = Date.now() + timeoutMs;
+    const pollMs = 5_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, pollMs));
+
+      // If trigger file is gone and state changed, deploy completed (or failed)
+      if (!existsSync(triggerFile) && !existsSync(processingFile)) {
+        const newState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+        if (newState !== initialState) {
+          const status = parseStateValue(newState, "LAST_STATUS");
+          if (status && status.startsWith("applied_local")) {
+            return `OK: deploy completed\n\n${newState.trim()}`;
+          }
+          if (status && (status.includes("fail") || status.includes("rollback"))) {
+            return `ERROR: deploy failed (status=${status})\n\n${newState.trim()}`;
+          }
+          return `OK: deploy state changed (status=${status})\n\n${newState.trim()}`;
+        }
       }
     }
 
-    return await new Promise((resolve) => {
-      execFile(scriptPath, args, { cwd: ctx.codeDir, timeout: timeoutMs, maxBuffer: 12 * 1024 * 1024 }, (err, stdout, stderr) => {
-        const combined = [stdout, stderr].filter(Boolean).join("\n");
-        if (err) {
-          const hint =
-            action === "apply_local"
-              ? "\n\nHINT: Check git cleanliness, Docker availability, and rollout lock/state (`ha_deploy` action=`status`)."
-              : "\n\nHINT: Use action=`status` to inspect active slot and rollout state.";
-          resolve(
-            truncateShellOutput(
-              `ERROR: ha_deploy ${action} failed: ${err.message}${hint}\n\nOutput:\n${combined}`,
-            ),
-          );
-          return;
-        }
-        resolve(truncateShellOutput(`OK: ha_deploy ${action} completed\n\n${combined}`));
-      });
-    });
+    return "ERROR: deploy timed out waiting for host daemon. Is ha-deployer.service running?";
   },
 });
+
+function parseStateValue(content: string, key: string): string | undefined {
+  for (const line of content.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0 && line.slice(0, eq) === key) return line.slice(eq + 1);
+  }
+}

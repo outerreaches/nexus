@@ -84,7 +84,28 @@ notify_ha_event() {
     > /dev/null 2>&1 || log "WARN: Failed to notify HA event"
 }
 
+DEPLOY_LOCK_DIR="${DEPLOY_LOCK_DIR:-/data/nexus/ha-rollout.lock}"
+
+check_deploy_in_progress() {
+  if [ -d "$DEPLOY_LOCK_DIR" ]; then
+    local owner_pid
+    owner_pid="$(cat "${DEPLOY_LOCK_DIR}/pid" 2>/dev/null || echo "")"
+    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+      return 0  # deploy is in progress
+    fi
+  fi
+  return 1  # no deploy running
+}
+
 failover() {
+  # Skip failover if an HA deploy is in progress — the active container may
+  # be temporarily down during switchover and will recover.
+  if check_deploy_in_progress; then
+    log "FAILOVER: Skipped — HA deploy in progress (lock held). Will retry next cycle."
+    consecutive_failures=0
+    return 0
+  fi
+
   log "FAILOVER: Primary ($current_primary) failed $FAILURE_THRESHOLD times"
   log "FAILOVER: Switching to standby ($current_standby)"
 

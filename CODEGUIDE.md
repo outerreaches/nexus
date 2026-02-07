@@ -8,31 +8,30 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 2. **Read before editing** (`file_read` with line ranges / `withLineNumbers`).
 3. **Apply minimal direct edits** to `root="code"` (`file_edit`, `file_edit_lines`, `file_write`).
 4. **Typecheck + build** (`shell_exec`).
-5. **Deploy in the same coder run** using `ha_deploy` (`action="apply_local"`).
-6. **Verify** health/status after rollout.
+5. **Deploy** using `ha_deploy` (`action="apply"`). This writes a trigger for the host daemon.
+6. **Wait** for deploy completion (the tool polls automatically).
 
 ## IMPORTANT: Deployment Boundaries
 
 - **Coder may edit code directly** under `root="code"`.
-- **Coder must not run raw** `git add`, `git commit`, or `git push`.
+- **Mutating git commands are blocked** in `shell_exec` for the code repo. Git is allowed on other repos.
 - **Coder must not use** `gateway_restart` as deployment.
-- **Coder should use** `ha_deploy` for rollout.
+- **Coder should use** `ha_deploy` action=`apply` for deployment.
 - Use `root="workspace"` for scratch scripts and temporary artifacts.
 
-Underlying host rollout command (what `ha_deploy` wraps):
+`ha_deploy` action=`apply` writes a trigger file. The host-side `ha-deployer` daemon picks it up and runs:
 
 ```bash
-cd /data/code
 infra/scripts/ha-rollout.sh apply-local "<commit message>" host main
 ```
 
 `apply-local` flow:
-- Build/recreate inactive slot with current working-tree changes.
-- Verify candidate health (`/health/live`, `/health/ready`, `/status`).
-- Switch traffic to candidate.
-- Commit host git checkout only after canary success.
-- Rebuild previous active slot as standby.
-- If canary fails, restore git checkout to previous HEAD and keep old active serving.
+1. Build/recreate inactive slot with current working-tree changes.
+2. Verify candidate health (`/health/live`).
+3. Commit + push on host.
+4. Switch traffic to candidate, run smoke checks.
+5. Rebuild previous active slot as standby.
+6. If canary fails, restore git checkout to previous HEAD and keep old active serving.
 
 ---
 
@@ -108,7 +107,7 @@ infra/
 ## Multi-Agent Architecture
 
 - **orchestrator**: plans, delegates, coordinates jobs/memory.
-- **coder**: code edits + validation (`typecheck`/`build`) + `ha_deploy` rollout.
+- **coder**: code edits + validation (`typecheck`/`build`) + `ha_deploy` action=`apply`.
 - **researcher/analyst/trader**: specialized non-code tasks.
 
 Workers should write meaningful results to blackboard and avoid noisy status spam.
@@ -152,5 +151,5 @@ Adding a tool:
 
 - **Edits blocked as read-only**: confirm writable `/data/code` mount and `NEXUS_ALLOW_CODE_WRITE=1`.
 - **Can’t find files**: verify `file_list root="code" path="."`.
-- **Behavior unchanged**: rollout not executed; run `ha_deploy` with `action="apply_local"` (or fallback to `ha-rollout.sh apply-local`).
+- **Behavior unchanged**: rollout not executed; run `ha_deploy` with `action="apply"`. Check `action="status"` for deploy state.
 - **HA oddities**: confirm one active slot and healthy standby via `/status` and HA dashboard.

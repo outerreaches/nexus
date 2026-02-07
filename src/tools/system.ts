@@ -14,6 +14,49 @@ export function truncateShellOutput(text: string, max: number = MAX_OUTPUT_CHARS
   return `${text.slice(0, half)}\n\n[…truncated ${omitted.toLocaleString()} chars…]\n\n${text.slice(-half)}`;
 }
 
+const MUTATING_GIT_SUBCMDS = new Set([
+  "add", "commit", "push", "reset", "checkout", "switch", "stash",
+  "rebase", "merge", "clean", "rm", "mv", "restore", "pull", "fetch",
+  "cherry-pick", "revert", "tag", "branch", "init",
+]);
+
+/**
+ * Returns true if the command is a mutating git operation targeting the code
+ * directory. Commands with `-C <other-dir>` are allowed (they target a
+ * different repo). Read-only commands like status/log/diff are allowed.
+ */
+function isMutatingGitOnCodeDir(command: string, codeDir: string): boolean {
+  // Quick check: does this command invoke git at all?
+  if (!/(^|\s|&&|\||\;)git\s/.test(command)) return false;
+
+  // Extract individual commands (split on && ; |)
+  const parts = command.split(/&&|;|\|/).map((s) => s.trim());
+  for (const part of parts) {
+    // Match "git ..." or "cd <somewhere> && git ..."
+    const gitMatch = part.match(/(?:^|\s)git\s+(.*)/);
+    if (!gitMatch) continue;
+
+    const args = gitMatch[1].trim();
+
+    // If -C is used and points somewhere other than codeDir, allow it
+    const dashCMatch = args.match(/^-C\s+(\S+)\s+(.*)/);
+    if (dashCMatch) {
+      const targetDir = dashCMatch[1];
+      if (targetDir !== codeDir && !targetDir.startsWith(codeDir + "/")) continue;
+      // -C points at codeDir — check the subcommand
+      const subcmd = dashCMatch[2].split(/\s/)[0];
+      if (MUTATING_GIT_SUBCMDS.has(subcmd)) return true;
+      continue;
+    }
+
+    // No -C — this targets whatever cwd is (assumed to be codeDir for agents)
+    const subcmd = args.split(/\s/)[0];
+    if (MUTATING_GIT_SUBCMDS.has(subcmd)) return true;
+  }
+
+  return false;
+}
+
 export const shellExec = defineTool({
   name: "shell_exec",
   description:
@@ -24,6 +67,14 @@ export const shellExec = defineTool({
   }),
   execute: async ({ command, timeoutMs }, ctx) => {
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";
+
+    // Block mutating git commands that target the code repository.
+    // Read-only commands (status, log, diff, show) are allowed.
+    // Commands explicitly using -C to target a different directory are allowed.
+    if (isMutatingGitOnCodeDir(command, ctx.codeDir)) {
+      return "ERROR: Mutating git commands on the code repository are not allowed from agents. Use ha_deploy to queue a deploy.";
+    }
+
     return await new Promise((resolve) => {
       exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) {

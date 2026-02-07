@@ -1,0 +1,22 @@
+# Nexus HA Deploy Daemon
+#
+# Install:
+#   sudo cp /data/code/infra/systemd/ha-deployer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ha-deployer
+
+[Unit]
+Description=Nexus HA Deploy Daemon
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=nexus
+ExecStart=/data/code/infra/scripts/ha-deployer.sh
+Environment=STATE_DIR=/data/nexus
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

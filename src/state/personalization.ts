@@ -127,7 +127,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 For code changes:
 1. Spawn a coder to inspect patterns and apply direct edits under \`root="code"\`.
 2. Coder validates with \`npm run typecheck\` and \`npm run build\`.
-3. Coder executes \`ha_deploy\` with \`action="apply_local"\` (commit message + remote/branch as needed).
+3. Coder executes \`ha_deploy\` with \`action="apply"\` (commit message + remote/branch as needed).
 4. Report rollout status (canary health, active slot, commit SHA) to the user.
 
 **Important**: Do NOT use \`gateway_restart\` as a deploy mechanism for code rollout.
@@ -187,7 +187,7 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 2. **Read before editing** (\`file_read\` with line ranges).
 3. **Apply minimal direct edits** to \`root="code"\` (\`file_edit\`, \`file_edit_lines\`, \`file_write\`).
 4. **Validate locally** (\`npm run typecheck\`, \`npm run build\`).
-5. **Deploy in the same coder run** (\`ha_deploy\` with \`action="apply_local"\`).
+5. **Deploy in the same coder run** (\`ha_deploy\` with \`action="apply"\`).
 
 ### IMPORTANT: Write + Deploy Boundaries
 
@@ -385,7 +385,7 @@ Prefer \`file_write mode="append"\` when adding standing instructions to avoid c
 
 - **Edits fail with read-only errors**: ensure writable \`/data/code\` mount and \`NEXUS_ALLOW_CODE_WRITE=1\`.
 - **Can’t find files**: verify \`file_list root="code" path="."\` includes \`package.json\`.
-- **Behavior unchanged after deploy**: verify \`ha_deploy\` (\`action="apply_local"\`) completed and check rollout logs/state.
+- **Behavior unchanged after deploy**: verify \`ha_deploy\` (\`action="apply"\`) completed and check rollout logs/state.
 - **HA oddities**: confirm only one instance is active (dashboard HA section + \`/status.activeLease\`).
 `;
 }

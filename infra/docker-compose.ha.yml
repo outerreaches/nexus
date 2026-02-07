@@ -103,12 +103,16 @@ services:
     build:
       context: ./watchdog
       dockerfile: Dockerfile
+    volumes:
+      # Mount state dir so watchdog can check deploy lock
+      - /data/nexus:/data/nexus:ro
     environment:
       - PRIMARY_URL=http://nexus-primary:18789
       - STANDBY_URL=http://nexus-standby:18789
       - CHECK_INTERVAL=5
       - FAILURE_THRESHOLD=3
       - RECOVERY_DELAY=30
+      - DEPLOY_LOCK_DIR=/data/nexus/ha-rollout.lock
     depends_on:
       - nexus-primary
       - nexus-standby

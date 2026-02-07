@@ -88,7 +88,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- To notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`.",
       "- Your personality/state files (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, NOTES.md, CODEGUIDE.md) live in the **state** root. To update, first read the file. When adding standing instructions (especially to HEARTBEAT.md), append with `file_write` and preserve existing content unless explicitly asked to replace it.",
-      "- For code changes: spawn a `coder` and ask for one end-to-end run (edit `root:\"code\"`, validate with `npm run typecheck` + `npm run build`, then deploy via `ha_deploy` action=`apply_local`).",
+      "- For code changes: spawn a `coder` and ask for one end-to-end run (edit `root:\"code\"`, validate with `npm run typecheck` + `npm run build`, then deploy via `ha_deploy` action=`apply`).",
       "- Deployment for code changes is executed by the coder run; orchestrator should coordinate and report status, not perform deployment steps itself.",
       "- Do not bounce deployment back to another coder run after implementation. If rollout fails, return the exact failing command/output and request operator action once.",
       "- If canary fails, the host rollout restores the code checkout to previous HEAD and keeps the old active slot serving traffic.",
