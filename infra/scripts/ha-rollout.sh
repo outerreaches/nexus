@@ -318,13 +318,13 @@ detect_slots() {
 build_slot() {
   local service="$1"
   log "building ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" compose build "$service"
+  timeout "$BUILD_TIMEOUT" docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" build "$service"
 }
 
 recreate_slot() {
   local service="$1"
   log "recreating ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" compose up -d --no-deps --force-recreate "$service"
+  timeout "$BUILD_TIMEOUT" docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$service"
 }
 
 switch_to_slot() {
