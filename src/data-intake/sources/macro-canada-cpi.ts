@@ -18,6 +18,25 @@ type WDSResponse = {
   };
 };
 
+// Type for normalized CPI record values
+type CPIRecordValue = {
+  vector: string;
+  referencePeriod: string;
+  referencePeriodRaw: string;
+  value: number;
+  scalarFactorCode?: string;
+  symbolCode?: string;
+  statusCode?: string;
+};
+
+// Type for records passed to summarize
+type CPIRecord = {
+  subject: string;
+  value: CPIRecordValue;
+  collectedAtMs: number;
+  metadata?: Record<string, unknown>;
+};
+
 const CanadaCPIParams = z.object({
   vectors: z.array(z.string()).min(1).max(10).default(["v41690973"]),
   periods: z.number().min(1).max(24).default(12),
@@ -87,12 +106,7 @@ Example: data_intake_source_add({ sourceId: "macro.canada-cpi", vectors: ["v4169
   normalize: (raw, params, ctx) => {
     const parsed = CanadaCPIParams.parse(params);
     const responses = raw as WDSResponse[];
-    const records: Array<{
-      subject: string;
-      value: Record<string, unknown>;
-      collectedAtMs: number;
-      metadata?: Record<string, unknown>;
-    }> = [];
+    const records: CPIRecord[] = [];
 
     for (const [index, response] of responses.entries()) {
       const vectorId = parsed.vectors[index]?.toLowerCase() || "unknown";
@@ -125,20 +139,19 @@ Example: data_intake_source_add({ sourceId: "macro.canada-cpi", vectors: ["v4169
             provider: "statistics-canada-wds",
             vector: vectorId,
           },
+        });
+      }
+    }
+
+    return records;
+  },
   summarize: (records, ctx) => {
-    type RecordValue = {
-      vector?: string;
-      referencePeriod?: string;
-      value?: number;
-    };
+    const byVector: Record<string, CPIRecord[]> = {};
     
-    const byVector: Record<string, Array<{ value: RecordValue }>> = {};
-    
-    for (const r of records) {
-      const value = r.value as RecordValue;
-      const vector = value.vector || "unknown";
+    for (const r of records as CPIRecord[]) {
+      const vector = r.value.vector || "unknown";
       if (!byVector[vector]) byVector[vector] = [];
-      byVector[vector].push(r as { value: RecordValue });
+      byVector[vector].push(r);
     }
 
     const summary: Record<string, unknown> = {};
@@ -161,44 +174,6 @@ Example: data_intake_source_add({ sourceId: "macro.canada-cpi", vectors: ["v4169
         previousPeriod: previous?.value?.referencePeriod,
         previousValue: prevValue,
         yoyChange: prevValue && latestValue ? ((latestValue - prevValue) / prevValue * 100).toFixed(2) + "%" : null,
-        dataPoints: vecRecords.length,
-      };
-    }
-    
-    return summary;
-  },
-};
-      }
-    }
-
-    return records;
-  },
-  summarize: (records, ctx) => {
-    const byVector: Record<string, Array<typeof records[0]>> = {};
-    
-    for (const r of records) {
-      const value = r.value as { vector?: string };
-      const vector = value.vector || "unknown";
-      if (!byVector[vector]) byVector[vector] = [];
-      byVector[vector].push(r);
-    }
-
-    const summary: Record<string, unknown> = {};
-    
-    for (const [vector, vecRecords] of Object.entries(byVector)) {
-      const sorted = vecRecords.sort((a, b) => b.collectedAtMs - a.collectedAtMs);
-      const latest = sorted[0];
-      const previous = sorted[1];
-      
-      const latestValue = (latest?.value as { value?: number })?.value;
-      const prevValue = previous?.value?.value as number;
-      
-      summary[vector] = {
-        latestPeriod: latest?.value?.referencePeriod,
-        latestValue: latestValue,
-        previousPeriod: previous?.value?.referencePeriod,
-        previousValue: prevValue,
-        yoyChange: prevValue ? ((latestValue - prevValue) / prevValue * 100).toFixed(2) + "%" : null,
         dataPoints: vecRecords.length,
       };
     }
