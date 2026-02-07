@@ -17,9 +17,10 @@ function parseStateValue(content: string, key: string): string | undefined {
  * ha_deploy — writes a deploy-trigger file to the shared volume for the
  * host-side ha-deployer daemon, then polls deploy-state.env for completion.
  *
- * Only the standby is rebuilt during deploy; this container (old active) stays
- * alive to poll. Once we read the result, we write deploy-ack so the host
- * daemon knows it's safe to rebuild this container with the new code.
+ * Only the standby is rebuilt during deploy; this container (old active)
+ * stays alive until the orchestrator's full request cycle completes. The
+ * orchestrator (agent-service) writes deploy-ack when done, which tells
+ * ha-deployer it's safe to rebuild the old primary via finalize.
  */
 export const haDeploy = defineTool({
   name: "ha_deploy",
@@ -49,7 +50,6 @@ export const haDeploy = defineTool({
     const stateFile = path.join(stateDir, "deploy-state.env");
     const triggerFile = path.join(stateDir, "deploy-trigger.json");
     const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
-    const ackFile = path.join(stateDir, "deploy-ack");
 
     if (action === "status") {
       const lines: string[] = [];
@@ -87,9 +87,8 @@ export const haDeploy = defineTool({
     // Read initial state for comparison
     const initialState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
 
-    // Poll for completion. This container (old active) stays alive while the
-    // standby is rebuilt. After we read the result, we write deploy-ack so the
-    // host daemon can safely rebuild this container.
+    // Poll for completion. This container (old active) is never rebuilt during
+    // the deploy cycle — only the standby gets rebuilt with new code.
     const deadline = Date.now() + timeoutMs;
     const pollMs = 5_000;
     while (Date.now() < deadline) {
@@ -100,9 +99,6 @@ export const haDeploy = defineTool({
         const newState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
         if (newState !== initialState) {
           const status = parseStateValue(newState, "LAST_STATUS");
-          // Ack the result so the host daemon knows it's safe to rebuild
-          // the old primary container (where we're running).
-          writeFileSync(ackFile, new Date(ctx.nowMs()).toISOString() + "\n");
           if (status && status.startsWith("applied_local")) {
             return `OK: deploy completed (status=${status})\n\n${newState.trim()}`;
           }

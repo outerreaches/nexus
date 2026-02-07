@@ -1,3 +1,6 @@
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 import { AgentRunner } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import type { Tool, ToolContext } from "./tools.js";
@@ -155,6 +158,11 @@ export class AgentService {
         });
       }
 
+      // If a deploy happened during this run, the host-side ha-deployer is
+      // waiting for deploy-ack before rebuilding the old primary container.
+      // Write the ack now that the orchestrator's full request cycle is done.
+      this.ackDeployIfPending();
+
       return {
         sessionId,
         output: result.output,
@@ -163,6 +171,22 @@ export class AgentService {
         iterationsUsed: result.iterationsUsed,
       };
     });
+  }
+
+  /** Write deploy-ack if finalize-pending exists (signals ha-deployer it's safe to rebuild). */
+  private ackDeployIfPending(): void {
+    try {
+      const stateDir = this.deps.stateDir;
+      const finalizePending = path.join(stateDir, "finalize-pending");
+      if (existsSync(finalizePending)) {
+        const ackFile = path.join(stateDir, "deploy-ack");
+        writeFileSync(ackFile, new Date().toISOString() + "\n");
+        try { unlinkSync(finalizePending); } catch { /* race with ha-deployer cleanup */ }
+        this.deps.onRunnerLog?.("deploy-ack written (orchestrator run complete)");
+      }
+    } catch {
+      // Non-fatal — ha-deployer has a timeout fallback
+    }
   }
 }
 
