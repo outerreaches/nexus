@@ -644,18 +644,24 @@ function parseWorkerResult(raw: string): { status?: string } | null {
 }
 
 /**
- * Ensure git treats codeDir as a safe directory (works around "dubious ownership"
- * errors when the container UID doesn't match the volume owner).
+ * Ensure git is configured for container use: safe.directory for mounted volumes
+ * and a fallback identity for automated commits.
  */
-const _safeDirCache = new Set<string>();
-async function ensureGitSafeDirectory(codeDir: string): Promise<void> {
-  if (_safeDirCache.has(codeDir)) return;
+let _gitConfigured = false;
+async function ensureGitConfig(codeDir: string): Promise<void> {
+  if (_gitConfigured) return;
   try {
     await execAsync(`git config --global --add safe.directory "${codeDir}"`);
+    // Set identity if not already configured (needed for coder agent commits)
+    const { stdout: email } = await execAsync("git config --global user.email").catch(() => ({ stdout: "" }));
+    if (!email.trim()) {
+      await execAsync('git config --global user.email "nexus@local"');
+      await execAsync('git config --global user.name "Nexus"');
+    }
   } catch {
     // git config may fail if git is not installed; ignore.
   }
-  _safeDirCache.add(codeDir);
+  _gitConfigured = true;
 }
 
 /**
@@ -665,7 +671,7 @@ async function ensureGitSafeDirectory(codeDir: string): Promise<void> {
  */
 async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: string) => void): Promise<void> {
   try {
-    await ensureGitSafeDirectory(codeDir);
+    await ensureGitConfig(codeDir);
     // Check if codeDir is a git repo
     await execAsync("git rev-parse --git-dir", { cwd: codeDir });
 
@@ -708,7 +714,7 @@ async function finalizeCoderGit(params: {
 }): Promise<{ ok: true; meta: Record<string, unknown> } | { ok: false; error: string }> {
   const { codeDir, runId, log } = params;
   try {
-    await ensureGitSafeDirectory(codeDir);
+    await ensureGitConfig(codeDir);
     await execAsync("git rev-parse --git-dir", { cwd: codeDir });
   } catch {
     return { ok: true, meta: { enabled: false, reason: "git unavailable" } };

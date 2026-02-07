@@ -66,22 +66,22 @@ export function listLatestDataItems(params: {
   const values: unknown[] = [];
 
   if (params.sourceId) {
-    conditions.push("source_id = ?");
+    conditions.push("d.source_id = ?");
     values.push(params.sourceId);
   }
   if (params.subject) {
-    conditions.push("subject = ?");
+    conditions.push("d.subject = ?");
     values.push(params.subject);
   } else if (params.subjectLike) {
-    conditions.push("subject LIKE ?");
+    conditions.push("d.subject LIKE ?");
     values.push(params.subjectLike);
   }
   if (params.tag) {
-    conditions.push("tags_json LIKE ?");
+    conditions.push("d.tags_json LIKE ?");
     values.push(`%${params.tag}%`);
   }
   if (!params.includeExpired) {
-    conditions.push("expires_at > ?");
+    conditions.push("d.expires_at > ?");
     values.push(params.nowMs);
   }
 
@@ -89,19 +89,18 @@ export function listLatestDataItems(params: {
   const sql = `
     SELECT d.*
     FROM data_items d
-    JOIN (
+    INNER JOIN (
       SELECT source_id, subject, MAX(collected_at) AS latest
       FROM data_items
-      ${where}
       GROUP BY source_id, subject
-    ) latest
-    ON d.source_id = latest.source_id AND d.subject = latest.subject AND d.collected_at = latest.latest
+    ) agg
+    ON d.source_id = agg.source_id AND d.subject = agg.subject AND d.collected_at = agg.latest
     ${where}
     ORDER BY d.collected_at DESC
     LIMIT ?
   `;
   const stmt = params.db.db.prepare(sql);
-  return stmt.all(...values, ...values, params.limit) as DataItemRow[];
+  return stmt.all(...values, params.limit) as DataItemRow[];
 }
 
 /** Returns only the most recent record per source_id (useful for dashboard summaries) */

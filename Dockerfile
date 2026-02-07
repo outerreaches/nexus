@@ -12,8 +12,11 @@ RUN apt-get update \
     python3-venv \
   && rm -rf /var/lib/apt/lists/*
 
-# Mark all directories as safe for git to handle mounted volumes with different ownership
-RUN git config --global --add safe.directory '*'
+# Configure git for container environment (safe.directory for mounted volumes,
+# identity for automated commits by coder agents)
+RUN git config --global --add safe.directory '*' \
+  && git config --global user.email "nexus@local" \
+  && git config --global user.name "Nexus"
 
 WORKDIR /app
 
