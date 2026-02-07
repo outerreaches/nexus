@@ -8,17 +8,18 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 2. **Read before editing** (`file_read` with line ranges / `withLineNumbers`).
 3. **Apply minimal direct edits** to `root="code"` (`file_edit`, `file_edit_lines`, `file_write`).
 4. **Typecheck + build** (`shell_exec`).
-5. **Handoff for host rollout** (do not deploy from inside the coder run unless host Docker/git access is explicitly available).
+5. **Deploy in the same coder run** using `ha_deploy` (`action="apply_local"`).
 6. **Verify** health/status after rollout.
 
 ## IMPORTANT: Deployment Boundaries
 
 - **Coder may edit code directly** under `root="code"`.
-- **Coder must not run** `git add`, `git commit`, or `git push`.
+- **Coder must not run raw** `git add`, `git commit`, or `git push`.
 - **Coder must not use** `gateway_restart` as deployment.
+- **Coder should use** `ha_deploy` for rollout.
 - Use `root="workspace"` for scratch scripts and temporary artifacts.
 
-Host rollout command:
+Underlying host rollout command (what `ha_deploy` wraps):
 
 ```bash
 cd /data/code
@@ -107,7 +108,7 @@ infra/
 ## Multi-Agent Architecture
 
 - **orchestrator**: plans, delegates, coordinates jobs/memory.
-- **coder**: code edits + validation (`typecheck`/`build`) + clear rollout handoff.
+- **coder**: code edits + validation (`typecheck`/`build`) + `ha_deploy` rollout.
 - **researcher/analyst/trader**: specialized non-code tasks.
 
 Workers should write meaningful results to blackboard and avoid noisy status spam.
@@ -143,7 +144,7 @@ Adding a tool:
 1. Add `src/tools/my-tool.ts` (`defineTool` + `zod`).
 2. Register in `src/tools/index.ts`.
 3. Run `npm run typecheck` and `npm run build`.
-4. Document rollout steps for orchestrator/operator.
+4. Document rollout verification steps (`ha_deploy` for code-changing workflows).
 
 ---
 
@@ -151,5 +152,5 @@ Adding a tool:
 
 - **Edits blocked as read-only**: confirm writable `/data/code` mount and `NEXUS_ALLOW_CODE_WRITE=1`.
 - **Can’t find files**: verify `file_list root="code" path="."`.
-- **Behavior unchanged**: rollout not executed; run `ha-rollout.sh apply-local`.
+- **Behavior unchanged**: rollout not executed; run `ha_deploy` with `action="apply_local"` (or fallback to `ha-rollout.sh apply-local`).
 - **HA oddities**: confirm one active slot and healthy standby via `/status` and HA dashboard.

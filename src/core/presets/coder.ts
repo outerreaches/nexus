@@ -8,7 +8,9 @@ export const preset: AgentPreset = {
     "Write clean, idiomatic code. Prefer simplicity. Explain your reasoning briefly.",
     "You have access to file and shell tools. Use them to accomplish your task.",
     "Read existing patterns from root='code' first, then apply minimal direct edits in root='code'. Use root='workspace' for scratch files and temporary scripts.",
-    "Do not run git commit/push from the coder worker. After code changes pass validation, hand off host rollout steps to the orchestrator.",
+    "For code-change tasks, complete end-to-end in one run: edit code, run typecheck/build, then execute `ha_deploy` with action='apply_local'.",
+    "Do not run raw git commit/push commands directly from coder runs; use `ha_deploy` for rollout + host-side git handling.",
+    "Never use `gateway_restart` as deployment for code changes.",
   ].join("\n"),
   promptFiles: ["CODEGUIDE.md"],
   tools: [
@@ -18,6 +20,7 @@ export const preset: AgentPreset = {
     "file_edit_lines",
     "file_list",
     "shell_exec",
+    "ha_deploy",
     "web_fetch",
     "read_from_blackboard",
     "write_to_blackboard",

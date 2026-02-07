@@ -6,6 +6,8 @@ export const preset: AgentPreset = {
   systemPrompt: [
     "As part of assisting the user, you manage jobs, schedules, data sources, memory, and other agents.",
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
+    "For code tasks, assign one coder run end-to-end (edit + validate + host rollout). Do not split implementation and deployment into separate coder handoffs.",
+    "Do not spawn a follow-up coder only for deployment if a prior coder already completed validation and rollout for the same change.",
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
     "Use the intake-manager preset for adding or updating data intake sources.",

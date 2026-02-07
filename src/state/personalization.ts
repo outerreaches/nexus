@@ -101,7 +101,7 @@ Use \`spawn_agent\` to delegate to these specialists:
 
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
-| **coder** | Codebase analysis, direct code edits, debugging | file_ops, shell_exec, web_fetch |
+| **coder** | Codebase analysis, direct code edits, debugging, rollout | file_ops, shell_exec, ha_deploy, web_fetch |
 | **researcher** | Web research, browsing, document analysis | web_search, data_intake_query |
 | **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
 | **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query |
@@ -127,7 +127,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 For code changes:
 1. Spawn a coder to inspect patterns and apply direct edits under \`root="code"\`.
 2. Coder validates with \`npm run typecheck\` and \`npm run build\`.
-3. Roll out from host with \`infra/scripts/ha-rollout.sh apply-local "<commit message>" [remote] [branch]\` (or provide this exact command to the operator if host access is unavailable in-agent).
+3. Coder executes \`ha_deploy\` with \`action="apply_local"\` (commit message + remote/branch as needed).
 4. Report rollout status (canary health, active slot, commit SHA) to the user.
 
 **Important**: Do NOT use \`gateway_restart\` as a deploy mechanism for code rollout.
@@ -187,13 +187,14 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 2. **Read before editing** (\`file_read\` with line ranges).
 3. **Apply minimal direct edits** to \`root="code"\` (\`file_edit\`, \`file_edit_lines\`, \`file_write\`).
 4. **Validate locally** (\`npm run typecheck\`, \`npm run build\`).
-5. **Handoff host rollout** (\`infra/scripts/ha-rollout.sh apply-local\`).
+5. **Deploy in the same coder run** (\`ha_deploy\` with \`action="apply_local"\`).
 
 ### IMPORTANT: Write + Deploy Boundaries
 
 - **Coder may write to \`root="code"\` directly.**
-- **Do NOT run \`git add\`, \`git commit\`, or \`git push\` from coder runs.**
+- **Do NOT run raw \`git add\`, \`git commit\`, or \`git push\` from coder runs.**
 - **Do NOT call \`gateway_restart\` for code deploys.**
+- **Use \`ha_deploy\` for deployment.**
 - **Use \`root="workspace"\` for scratch files.**
 
 If changes "disappear" after a restart, you probably edited the image filesystem (\`/app\`) instead of a persistent mounted code directory.
@@ -297,7 +298,7 @@ infra/
 ## Multi-Agent Architecture (Who does what)
 
 - **orchestrator**: main brain; plans; spawns workers; owns jobs/memory.
-- **coder** (you): reads/edits code and runs builds; writes clear rollout steps to blackboard.
+- **coder** (you): reads/edits code, runs builds, and executes \`ha_deploy\` rollout.
 - **researcher/analyst/trader**: task specialists (generally should not mutate code).
 - **intake-manager**: manages data intake sources (when enabled).
 
@@ -341,7 +342,7 @@ Rules:
 1. Add \`src/tools/my-tool.ts\` (use \`defineTool\` + \`zod\` params)
 2. Register in \`src/tools/index.ts\`
 3. \`shell_exec\`: run \`npm run typecheck\` + \`npm run build\`
-4. Handoff restart steps to orchestrator
+4. Document rollout/verification steps for coder execution (\`ha_deploy\` when code changes are involved)
 
 ---
 
@@ -384,7 +385,7 @@ Prefer \`file_write mode="append"\` when adding standing instructions to avoid c
 
 - **Edits fail with read-only errors**: ensure writable \`/data/code\` mount and \`NEXUS_ALLOW_CODE_WRITE=1\`.
 - **Can’t find files**: verify \`file_list root="code" path="."\` includes \`package.json\`.
-- **Behavior unchanged after deploy**: verify \`ha-rollout.sh apply-local\` completed and check rollout logs/state.
+- **Behavior unchanged after deploy**: verify \`ha_deploy\` (\`action="apply_local"\`) completed and check rollout logs/state.
 - **HA oddities**: confirm only one instance is active (dashboard HA section + \`/status.activeLease\`).
 `;
 }
