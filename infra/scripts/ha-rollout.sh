@@ -6,9 +6,9 @@
 #                                       On failure, auto-rollback to last-good commit.
 #   apply-local [<msg>] [<remote>] [<branch>]
 #                                       Deploy current local working-tree changes:
-#                                       build canary (inactive slot) -> switch -> smoke ->
-#                                       commit on host -> refresh standby.
-#                                       If canary fails, restore git to previous HEAD.
+#                                       build canary -> health check -> commit on host ->
+#                                       switch traffic -> smoke -> push -> refresh standby.
+#                                       If canary fails pre-switch, restore git to previous HEAD.
 #   rollback [<target-ref>]             Force rollback to a known commit (default: last-good).
 #   finalize [<target-ref>]             Rebuild only inactive slot at target commit (no switchover).
 #   status                              Show HA slot modes and rollout state.
@@ -411,6 +411,8 @@ rollback_after_failure() {
       warn "git restore to ${rollback_sha} failed"
       rollback_ok=0
     fi
+    # Restore branch ref if we ended up in detached HEAD
+    git -C "$CODE_DIR" checkout main >/dev/null 2>&1 || true
     if ! build_slot "$candidate"; then
       warn "rebuild of candidate ${candidate} failed"
       rollback_ok=0
@@ -543,9 +545,23 @@ cmd_apply_local() {
     rollback_after_failure "git add failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed during git add"
   fi
-  if ! git -C "$CODE_DIR" commit -m "$commit_message" >/dev/null; then
-    rollback_after_failure "git commit failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
-    fail "apply-local failed during git commit"
+
+  # Ensure git identity is configured (needed for commit)
+  if [ -z "$(git -C "$CODE_DIR" config user.name 2>/dev/null)" ]; then
+    git -C "$CODE_DIR" config user.name "Nexus Deploy"
+  fi
+  if [ -z "$(git -C "$CODE_DIR" config user.email 2>/dev/null)" ]; then
+    git -C "$CODE_DIR" config user.email "nexus@deploy.local"
+  fi
+
+  # Commit if there are staged changes; skip gracefully if tree is clean
+  if git -C "$CODE_DIR" diff --cached --quiet; then
+    log "no staged changes to commit — proceeding with current HEAD"
+  else
+    if ! git -C "$CODE_DIR" commit -m "$commit_message" >/dev/null; then
+      rollback_after_failure "git commit failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+      fail "apply-local failed during git commit"
+    fi
   fi
   new_sha="$(current_head_sha)"
 
