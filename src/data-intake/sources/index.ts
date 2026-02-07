@@ -29,4 +29,5 @@ export function registerBuiltInSources(): void {
   registerDataSource(yahooStocksSource);
   registerDataSource(weatherSource);
   registerDataSource(birdSource);
+  registerDataSource(canadaCPISource);
 }
