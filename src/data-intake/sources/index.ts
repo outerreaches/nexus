@@ -13,7 +13,6 @@ import { twelveDataSource } from "./stocks-twelvedata.js";
 import { yahooStocksSource } from "./stocks-yahoo.js";
 import { weatherSource } from "./weather.js";
 import { birdSource } from "./social-bird.js";
-import { canadaCPISource } from "./macro-canada-cpi.js";
 
 export function registerBuiltInSources(): void {
   registerDataSource(cryptoSource);
@@ -29,5 +28,4 @@ export function registerBuiltInSources(): void {
   registerDataSource(yahooStocksSource);
   registerDataSource(weatherSource);
   registerDataSource(birdSource);
-  registerDataSource(canadaCPISource);
 }

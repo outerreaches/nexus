@@ -43,14 +43,15 @@ services:
     volumes:
       # Persistent host state (reuse existing DB/backups/config)
       - /data/nexus:/data/nexus
-      # Host code tree for read-only pattern inspection in-agent
-      - /data/code:/data/code:ro
+      # Host code tree (writable for direct in-agent edits)
+      - /data/code:/data/code
       # Persistent workspace
       - /data/workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-standby:18789
@@ -75,12 +76,13 @@ services:
     volumes:
       # Same bind mounts as primary
       - /data/nexus:/data/nexus
-      - /data/code:/data/code:ro
+      - /data/code:/data/code
       - /data/workspace:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-primary:18789

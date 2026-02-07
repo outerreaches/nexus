@@ -245,7 +245,7 @@ export const fileWrite = defineTool({
     if (root === "code" && !ctx.allowCodeWrite) {
       return (
         "ERROR: code root is read-only in this runtime. " +
-        "Submit a code change request for host-side apply/deploy instead of writing directly."
+        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
       );
     }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -342,7 +342,7 @@ export const fileEdit = defineTool({
     if (root === "code" && !ctx.allowCodeWrite) {
       return (
         "ERROR: code root is read-only in this runtime. " +
-        "Submit a code change request for host-side apply/deploy instead of editing directly."
+        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
       );
     }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -391,7 +391,7 @@ export const fileEditLines = defineTool({
     if (root === "code" && !ctx.allowCodeWrite) {
       return (
         "ERROR: code root is read-only in this runtime. " +
-        "Submit a code change request for host-side apply/deploy instead of editing directly."
+        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
       );
     }
     const allowedRoots = [ctx.workspaceDir, ctx.stateDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];

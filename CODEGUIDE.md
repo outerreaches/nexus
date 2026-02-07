@@ -5,45 +5,52 @@ This file is loaded into the **coder** agent's prompt. Keep it accurate and conc
 ## TL;DR — Safe Self-Modification Workflow
 
 1. **Locate the correct repo root** in `root="code"` (must contain `package.json` + `src/`).
-2. **Read before editing** (`file_read` with line ranges).
-3. **Prepare minimal change operations** (`changeSet.ops` or `changeSet.patch`) instead of writing into `root="code"`.
-4. **Define host validations** (`validate[]`, usually `npm run typecheck` + `npm run build`).
-5. **Write a complete payload to blackboard** so orchestrator can call `code_change_request_create`.
-6. **Verify via request status** (`code_change_request_status`) and inspect `logFile` on failure.
+2. **Read before editing** (`file_read` with line ranges / `withLineNumbers`).
+3. **Apply minimal direct edits** to `root="code"` (`file_edit`, `file_edit_lines`, `file_write`).
+4. **Typecheck + build** (`shell_exec`).
+5. **Handoff for host rollout** (do not deploy from inside the coder run unless host Docker/git access is explicitly available).
+6. **Verify** health/status after rollout.
 
-### IMPORTANT: Code Root Is Read-Only
+## IMPORTANT: Deployment Boundaries
 
-- **Do NOT run `git add`, `git commit`, or `git push`.**
-- **Do NOT call `gateway_restart` to deploy code changes.**
-- **Do NOT write directly to `root="code"` unless policy explicitly allows it.**
-- **Use `root="workspace"` for scratch scripts and temporary files.**
+- **Coder may edit code directly** under `root="code"`.
+- **Coder must not run** `git add`, `git commit`, or `git push`.
+- **Coder must not use** `gateway_restart` as deployment.
+- Use `root="workspace"` for scratch scripts and temporary artifacts.
 
-If changes “disappear” after a restart, you probably edited the image filesystem (`/app`) instead of a persistent mounted code directory.
+Host rollout command:
+
+```bash
+cd /data/code
+infra/scripts/ha-rollout.sh apply-local "<commit message>" host main
+```
+
+`apply-local` flow:
+- Build/recreate inactive slot with current working-tree changes.
+- Verify candidate health (`/health/live`, `/health/ready`, `/status`).
+- Switch traffic to candidate.
+- Commit host git checkout only after canary success.
+- Rebuild previous active slot as standby.
+- If canary fails, restore git checkout to previous HEAD and keep old active serving.
 
 ---
 
-## Runtime Directories (Critical for Self-Mod)
+## Runtime Directories
 
 Nexus resolves three key directories at runtime:
 
 - **stateDir**: persistent state (SQLite DB, config, personalization files)
-- **codeDir**: the source code tree used by `root="code"`
-- **workspaceDir**: agent scratch/work area used by `root="workspace"`
+- **codeDir**: source tree used by `root="code"`
+- **workspaceDir**: scratch/work area used by `root="workspace"`
 
 File tools map roots like this:
 - `root="state"` → `stateDir`
 - `root="code"` → `codeDir`
 - `root="workspace"` → `workspaceDir`
 
-### How codeDir/workspaceDir are chosen
+### Production/VM recommendation
 
-- `stateDir` defaults from `NEXUS_STATE_DIR` (or `~/.nexus`).
-- `codeDir` **defaults to the built image source tree** (usually `/app`) unless configured.
-- `workspaceDir` defaults to `{stateDir}/workspace` unless configured.
-
-### Production/VM recommendation (persistent self-editing)
-
-In your `{stateDir}/nexus.json`, explicitly set:
+In `{stateDir}/nexus.json`, set:
 
 ```json
 {
@@ -52,159 +59,97 @@ In your `{stateDir}/nexus.json`, explicitly set:
 }
 ```
 
-…then mount those paths in Docker Compose:
-
-- `/data/code` → `NEXUS_CODE_DIR` (a real git working tree)
+Mounts in Compose:
+- `/data/code` → `NEXUS_CODE_DIR` (writable git working tree)
 - `/data/workspace` → `NEXUS_WORKSPACE_DIR`
 
-### Sanity check (always do this first)
+Set:
+- `NEXUS_ALLOW_CODE_WRITE=1`
 
-```
+Sanity check:
+
+```text
 file_list root="code" path="."
 ```
 
-You should see `package.json`, `src/`, `tsconfig.json`, etc.
+You should see `package.json`, `src/`, `tsconfig.json`.
 
 ---
 
 ## Project Structure (Source)
 
-```
+```text
 src/
-  index.ts              # CLI entry (commander) — starts gateway/chat/etc.
-  core/                 # Agent runner, presets, prompt builder
-    agent-runner.ts     # LLM ↔ tool loop, iterations/budget
-    agent-service.ts    # Session orchestration, persistence, concurrency
-    agent-tracker.ts    # Tracks running/recent agent runs (dashboard)
-    presets/            # Orchestrator/coder/researcher/analyst/trader prompts
-    prompt.ts           # Builds prompt from state files + skills
-  gateway/              # Runtime gateway services
-    start.ts            # Boot: DB, tools, agent, HTTP, scheduler, telegram
-    http.ts             # Hono HTTP API + dashboard UI
-    proactive.ts        # Heartbeat tick loop
-    telegram.ts         # Telegram bot + pairing/allowlist
-  scheduler/            # Job scheduler
-    job-scheduler.ts    # Tick loop + job execution + leases
-    cron.ts             # Cron parsing
-  data-intake/          # Data sources + scheduling + storage
-    sources/            # Source implementations (stocks, weather, etc.)
-    source-store.ts     # data_intake_sources table CRUD
-    store.ts            # data_items store/query
-  maintenance/          # System jobs + cleanup + backups
-    system-jobs.ts      # Seeds SYS_* jobs
-    db-backup.ts        # Backup implementation + status
-  storage/              # SQLite schema and session persistence
-    database.ts         # CREATE TABLE IF NOT EXISTS ... (schema)
-    sessions.ts         # Chat message persistence
-  state/                # Config + personalization + bootstrap
-    config.ts           # JSON5 config with env expansion (${...})
-    personalization.ts  # Seeds SOUL/AGENTS/USER/CODEGUIDE/HEARTBEAT/NOTES
-    bootstrap.ts        # Seeds state markdown files if missing
-    paths.ts            # Runtime path resolution
-  tools/                # Built-in tools (all tool implementations)
-    index.ts            # Registers tools (getBuiltInTools)
+  index.ts
+  core/
+  gateway/
+  scheduler/
+  data-intake/
+  maintenance/
+  storage/
+  state/
+  tools/
 ```
 
-Infra (deployment/HA) lives in:
-```
+Infra:
+
+```text
 infra/
   DEPLOYMENT.md
   docker-compose.ha.yml
   haproxy/
   watchdog/
+  scripts/ha-rollout.sh
 ```
 
 ---
 
-## Multi-Agent Architecture (Who does what)
+## Multi-Agent Architecture
 
-- **orchestrator**: main brain; plans; spawns workers; owns jobs/memory.
-- **coder** (you): reads/edits code and runs builds; writes clear rollout steps to blackboard.
-- **researcher/analyst/trader**: task specialists (generally should not mutate code).
-- **intake-manager**: manages data intake sources (when enabled).
+- **orchestrator**: plans, delegates, coordinates jobs/memory.
+- **coder**: code edits + validation (`typecheck`/`build`) + clear rollout handoff.
+- **researcher/analyst/trader**: specialized non-code tasks.
 
-Workers share results via the blackboard; use clear titles and structured output.
+Workers should write meaningful results to blackboard and avoid noisy status spam.
 
 ---
 
 ## Database Integration (SQLite)
 
-Schema is defined in `src/storage/database.ts` (idempotent creates).
+Schema is in `src/storage/database.ts`.
 
-Key tables (high level):
-- `sessions`, `messages`: chat history
-- `jobs`, `job_runs`, `job_events`, `job_leases`: scheduler + execution
-- `gateway_leases`: HA active-lease (prevents dual-active gateways)
-- `data_intake_sources`, `data_items`, `data_item_events`: intake sources + cached data
-- `memories`: long-term key/value memory
-- `blackboard`: cross-agent scratchpad
-- `agent_runs`: agent run tracking
-- `db_backups`: backup run tracking
-- `ha_events`: failover/failback/activation audit trail
+Key tables:
+- `sessions`, `messages`
+- `jobs`, `job_runs`, `job_events`, `job_leases`
+- `gateway_leases`
+- `data_intake_sources`, `data_items`, `data_item_events`
+- `memories`, `blackboard`, `agent_runs`
+- `db_backups`, `ha_events`
 
-Timestamps are **INTEGER ms since epoch**.
-
-### Adding/changing schema
-- Add `CREATE TABLE IF NOT EXISTS` and indexes in `src/storage/database.ts`.
-- Prefer additive migrations (new columns/tables); avoid destructive schema changes.
+Timestamps are integer epoch ms.
 
 ---
 
-## Tools (How they’re defined)
+## Tools
 
-All built-in tools live in `src/tools/*` and are registered in `src/tools/index.ts`.
+Built-in tools live in `src/tools/*` and are registered in `src/tools/index.ts`.
 
 Rules:
-- Tool `execute` **returns a string**.
-- Use `"OK:"` for success and `"ERROR:"` for failures.
-- Keep outputs concise; use JSON when structure helps.
+- Tool `execute` returns a string.
+- Prefix success with `OK:` and failures with `ERROR:`.
+- Keep outputs concise.
 
-### Adding a tool
-1. Add `src/tools/my-tool.ts` (use `defineTool` + `zod` params)
-2. Register in `src/tools/index.ts`
-3. `shell_exec`: run `npm run typecheck` + `npm run build`
-4. Handoff restart steps to orchestrator
-
----
-
-## Scheduling & Maintenance
-
-- Use the scheduler (jobs) for periodic work. Prefer `mode: "tool_call"` for zero-token automation.
-- System jobs are seeded in `src/maintenance/system-jobs.ts` (e.g., `SYS_DB_BACKUP`).
-- Backups are written under `{stateDir}/backups/YYYY-MM-DD/`.
-
----
-
-## HA / Standby Mode (Hot Standby)
-
-HA design:
-- One gateway should be **active**, others **standby**.
-- Active is enforced by a DB-backed lease in `gateway_leases` (`key="gateway_active"`).
-- Standby can be promoted via `POST /api/activate`; active can step down via `POST /api/deactivate`.
-
-When modifying code in HA setups:
-- Expect **two containers**. Changes must be deployed/rebuilt so both run the same version.
-- A restart of the active instance may cause failover; plan rollouts accordingly.
-
----
-
-## Prompt / State Files
-
-State markdown files live at `{stateDir}`:
-- `SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`
-
-Edit them with:
-```
-file_edit root="state" path="CODEGUIDE.md"
-```
-
-Prefer `file_write mode="append"` when adding standing instructions to avoid clobbering content.
+Adding a tool:
+1. Add `src/tools/my-tool.ts` (`defineTool` + `zod`).
+2. Register in `src/tools/index.ts`.
+3. Run `npm run typecheck` and `npm run build`.
+4. Document rollout steps for orchestrator/operator.
 
 ---
 
 ## Troubleshooting Self-Mod
 
-- **Edits fail with read-only errors**: expected in this mode. Return a `changeSet` payload and let orchestrator submit `code_change_request_create`.
-- **Can’t find files**: verify `file_list root="code" path="."` includes `package.json`.
-- **Behavior unchanged after request**: check `code_change_request_status` for failure details and `logFile`.
-- **HA oddities**: confirm only one instance is active (dashboard HA section + `/status.activeLease`).
+- **Edits blocked as read-only**: confirm writable `/data/code` mount and `NEXUS_ALLOW_CODE_WRITE=1`.
+- **Can’t find files**: verify `file_list root="code" path="."`.
+- **Behavior unchanged**: rollout not executed; run `ha-rollout.sh apply-local`.
+- **HA oddities**: confirm one active slot and healthy standby via `/status` and HA dashboard.

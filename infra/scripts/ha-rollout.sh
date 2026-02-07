@@ -2,11 +2,16 @@
 # HA rolling deploy with git-based rollback.
 #
 # Commands:
-#   deploy [<target-ref>]   Build/recreate inactive slot, switch traffic, smoke test.
-#                           On failure, auto-rollback to last-good commit.
-#   rollback [<target-ref>] Force rollback to a known commit (default: last-good).
-#   finalize [<target-ref>] Rebuild only inactive slot at target commit (no switchover).
-#   status                  Show HA slot modes and rollout state.
+#   deploy [<target-ref>]               Build/recreate inactive slot, switch traffic, smoke test.
+#                                       On failure, auto-rollback to last-good commit.
+#   apply-local [<msg>] [<remote>] [<branch>]
+#                                       Deploy current local working-tree changes:
+#                                       build canary (inactive slot) -> switch -> smoke ->
+#                                       commit on host -> refresh standby.
+#                                       If canary fails, restore git to previous HEAD.
+#   rollback [<target-ref>]             Force rollback to a known commit (default: last-good).
+#   finalize [<target-ref>]             Rebuild only inactive slot at target commit (no switchover).
+#   status                              Show HA slot modes and rollout state.
 #
 # Environment overrides:
 #   CODE_DIR=/data/code
@@ -46,6 +51,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ha-rollout.sh deploy [<target-ref>]
+  ha-rollout.sh apply-local [<commit-message>] [<target-remote>] [<target-branch>]
   ha-rollout.sh rollback [<target-ref>]
   ha-rollout.sh finalize [<target-ref>]
   ha-rollout.sh status
@@ -54,6 +60,9 @@ Examples:
   infra/scripts/ha-rollout.sh status
   infra/scripts/ha-rollout.sh deploy HEAD
   infra/scripts/ha-rollout.sh deploy bfea957
+  infra/scripts/ha-rollout.sh apply-local
+  infra/scripts/ha-rollout.sh apply-local "Add canada CPI source"
+  infra/scripts/ha-rollout.sh apply-local "Add canada CPI source" host main
   infra/scripts/ha-rollout.sh rollback
   infra/scripts/ha-rollout.sh rollback 82e7cc6
   infra/scripts/ha-rollout.sh finalize HEAD
@@ -153,6 +162,13 @@ checkout_commit() {
   fi
   log "checking out rollback commit $sha"
   git -C "$CODE_DIR" checkout "$sha" >/dev/null
+}
+
+reset_clean_to_commit() {
+  local sha="$1"
+  log "restoring git checkout to ${sha}"
+  git -C "$CODE_DIR" reset --hard "$sha" >/dev/null
+  git -C "$CODE_DIR" clean -fd >/dev/null
 }
 
 service_mode() {
@@ -390,8 +406,8 @@ rollback_after_failure() {
 
   if [ -n "$rollback_sha" ]; then
     warn "restoring git checkout to last-good ${rollback_sha}"
-    if ! checkout_commit "$rollback_sha"; then
-      warn "git checkout to ${rollback_sha} failed"
+    if ! reset_clean_to_commit "$rollback_sha"; then
+      warn "git restore to ${rollback_sha} failed"
       rollback_ok=0
     fi
     if ! build_slot "$candidate"; then
@@ -414,6 +430,7 @@ rollback_after_failure() {
   fi
   LAST_ACTIVE_SLOT="$old_active"
   LAST_GOOD_SHA="$rollback_sha"
+  LAST_DEPLOY_PID=""
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 }
@@ -450,12 +467,18 @@ release_lock() {
 
 cmd_status() {
   load_state
-  local head primary_mode standby_mode
+  local head primary_mode standby_mode dirty
   head="$(current_head_sha)"
   primary_mode="$(service_mode nexus-primary)"
   standby_mode="$(service_mode nexus-standby)"
+  if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+    dirty="yes"
+  else
+    dirty="no"
+  fi
 
   echo "head_sha=${head}"
+  echo "git_dirty=${dirty}"
   echo "primary_mode=${primary_mode}"
   echo "standby_mode=${standby_mode}"
   echo "last_good_sha=${LAST_GOOD_SHA}"
@@ -464,6 +487,144 @@ cmd_status() {
   echo "last_active_slot=${LAST_ACTIVE_SLOT}"
   echo "last_updated_at=${LAST_UPDATED_AT}"
   compose ps
+}
+
+cmd_apply_local() {
+  local commit_message="${1:-}"
+  local target_remote="${2:-}"
+  local target_branch="${3:-main}"
+  local base_sha rollback_sha old_active candidate switched new_sha standby_mode
+  switched=0
+
+  check_interrupted_deploy
+  load_state
+
+  if [ -z "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+    fail "git working tree is clean; nothing to apply"
+  fi
+
+  base_sha="$(current_head_sha)"
+  rollback_sha="${LAST_GOOD_SHA:-$base_sha}"
+
+  detect_slots
+  old_active="$ACTIVE_SLOT"
+  candidate="$INACTIVE_SLOT"
+
+  LAST_DEPLOY_SHA="$base_sha"
+  LAST_STATUS="applying_local"
+  LAST_ACTIVE_SLOT="$old_active"
+  LAST_DEPLOY_PID="$$"
+  [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$rollback_sha"
+  LAST_UPDATED_AT="$(date +%s)"
+  write_state
+
+  if ! build_slot "$candidate"; then
+    rollback_after_failure "build failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during build"
+  fi
+  if ! recreate_slot "$candidate"; then
+    rollback_after_failure "recreate failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during recreate"
+  fi
+  if ! wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT"; then
+    rollback_after_failure "candidate liveness failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed waiting for candidate live health"
+  fi
+  switched=1
+  if ! switch_to_slot "$old_active" "$candidate"; then
+    rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during switchover"
+  fi
+  if ! run_smoke_checks; then
+    rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during smoke checks"
+  fi
+
+  if [ -z "$commit_message" ]; then
+    commit_message="ha-rollout: apply local changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+
+  log "committing local code changes on host"
+  if ! git -C "$CODE_DIR" add -A; then
+    rollback_after_failure "git add failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during git add"
+  fi
+  if ! git -C "$CODE_DIR" commit -m "$commit_message" >/dev/null; then
+    rollback_after_failure "git commit failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during git commit"
+  fi
+  new_sha="$(current_head_sha)"
+
+  if [ -n "$target_remote" ]; then
+    log "pushing commit ${new_sha} to ${target_remote}/${target_branch}"
+    if ! git -C "$CODE_DIR" push "$target_remote" "HEAD:${target_branch}" >/dev/null; then
+      warn "push failed for ${target_remote}/${target_branch}"
+      LAST_GOOD_SHA="$new_sha"
+      LAST_DEPLOY_SHA="$new_sha"
+      LAST_STATUS="applied_local_push_failed"
+      LAST_ACTIVE_SLOT="$candidate"
+      LAST_DEPLOY_PID=""
+      LAST_UPDATED_AT="$(date +%s)"
+      write_state
+      fail "apply-local deployed and committed, but push failed"
+    fi
+  fi
+
+  if ! build_slot "$old_active"; then
+    LAST_GOOD_SHA="$new_sha"
+    LAST_DEPLOY_SHA="$new_sha"
+    LAST_STATUS="applied_local_standby_build_failed"
+    LAST_ACTIVE_SLOT="$candidate"
+    LAST_DEPLOY_PID=""
+    LAST_UPDATED_AT="$(date +%s)"
+    write_state
+    fail "apply-local succeeded on active slot, but standby rebuild failed"
+  fi
+  if ! recreate_slot "$old_active"; then
+    LAST_GOOD_SHA="$new_sha"
+    LAST_DEPLOY_SHA="$new_sha"
+    LAST_STATUS="applied_local_standby_recreate_failed"
+    LAST_ACTIVE_SLOT="$candidate"
+    LAST_DEPLOY_PID=""
+    LAST_UPDATED_AT="$(date +%s)"
+    write_state
+    fail "apply-local succeeded on active slot, but standby recreate failed"
+  fi
+  if ! wait_for_service_http "$old_active" "/health/live" "$LIVE_TIMEOUT"; then
+    LAST_GOOD_SHA="$new_sha"
+    LAST_DEPLOY_SHA="$new_sha"
+    LAST_STATUS="applied_local_standby_live_failed"
+    LAST_ACTIVE_SLOT="$candidate"
+    LAST_DEPLOY_PID=""
+    LAST_UPDATED_AT="$(date +%s)"
+    write_state
+    fail "apply-local succeeded on active slot, but standby is not live"
+  fi
+
+  standby_mode="$(service_mode "$old_active")"
+  case "$standby_mode" in
+    standby|active) ;;
+    *)
+      LAST_GOOD_SHA="$new_sha"
+      LAST_DEPLOY_SHA="$new_sha"
+      LAST_STATUS="applied_local_standby_mode_unexpected"
+      LAST_ACTIVE_SLOT="$candidate"
+      LAST_DEPLOY_PID=""
+      LAST_UPDATED_AT="$(date +%s)"
+      write_state
+      fail "apply-local succeeded on active slot, but standby mode is unexpected (${standby_mode})"
+      ;;
+  esac
+
+  LAST_GOOD_SHA="$new_sha"
+  LAST_DEPLOY_SHA="$new_sha"
+  LAST_STATUS="applied_local"
+  LAST_ACTIVE_SLOT="$candidate"
+  LAST_DEPLOY_PID=""
+  LAST_UPDATED_AT="$(date +%s)"
+  write_state
+
+  log "apply-local complete: active=${candidate} commit=${new_sha}"
 }
 
 cmd_deploy() {
@@ -620,7 +781,7 @@ main() {
       [ -f "$COMPOSE_FILE" ] || fail "missing compose file: $COMPOSE_FILE"
       cmd_status
       ;;
-    deploy|rollback|finalize)
+    deploy|apply-local|rollback|finalize)
       require_cmd git
       require_cmd docker
       require_cmd curl
@@ -630,6 +791,7 @@ main() {
       trap release_lock EXIT
       case "$cmd" in
         deploy) cmd_deploy "$@" ;;
+        apply-local) cmd_apply_local "$@" ;;
         rollback) cmd_rollback "$@" ;;
         finalize) cmd_finalize "$@" ;;
       esac

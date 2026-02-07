@@ -566,7 +566,8 @@ curl -s http://localhost:9999/stats | head
 Notes:
 - Always use `-p infra` with the HA compose file. Omitting it can leave an old stack running and cause port conflicts.
 - The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
-- `/data/code` is mounted read-only in containers; host worker applies code changes on VM and redeploys safely.
+- `/data/code` is mounted writable in containers to allow direct in-agent code edits.
+- Deploys should still be performed from the VM host using `ha-rollout.sh apply-local`.
 
 ### 7.3.1 Rolling Deploy (Recommended)
 
@@ -584,6 +585,13 @@ infra/scripts/ha-rollout.sh deploy HEAD
 
 # Optional but recommended: refresh the inactive slot to match the new version
 infra/scripts/ha-rollout.sh finalize HEAD
+
+# Deploy local uncommitted changes safely:
+# canary inactive slot -> switch + smoke -> host commit -> refresh standby
+infra/scripts/ha-rollout.sh apply-local "Describe change"
+
+# Optional: also push after successful local apply
+infra/scripts/ha-rollout.sh apply-local "Describe change" host main
 ```
 
 Rollback commands:
@@ -602,73 +610,20 @@ Notes:
 - Rollout state is persisted in `/data/nexus/deploy-state.env`.
 - If both slots are accidentally in standby mode, the script attempts bootstrap activation before failing.
 
-### 7.3.2 Host Change Worker (Fully Automated)
-
-To automate self-modification safely with host-owned git/deploy, run the host change worker:
-
-```bash
-# On VM (one-time install)
-sudo systemctl disable --now nexus-ha-deployer 2>/dev/null || true
-sudo cp /data/code/infra/systemd/nexus-change-worker.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now nexus-change-worker
-
-# Verify
-systemctl status nexus-change-worker --no-pager
-/data/code/infra/scripts/change-worker.sh status
-```
-
-The worker watches `/data/nexus/change-queue/pending` and processes `code_change_request_create` requests:
-1. Verify clean host git tree and `baseSha == HEAD`.
-2. Apply `changeSet` to `/data/code`.
-3. Run `validate[]` commands.
-4. Rebuild/recreate inactive slot (candidate) and wait for readiness.
-5. Commit and push to `host/main`.
-6. Promote candidate to active.
-7. Rebuild old active slot as standby.
-
-Queue directories:
-- Pending: `/data/nexus/change-queue/pending`
-- Processing: `/data/nexus/change-queue/processing`
-- Completed: `/data/nexus/change-queue/done`
-- Failed: `/data/nexus/change-queue/failed`
-- Logs: `/data/nexus/change-queue/logs`
-
-From agent/orchestrator:
-- Submit request with `code_change_request_create(...)`.
-- Track with `code_change_request_status(...)`.
-
-#### Dry-Run Mode
-
-Set `CHANGE_WORKER_DRY_RUN=1` in the systemd unit to test safely.
-
-Dry-run still does:
-- apply `changeSet`
-- run `validate[]`
-- rebuild and readiness-check inactive slot
-
-Dry-run does **not**:
-- commit
-- push
-- promote active slot
-- rebuild final standby slot
-
-After dry-run, the worker resets host git to `baseSha` and restores candidate slot.
-
-### 7.3.3 Self-Modification Deploy Flow
+### 7.3.2 Self-Modification Deploy Flow
 
 Typical flow for autonomous code changes:
-1. Orchestrator spawns coder to inspect current code and produce a structured change payload.
-2. Orchestrator submits `code_change_request_create` with `changeSet` + `validate[]`.
-3. Host worker applies change on host repo and boots the inactive slot first.
-4. If inactive slot is healthy, host worker commits/pushes and promotes it to active.
-5. Host worker rebuilds old active slot so both instances run the same commit.
-6. If candidate boot fails before promotion, worker resets repo to `baseSha` and restores the candidate slot from git.
+1. Coder edits files directly in `/data/code` and runs validation (`npm run typecheck`, `npm run build`).
+2. Host runs `infra/scripts/ha-rollout.sh apply-local "<message>"`.
+3. Script rebuilds inactive slot first and verifies health.
+4. If healthy, script switches traffic, runs smoke checks, then commits host git.
+5. Script rebuilds previous active slot as standby.
+6. If canary boot fails before promotion, script restores git to previous HEAD and keeps previous active slot serving.
 
 Operational behavior:
 - Only the active slot handles Telegram/scheduler/proactive jobs.
 - Standby slot intentionally does not process channel traffic.
-- If both slots report standby, worker attempts bootstrap activation on `nexus-primary` before failing slot detection.
+- If both slots report standby, rollout attempts bootstrap activation before failing slot detection.
 
 ### 7.4 Testing Failover
 
@@ -895,6 +850,6 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep 
 | `docker compose restart` | Restart Nexus |
 | `infra/scripts/ha-rollout.sh status` | Show active/inactive HA slots + rollout state |
 | `infra/scripts/ha-rollout.sh deploy HEAD` | Roll out current commit to inactive slot and switch |
+| `infra/scripts/ha-rollout.sh apply-local "msg"` | Roll out local working-tree changes, then commit on host |
 | `infra/scripts/ha-rollout.sh finalize HEAD` | Rebuild standby slot to match active commit |
 | `infra/scripts/ha-rollout.sh rollback` | Roll back to recorded last-good commit |
-| `infra/scripts/change-worker.sh status` | Show change queue counts (pending/processing/done/failed) |

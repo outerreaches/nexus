@@ -16,7 +16,7 @@ export const gatewayRestart = defineTool({
     if (haPeer && !force) {
       return (
         "ERROR: gateway_restart is blocked in HA mode. " +
-        "For code changes: submit code_change_request_create and let the host worker apply/deploy safely. " +
+        "For code changes: use host rollout (`infra/scripts/ha-rollout.sh apply-local`) instead of restarting in place. " +
         "Use force=true only for emergency restart without code rollout."
       );
     }
