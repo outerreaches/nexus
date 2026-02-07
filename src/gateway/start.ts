@@ -32,8 +32,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   const stderrWrite = process.stderr.write.bind(process.stderr);
   let teeInstalled = false;
+  const hostId = os.hostname().slice(0, 12);
+  let logMode: () => string = () => params.standby ? "standby" : "active";
   const log = (msg: string) => {
-    const line = `[nexus] ${msg}\n`;
+    const line = `[nexus] ${new Date().toISOString()} [${hostId}/${logMode()}] ${msg}\n`;
     if (params.verbose) {
       process.stdout.write(line);
       return;
@@ -165,6 +167,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   // Standby mode tracking (declared early so getStatus can reference it)
   let isStandby = params.standby ?? false;
   const getMode = () => (isStandby ? "standby" : "active");
+  logMode = getMode;
 
   // Active lease (prevents dual-active containers)
   const leaseKey = "gateway_active";
