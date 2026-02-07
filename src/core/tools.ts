@@ -22,7 +22,14 @@ export type ToolContext = {
   allowCodeEdit?: boolean;
   allowCodeWrite?: boolean;
   requestRestart?: (reason: string, delayMs?: number) => void;
-  request?: { channel: string; channelKey: string; agentId: string; sessionId: string; runId?: string };
+  request?: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    sessionId: string;
+    runId?: string;
+    parentRunId?: string;
+  };
   planState?: {
     completed: boolean;
     complexity: "simple" | "complex";

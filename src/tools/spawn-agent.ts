@@ -203,6 +203,7 @@ export const spawnAgent = defineTool({
         task: cleanedTask,
         budget,
         runId: runId ?? null,
+        parentRunId: effectiveParentRunId,
         workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
         tracker,
         blackboardTitle,
@@ -224,11 +225,12 @@ async function runInProcess(params: {
   task: string;
   budget: { maxToolCalls: number; maxIterations: number; maxContextTokens: number };
   runId: string | null;
+  parentRunId: string | null;
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
 }): Promise<string> {
-  const { ctx, preset, systemPrompt, task, budget, runId, workerTools, tracker, blackboardTitle } = params;
+  const { ctx, preset, systemPrompt, task, budget, runId, parentRunId, workerTools, tracker, blackboardTitle } = params;
   const llm = ctx.llm!;
 
   // Create worker ToolContext (inherit from orchestrator but with worker identity)
@@ -241,6 +243,7 @@ async function runInProcess(params: {
           ...ctx.request,
           agentId: `${ctx.request.agentId}:${preset.name}`,
           runId: runId ?? undefined,
+          parentRunId: parentRunId ?? undefined,
         }
       : undefined,
     // Workers get their own budget info

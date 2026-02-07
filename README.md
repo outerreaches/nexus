@@ -227,4 +227,5 @@ For multi-agent setups, you can create agent-specific overrides in `~/.nexus/wor
 
 - Prompts: edit personalization files in `~/.nexus/workspace/` (SOUL.md, IDENTITY.md, USER.md, etc.).
 - Code edits: `file_*` tools can target `root:"code"` (or absolute paths under the code dir). This is controlled by `permissions.allowCodeEdit` and `codeDir` in config.
-- Restart: call `gateway_restart` after changing code/config.
+- Deploy code changes with `ha_deploy` (`action:"apply"`) in HA workflows.
+- `gateway_restart` is for non-HA restarts or emergency operations, not normal code rollout.

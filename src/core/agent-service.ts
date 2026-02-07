@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { AgentRunner } from "./agent-runner.js";
@@ -161,7 +161,13 @@ export class AgentService {
       // If a deploy happened during this run, the host-side ha-deployer is
       // waiting for deploy-ack before rebuilding the old primary container.
       // Write the ack now that the orchestrator's full request cycle is done.
-      this.ackDeployIfPending();
+      this.ackDeployIfPending({
+        runId: runId ?? null,
+        sessionId,
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+      });
 
       return {
         sessionId,
@@ -173,21 +179,106 @@ export class AgentService {
     });
   }
 
-  /** Write deploy-ack if finalize-pending exists (signals ha-deployer it's safe to rebuild). */
-  private ackDeployIfPending(): void {
+  /** Write deploy-ack if finalize-pending exists and this run matches the pending deploy context. */
+  private ackDeployIfPending(current: {
+    runId: string | null;
+    sessionId: string;
+    channel: string;
+    channelKey: string;
+    agentId: string;
+  }): void {
     try {
       const stateDir = this.deps.stateDir;
       const finalizePending = path.join(stateDir, "finalize-pending");
-      if (existsSync(finalizePending)) {
-        const ackFile = path.join(stateDir, "deploy-ack");
-        writeFileSync(ackFile, new Date().toISOString() + "\n");
-        try { unlinkSync(finalizePending); } catch { /* race with ha-deployer cleanup */ }
-        this.deps.onRunnerLog?.("deploy-ack written (orchestrator run complete)");
+      if (!existsSync(finalizePending)) return;
+
+      const pending = readFinalizePending(finalizePending);
+      if (pending && !shouldAckPending(pending, current)) {
+        this.deps.onRunnerLog?.(
+          `deploy-ack deferred: pending trigger=${pending.triggerId ?? "unknown"} expectedRun=${pending.expectedAckRunId ?? pending.request?.parentRunId ?? pending.request?.runId ?? "n/a"} currentRun=${current.runId ?? "none"}`,
+        );
+        return;
       }
+
+      const ackFile = path.join(stateDir, "deploy-ack");
+      const ackPayload = {
+        triggerId: pending?.triggerId ?? null,
+        expectedSha: pending?.expectedSha ?? null,
+        ackedAt: new Date().toISOString(),
+        by: {
+          runId: current.runId,
+          sessionId: current.sessionId,
+          channel: current.channel,
+          channelKey: current.channelKey,
+          agentId: current.agentId,
+        },
+      };
+      writeFileSync(ackFile, JSON.stringify(ackPayload, null, 2) + "\n");
+      try { unlinkSync(finalizePending); } catch { /* race with ha-deployer cleanup */ }
+      this.deps.onRunnerLog?.("deploy-ack written (matched pending deploy context)");
     } catch {
       // Non-fatal — ha-deployer has a timeout fallback
     }
   }
+}
+
+type FinalizePending = {
+  triggerId?: string;
+  expectedSha?: string;
+  expectedAckRunId?: string;
+  request?: {
+    channel?: string;
+    channelKey?: string;
+    agentId?: string;
+    sessionId?: string;
+    runId?: string;
+    parentRunId?: string;
+  };
+};
+
+function readFinalizePending(filePath: string): FinalizePending | null {
+  try {
+    const raw = readFileSync(filePath, "utf-8").trim();
+    if (!raw) return null;
+    if (!raw.startsWith("{")) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as FinalizePending;
+  } catch {
+    return null;
+  }
+}
+
+function shouldAckPending(
+  pending: FinalizePending,
+  current: { runId: string | null; sessionId: string; channel: string; channelKey: string },
+): boolean {
+  const expectedRunId = (
+    pending.expectedAckRunId ??
+    pending.request?.parentRunId ??
+    pending.request?.runId ??
+    ""
+  ).trim();
+  if (expectedRunId) {
+    if (current.runId && current.runId === expectedRunId) return true;
+    if (!current.runId) {
+      const expectedSessionId = (pending.request?.sessionId ?? "").trim();
+      return Boolean(expectedSessionId && expectedSessionId === current.sessionId);
+    }
+    return false;
+  }
+
+  const expectedSessionId = (pending.request?.sessionId ?? "").trim();
+  if (expectedSessionId) {
+    return expectedSessionId === current.sessionId;
+  }
+
+  const expectedChannel = (pending.request?.channel ?? "").trim();
+  const expectedChannelKey = (pending.request?.channelKey ?? "").trim();
+  if (expectedChannel && expectedChannelKey) {
+    return expectedChannel === current.channel && expectedChannelKey === current.channelKey;
+  }
+  return true;
 }
 
 function filterToolsByPreset(allTools: Tool[], preset?: AgentPreset): Tool[] {

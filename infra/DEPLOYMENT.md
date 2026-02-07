@@ -635,18 +635,20 @@ The coder agent deploys autonomously via `ha_deploy` tool + host-side `ha-deploy
 2. ha_deploy writes /data/nexus/deploy-trigger.json
 3. ha-deployer daemon (host) picks up trigger, runs:
      ha-rollout.sh apply-local "<commit message>" host main
-4. apply-local: build standby with new code → health check → switch traffic → commit+push
+4. apply-local: build standby with new code → health check → commit+push → switch traffic
 5. ha_deploy polls deploy-state.env, sees success, returns OK to coder
 6. Coder writes results to blackboard, returns to orchestrator
 7. Orchestrator finishes full request cycle (including Telegram reply)
 8. agent-service writes /data/nexus/deploy-ack
-9. ha-deployer sees ack, runs finalize to rebuild old primary with new code
+9. ha-deployer validates ack context, then runs finalize at the exact deployed SHA to rebuild old primary
 10. Both containers now running latest code
 ```
 
 **Safeguards:**
 - **Auto-deploy**: If the coder edits code + builds but skips `ha_deploy`, the isolated worker auto-triggers it after the agent run completes.
 - **Finalize ack protocol**: ha-deployer writes `finalize-pending` and waits for `deploy-ack` before rebuilding the old primary. This ensures the orchestrator's full request cycle (including Telegram reply) completes before the container is killed.
+- **Ack correlation**: `finalize-pending` includes trigger/run context, and `deploy-ack` is matched against that context to avoid unrelated runs unblocking finalize.
+- **Pinned finalize target**: after `apply-local`, ha-deployer finalizes the exact `LAST_DEPLOY_SHA` from deploy state (not floating `HEAD`).
 - **Ack timeout**: If deploy-ack doesn't arrive within 10 minutes, ha-deployer proceeds with finalize anyway (safety net for crashed agents).
 - **Git blocking**: Mutating git commands (`add`, `commit`, `push`, `reset`, etc.) are blocked in the coder's `shell_exec` for the code repo. The host daemon handles all git operations.
 

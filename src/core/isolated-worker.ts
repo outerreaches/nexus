@@ -18,6 +18,7 @@ import { ProcessManager } from "../process/manager.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
 import type { ToolContext } from "./tools.js";
+import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
 
 function send(msg: WorkerMessage): void {
@@ -81,6 +82,7 @@ process.on("message", async (msg: ParentMessage) => {
         agentId: cfg.agentId,
         sessionId: cfg.sessionId,
         runId: cfg.runId ?? undefined,
+        parentRunId: cfg.parentRunId ?? undefined,
       },
       planState: undefined,
       budgetInfo: {
@@ -110,12 +112,11 @@ process.on("message", async (msg: ParentMessage) => {
     // Coder safeguard: if code was edited and built but ha_deploy was never
     // called, auto-trigger it so deploys can't be silently skipped.
     if (cfg.presetName === "coder") {
-      const toolNames = new Set(
-        result.newMessages.flatMap((m) => ("toolCalls" in m && m.toolCalls) ? m.toolCalls.map((tc) => tc.name) : []),
-      );
-      const builtCode = toolNames.has("shell_exec") &&
-        (toolNames.has("file_edit") || toolNames.has("file_edit_lines") || toolNames.has("file_write"));
-      const deployed = toolNames.has("ha_deploy");
+      const calls = collectToolCallRecords(result.newMessages);
+      const editedCode = calls.some((call) => isCodeEditCall(call, cfg.codeDir));
+      const validatedBuild = hasSuccessfulTypecheckAndBuild(calls);
+      const builtCode = editedCode && validatedBuild;
+      const deployed = calls.some((call) => isApplyDeployCall(call));
 
       if (builtCode && !deployed) {
         log("coder edited code + built but skipped ha_deploy — auto-triggering deploy");
@@ -174,3 +175,84 @@ process.on("unhandledRejection", (reason) => {
   send({ type: "error", error: `Unhandled rejection: ${reason}` });
   process.exit(1);
 });
+
+type ToolCallRecord = {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  result?: string;
+};
+
+function collectToolCallRecords(messages: ChatMessage[]): ToolCallRecord[] {
+  const records: ToolCallRecord[] = [];
+  const byId = new Map<string, ToolCallRecord>();
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.toolCalls)) {
+      for (const call of message.toolCalls) {
+        const record: ToolCallRecord = {
+          id: call.id,
+          name: call.name,
+          args: parseJsonObject(call.arguments),
+        };
+        records.push(record);
+        byId.set(call.id, record);
+      }
+      continue;
+    }
+    if (message.role === "tool" && typeof message.toolCallId === "string") {
+      const existing = byId.get(message.toolCallId);
+      if (existing) {
+        existing.result = typeof message.content === "string" ? message.content : "";
+      }
+    }
+  }
+  return records;
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function isSuccessfulResult(result: string | undefined): boolean {
+  if (typeof result !== "string") return false;
+  return !result.trimStart().startsWith("ERROR:");
+}
+
+function isApplyDeployCall(call: ToolCallRecord): boolean {
+  if (call.name !== "ha_deploy") return false;
+  return call.args.action === "apply";
+}
+
+function isCodeEditCall(call: ToolCallRecord, codeDir: string): boolean {
+  if (call.name !== "file_edit" && call.name !== "file_edit_lines" && call.name !== "file_write") {
+    return false;
+  }
+  if (call.args.root === "code") return true;
+  const rawPath = typeof call.args.path === "string" ? call.args.path.trim() : "";
+  if (!rawPath) return false;
+  if (rawPath === "code" || rawPath.startsWith("code/") || rawPath.startsWith("code\\")) return true;
+  if (!path.isAbsolute(rawPath)) return false;
+  const normalizedPath = path.normalize(rawPath);
+  const normalizedCodeDir = path.normalize(codeDir);
+  return normalizedPath === normalizedCodeDir || normalizedPath.startsWith(`${normalizedCodeDir}${path.sep}`);
+}
+
+function hasSuccessfulTypecheckAndBuild(calls: ToolCallRecord[]): boolean {
+  let typecheckOk = false;
+  let buildOk = false;
+  for (const call of calls) {
+    if (call.name !== "shell_exec") continue;
+    if (!isSuccessfulResult(call.result)) continue;
+    const command = typeof call.args.command === "string" ? call.args.command : "";
+    if (/\bnpm\s+run\s+typecheck\b/.test(command)) typecheckOk = true;
+    if (/\bnpm\s+run\s+build\b/.test(command)) buildOk = true;
+  }
+  return typecheckOk && buildOk;
+}

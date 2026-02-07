@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -10,6 +10,14 @@ function parseStateValue(content: string, key: string): string | undefined {
   for (const line of content.split("\n")) {
     const eq = line.indexOf("=");
     if (eq > 0 && line.slice(0, eq) === key) return line.slice(eq + 1);
+  }
+}
+
+function fileAgeMs(file: string): number | null {
+  try {
+    return Date.now() - statSync(file).mtimeMs;
+  } catch {
+    return null;
   }
 }
 
@@ -50,6 +58,7 @@ export const haDeploy = defineTool({
     const stateFile = path.join(stateDir, "deploy-state.env");
     const triggerFile = path.join(stateDir, "deploy-trigger.json");
     const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
+    const lockDir = path.join(stateDir, "ha-rollout.lock");
 
     if (action === "status") {
       const lines: string[] = [];
@@ -65,6 +74,16 @@ export const haDeploy = defineTool({
     }
 
     // action === "apply"
+    // Recovery guard: if processing file is stale and no rollout lock exists,
+    // clear it so deploys are not blocked forever after interrupted daemon runs.
+    if (!existsSync(triggerFile) && existsSync(processingFile) && !existsSync(lockDir)) {
+      const ageMs = fileAgeMs(processingFile);
+      if (ageMs !== null && ageMs > 120_000) {
+        rmSync(processingFile, { force: true });
+        ctx.log(`removed stale processing trigger (${Math.round(ageMs / 1000)}s old)`);
+      }
+    }
+
     if (existsSync(triggerFile) || existsSync(processingFile)) {
       return "ERROR: A deploy is already pending or in progress. Use action='status' to check.";
     }
@@ -78,6 +97,16 @@ export const haDeploy = defineTool({
       remote,
       branch,
       requestedAt: new Date(ctx.nowMs()).toISOString(),
+      request: ctx.request
+        ? {
+            channel: ctx.request.channel,
+            channelKey: ctx.request.channelKey,
+            agentId: ctx.request.agentId,
+            sessionId: ctx.request.sessionId,
+            runId: ctx.request.runId ?? null,
+            parentRunId: ctx.request.parentRunId ?? null,
+          }
+        : undefined,
     };
 
     mkdirSync(stateDir, { recursive: true });
@@ -91,6 +120,7 @@ export const haDeploy = defineTool({
     // the deploy cycle — only the standby gets rebuilt with new code.
     const deadline = Date.now() + timeoutMs;
     const pollMs = 5_000;
+    let emptyPollsWithNoStateChange = 0;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, pollMs));
 
@@ -107,6 +137,15 @@ export const haDeploy = defineTool({
           }
           return `OK: deploy state changed (status=${status})\n\n${newState.trim()}`;
         }
+        emptyPollsWithNoStateChange += 1;
+        if (emptyPollsWithNoStateChange >= 2) {
+          return (
+            "ERROR: deploy trigger was cleared but deploy state did not change. " +
+            "Deploy likely failed before state write; check ha-deployer logs."
+          );
+        }
+      } else {
+        emptyPollsWithNoStateChange = 0;
       }
     }
 
