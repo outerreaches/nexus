@@ -88,9 +88,11 @@ failover() {
   log "FAILOVER: Primary ($current_primary) failed $FAILURE_THRESHOLD times"
   log "FAILOVER: Switching to standby ($current_standby)"
 
-  # Check if standby is alive
+  # Check if standby is alive (liveness is sufficient here — it may be in
+  # standby mode so /health/ready would fail on the role check, but we are
+  # about to activate it).
   if ! check_health "$current_standby"; then
-    log "ERROR: Standby is also unhealthy! Cannot failover."
+    log "ERROR: Standby is also unhealthy (liveness failed)! Cannot failover."
     return 1
   fi
 
@@ -103,13 +105,39 @@ failover() {
     return 1
   fi
 
+  # Verify standby is actually serving as active before declaring success.
+  log "FAILOVER: Verifying new primary reports active mode"
+  local verify_attempts=0
+  local verify_ok=0
+  while [ "$verify_attempts" -lt 10 ]; do
+    verify_attempts=$((verify_attempts + 1))
+    mode_response=$(curl -sf --max-time 5 "${current_standby}/api/mode" 2>&1) || mode_response=""
+    case "$mode_response" in
+      *'"mode":"active"'*)
+        verify_ok=1
+        break
+        ;;
+    esac
+    sleep 2
+  done
+
+  if [ "$verify_ok" -ne 1 ]; then
+    log "ERROR: Standby activated but not reporting active mode after ${verify_attempts} attempts"
+    return 1
+  fi
+
+  # Verify readiness (not just liveness) before trusting failover.
+  if ! check_ready "$current_standby"; then
+    log "WARN: Standby activated as active but /health/ready failing; proceeding cautiously"
+  fi
+
   # Swap primary and standby
   old_primary="$current_primary"
   temp="$current_primary"
   current_primary="$current_standby"
   current_standby="$temp"
 
-  log "FAILOVER: Complete. New primary: $current_primary"
+  log "FAILOVER: Complete. New primary: $current_primary (verified active)"
   consecutive_failures=0
   failback_healthy_count=0
 

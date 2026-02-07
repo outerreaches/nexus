@@ -30,6 +30,9 @@ LOCK_DIR="${STATE_DIR}/ha-deployer.lock"
 ROLLOUT_SCRIPT="${ROLLOUT_SCRIPT:-${CODE_DIR}/infra/scripts/ha-rollout.sh}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 API_URL="${API_URL:-http://localhost:18789}"
+GIT_TIMEOUT="${GIT_TIMEOUT:-120}"
+DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-600}"
+FINALIZE_TIMEOUT="${FINALIZE_TIMEOUT:-600}"
 
 log() {
   echo "[ha-deployer] $*"
@@ -72,12 +75,31 @@ next_pending_file() {
 
 acquire_lock() {
   mkdir -p "$STATE_DIR"
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    fail "another deployer instance is already running (lock: $LOCK_DIR)"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo $$ >"${LOCK_DIR}/pid"
+    return 0
   fi
+
+  # Lock exists — check if the owning process is still alive.
+  local owner_pid
+  owner_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo "")"
+  if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+    fail "another deployer instance is already running (pid=${owner_pid}, lock: $LOCK_DIR)"
+  fi
+
+  # Owning process is gone — stale lock.
+  warn "removing stale lock (pid=${owner_pid:-unknown} is no longer running)"
+  rm -f "${LOCK_DIR}/pid"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    fail "could not reclaim lock after stale removal (lock: $LOCK_DIR)"
+  fi
+  echo $$ >"${LOCK_DIR}/pid"
 }
 
 release_lock() {
+  rm -f "${LOCK_DIR}/pid" 2>/dev/null || true
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
@@ -210,36 +232,46 @@ process_request_file() {
 
   current_sha="$(git -C "$CODE_DIR" rev-parse HEAD)"
   if [ "$current_sha" != "$commit_sha" ]; then
-    echo "\$ git -C ${CODE_DIR} checkout ${commit_sha}" >>"$log_file"
-    if ! git -C "$CODE_DIR" checkout "$commit_sha" >>"$log_file" 2>&1; then
+    echo "\$ git -C ${CODE_DIR} checkout ${commit_sha} (timeout=${GIT_TIMEOUT}s)" >>"$log_file"
+    if ! timeout "$GIT_TIMEOUT" git -C "$CODE_DIR" checkout "$commit_sha" >>"$log_file" 2>&1; then
       finished_at="$(date -Iseconds)"
-      finalize_request "failed" "$processing_file" "git checkout failed for ${commit_sha}" "$log_file" "$finished_at"
+      finalize_request "failed" "$processing_file" "git checkout failed or timed out for ${commit_sha}" "$log_file" "$finished_at"
       notify_event "deploy_failed" "$request_id" "$commit_sha" "git checkout failed"
       return 0
     fi
   fi
 
   deploy_code=0
-  echo "\$ ${ROLLOUT_SCRIPT} deploy ${commit_sha}" >>"$log_file"
+  echo "\$ ${ROLLOUT_SCRIPT} deploy ${commit_sha} (timeout=${DEPLOY_TIMEOUT}s)" >>"$log_file"
   set +e
-  "$ROLLOUT_SCRIPT" deploy "$commit_sha" >>"$log_file" 2>&1
+  timeout "$DEPLOY_TIMEOUT" "$ROLLOUT_SCRIPT" deploy "$commit_sha" >>"$log_file" 2>&1
   deploy_code=$?
   set -e
   if [ "$deploy_code" -ne 0 ]; then
     warn "deploy failed for request ${request_id} (exit=${deploy_code}); attempting rollback"
-    echo "\$ ${ROLLOUT_SCRIPT} rollback" >>"$log_file"
-    "$ROLLOUT_SCRIPT" rollback >>"$log_file" 2>&1 || true
+    echo "\$ ${ROLLOUT_SCRIPT} rollback (timeout=${DEPLOY_TIMEOUT}s)" >>"$log_file"
+    local rollback_code=0
+    set +e
+    timeout "$DEPLOY_TIMEOUT" "$ROLLOUT_SCRIPT" rollback >>"$log_file" 2>&1
+    rollback_code=$?
+    set -e
     finished_at="$(date -Iseconds)"
-    finalize_request "failed" "$processing_file" "ha-rollout deploy failed (exit=${deploy_code})" "$log_file" "$finished_at"
-    notify_event "deploy_failed" "$request_id" "$commit_sha" "ha-rollout deploy failed"
+    if [ "$rollback_code" -ne 0 ]; then
+      warn "rollback ALSO failed for request ${request_id} (exit=${rollback_code}); MANUAL INTERVENTION REQUIRED"
+      finalize_request "failed" "$processing_file" "deploy failed (exit=${deploy_code}) AND rollback failed (exit=${rollback_code}); manual intervention required" "$log_file" "$finished_at"
+      notify_event "rollback_failed" "$request_id" "$commit_sha" "deploy and rollback both failed"
+    else
+      finalize_request "failed" "$processing_file" "ha-rollout deploy failed (exit=${deploy_code}); rolled back successfully" "$log_file" "$finished_at"
+      notify_event "deploy_failed" "$request_id" "$commit_sha" "ha-rollout deploy failed; rollback ok"
+    fi
     return 0
   fi
 
   if [ "$finalize" = "true" ]; then
     finalize_code=0
-    echo "\$ ${ROLLOUT_SCRIPT} finalize ${commit_sha}" >>"$log_file"
+    echo "\$ ${ROLLOUT_SCRIPT} finalize ${commit_sha} (timeout=${FINALIZE_TIMEOUT}s)" >>"$log_file"
     set +e
-    "$ROLLOUT_SCRIPT" finalize "$commit_sha" >>"$log_file" 2>&1
+    timeout "$FINALIZE_TIMEOUT" "$ROLLOUT_SCRIPT" finalize "$commit_sha" >>"$log_file" 2>&1
     finalize_code=$?
     set -e
     if [ "$finalize_code" -ne 0 ]; then
@@ -295,6 +327,7 @@ main() {
   require_cmd docker
   require_cmd curl
   require_cmd jq
+  require_cmd timeout
   [ -d "$CODE_DIR" ] || fail "missing CODE_DIR: ${CODE_DIR}"
   [ -x "$ROLLOUT_SCRIPT" ] || fail "missing executable rollout script: ${ROLLOUT_SCRIPT}"
 

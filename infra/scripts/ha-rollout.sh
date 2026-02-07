@@ -40,6 +40,7 @@ LAST_DEPLOY_SHA=""
 LAST_STATUS=""
 LAST_ACTIVE_SLOT=""
 LAST_UPDATED_AT=""
+LAST_DEPLOY_PID=""
 
 usage() {
   cat <<'EOF'
@@ -94,6 +95,7 @@ load_state() {
       LAST_STATUS) LAST_STATUS="$value" ;;
       LAST_ACTIVE_SLOT) LAST_ACTIVE_SLOT="$value" ;;
       LAST_UPDATED_AT) LAST_UPDATED_AT="$value" ;;
+      LAST_DEPLOY_PID) LAST_DEPLOY_PID="$value" ;;
     esac
   done <"$STATE_FILE"
 }
@@ -106,7 +108,25 @@ LAST_DEPLOY_SHA=${LAST_DEPLOY_SHA}
 LAST_STATUS=${LAST_STATUS}
 LAST_ACTIVE_SLOT=${LAST_ACTIVE_SLOT}
 LAST_UPDATED_AT=${LAST_UPDATED_AT}
+LAST_DEPLOY_PID=${LAST_DEPLOY_PID}
 EOF
+}
+
+# Detect if a previous deploy was interrupted (state says "deploying" but no
+# process is running).  Warn the operator so they can inspect before proceeding.
+check_interrupted_deploy() {
+  load_state
+  if [ "$LAST_STATUS" = "deploying" ]; then
+    if [ -n "$LAST_DEPLOY_PID" ] && kill -0 "$LAST_DEPLOY_PID" 2>/dev/null; then
+      fail "another deploy is in progress (pid=${LAST_DEPLOY_PID}, status=deploying)"
+    fi
+    warn "previous deploy was interrupted (status=deploying, pid=${LAST_DEPLOY_PID:-unknown} not running)"
+    warn "setting status to 'interrupted' — review state before proceeding"
+    LAST_STATUS="interrupted"
+    LAST_DEPLOY_PID=""
+    LAST_UPDATED_AT="$(date +%s)"
+    write_state
+  fi
 }
 
 current_head_sha() {
@@ -304,12 +324,42 @@ switch_to_slot() {
 run_smoke_checks() {
   log "running smoke checks via HAProxy"
   wait_for_public_http "/health/ready" "$SMOKE_TIMEOUT" || return 1
+
+  # Verify mode is active
   local mode
   mode="$(curl -fsS --max-time 5 "http://localhost:${API_PORT}/api/mode" || true)"
   case "$mode" in
-    *'"mode":"active"'*) return 0 ;;
-    *) return 1 ;;
+    *'"mode":"active"'*) ;;
+    *)
+      warn "smoke: /api/mode not active: ${mode}"
+      return 1
+      ;;
   esac
+
+  # Verify /health/ready reports all checks ok (database, scheduler, role, etc.)
+  local ready_body
+  ready_body="$(curl -fsS --max-time 10 "http://localhost:${API_PORT}/health/ready" || true)"
+  case "$ready_body" in
+    *'"ok":true'*) ;;
+    *)
+      warn "smoke: /health/ready not fully ok: ${ready_body}"
+      return 1
+      ;;
+  esac
+
+  # Verify /status endpoint responds (exercises config loading + DB)
+  local status_body
+  status_body="$(curl -fsS --max-time 10 "http://localhost:${API_PORT}/status" || true)"
+  case "$status_body" in
+    *'"ok":true'*) ;;
+    *)
+      warn "smoke: /status not ok: ${status_body}"
+      return 1
+      ;;
+  esac
+
+  log "smoke checks passed"
+  return 0
 }
 
 rollback_after_failure() {
@@ -319,25 +369,49 @@ rollback_after_failure() {
   local rollback_sha="$4"
   local switched="$5"
   local target_sha="$6"
+  local rollback_ok=1
 
   warn "deploy failed: ${reason}"
   if [ "$switched" = "1" ]; then
     warn "attempting traffic rollback to ${old_active}"
-    service_post "$candidate" "/api/deactivate" || true
-    service_post "$old_active" "/api/activate" || true
-    wait_for_service_http "$old_active" "/health/ready" "$READY_TIMEOUT" || true
+    if ! service_post "$candidate" "/api/deactivate"; then
+      warn "failed to deactivate candidate ${candidate}"
+      rollback_ok=0
+    fi
+    if ! service_post "$old_active" "/api/activate"; then
+      warn "failed to re-activate old active ${old_active}"
+      rollback_ok=0
+    fi
+    if ! wait_for_service_http "$old_active" "/health/ready" "$READY_TIMEOUT"; then
+      warn "old active ${old_active} not ready after re-activation"
+      rollback_ok=0
+    fi
   fi
 
   if [ -n "$rollback_sha" ]; then
     warn "restoring git checkout to last-good ${rollback_sha}"
-    checkout_commit "$rollback_sha" || true
-    build_slot "$candidate" || true
-    recreate_slot "$candidate" || true
+    if ! checkout_commit "$rollback_sha"; then
+      warn "git checkout to ${rollback_sha} failed"
+      rollback_ok=0
+    fi
+    if ! build_slot "$candidate"; then
+      warn "rebuild of candidate ${candidate} failed"
+      rollback_ok=0
+    fi
+    if ! recreate_slot "$candidate"; then
+      warn "recreate of candidate ${candidate} failed"
+      rollback_ok=0
+    fi
     wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || true
   fi
 
   LAST_DEPLOY_SHA="$target_sha"
-  LAST_STATUS="rollback_after_failure"
+  if [ "$rollback_ok" = "1" ]; then
+    LAST_STATUS="rollback_after_failure"
+  else
+    LAST_STATUS="rollback_failed"
+    warn "ROLLBACK INCOMPLETE — manual intervention may be required"
+  fi
   LAST_ACTIVE_SLOT="$old_active"
   LAST_GOOD_SHA="$rollback_sha"
   LAST_UPDATED_AT="$(date +%s)"
@@ -346,12 +420,31 @@ rollback_after_failure() {
 
 acquire_lock() {
   mkdir -p "$STATE_DIR"
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    fail "another rollout appears to be running (lock: ${LOCK_DIR})"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo $$ >"${LOCK_DIR}/pid"
+    return 0
   fi
+
+  # Lock exists — check if the owning process is still alive.
+  local owner_pid
+  owner_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo "")"
+  if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+    fail "another rollout appears to be running (pid=${owner_pid}, lock: ${LOCK_DIR})"
+  fi
+
+  # Owning process is gone — stale lock.
+  warn "removing stale lock (pid=${owner_pid:-unknown} is no longer running)"
+  rm -f "${LOCK_DIR}/pid"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    fail "could not reclaim lock after stale removal (lock: ${LOCK_DIR})"
+  fi
+  echo $$ >"${LOCK_DIR}/pid"
 }
 
 release_lock() {
+  rm -f "${LOCK_DIR}/pid" 2>/dev/null || true
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
@@ -379,6 +472,7 @@ cmd_deploy() {
   switched=0
 
   require_clean_repo
+  check_interrupted_deploy
   target_sha="$(resolve_commit "$target_ref")"
   head_sha="$(current_head_sha)"
   [ "$head_sha" = "$target_sha" ] || fail "HEAD (${head_sha}) does not match target (${target_sha}); checkout target first"
@@ -393,6 +487,7 @@ cmd_deploy() {
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deploying"
   LAST_ACTIVE_SLOT="$old_active"
+  LAST_DEPLOY_PID="$$"
   [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$rollback_sha"
   LAST_UPDATED_AT="$(date +%s)"
   write_state
@@ -423,6 +518,7 @@ cmd_deploy() {
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deployed"
   LAST_ACTIVE_SLOT="$candidate"
+  LAST_DEPLOY_PID=""
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 
@@ -435,6 +531,7 @@ cmd_rollback() {
   local target_sha head_sha old_active candidate
 
   require_clean_repo
+  check_interrupted_deploy
   load_state
   if [ -z "$target_ref" ]; then
     [ -n "$LAST_GOOD_SHA" ] || fail "no last_good_sha recorded; specify rollback ref explicitly"
@@ -466,9 +563,10 @@ cmd_rollback() {
 
 cmd_finalize() {
   local target_ref="${1:-HEAD}"
-  local target_sha head_sha candidate active
+  local target_sha head_sha candidate active candidate_mode
 
   require_clean_repo
+  check_interrupted_deploy
   target_sha="$(resolve_commit "$target_ref")"
   head_sha="$(current_head_sha)"
   [ "$head_sha" = "$target_sha" ] || fail "HEAD (${head_sha}) does not match target (${target_sha}); checkout target first"
@@ -480,6 +578,20 @@ cmd_finalize() {
   build_slot "$candidate"
   recreate_slot "$candidate"
   wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || fail "finalize candidate not live"
+
+  # Verify the standby is actually running and in standby mode (not crashed/errored).
+  # Standby instances won't pass /health/ready (role check fails) so we verify
+  # liveness + mode instead.
+  candidate_mode="$(service_mode "$candidate")"
+  case "$candidate_mode" in
+    standby|active)
+      log "finalize: ${candidate} mode=${candidate_mode} (ok)"
+      ;;
+    *)
+      warn "finalize: ${candidate} in unexpected mode=${candidate_mode} after rebuild"
+      fail "finalize candidate not healthy (mode=${candidate_mode})"
+      ;;
+  esac
 
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="finalized"

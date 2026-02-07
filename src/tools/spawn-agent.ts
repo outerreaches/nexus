@@ -665,6 +665,14 @@ async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: 
     const commitMsg = `checkpoint: pre-coder ${timestamp}${runId ? ` (run:${runId.slice(0, 8)})` : ""}`;
 
     await execAsync("git add -A", { cwd: codeDir });
+
+    // Unstage sensitive files before checkpoint commit.
+    const SENSITIVE_RE = /\.(env|pem|key|secret)$|credentials\.json$|oauth\.json$|token\.json$|secrets?\.\w+$/i;
+    const { stdout: stagedForCheckpoint } = await execAsync("git diff --cached --name-only", { cwd: codeDir });
+    for (const file of stagedForCheckpoint.split("\n").map((f) => f.trim()).filter((f) => f && SENSITIVE_RE.test(f))) {
+      await execAsync(`git reset HEAD -- "${file}"`, { cwd: codeDir }).catch(() => {});
+    }
+
     await execAsync(`git commit -m "${commitMsg}" --allow-empty`, { cwd: codeDir });
 
     log?.(`git-checkpoint: created commit "${commitMsg}"`);
@@ -724,6 +732,32 @@ async function finalizeCoderGit(params: {
 
   try {
     await execAsync("git add -A", { cwd: codeDir });
+
+    // Check for sensitive files that should not be committed.
+    const SENSITIVE_PATTERNS = [
+      /\.env$/i,
+      /\.env\.\w+$/i,
+      /credentials\.json$/i,
+      /\.pem$/i,
+      /\.key$/i,
+      /secrets?\.\w+$/i,
+      /oauth\.json$/i,
+      /token\.json$/i,
+      /\.secret$/i,
+    ];
+    const { stdout: stagedFiles } = await execAsync("git diff --cached --name-only", { cwd: codeDir });
+    const suspicious = stagedFiles
+      .split("\n")
+      .map((f) => f.trim())
+      .filter((f) => f && SENSITIVE_PATTERNS.some((p) => p.test(f)));
+    if (suspicious.length > 0) {
+      // Unstage the suspicious files rather than aborting the whole commit.
+      for (const file of suspicious) {
+        await execAsync(`git reset HEAD -- "${file}"`, { cwd: codeDir }).catch(() => {});
+      }
+      log?.(`git-finalize: unstaged ${suspicious.length} potentially sensitive file(s): ${suspicious.join(", ")}`);
+    }
+
     await execAsync(`git commit -m "${escapedMsg}"`, { cwd: codeDir, maxBuffer: 1024 * 1024 });
     const { stdout: shaRaw } = await execAsync("git rev-parse HEAD", { cwd: codeDir });
     const commitSha = shaRaw.trim();

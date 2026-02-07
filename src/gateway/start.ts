@@ -450,6 +450,12 @@ export async function startGateway(params: { configPath: string; port?: number; 
           return;
         }
 
+        // Activate peer BEFORE releasing our lease to avoid a window where
+        // neither instance is active.  The peer's /api/activate will acquire
+        // the lease only once we release it (or it expires), so we deactivate
+        // first only if the peer is already confirmed live above.  To keep the
+        // window as short as possible we: (1) release our lease, (2) immediately
+        // ask the peer to activate, (3) verify it actually became ready.
         if (!isStandby) {
           await deactivateServices(`restart handoff (${reason})`);
         } else {
@@ -458,14 +464,34 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
         const activated = await tryActivatePeer(restartPeerUrl, activateTimeoutMs, retryMs);
         if (!activated) {
-          log("restart: handoff failed (peer activation timeout); falling back to local restart");
+          log("restart: handoff failed (peer activation timeout); attempting to re-activate locally");
+          // Try to reclaim our own lease before falling back to a bare restart.
+          const reclaimed = await activateServices();
+          if (reclaimed.ok) {
+            log("restart: re-activated locally after peer timeout");
+          } else {
+            log("restart: local re-activation also failed; restarting process");
+          }
           scheduleProcessRestart(reason, 250);
           return;
         }
 
+        // Verify peer is actually serving traffic (mode=active), not just HTTP up.
+        const peerMode = await fetchText(`${restartPeerUrl}/api/mode`, { method: "GET" }, 5000);
+        const peerIsActive = peerMode.ok && peerMode.text.includes('"mode":"active"');
+        if (!peerIsActive) {
+          log("restart: peer activated but not reporting active mode; waiting for readiness");
+        }
+
         const ready = await waitPeerReady(restartPeerUrl, readyTimeoutMs, retryMs);
         if (!ready) {
-          log("restart: handoff failed (peer readiness timeout); falling back to local restart");
+          log("restart: handoff failed (peer readiness timeout); attempting to re-activate locally");
+          const reclaimed = await activateServices();
+          if (reclaimed.ok) {
+            log("restart: re-activated locally after peer readiness timeout");
+          } else {
+            log("restart: local re-activation also failed; restarting process");
+          }
           scheduleProcessRestart(reason, 250);
           return;
         }
