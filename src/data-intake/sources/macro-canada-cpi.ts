@@ -1,3 +1,12 @@
+/**
+ * Canada CPI Data Source
+ * 
+ * This source fetches Canadian Consumer Price Index (CPI) data from the
+ * Statistics Canada API and provides normalized inflation data.
+ * The data can be used to calculate YoY (Year-over-Year) inflation rates
+ * by comparing CPI values across different time periods.
+ */
+
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
