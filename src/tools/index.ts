@@ -10,12 +10,6 @@ import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
-import {
-  codeChangeRequestCancel,
-  codeChangeRequestCreate,
-  codeChangeRequestList,
-  codeChangeRequestStatus,
-} from "./code-change.js";
 import { gmailGetMessage, gmailProfile, gmailSearch, gmailSend } from "./gmail.js";
 import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
 import { humanRequest, humanStatus } from "./human-actions.js";
@@ -64,10 +58,6 @@ export function getBuiltInTools(): Tool[] {
     queryData,
     toolsReload,
     gatewayRestart,
-    codeChangeRequestCreate,
-    codeChangeRequestStatus,
-    codeChangeRequestList,
-    codeChangeRequestCancel,
     paperTrade,
     portfolioStatus,
     gmailProfile,
