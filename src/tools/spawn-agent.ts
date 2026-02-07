@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import { fork, exec, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -231,6 +232,23 @@ export const spawnAgent = defineTool({
           return `ERROR: coder git finalize failed: ${git.error}`;
         }
         workerResult = attachGitFinalize(workerResult, git.meta);
+
+        // Auto-queue HA deploy if we got a commitSha and stateDir is available.
+        const commitSha = git.meta.commitSha as string | undefined;
+        if (commitSha && ctx.stateDir) {
+          const deployResult = await queueHaDeploy({
+            stateDir: ctx.stateDir,
+            commitSha,
+            reason: `auto-deploy after coder run ${runId?.slice(0, 8) ?? "unknown"}`,
+            agentId: ctx.request?.agentId ?? "orchestrator",
+            channel: ctx.request?.channel ?? "unknown",
+            channelKey: ctx.request?.channelKey ?? "unknown",
+            log: ctx.log,
+          });
+          if (deployResult) {
+            workerResult = attachDeployInfo(workerResult, deployResult);
+          }
+        }
       }
     }
 
@@ -631,6 +649,62 @@ function attachGitFinalize(resultJson: string, meta: Record<string, unknown>): s
     // ignore parse errors
   }
   return resultJson;
+}
+
+function attachDeployInfo(resultJson: string, deploy: { requestId: string; queueFile: string }): string {
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      parsed.deploy = { queued: true, requestId: deploy.requestId, queueFile: deploy.queueFile };
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // ignore
+  }
+  return resultJson;
+}
+
+/**
+ * Write a deploy request JSON to the deploy queue so the host deployer daemon picks it up.
+ * Returns the request ID and file path, or null if queueing failed.
+ */
+async function queueHaDeploy(params: {
+  stateDir: string;
+  commitSha: string;
+  reason: string;
+  agentId: string;
+  channel: string;
+  channelKey: string;
+  log?: (msg: string) => void;
+}): Promise<{ requestId: string; queueFile: string } | null> {
+  try {
+    const pendingDir = path.join(params.stateDir, "deploy-queue", "pending");
+    await mkdir(pendingDir, { recursive: true });
+
+    const nowMs = Date.now();
+    const requestId = `deploy-${nowMs}-${crypto.randomBytes(3).toString("hex")}`;
+    const payload = {
+      id: requestId,
+      commitSha: params.commitSha,
+      finalize: true,
+      reason: params.reason,
+      requestedAt: new Date(nowMs).toISOString(),
+      requestedAtMs: nowMs,
+      requestedBy: params.agentId,
+      source: "auto-finalize",
+      channel: params.channel,
+      channelKey: params.channelKey,
+      agentId: params.agentId,
+    };
+    const filename = `${String(nowMs).padStart(13, "0")}-${requestId}.json`;
+    const fullPath = path.join(pendingDir, filename);
+    await writeFile(fullPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+    params.log?.(`auto-deploy: queued ${requestId} for commit ${params.commitSha.slice(0, 12)}`);
+    return { requestId, queueFile: fullPath };
+  } catch (err) {
+    params.log?.(`auto-deploy: failed to queue — ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 }
 
 function parseWorkerResult(raw: string): { status?: string } | null {

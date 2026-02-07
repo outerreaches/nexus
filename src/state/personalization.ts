@@ -122,6 +122,16 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests (including read-only investigations) — spawn a coder agent because they have extra codebase context.
 - When spawning workers, give them clear, specific tasks with all necessary context.
 
+## Code Change → Deploy Workflow (HA Mode)
+
+When a coder agent modifies code:
+1. The coder edits files, runs typecheck/build, and returns results.
+2. \`finalizeCoderGit\` automatically commits the changes and returns a \`commitSha\` in the result (under \`git.commitSha\`).
+3. **You (the orchestrator) must deploy**: call \`ha_deploy_request\` with the \`commitSha\` from the coder result.
+4. Check status with \`ha_deploy_status\` if needed.
+
+**Important**: Do NOT tell the coder to commit or deploy — it's automatic. Do NOT use \`gateway_restart\` in HA mode. Always extract \`git.commitSha\` from the coder result and call \`ha_deploy_request\`.
+
 ## Memory Strategy
 - Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
 - Use \`NOTES.md\` for longer-form plans and scratchpad content.
@@ -169,121 +179,215 @@ ${user.context ?? "Add notes about yourself here — preferences, projects, cont
 export function getDefaultCodeguideTemplate(): string {
   return `# CODEGUIDE
 
-Guide for understanding and extending the Nexus codebase. Read this before modifying source code.
+This file is loaded into the **coder** agent's prompt. Keep it accurate and concise.
 
-## Project Structure
+## TL;DR — Safe Self-Modification Workflow
+
+1. **Locate the correct repo root** in \`root="code"\` (must contain \`package.json\` + \`src/\`).
+2. **Read before editing** (\`file_read\` with line ranges).
+3. **Make minimal changes** (\`file_edit\` or \`file_edit_lines\`).
+4. **Typecheck + build** (\`shell_exec\`: \`npm run typecheck\` then \`npm run build\`).
+5. **Report completion** — write results to blackboard and return.
+
+### IMPORTANT: Do NOT commit or deploy
+
+- **Do NOT run \`git add\`, \`git commit\`, or \`git push\`.**
+  The system automatically runs typecheck, build, and commit after you finish (via \`finalizeCoderGit\`).
+  If you commit manually, the automatic finalize finds "no changes" and the orchestrator never gets the commit SHA it needs for deployment.
+- **Do NOT call \`ha_deploy_request\`, \`gateway_restart\`, or write deploy queue files.**
+  The orchestrator handles deployment after receiving your results.
+- **Do NOT create test scripts in the code directory.** Use \`root="workspace"\` for scratch files.
+
+If changes "disappear" after a restart, you probably edited the image filesystem (\`/app\`) instead of a persistent mounted code directory.
+
+---
+
+## Runtime Directories (Critical for Self-Mod)
+
+Nexus resolves three key directories at runtime:
+
+- **stateDir**: persistent state (SQLite DB, config, personalization files)
+- **codeDir**: the source code tree used by \`root="code"\`
+- **workspaceDir**: agent scratch/work area used by \`root="workspace"\`
+
+File tools map roots like this:
+- \`root="state"\` → \`stateDir\`
+- \`root="code"\` → \`codeDir\`
+- \`root="workspace"\` → \`workspaceDir\`
+
+### How codeDir/workspaceDir are chosen
+
+- \`stateDir\` defaults from \`NEXUS_STATE_DIR\` (or \`~/.nexus\`).
+- \`codeDir\` **defaults to the built image source tree** (usually \`/app\`) unless configured.
+- \`workspaceDir\` defaults to \`{stateDir}/workspace\` unless configured.
+
+### Production/VM recommendation (persistent self-editing)
+
+In your \`{stateDir}/nexus.json\`, explicitly set:
+
+\`\`\`json
+{
+  "codeDir": "\${NEXUS_CODE_DIR}",
+  "workspaceDir": "\${NEXUS_WORKSPACE_DIR}"
+}
+\`\`\`
+
+…then mount those paths in Docker Compose:
+
+- \`/data/code\` → \`NEXUS_CODE_DIR\` (a real git working tree)
+- \`/data/workspace\` → \`NEXUS_WORKSPACE_DIR\`
+
+### Sanity check (always do this first)
+
+\`\`\`
+file_list root="code" path="."
+\`\`\`
+
+You should see \`package.json\`, \`src/\`, \`tsconfig.json\`, etc.
+
+---
+
+## Project Structure (Source)
 
 \`\`\`
 src/
-  core/           # Agent runner loop, tool definitions, prompt builder, types
-    agent-runner.ts   # Main LLM ↔ tool loop (iterations, budget, retry detection)
-    agent-service.ts  # Session management, message persistence, concurrency
-    prompt.ts         # Builds system prompt from personalization files + skills
-    tools.ts          # ToolContext type, defineTool(), Tool type
-    types.ts          # ChatMessage, ToolCall types
-  gateway/        # HTTP server, Telegram bot, proactive heartbeat
-    start.ts          # Boot sequence: DB, LLM, tools, agent, scheduler
-    proactive.ts      # Heartbeat tick system with idle backoff
-    telegram.ts       # Grammy-based Telegram bot
-    http.ts           # Hono HTTP API
-  storage/        # SQLite database and session management
-    database.ts       # Schema definitions (CREATE TABLE IF NOT EXISTS)
-    sessions.ts       # Message history load/append/sanitize
-  scheduler/      # Cron job scheduler with leases and failure backoff
-    job-scheduler.ts  # Tick loop, lease acquisition, job execution
-    cron.ts           # Cron expression parser
-  state/          # Configuration, personalization files, bootstrap
-    config.ts         # Zod-validated JSON5 config (limits, permissions, channels)
-    personalization.ts # SOUL/AGENTS/IDENTITY/USER/TOOLS/CODEGUIDE/HEARTBEAT.md
-    skills.ts         # Skill loader for prompt injection
-    bootstrap.ts      # Workspace directory initialization
-    paths.ts          # Runtime path resolution
-  tools/          # All built-in tool implementations
-    file-ops.ts       # file_read, file_write, file_edit, file_list
-    memory.ts         # memory_store, memory_recall, memory_search, memory_delete
-    skills.ts         # skill_create, skill_list, skill_update
-    budget.ts         # budget_status
-    reflect.ts        # reflect
-    jobs.ts           # job_create, job_list, job_get, job_update, etc.
-    process.ts        # process_start, process_status, process_logs, process_stop
-    system.ts         # shell_exec
-    web.ts            # web_fetch
-    web-search.ts     # web_search
-    browser.ts        # browser (Playwright CDP)
-    query-data.ts     # query_data
-    trading.ts        # paper_trade, portfolio_status
-    gmail.ts          # gmail_profile, gmail_search, gmail_get_message, gmail_send
-    credentials.ts    # credential_set, credential_generate, credential_list, credential_delete
-    human-actions.ts  # human_request, human_status
-    telegram-send.ts  # telegram_send
-    lifecycle.ts      # gateway_restart
-    registry.ts       # tools_reload
-    custom.ts         # Custom tool loader (.tool.json, .tool.mjs)
-    index.ts          # getBuiltInTools() — registers all built-in tools
-  llm/            # LLM client (OpenAI-compatible API)
-  browser/        # Browser manager (Playwright)
-  process/        # Background process manager
-  gmail/          # Gmail OAuth + API
-  secrets/        # Credential vault
+  index.ts              # CLI entry (commander) — starts gateway/chat/etc.
+  core/                 # Agent runner, presets, prompt builder
+    agent-runner.ts     # LLM ↔ tool loop, iterations/budget
+    agent-service.ts    # Session orchestration, persistence, concurrency
+    agent-tracker.ts    # Tracks running/recent agent runs (dashboard)
+    presets/            # Orchestrator/coder/researcher/analyst/trader prompts
+    prompt.ts           # Builds prompt from state files + skills
+  gateway/              # Runtime gateway services
+    start.ts            # Boot: DB, tools, agent, HTTP, scheduler, telegram
+    http.ts             # Hono HTTP API + dashboard UI
+    proactive.ts        # Heartbeat tick loop
+    telegram.ts         # Telegram bot + pairing/allowlist
+  scheduler/            # Job scheduler
+    job-scheduler.ts    # Tick loop + job execution + leases
+    cron.ts             # Cron parsing
+  data-intake/          # Data sources + scheduling + storage
+    sources/            # Source implementations (stocks, weather, etc.)
+    source-store.ts     # data_intake_sources table CRUD
+    store.ts            # data_items store/query
+  maintenance/          # System jobs + cleanup + backups
+    system-jobs.ts      # Seeds SYS_* jobs
+    db-backup.ts        # Backup implementation + status
+  storage/              # SQLite schema and session persistence
+    database.ts         # CREATE TABLE IF NOT EXISTS ... (schema)
+    sessions.ts         # Chat message persistence
+  state/                # Config + personalization + bootstrap
+    config.ts           # JSON5 config with env expansion (\${...})
+    personalization.ts  # Seeds SOUL/AGENTS/USER/CODEGUIDE/HEARTBEAT/NOTES
+    bootstrap.ts        # Seeds state markdown files if missing
+    paths.ts            # Runtime path resolution
+  tools/                # Built-in tools (all tool implementations)
+    index.ts            # Registers tools (getBuiltInTools)
 \`\`\`
 
-## How to Add a New Tool
+Infra (deployment/HA) lives in:
+\`\`\`
+infra/
+  DEPLOYMENT.md
+  docker-compose.ha.yml
+  haproxy/
+  watchdog/
+\`\`\`
 
-1. Create \`src/tools/my-tool.ts\`:
-   \`\`\`typescript
-   import { z } from "zod";
-   import { defineTool } from "../core/tools.js";
+---
 
-   export const myTool = defineTool({
-     name: "my_tool",
-     description: "What this tool does",
-     parameters: z.object({
-       arg1: z.string().describe("Description"),
-     }),
-     execute: async (args, ctx) => {
-       // ctx has: workspaceDir, stateDir, db, browser, processManager, etc.
-       return "OK: result";  // or "ERROR: message" for failures
-     },
-   });
-   \`\`\`
-2. Register in \`src/tools/index.ts\`: import + add to \`getBuiltInTools()\` array.
-3. Build: \`shell_exec("cd /app && npm run build")\`
-4. Restart: \`gateway_restart()\`
+## Multi-Agent Architecture (Who does what)
 
-## How to Add a Database Table
+- **orchestrator**: main brain; plans; spawns workers; owns jobs/memory.
+- **coder** (you): reads/edits code and runs builds; writes clear rollout steps to blackboard.
+- **researcher/analyst/trader**: task specialists (generally should not mutate code).
+- **intake-manager**: manages data intake sources (when enabled).
 
-Add \`CREATE TABLE IF NOT EXISTS\` + indexes to \`src/storage/database.ts\` inside the \`db.exec()\` block.
-All tables use \`INTEGER\` timestamps (milliseconds since epoch). Use \`ctx.nowMs()\` for current time.
+Workers share results via the blackboard; use clear titles and structured output.
 
-## How to Modify the System Prompt
+---
 
-- Edit state markdown files using \`file_edit\` with \`root: "state"\` for precise, unique replacements in SOUL.md, AGENTS.md, USER.md, CODEGUIDE.md, HEARTBEAT.md, NOTES.md
-- When adding new standing instructions (especially HEARTBEAT.md), prefer \`file_write\` with \`mode: "append"\` to preserve existing content
-- These are loaded fresh on every message via \`loadPersonalizationContext()\`
-- For runtime notes, edit \`src/core/prompt.ts\` → \`formatSystemPrompt()\`
-- Skills are loaded from \`{stateDir}/skills/*/SKILL.md\` and appended automatically
+## Database Integration (SQLite)
 
-## Key Patterns
+Schema is defined in \`src/storage/database.ts\` (idempotent creates).
 
-- **Tool return values**: Always return strings. "OK" or "OK: detail" for success. "ERROR: message" for failure. JSON for structured data.
-- **Agent ownership**: Jobs, memories are scoped by \`agent_id\` (from \`ctx.request.agentId\`).
-- **File roots**: \`workspace\` (user projects/code), \`state\` (agent config: SOUL.md, HEARTBEAT.md, skills, custom tools), \`code\` (source code, gated by \`allowCodeEdit\`).
-- **Custom tools**: Place \`.tool.json\` or \`.tool.mjs\` in \`{stateDir}/tools/\`. Loaded on boot + \`tools_reload\`.
+Key tables (high level):
+- \`sessions\`, \`messages\`: chat history
+- \`jobs\`, \`job_runs\`, \`job_events\`, \`job_leases\`: scheduler + execution
+- \`gateway_leases\`: HA active-lease (prevents dual-active gateways)
+- \`data_intake_sources\`, \`data_items\`, \`data_item_events\`: intake sources + cached data
+- \`memories\`: long-term key/value memory
+- \`blackboard\`: cross-agent scratchpad
+- \`agent_runs\`: agent run tracking
+- \`db_backups\`: backup run tracking
+- \`ha_events\`: failover/failback/activation audit trail
 
-## Build & Deploy Workflow
+Timestamps are **INTEGER ms since epoch**.
 
-1. \`file_read\` with \`offset/limit\` or \`startLine/endLine\` to inspect TypeScript source
-2. \`file_edit\` (unique text replacement) or \`file_edit_lines\` for line-range edits with \`root: "code"\`
-3. \`shell_exec("cd /app && npm run build")\` to compile
-4. \`gateway_restart()\` to reload — changes are synced to host repo via bind mount
+### Adding/changing schema
+- Add \`CREATE TABLE IF NOT EXISTS\` and indexes in \`src/storage/database.ts\`.
+- Prefer additive migrations (new columns/tables); avoid destructive schema changes.
 
-## What NOT to Do
+---
 
-- Don't write Python scripts for scheduling — use \`job_create\`
-- Don't \`pip install\` — the container has no pip packages
-- Don't use \`process_start\` for periodic tasks — use \`job_create\`
-- Don't hardcode secrets in files — use \`credential_set\` / \`credential_generate\`
-- Don't modify the compiled \`dist/\` directory — edit \`src/\` and build
+## Tools (How they’re defined)
+
+All built-in tools live in \`src/tools/*\` and are registered in \`src/tools/index.ts\`.
+
+Rules:
+- Tool \`execute\` **returns a string**.
+- Use \`"OK:"\` for success and \`"ERROR:"\` for failures.
+- Keep outputs concise; use JSON when structure helps.
+
+### Adding a tool
+1. Add \`src/tools/my-tool.ts\` (use \`defineTool\` + \`zod\` params)
+2. Register in \`src/tools/index.ts\`
+3. \`shell_exec\`: run \`npm run typecheck\` + \`npm run build\`
+4. Handoff restart steps to orchestrator
+
+---
+
+## Scheduling & Maintenance
+
+- Use the scheduler (jobs) for periodic work. Prefer \`mode: "tool_call"\` for zero-token automation.
+- System jobs are seeded in \`src/maintenance/system-jobs.ts\` (e.g., \`SYS_DB_BACKUP\`).
+- Backups are written under \`{stateDir}/backups/YYYY-MM-DD/\`.
+
+---
+
+## HA / Standby Mode (Hot Standby)
+
+HA design:
+- One gateway should be **active**, others **standby**.
+- Active is enforced by a DB-backed lease in \`gateway_leases\` (\`key="gateway_active"\`).
+- Standby can be promoted via \`POST /api/activate\`; active can step down via \`POST /api/deactivate\`.
+
+When modifying code in HA setups:
+- Expect **two containers**. Changes must be deployed/rebuilt so both run the same version.
+- A restart of the active instance may cause failover; plan rollouts accordingly.
+
+---
+
+## Prompt / State Files
+
+State markdown files live at \`{stateDir}\`:
+- \`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`
+
+Edit them with:
+\`\`\`
+file_edit root="state" path="CODEGUIDE.md"
+\`\`\`
+
+Prefer \`file_write mode="append"\` when adding standing instructions to avoid clobbering content.
+
+---
+
+## Troubleshooting Self-Mod
+
+- **Edits don’t persist**: you edited \`/app\` (image FS). Configure \`codeDir\` to a mounted git working tree.
+- **Can’t find files**: verify \`file_list root="code" path="."\` includes \`package.json\`.
+- **Build succeeds but behavior unchanged**: you built the wrong directory. Run \`shell_exec("pwd")\` and ensure you’re in the repo root.
+- **HA oddities**: confirm only one instance is active (dashboard HA section + \`/status.activeLease\`).
 `;
 }
 
