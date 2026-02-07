@@ -1,9 +1,5 @@
 /**
- * Data Source Registry
- *
  * This file manages the registration and lookup of data sources.
- * It provides a centralized registry for storing and retrieving data source
- * definitions, supporting operations like registration, listing, and lookup by ID or tag.
  */
 
 import type { DataSource } from "./types.js";
