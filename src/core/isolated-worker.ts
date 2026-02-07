@@ -107,6 +107,31 @@ process.on("message", async (msg: ParentMessage) => {
       userMessage: cfg.userMessage,
     });
 
+    // Coder safeguard: if code was edited and built but ha_deploy was never
+    // called, auto-trigger it so deploys can't be silently skipped.
+    if (cfg.presetName === "coder") {
+      const toolNames = new Set(
+        result.newMessages.flatMap((m) => ("toolCalls" in m && m.toolCalls) ? m.toolCalls.map((tc) => tc.name) : []),
+      );
+      const builtCode = toolNames.has("shell_exec") &&
+        (toolNames.has("file_edit") || toolNames.has("file_edit_lines") || toolNames.has("file_write"));
+      const deployed = toolNames.has("ha_deploy");
+
+      if (builtCode && !deployed) {
+        log("coder edited code + built but skipped ha_deploy — auto-triggering deploy");
+        const haDeployTool = workerTools.find((t) => t.name === "ha_deploy");
+        if (haDeployTool) {
+          try {
+            const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
+            log(`auto ha_deploy: ${deployResult.slice(0, 200)}`);
+            result.output += `\n\n[AUTO-DEPLOY] ${deployResult}`;
+          } catch (err) {
+            log(`auto ha_deploy failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+    }
+
     // Complete tracking in the worker's own DB connection
     if (cfg.runId) {
       agentTracker.completeRun(cfg.runId, {
