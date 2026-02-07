@@ -6,6 +6,7 @@ import { registerDataSource } from "../registry.js";
 import { cryptoSource } from "./crypto.js";
 import { coinlayerSource } from "./crypto-coinlayer.js";
 import { cryptoCompareSource } from "./crypto-cryptocompare.js";
+import { cryptoCoingeckoMultiSource } from "./crypto-coingecko-multi.js";
 import { kalshiSource } from "./markets-kalshi.js";
 import { polymarketSource } from "./markets-polymarket.js";
 import { metalsSource } from "./metals.js";
@@ -27,6 +28,7 @@ export function registerBuiltInSources(): void {
   registerDataSource(cryptoSource);
   registerDataSource(coinlayerSource);
   registerDataSource(cryptoCompareSource);
+  registerDataSource(cryptoCoingeckoMultiSource);
   registerDataSource(kalshiSource);
   registerDataSource(polymarketSource);
   registerDataSource(metalsSource);
