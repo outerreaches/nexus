@@ -1,3 +1,6 @@
+// Built-in data sources for the Nexus system
+// Canada CPI source added for inflation tracking
+
 import { registerDataSource } from "../registry.js";
 
 import { cryptoSource } from "./crypto.js";
@@ -13,6 +16,7 @@ import { twelveDataSource } from "./stocks-twelvedata.js";
 import { yahooStocksSource } from "./stocks-yahoo.js";
 import { weatherSource } from "./weather.js";
 import { birdSource } from "./social-bird.js";
+import { canadaCPISource } from "./macro-canada-cpi.js";
 
 export function registerBuiltInSources(): void {
   registerDataSource(cryptoSource);
@@ -28,4 +32,5 @@ export function registerBuiltInSources(): void {
   registerDataSource(yahooStocksSource);
   registerDataSource(weatherSource);
   registerDataSource(birdSource);
+  registerDataSource(canadaCPISource); // Canadian inflation data
 }
