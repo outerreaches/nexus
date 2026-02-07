@@ -1103,6 +1103,13 @@ export function renderDashboard(params: {
       };
       updateRefreshIndicator();
 
+      // Filter out completed/failed nodes older than 60s from the 3D visualization
+      const VISUAL_DECAY_MS = 60_000;
+      const filterVisibleNodes = (nodes) => {
+        const now = Date.now();
+        return nodes.filter((n) => n.status === 'running' || !n.ended_at || (now - n.ended_at) < VISUAL_DECAY_MS);
+      };
+
       // Scene state - will be populated when scene is created
       let sceneState = null;
 
@@ -1121,7 +1128,7 @@ export function renderDashboard(params: {
           }
 
           if (sceneState) {
-            updateSceneWithNewData(sceneState, data.nodes);
+            updateSceneWithNewData(sceneState, filterVisibleNodes(data.nodes));
           }
         } catch (e) {
           console.warn("Failed to fetch agent data:", e);
@@ -1366,8 +1373,8 @@ export function renderDashboard(params: {
         const meshToNode = new Map();
         meshToNode.set(orchestratorMesh, orchestratorNode);
 
-        // Build initial node tree
-        const { nodesById, roots } = buildNodeTree(graphData);
+        // Build initial node tree (filter out stale completed nodes from visualization)
+        const { nodesById, roots } = buildNodeTree(filterVisibleNodes(graphData));
 
         // Create initial node meshes
         for (const node of nodesById.values()) {
