@@ -3,8 +3,10 @@
 # Watches for /data/nexus/deploy-trigger.json written by the ha_deploy tool
 # inside a container, then runs ha-rollout.sh apply-local on the host.
 #
-# After apply-local succeeds (state file written, agent can read result),
-# runs ha-rollout.sh finalize to rebuild the old active as standby.
+# apply-local builds the standby with new code, health-checks it, switches
+# traffic, then leaves the old active running. After the in-container agent
+# acks the result (deploy-ack file), this daemon rebuilds the old active
+# with the new code so both containers are up to date.
 #
 # Run as systemd service (see infra/systemd/ha-deployer.service) or manually:
 #   ./infra/scripts/ha-deployer.sh
@@ -17,7 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 TRIGGER_FILE="${STATE_DIR}/deploy-trigger.json"
 PROCESSING_FILE="${STATE_DIR}/deploy-trigger.processing.json"
+ACK_FILE="${STATE_DIR}/deploy-ack"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
+ACK_TIMEOUT="${ACK_TIMEOUT:-120}"
 ROLLOUT_SCRIPT="${SCRIPT_DIR}/ha-rollout.sh"
 
 log() { echo "[ha-deployer] $(date -Iseconds) $*"; }
@@ -47,21 +51,38 @@ process_trigger() {
 
   log "processing deploy: msg='${msg}' remote=${remote} branch=${branch}"
 
+  # Clear any stale ack from a previous deploy
+  rm -f "$ACK_FILE"
+
   if "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch"; then
-    log "deploy succeeded — rebuilding standby with new code"
-    # apply-local wrote deploy-state.env. The agent inside the old active
-    # container can now read the result. Rebuild the old active (now standby)
-    # so it has the new code for failover readiness.
-    if "$ROLLOUT_SCRIPT" finalize; then
-      log "standby rebuilt successfully"
+    log "deploy succeeded — waiting for agent ack before rebuilding old primary"
+    rm -f "$PROCESSING_FILE"
+
+    # Wait for the in-container ha_deploy tool to write deploy-ack, confirming
+    # it read the result and the coder session is done with this container.
+    local waited=0
+    while [ ! -f "$ACK_FILE" ] && [ "$waited" -lt "$ACK_TIMEOUT" ]; do
+      sleep "$POLL_INTERVAL"
+      waited=$((waited + POLL_INTERVAL))
+    done
+    rm -f "$ACK_FILE"
+
+    if [ "$waited" -ge "$ACK_TIMEOUT" ]; then
+      warn "ack timeout (${ACK_TIMEOUT}s) — rebuilding old primary anyway"
     else
-      warn "standby rebuild failed (non-fatal — active is serving new code)"
+      log "agent acked after ${waited}s"
+    fi
+
+    log "rebuilding old primary with new code"
+    if "$ROLLOUT_SCRIPT" finalize; then
+      log "old primary rebuilt successfully"
+    else
+      warn "old primary rebuild failed (non-fatal — new active is serving)"
     fi
   else
     warn "deploy failed (exit $?)"
+    rm -f "$PROCESSING_FILE"
   fi
-
-  rm -f "$PROCESSING_FILE"
 }
 
 log "starting (poll_interval=${POLL_INTERVAL}s state_dir=${STATE_DIR})"
