@@ -644,12 +644,28 @@ function parseWorkerResult(raw: string): { status?: string } | null {
 }
 
 /**
+ * Ensure git treats codeDir as a safe directory (works around "dubious ownership"
+ * errors when the container UID doesn't match the volume owner).
+ */
+const _safeDirCache = new Set<string>();
+async function ensureGitSafeDirectory(codeDir: string): Promise<void> {
+  if (_safeDirCache.has(codeDir)) return;
+  try {
+    await execAsync(`git config --global --add safe.directory "${codeDir}"`);
+  } catch {
+    // git config may fail if git is not installed; ignore.
+  }
+  _safeDirCache.add(codeDir);
+}
+
+/**
  * Create a git checkpoint (commit) before coder agents modify code.
  * This allows rollback if the agent breaks something.
  * Only runs if codeDir is a git repository.
  */
 async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: string) => void): Promise<void> {
   try {
+    await ensureGitSafeDirectory(codeDir);
     // Check if codeDir is a git repo
     await execAsync("git rev-parse --git-dir", { cwd: codeDir });
 
@@ -692,6 +708,7 @@ async function finalizeCoderGit(params: {
 }): Promise<{ ok: true; meta: Record<string, unknown> } | { ok: false; error: string }> {
   const { codeDir, runId, log } = params;
   try {
+    await ensureGitSafeDirectory(codeDir);
     await execAsync("git rev-parse --git-dir", { cwd: codeDir });
   } catch {
     return { ok: true, meta: { enabled: false, reason: "git unavailable" } };

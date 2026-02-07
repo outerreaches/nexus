@@ -12,6 +12,9 @@ RUN apt-get update \
     python3-venv \
   && rm -rf /var/lib/apt/lists/*
 
+# Mark all directories as safe for git to handle mounted volumes with different ownership
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /app
 
 COPY package.json package-lock.json ./
