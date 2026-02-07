@@ -1,5 +1,5 @@
-// Built-in data sources for the Nexus system
-// Canada CPI source added for inflation tracking
+// This file registers all built-in data sources for the Nexus system.
+// It imports and registers each data source with the registry so they are available for use.
 
 import { registerDataSource } from "../registry.js";
 
