@@ -85,6 +85,18 @@ src/
   index.ts
   core/
   gateway/
+    http.ts              — HTTP entry point, wires route modules
+    start.ts             — Main gateway orchestration
+    routes/
+      health.ts          — /healthz, /health/live, /health/ready
+      api.ts             — /status, /api/agents, /api/logs, /api/job-runs
+      dashboard.ts       — Dashboard GET + POST CRUD routes
+    dashboard/
+      render.ts          — renderDashboard() (HTML structure + client JS)
+      styles.ts          — dashboardStyles() (all CSS)
+      tables.ts          — Table renderers + HTML utilities
+      types.ts           — Row types shared by queries and renderers
+      queries.ts         — DB query functions for dashboard data
   scheduler/
   data-intake/
   maintenance/
