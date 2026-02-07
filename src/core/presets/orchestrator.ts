@@ -72,7 +72,6 @@ export const preset: AgentPreset = {
     "credential_list",
     "credential_delete",
     // Lifecycle
-    "gateway_restart",
     "ha_deploy_request",
     "ha_deploy_status",
     "tools_reload",

@@ -10,6 +10,10 @@ WorkingDirectory=/data/code
 Environment=CODE_DIR=/data/code
 Environment=STATE_DIR=/data/nexus
 Environment=POLL_INTERVAL=5
+Environment=PUSH_AFTER_DEPLOY=1
+Environment=PUSH_REMOTE=host
+Environment=PUSH_BRANCH=main
+Environment=PUSH_REQUIRED=0
 ExecStart=/data/code/infra/scripts/ha-deployer.sh daemon
 Restart=always
 RestartSec=3

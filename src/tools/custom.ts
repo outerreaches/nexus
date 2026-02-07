@@ -6,6 +6,7 @@ import JSON5 from "json5";
 import { z } from "zod";
 
 import type { Tool, ToolContext } from "../core/tools.js";
+import { truncateShellOutput } from "./system.js";
 
 const JsonSchema = z.record(z.unknown());
 
@@ -117,8 +118,8 @@ function toTool(tool: CustomTool): Tool {
       const command = interpolate(tool.command, vars);
       return await new Promise((resolve) => {
         exec(command, { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-          if (err) resolve(`ERROR: ${err.message}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`);
-          else resolve([stdout, stderr].filter(Boolean).join("\n"));
+          if (err) resolve(truncateShellOutput(`ERROR: ${err.message}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));
+          else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n")));
         });
       });
     }

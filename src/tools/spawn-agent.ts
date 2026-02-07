@@ -221,6 +221,7 @@ export const spawnAgent = defineTool({
 
     // Ensure coder changes are validated and committed for reliable rollouts.
     if (preset.name === "coder" && ctx.allowCodeEdit && ctx.codeDir) {
+      let autoDeployCommitSha: string | null = null;
       const parsed = parseWorkerResult(workerResult);
       if (parsed?.status === "complete") {
         const git = await finalizeCoderGit({
@@ -232,22 +233,37 @@ export const spawnAgent = defineTool({
           return `ERROR: coder git finalize failed: ${git.error}`;
         }
         workerResult = attachGitFinalize(workerResult, git.meta);
-
-        // Auto-queue HA deploy if we got a commitSha and stateDir is available.
         const commitSha = git.meta.commitSha as string | undefined;
-        if (commitSha && ctx.stateDir) {
-          const deployResult = await queueHaDeploy({
-            stateDir: ctx.stateDir,
-            commitSha,
-            reason: `auto-deploy after coder run ${runId?.slice(0, 8) ?? "unknown"}`,
-            agentId: ctx.request?.agentId ?? "orchestrator",
-            channel: ctx.request?.channel ?? "unknown",
-            channelKey: ctx.request?.channelKey ?? "unknown",
-            log: ctx.log,
-          });
-          if (deployResult) {
-            workerResult = attachDeployInfo(workerResult, deployResult);
-          }
+        autoDeployCommitSha = commitSha ?? null;
+      }
+      const pending = await getGitStatusPorcelain(ctx.codeDir);
+      if (pending !== null && pending.trim()) {
+        const lines = pending
+          .trim()
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const preview = lines.slice(0, 8).join("; ");
+        const suffix = lines.length > 8 ? `; ...(+${lines.length - 8} more)` : "";
+        return (
+          "ERROR: coder run left uncommitted changes in codeDir after completion. " +
+          "Refusing to continue with deploy/restart while git is dirty. " +
+          `Changes: ${preview}${suffix}`
+        );
+      }
+      // Auto-queue HA deploy only after we have verified the tree is clean.
+      if (autoDeployCommitSha && ctx.stateDir) {
+        const deployResult = await queueHaDeploy({
+          stateDir: ctx.stateDir,
+          commitSha: autoDeployCommitSha,
+          reason: `auto-deploy after coder run ${runId?.slice(0, 8) ?? "unknown"}`,
+          agentId: ctx.request?.agentId ?? "orchestrator",
+          channel: ctx.request?.channel ?? "unknown",
+          channelKey: ctx.request?.channelKey ?? "unknown",
+          log: ctx.log,
+        });
+        if (deployResult) {
+          workerResult = attachDeployInfo(workerResult, deployResult);
         }
       }
     }
@@ -738,6 +754,16 @@ async function ensureGitConfig(codeDir: string): Promise<void> {
   _gitConfigured = true;
 }
 
+async function getGitStatusPorcelain(codeDir: string): Promise<string | null> {
+  try {
+    await ensureGitConfig(codeDir);
+    const { stdout } = await execAsync("git status --porcelain", { cwd: codeDir });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Create a git checkpoint (commit) before coder agents modify code.
  * This allows rollback if the agent breaks something.
@@ -750,7 +776,7 @@ async function gitCheckpoint(codeDir: string, runId: string | null, log?: (msg: 
     await execAsync("git rev-parse --git-dir", { cwd: codeDir });
 
     // Check if there are any changes to commit
-    const { stdout: status } = await execAsync("git status --porcelain", { cwd: codeDir });
+    const status = (await getGitStatusPorcelain(codeDir)) ?? "";
     if (!status.trim()) {
       log?.("git-checkpoint: no changes to commit");
       return;
@@ -794,7 +820,7 @@ async function finalizeCoderGit(params: {
     return { ok: true, meta: { enabled: false, reason: "git unavailable" } };
   }
 
-  const { stdout: statusBefore } = await execAsync("git status --porcelain", { cwd: codeDir });
+  const statusBefore = (await getGitStatusPorcelain(codeDir)) ?? "";
   if (!statusBefore.trim()) {
     return { ok: true, meta: { enabled: true, changed: false, committed: false } };
   }

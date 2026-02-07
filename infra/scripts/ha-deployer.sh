@@ -33,6 +33,11 @@ API_URL="${API_URL:-http://localhost:18789}"
 GIT_TIMEOUT="${GIT_TIMEOUT:-120}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-600}"
 FINALIZE_TIMEOUT="${FINALIZE_TIMEOUT:-600}"
+PUSH_AFTER_DEPLOY="${PUSH_AFTER_DEPLOY:-1}"
+PUSH_REMOTE="${PUSH_REMOTE:-host}"
+PUSH_BRANCH="${PUSH_BRANCH:-main}"
+PUSH_TIMEOUT="${PUSH_TIMEOUT:-120}"
+PUSH_REQUIRED="${PUSH_REQUIRED:-0}"
 
 log() {
   echo "[ha-deployer] $*"
@@ -54,6 +59,13 @@ Usage:
   ha-deployer.sh once
   ha-deployer.sh status
 EOF
+}
+
+is_true() {
+  case "${1,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 require_cmd() {
@@ -163,6 +175,24 @@ finalize_request() {
   log "request finalized state=${state} file=${dest_file}"
 }
 
+push_deployed_commit() {
+  local commit_sha="$1"
+  local log_file="$2"
+
+  if ! git -C "$CODE_DIR" remote get-url "$PUSH_REMOTE" >/dev/null 2>&1; then
+    echo "push skipped: remote '${PUSH_REMOTE}' not found in ${CODE_DIR}" >>"$log_file"
+    return 2
+  fi
+
+  echo "\$ git -C ${CODE_DIR} push ${PUSH_REMOTE} ${commit_sha}:refs/heads/${PUSH_BRANCH} (timeout=${PUSH_TIMEOUT}s)" >>"$log_file"
+  local push_code=0
+  set +e
+  timeout "$PUSH_TIMEOUT" git -C "$CODE_DIR" push "$PUSH_REMOTE" "${commit_sha}:refs/heads/${PUSH_BRANCH}" >>"$log_file" 2>&1
+  push_code=$?
+  set -e
+  return "$push_code"
+}
+
 process_request_file() {
   local pending_file="$1"
   local processing_file
@@ -177,6 +207,9 @@ process_request_file() {
   local deploy_reason
   local event
   local current_sha
+  local push_required
+  local push_message
+  local push_code
 
   processing_file="${PROCESSING_DIR}/$(basename "$pending_file")"
   if ! mv "$pending_file" "$processing_file" 2>/dev/null; then
@@ -215,6 +248,10 @@ process_request_file() {
   deploy_reason="deploy request ${request_id}"
   event="deploy_started"
   notify_event "$event" "$request_id" "$commit_sha" "$deploy_reason"
+  push_required=0
+  if is_true "$PUSH_REQUIRED"; then
+    push_required=1
+  fi
 
   if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
     finished_at="$(date -Iseconds)"
@@ -282,8 +319,30 @@ process_request_file() {
     fi
   fi
 
+  push_message="publish skipped"
+  if is_true "$PUSH_AFTER_DEPLOY"; then
+    push_code=0
+    set +e
+    push_deployed_commit "$commit_sha" "$log_file"
+    push_code=$?
+    set -e
+    if [ "$push_code" -eq 0 ]; then
+      push_message="published to ${PUSH_REMOTE}/${PUSH_BRANCH}"
+      notify_event "publish_success" "$request_id" "$commit_sha" "published to ${PUSH_REMOTE}/${PUSH_BRANCH}"
+    else
+      push_message="publish failed (${PUSH_REMOTE}/${PUSH_BRANCH}, exit=${push_code})"
+      notify_event "publish_failed" "$request_id" "$commit_sha" "$push_message"
+      if [ "$push_required" -eq 1 ]; then
+        finished_at="$(date -Iseconds)"
+        finalize_request "failed" "$processing_file" "deployment completed but ${push_message}" "$log_file" "$finished_at"
+        notify_event "deploy_failed" "$request_id" "$commit_sha" "deployment completed but publish failed"
+        return 0
+      fi
+    fi
+  fi
+
   finished_at="$(date -Iseconds)"
-  finalize_request "done" "$processing_file" "deployment completed" "$log_file" "$finished_at"
+  finalize_request "done" "$processing_file" "deployment completed; ${push_message}" "$log_file" "$finished_at"
   notify_event "deploy_success" "$request_id" "$commit_sha" "deployment completed"
   return 0
 }
@@ -319,6 +378,10 @@ run_status() {
   echo "done=$(queue_count "$DONE_DIR")"
   echo "failed=$(queue_count "$FAILED_DIR")"
   echo "logs=$(find "$LOG_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+  echo "push_after_deploy=${PUSH_AFTER_DEPLOY}"
+  echo "push_remote=${PUSH_REMOTE}"
+  echo "push_branch=${PUSH_BRANCH}"
+  echo "push_required=${PUSH_REQUIRED}"
 }
 
 main() {

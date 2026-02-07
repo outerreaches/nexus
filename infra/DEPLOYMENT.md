@@ -619,6 +619,32 @@ systemctl status nexus-ha-deployer --no-pager
 The daemon watches `/data/nexus/deploy-queue/pending` and processes requests by running:
 - `infra/scripts/ha-rollout.sh deploy <commitSha>`
 - `infra/scripts/ha-rollout.sh finalize <commitSha>` (if requested)
+- `git push <remote> <commitSha>:refs/heads/<branch>` (after successful deploy/finalize)
+
+Default publish settings:
+- `PUSH_AFTER_DEPLOY=1` (enabled)
+- `PUSH_REMOTE=host`
+- `PUSH_BRANCH=main`
+- `PUSH_REQUIRED=0` (if `1`, request is marked failed when publish fails)
+
+Optional systemd override for publish settings:
+
+```bash
+sudo systemctl edit nexus-ha-deployer
+```
+
+```ini
+[Service]
+Environment=PUSH_AFTER_DEPLOY=1
+Environment=PUSH_REMOTE=host
+Environment=PUSH_BRANCH=main
+Environment=PUSH_REQUIRED=1
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart nexus-ha-deployer
+```
 
 Queue directories:
 - Pending: `/data/nexus/deploy-queue/pending`
@@ -629,18 +655,18 @@ Queue directories:
 
 From agent/orchestrator:
 - Queue request with `ha_deploy_request({ commitSha: "<sha>", finalize: true })`
-- Check progress with `ha_deploy_status()`
+- Check progress with `ha_deploy_status()` (includes `message` and `logFile` for completed/failed runs)
 
 ### 7.3.3 Self-Modification Deploy Flow
 
 Typical flow when the agent edits its own code:
-1. Coder agent modifies files in `/data/code`, commits, and pushes to host remote.
-2. VM working tree is updated (`git pull` on `/data/code`), or already at that commit.
-3. Orchestrator queues deploy with `ha_deploy_request(commitSha, finalize=true)`.
-4. Host deployer runs `ha-rollout deploy <sha>` on inactive slot first.
-5. Traffic switches only after candidate slot passes liveness/readiness and smoke checks.
-6. If deploy fails, rollout automatically re-activates prior slot and restores `last_good_sha`.
-7. If deploy succeeds, `ha-rollout finalize <sha>` refreshes the inactive slot to the same version.
+1. Coder agent modifies files in `/data/code` and commits.
+2. Orchestrator queues deploy with `ha_deploy_request(commitSha, finalize=true)`.
+3. Host deployer runs `ha-rollout deploy <sha>` on inactive slot first.
+4. Traffic switches only after candidate slot passes liveness/readiness and smoke checks.
+5. If deploy fails, rollout automatically re-activates prior slot and restores `last_good_sha`.
+6. If deploy succeeds, `ha-rollout finalize <sha>` refreshes the inactive slot to the same version.
+7. Host deployer pushes the deployed commit from VM to host (`PUSH_REMOTE/PUSH_BRANCH`).
 
 Operational behavior:
 - Only the active slot handles Telegram/scheduler/proactive jobs.

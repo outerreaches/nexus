@@ -41,6 +41,10 @@ type QueueEntry = {
   channel: string;
   channelKey: string;
   agentId: string;
+  startedAt?: string;
+  finishedAt?: string;
+  message?: string;
+  logFile?: string;
 };
 
 function queueDirs(stateDir: string): Record<QueueState, string> {
@@ -68,6 +72,35 @@ async function gitCommitExists(codeDir: string, commitSha: string): Promise<bool
   } catch {
     return false;
   }
+}
+
+async function gitResolveCommit(codeDir: string, ref: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", codeDir, "rev-parse", "--verify", `${ref}^{commit}`]);
+    const resolved = stdout.trim();
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
+async function gitHeadCommit(codeDir: string): Promise<string | null> {
+  return await gitResolveCommit(codeDir, "HEAD");
+}
+
+async function gitStatusPorcelain(codeDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", codeDir, "status", "--porcelain"]);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+function sameCommit(a: string, b: string): boolean {
+  const aa = a.trim().toLowerCase();
+  const bb = b.trim().toLowerCase();
+  return aa === bb || aa.startsWith(bb) || bb.startsWith(aa);
 }
 
 function sanitizeId(raw: string): string {
@@ -99,6 +132,18 @@ async function readQueueEntries(dir: string, state: QueueState): Promise<QueueEn
       const channel = typeof parsed.channel === "string" ? parsed.channel : "unknown";
       const channelKey = typeof parsed.channelKey === "string" ? parsed.channelKey : "unknown";
       const agentId = typeof parsed.agentId === "string" ? parsed.agentId : "unknown";
+      const startedAt = typeof (parsed as { startedAt?: unknown }).startedAt === "string"
+        ? (parsed as { startedAt: string }).startedAt
+        : "";
+      const finishedAt = typeof (parsed as { finishedAt?: unknown }).finishedAt === "string"
+        ? (parsed as { finishedAt: string }).finishedAt
+        : "";
+      const message = typeof (parsed as { message?: unknown }).message === "string"
+        ? (parsed as { message: string }).message
+        : "";
+      const logFile = typeof (parsed as { logFile?: unknown }).logFile === "string"
+        ? (parsed as { logFile: string }).logFile
+        : "";
       out.push({
         state,
         file: full,
@@ -112,6 +157,10 @@ async function readQueueEntries(dir: string, state: QueueState): Promise<QueueEn
         channel,
         channelKey,
         agentId,
+        startedAt,
+        finishedAt,
+        message,
+        logFile,
       });
     } catch {
       // Ignore malformed files so queue remains robust.
@@ -141,7 +190,8 @@ export const haDeployRequest = defineTool({
       .string()
       .min(7)
       .max(40)
-      .describe("Git commit SHA to deploy (7-40 hex chars). Must exist in the code repository."),
+      .optional()
+      .describe("Git commit SHA to deploy (7-40 hex chars). Optional; defaults to current HEAD."),
     finalize: z
       .boolean()
       .default(true)
@@ -158,16 +208,49 @@ export const haDeployRequest = defineTool({
       .describe("Optional stable request ID. If omitted, a generated ID is used."),
   }),
   execute: async (args, ctx) => {
-    const commitSha = args.commitSha.trim();
-    if (!COMMIT_RE.test(commitSha)) {
+    const requestedSha = args.commitSha?.trim() ?? "";
+    if (requestedSha && !COMMIT_RE.test(requestedSha)) {
       return "ERROR: commitSha must be 7-40 hexadecimal characters";
     }
     if (!ctx.stateDir) return "ERROR: stateDir is not available";
     if (!ctx.codeDir) return "ERROR: codeDir is not available";
 
+    const headSha = await gitHeadCommit(ctx.codeDir);
+    if (!headSha) {
+      return `ERROR: unable to resolve HEAD in ${ctx.codeDir}`;
+    }
+    const commitSha = requestedSha || headSha;
     const commitExists = await gitCommitExists(ctx.codeDir, commitSha);
     if (!commitExists) {
       return `ERROR: commit ${commitSha} does not exist in ${ctx.codeDir}`;
+    }
+    const resolvedRequested = await gitResolveCommit(ctx.codeDir, commitSha);
+    if (!resolvedRequested) {
+      return `ERROR: unable to resolve commit ${commitSha}`;
+    }
+    if (!sameCommit(resolvedRequested, headSha)) {
+      return (
+        `ERROR: commit ${commitSha} is not the current HEAD (${headSha.slice(0, 12)}). ` +
+        "Deploy requests must target the checked-out HEAD to avoid stale rollouts."
+      );
+    }
+
+    const porcelain = await gitStatusPorcelain(ctx.codeDir);
+    if (porcelain === null) {
+      return `ERROR: unable to inspect git status in ${ctx.codeDir}`;
+    }
+    if (porcelain.trim()) {
+      const lines = porcelain
+        .trim()
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const preview = lines.slice(0, 6).join("; ");
+      const suffix = lines.length > 6 ? `; ...(+${lines.length - 6} more)` : "";
+      return (
+        `ERROR: git working tree is dirty in ${ctx.codeDir}. ` +
+        `Commit/stash changes before deploy. Changes: ${preview}${suffix}`
+      );
     }
 
     const dirs = await ensureQueue(ctx.stateDir);
@@ -176,7 +259,7 @@ export const haDeployRequest = defineTool({
       readQueueEntries(dirs.processing, "processing"),
     ]))
       .flat()
-      .find((e) => e.commitSha.toLowerCase() === commitSha.toLowerCase());
+      .find((e) => sameCommit(e.commitSha, headSha));
     if (existing) {
       return JSON.stringify(
         {
@@ -197,7 +280,7 @@ export const haDeployRequest = defineTool({
     const requestId = sanitizeId(args.requestId?.trim() || `deploy-${nowMs}-${crypto.randomBytes(3).toString("hex")}`);
     const payload: DeployRequest = {
       id: requestId,
-      commitSha,
+      commitSha: headSha,
       finalize: args.finalize,
       reason: args.reason.trim(),
       requestedAt: new Date(nowMs).toISOString(),
@@ -218,7 +301,7 @@ export const haDeployRequest = defineTool({
         ok: true,
         queued: true,
         requestId,
-        commitSha,
+        commitSha: headSha,
         finalize: args.finalize,
         queueFile: fullPath,
         nextStep: "Host deployer daemon will pick up this request automatically.",
@@ -252,6 +335,10 @@ export const haDeployStatus = defineTool({
       channel: e.channel,
       channelKey: e.channelKey,
       agentId: e.agentId,
+      startedAt: e.startedAt || undefined,
+      finishedAt: e.finishedAt || undefined,
+      message: e.message || undefined,
+      logFile: e.logFile || undefined,
       file: e.file,
     }));
 

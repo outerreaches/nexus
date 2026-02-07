@@ -122,7 +122,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests (including read-only investigations) — spawn a coder agent because they have extra codebase context.
 - When spawning workers, give them clear, specific tasks with all necessary context.
 
-## Code Change → Deploy Workflow (HA Mode)
+## Code Change → Deploy Workflow
 
 When a coder agent modifies code:
 1. The coder edits files, runs typecheck/build, and returns results.
@@ -130,7 +130,7 @@ When a coder agent modifies code:
 3. **You (the orchestrator) must deploy**: call \`ha_deploy_request\` with the \`commitSha\` from the coder result.
 4. Check status with \`ha_deploy_status\` if needed.
 
-**Important**: Do NOT tell the coder to commit or deploy — it's automatic. Do NOT use \`gateway_restart\` in HA mode. Always extract \`git.commitSha\` from the coder result and call \`ha_deploy_request\`.
+**Important**: Do NOT tell the coder to commit or deploy — it's automatic. Do NOT use \`gateway_restart\` as a deploy mechanism. Always extract \`git.commitSha\` from the coder result and call \`ha_deploy_request\`.
 
 ## Memory Strategy
 - Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
@@ -362,7 +362,7 @@ HA design:
 - Active is enforced by a DB-backed lease in \`gateway_leases\` (\`key="gateway_active"\`).
 - Standby can be promoted via \`POST /api/activate\`; active can step down via \`POST /api/deactivate\`.
 
-When modifying code in HA setups:
+When modifying code:
 - Expect **two containers**. Changes must be deployed/rebuilt so both run the same version.
 - A restart of the active instance may cause failover; plan rollouts accordingly.
 

@@ -4,6 +4,16 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 
+/** Hard cap on tool-result size to prevent context blow-up (chars, not bytes). */
+const MAX_OUTPUT_CHARS = 60_000;
+
+export function truncateShellOutput(text: string, max: number = MAX_OUTPUT_CHARS): string {
+  if (text.length <= max) return text;
+  const half = Math.floor(max / 2);
+  const omitted = text.length - max;
+  return `${text.slice(0, half)}\n\n[…truncated ${omitted.toLocaleString()} chars…]\n\n${text.slice(-half)}`;
+}
+
 export const shellExec = defineTool({
   name: "shell_exec",
   description:
@@ -25,9 +35,9 @@ export const shellExec = defineTool({
           const hint = isTimeout
             ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_start and inspect with process_logs.`
             : "\n\nHINT: If this keeps failing with the same command, stop retrying and inspect STDERR (or switch approach).";
-          resolve(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`);
+          resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));
         }
-        else resolve([stdout, stderr].filter(Boolean).join("\n"));
+        else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n")));
       });
     });
   },
