@@ -338,11 +338,84 @@ export function dashboardStyles(): string {
         overflow: auto;
         white-space: pre-wrap;
         font-size: 11px;
+        line-height: 1.45;
         color: var(--text-dim);
         border: 1px solid var(--line);
         background: #050505;
         padding: 10px;
         box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.8);
+      }
+      .log-line {
+        display: block;
+        margin: 0 -6px;
+        padding: 1px 6px;
+        border-left: 2px solid transparent;
+      }
+      .log-line.level-neutral {
+        color: var(--text-dim);
+      }
+      .log-line.level-ok {
+        color: #8fffc8;
+      }
+      .log-line.level-warn {
+        color: #ffe8b4;
+        background: rgba(255, 184, 0, 0.1);
+        border-left-color: rgba(255, 184, 0, 0.75);
+      }
+      .log-line.level-error {
+        color: #ffd7e2;
+        background: rgba(255, 0, 64, 0.14);
+        border-left-color: rgba(255, 0, 64, 0.9);
+      }
+      .log-line.kind-tool-call {
+        box-shadow: inset 0 0 0 1px rgba(0, 212, 255, 0.08);
+      }
+      .log-line.kind-tool-result {
+        box-shadow: inset 0 0 0 1px rgba(0, 255, 65, 0.09);
+      }
+      .log-line.kind-deploy {
+        box-shadow: inset 0 0 0 1px rgba(142, 192, 255, 0.2);
+      }
+      .log-line.kind-timeout {
+        box-shadow: inset 0 0 0 1px rgba(255, 184, 0, 0.25);
+      }
+      .log-label {
+        color: var(--muted);
+      }
+      .log-ts {
+        color: var(--info);
+      }
+      .log-agent-tag {
+        color: #66d4ff;
+      }
+      .log-tool-name {
+        color: #9ac8ff;
+      }
+      .log-call-id {
+        color: #d3b4ff;
+      }
+      .log-status-ok {
+        color: #87ffbf;
+      }
+      .log-status-running,
+      .log-status-complete {
+        color: #73ffd1;
+      }
+      .log-status-error,
+      .log-status-failed {
+        color: #ff6f9a;
+        font-weight: 700;
+      }
+      .log-status-budget_exhausted {
+        color: #ffd369;
+        font-weight: 700;
+      }
+      .log-token-error {
+        color: #ff6f9a;
+        font-weight: 700;
+      }
+      .log-empty {
+        color: var(--muted);
       }
       .graph-header {
         display: flex;
