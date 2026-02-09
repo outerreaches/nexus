@@ -368,17 +368,17 @@ export function renderDashboard(params: {
 
       const highlightLogLine = (line) => {
         let html = escapeLogHtml(line);
-        html = html.replace(/(\[nexus\])/g, '<span class="log-label">$1</span>');
+        html = html.replace(/(\\[nexus\\])/g, '<span class="log-label">$1</span>');
         html = html.replace(
-          /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/g,
+          /(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)/g,
           '<span class="log-ts">$1</span>',
         );
-        html = html.replace(/\b(worker\[[^\]\s]+\])/g, '<span class="log-agent-tag">$1</span>');
-        html = html.replace(/\b(tool_call|tool_result)\b/g, '<span class="log-label">$1</span>');
-        html = html.replace(/\b(name=[^\s]+)/g, '<span class="log-tool-name">$1</span>');
-        html = html.replace(/\b(id=[^\s]+)/g, '<span class="log-call-id">$1</span>');
+        html = html.replace(/\\b(worker\\[[^\\]\\s]+\\])/g, '<span class="log-agent-tag">$1</span>');
+        html = html.replace(/\\b(tool_call|tool_result)\\b/g, '<span class="log-label">$1</span>');
+        html = html.replace(/\\b(name=[^\\s]+)/g, '<span class="log-tool-name">$1</span>');
+        html = html.replace(/\\b(id=[^\\s]+)/g, '<span class="log-call-id">$1</span>');
         html = html.replace(
-          /\b(status=(ok|error|failed|running|complete|budget_exhausted))\b/gi,
+          /\\b(status=(ok|error|failed|running|complete|budget_exhausted))\\b/gi,
           (_match, token, rawStatus) => {
             const normalized = String(rawStatus).toLowerCase();
             return '<span class="log-status log-status-' + normalized + '">' + token + '</span>';
@@ -393,9 +393,9 @@ export function renderDashboard(params: {
           return '<span class="log-empty">No logs found.</span>';
         }
         return String(text)
-          .split(/\r?\n/)
+          .split(/\\r?\\n/)
           .map((line) => '<span class="' + classifyLogLine(line) + '">' + highlightLogLine(line) + "</span>")
-          .join("\n");
+          .join("\\n");
       };
 
       const fetchLogs = async () => {
