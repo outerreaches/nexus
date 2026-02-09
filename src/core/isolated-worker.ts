@@ -113,12 +113,20 @@ process.on("message", async (msg: ParentMessage) => {
     // called, auto-trigger it so deploys can't be silently skipped.
     if (cfg.presetName === "coder") {
       const calls = collectToolCallRecords(result.newMessages);
-      const editedCode = calls.some((call) => isCodeEditCall(call, cfg.codeDir));
-      const validatedBuild = hasSuccessfulTypecheckAndBuild(calls);
+      const codeEditMatches = calls.filter((call) => isCodeEditCall(call, cfg.codeDir));
+      const editedCode = codeEditMatches.length > 0;
+      const buildValidation = collectSuccessfulBuildCommands(calls);
+      const validatedBuild = buildValidation.typecheckCommands.length > 0 && buildValidation.buildCommands.length > 0;
       const builtCode = editedCode && validatedBuild;
       const deployed = calls.some((call) => isApplyDeployCall(call));
 
       if (builtCode && !deployed) {
+        log(
+          "coder deploy safeguard details: " +
+          `code_edits=${summarizeItems(codeEditMatches.map((call) => summarizeDeployRelevantCall(call)))} ` +
+          `typecheck=${summarizeItems(buildValidation.typecheckCommands)} ` +
+          `build=${summarizeItems(buildValidation.buildCommands)}`,
+        );
         log("coder edited code + built but skipped ha_deploy — auto-triggering deploy");
         const haDeployTool = workerTools.find((t) => t.name === "ha_deploy");
         if (haDeployTool) {
@@ -244,15 +252,46 @@ function isCodeEditCall(call: ToolCallRecord, codeDir: string): boolean {
   return normalizedPath === normalizedCodeDir || normalizedPath.startsWith(`${normalizedCodeDir}${path.sep}`);
 }
 
-function hasSuccessfulTypecheckAndBuild(calls: ToolCallRecord[]): boolean {
-  let typecheckOk = false;
-  let buildOk = false;
+function collectSuccessfulBuildCommands(calls: ToolCallRecord[]): { typecheckCommands: string[]; buildCommands: string[] } {
+  const typecheckCommands: string[] = [];
+  const buildCommands: string[] = [];
   for (const call of calls) {
     if (call.name !== "shell_exec") continue;
     if (!isSuccessfulResult(call.result)) continue;
     const command = typeof call.args.command === "string" ? call.args.command : "";
-    if (/\bnpm\s+run\s+typecheck\b/.test(command)) typecheckOk = true;
-    if (/\bnpm\s+run\s+build\b/.test(command)) buildOk = true;
+    if (/\bnpm\s+run\s+typecheck\b/.test(command)) {
+      typecheckCommands.push(command);
+    }
+    if (/\bnpm\s+run\s+build\b/.test(command)) {
+      buildCommands.push(command);
+    }
   }
-  return typecheckOk && buildOk;
+  return { typecheckCommands, buildCommands };
+}
+
+function summarizeDeployRelevantCall(call: ToolCallRecord): string {
+  const root = typeof call.args.root === "string" ? call.args.root.trim() : "";
+  const filePath = typeof call.args.path === "string" ? call.args.path.trim() : "";
+  const command = typeof call.args.command === "string" ? call.args.command.trim() : "";
+  if (command) return `${call.name} command=${sanitizeForLog(command, 160)}`;
+  if (filePath) {
+    const rootPart = root ? `root=${root} ` : "";
+    return `${call.name} ${rootPart}path=${sanitizeForLog(filePath, 120)}`.trim();
+  }
+  return call.name;
+}
+
+function summarizeItems(items: string[], maxItems: number = 3): string {
+  if (items.length === 0) return "(none)";
+  const rendered = items.slice(0, maxItems).map((item) => sanitizeForLog(item, 160));
+  if (items.length > maxItems) {
+    rendered.push(`(+${items.length - maxItems} more)`);
+  }
+  return rendered.join(" | ");
+}
+
+function sanitizeForLog(value: string, maxLen: number): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLen) return compact;
+  return `${compact.slice(0, maxLen)}...(+${compact.length - maxLen} chars)`;
 }

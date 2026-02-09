@@ -4,6 +4,7 @@ import { OpenAICompatClient } from "../llm/openai-compat.js";
 import { createHash } from "node:crypto";
 import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
+import type { ToolCall } from "./types.js";
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -51,6 +52,44 @@ function safeJson(value: unknown): string {
 function toolCallSignature(call: import("./types.js").ToolCall): string {
   const hash = createHash("sha256").update(call.name).update("\n").update(call.arguments).digest("hex").slice(0, 16);
   return `${call.name}:${hash}`;
+}
+
+type ToolExecutionStatus = "ok" | "error";
+
+type ToolResultClassification = {
+  status: ToolExecutionStatus;
+  errorSummary?: string;
+};
+
+function parseSpawnAgentStatus(result: string): { status?: string; output?: string } | null {
+  try {
+    const parsed = JSON.parse(result) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    const status = typeof obj.status === "string" ? obj.status : undefined;
+    const output = typeof obj.output === "string" ? obj.output : undefined;
+    return { status, output };
+  } catch {
+    return null;
+  }
+}
+
+export function classifyToolResultStatus(call: ToolCall, result: string): ToolResultClassification {
+  if (result.startsWith("ERROR:")) {
+    return { status: "error", errorSummary: result.split(/\r?\n/)[0] ?? "ERROR" };
+  }
+  if (call.name !== "spawn_agent") return { status: "ok" };
+
+  const parsed = parseSpawnAgentStatus(result);
+  const status = parsed?.status?.trim().toLowerCase();
+  if (!status) return { status: "ok" };
+  if (status === "complete" || status === "completed") return { status: "ok" };
+
+  const summarySource = parsed?.output?.trim() ? parsed.output.trim() : `spawn_agent status=${parsed?.status ?? status}`;
+  return {
+    status: "error",
+    errorSummary: summarySource.split(/\r?\n/)[0] ?? summarySource,
+  };
 }
 
 export type AgentBudget = {
@@ -209,8 +248,10 @@ export class AgentRunner {
         result: string,
         callIndex: number,
       ): AgentResult | null => {
-        const status = result.startsWith("ERROR:") ? "error" : "ok";
-        const errPreview = status === "error" ? ` msg=${safeJson(truncate(result.split(/\r?\n/)[0] ?? "", 200))}` : "";
+        const classification = classifyToolResultStatus(call, result);
+        const status = classification.status;
+        const errorFirstLine = classification.errorSummary ?? result.split(/\r?\n/)[0] ?? "";
+        const errPreview = status === "error" ? ` msg=${safeJson(truncate(errorFirstLine, 200))}` : "";
         this.deps.onLog?.(`tool_result name=${call.name} id=${call.id} status=${status} chars=${result.length}${errPreview}`);
 
         const toolResultMsg: ChatMessage = {
