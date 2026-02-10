@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyToolResultStatus } from "./agent-runner.js";
+import { classifyToolResultStatus, toolResultIndicatesDeployApplied } from "./agent-runner.js";
 import type { ToolCall } from "./types.js";
 
 function makeCall(name: string): ToolCall {
@@ -61,4 +61,33 @@ test("classifyToolResultStatus does not parse non-spawn JSON payloads", () => {
   });
   const result = classifyToolResultStatus(call, payload);
   assert.equal(result.status, "ok");
+});
+
+test("toolResultIndicatesDeployApplied detects direct ha_deploy apply success", () => {
+  const call = makeCall("ha_deploy");
+  const didApply = toolResultIndicatesDeployApplied(call, { action: "apply" }, "OK: deploy completed");
+  assert.equal(didApply, true);
+});
+
+test("toolResultIndicatesDeployApplied ignores ha_deploy status action", () => {
+  const call = makeCall("ha_deploy");
+  const didApply = toolResultIndicatesDeployApplied(call, { action: "status" }, "LAST_STATUS=ok");
+  assert.equal(didApply, false);
+});
+
+test("toolResultIndicatesDeployApplied detects spawn_agent deployApplied flag", () => {
+  const call = makeCall("spawn_agent");
+  const payload = JSON.stringify({
+    status: "complete",
+    output: "Done",
+    deployApplied: true,
+  });
+  const didApply = toolResultIndicatesDeployApplied(call, {}, payload);
+  assert.equal(didApply, true);
+});
+
+test("toolResultIndicatesDeployApplied ignores ERROR-prefixed results", () => {
+  const call = makeCall("ha_deploy");
+  const didApply = toolResultIndicatesDeployApplied(call, { action: "apply" }, "ERROR: failed");
+  assert.equal(didApply, false);
 });

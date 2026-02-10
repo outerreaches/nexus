@@ -11,6 +11,7 @@ import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js"
 import { buildPresetSystemPrompt } from "../core/prompt.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
+import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
 
@@ -293,6 +294,7 @@ async function runInProcess(params: {
       output: result.output,
       toolCallsUsed: result.toolCallsUsed,
       iterationsUsed: result.iterationsUsed,
+      deployApplied: didRunApplyDeploy(result.newMessages),
       blackboardTitle,
     };
     return JSON.stringify(returnValue, null, 2);
@@ -357,12 +359,13 @@ async function runIsolated(params: {
   try {
     workerPath = resolveIsolatedWorkerPath();
   } catch (err) {
-    return JSON.stringify({
-      status: "failed",
-      output: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
-      toolCallsUsed: 0,
-      iterationsUsed: 0,
-    }, null, 2);
+      return JSON.stringify({
+        status: "failed",
+        output: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+        toolCallsUsed: 0,
+        iterationsUsed: 0,
+        deployApplied: false,
+      }, null, 2);
   }
 
   return new Promise<string>((resolve) => {
@@ -398,6 +401,7 @@ async function runIsolated(params: {
         output: "ERROR: worker process timed out",
         toolCallsUsed: 0,
         iterationsUsed: 0,
+        deployApplied: false,
       }, null, 2));
     }, timeoutMs);
 
@@ -432,6 +436,7 @@ async function runIsolated(params: {
           output: `ERROR: worker process failed: ${msg.error}`,
           toolCallsUsed: 0,
           iterationsUsed: 0,
+          deployApplied: false,
         }, null, 2));
       }
     });
@@ -455,6 +460,7 @@ async function runIsolated(params: {
           output: `ERROR: worker process ${reason}`,
           toolCallsUsed: 0,
           iterationsUsed: 0,
+          deployApplied: false,
         }, null, 2));
       }
     });
@@ -552,6 +558,42 @@ function safeJsonParse(raw: string): unknown {
   } catch {
     return [];
   }
+}
+
+function didRunApplyDeploy(messages: ChatMessage[]): boolean {
+  const callById = new Map<string, { name: string; args: Record<string, unknown>; result?: string }>();
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.toolCalls)) {
+      for (const call of message.toolCalls) {
+        let parsedArgs: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(call.arguments) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            parsedArgs = parsed as Record<string, unknown>;
+          }
+        } catch {
+          parsedArgs = {};
+        }
+        callById.set(call.id, { name: call.name, args: parsedArgs });
+      }
+      continue;
+    }
+    if (message.role === "tool" && typeof message.toolCallId === "string") {
+      const existing = callById.get(message.toolCallId);
+      if (existing) {
+        existing.result = typeof message.content === "string" ? message.content : "";
+      }
+    }
+  }
+
+  for (const call of callById.values()) {
+    if (call.name !== "ha_deploy") continue;
+    if (call.args.action !== "apply") continue;
+    if (!call.result || call.result.trimStart().startsWith("ERROR:")) continue;
+    return true;
+  }
+
+  return false;
 }
 
 function parseBlackboardTitle(task: string, presetName: string): { title: string; cleanedTask: string } {

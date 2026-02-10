@@ -76,6 +76,7 @@ export type WorkerResultMessage = {
     output: string;
     toolCallsUsed: number;
     iterationsUsed: number;
+    deployApplied: boolean;
   };
 };
 

@@ -109,16 +109,18 @@ process.on("message", async (msg: ParentMessage) => {
       userMessage: cfg.userMessage,
     });
 
+    const calls = collectToolCallRecords(result.newMessages);
+    let deployApplied = calls.some((call) => isApplyDeployCall(call) && isSuccessfulResult(call.result));
+
     // Coder safeguard: if code was edited and built but ha_deploy was never
     // called, auto-trigger it so deploys can't be silently skipped.
     if (cfg.presetName === "coder") {
-      const calls = collectToolCallRecords(result.newMessages);
       const codeEditMatches = calls.filter((call) => isCodeEditCall(call, cfg.codeDir));
       const editedCode = codeEditMatches.length > 0;
       const buildValidation = collectSuccessfulBuildCommands(calls);
       const validatedBuild = buildValidation.typecheckCommands.length > 0 && buildValidation.buildCommands.length > 0;
       const builtCode = editedCode && validatedBuild;
-      const deployed = calls.some((call) => isApplyDeployCall(call));
+      const deployed = deployApplied;
 
       if (builtCode && !deployed) {
         log(
@@ -134,6 +136,9 @@ process.on("message", async (msg: ParentMessage) => {
             const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
             log(`auto ha_deploy: ${deployResult.slice(0, 200)}`);
             result.output += `\n\n[AUTO-DEPLOY] ${deployResult}`;
+            if (isSuccessfulResult(deployResult)) {
+              deployApplied = true;
+            }
           } catch (err) {
             log(`auto ha_deploy failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -159,6 +164,7 @@ process.on("message", async (msg: ParentMessage) => {
         output: result.output,
         toolCallsUsed: result.toolCallsUsed,
         iterationsUsed: result.iterationsUsed,
+        deployApplied,
       },
     });
 

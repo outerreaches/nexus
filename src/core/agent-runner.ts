@@ -61,14 +61,21 @@ type ToolResultClassification = {
   errorSummary?: string;
 };
 
-function parseSpawnAgentStatus(result: string): { status?: string; output?: string } | null {
+type ParsedSpawnAgentResult = {
+  status?: string;
+  output?: string;
+  deployApplied?: boolean;
+};
+
+function parseSpawnAgentResult(result: string): ParsedSpawnAgentResult | null {
   try {
     const parsed = JSON.parse(result) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const obj = parsed as Record<string, unknown>;
     const status = typeof obj.status === "string" ? obj.status : undefined;
     const output = typeof obj.output === "string" ? obj.output : undefined;
-    return { status, output };
+    const deployApplied = obj.deployApplied === true;
+    return { status, output, deployApplied };
   } catch {
     return null;
   }
@@ -80,7 +87,7 @@ export function classifyToolResultStatus(call: ToolCall, result: string): ToolRe
   }
   if (call.name !== "spawn_agent") return { status: "ok" };
 
-  const parsed = parseSpawnAgentStatus(result);
+  const parsed = parseSpawnAgentResult(result);
   const status = parsed?.status?.trim().toLowerCase();
   if (!status) return { status: "ok" };
   if (status === "complete" || status === "completed") return { status: "ok" };
@@ -90,6 +97,22 @@ export function classifyToolResultStatus(call: ToolCall, result: string): ToolRe
     status: "error",
     errorSummary: summarySource.split(/\r?\n/)[0] ?? summarySource,
   };
+}
+
+export function toolResultIndicatesDeployApplied(call: ToolCall, args: unknown, result: string): boolean {
+  if (result.trimStart().startsWith("ERROR:")) return false;
+
+  if (call.name === "ha_deploy") {
+    const action = args && typeof args === "object" ? (args as Record<string, unknown>).action : undefined;
+    return action === "apply";
+  }
+
+  if (call.name === "spawn_agent") {
+    const parsed = parseSpawnAgentResult(result);
+    return parsed?.deployApplied === true;
+  }
+
+  return false;
 }
 
 export type AgentBudget = {
@@ -245,6 +268,7 @@ export class AgentRunner {
 
       const handleToolResult = (
         call: import("./types.js").ToolCall,
+        args: unknown,
         result: string,
         callIndex: number,
       ): AgentResult | null => {
@@ -331,6 +355,44 @@ export class AgentRunner {
             `Wrap up or summarize progress soon.]`;
         }
 
+        // Hard workflow guard: once deploy is applied, stop this run immediately.
+        // Any further runtime/schema checks in this same process can observe stale state.
+        if (toolResultIndicatesDeployApplied(call, args, result)) {
+          const parsedSpawn = call.name === "spawn_agent" ? parseSpawnAgentResult(result) : null;
+          const workerLine = parsedSpawn?.output?.trim()?.split(/\r?\n/)[0] ?? "";
+          const outputLines = [
+            "Deploy applied. Stopping this run to avoid post-deploy tool calls on a stale process image.",
+            "Start a fresh follow-up request for runtime/schema validation or post-deploy actions.",
+          ];
+          if (workerLine) {
+            outputLines.push(`Latest worker output: ${truncate(workerLine, 220)}`);
+          }
+          const handoffText = outputLines.join("\n");
+
+          for (let j = callIndex + 1; j < toolCalls.length; j++) {
+            const pending = toolCalls[j];
+            const pendingMsg: ChatMessage = {
+              role: "tool",
+              name: pending.name,
+              toolCallId: pending.id,
+              content: "ERROR: deferred until a fresh post-deploy run",
+            };
+            messages.push(pendingMsg);
+            newMessages.push(pendingMsg);
+          }
+
+          const assistantMsg: ChatMessage = { role: "assistant", content: handoffText };
+          messages.push(assistantMsg);
+          newMessages.push(assistantMsg);
+          return {
+            status: "complete",
+            output: handoffText,
+            newMessages,
+            toolCallsUsed,
+            iterationsUsed: iteration + 1,
+          };
+        }
+
         return null;
       };
 
@@ -384,7 +446,7 @@ export class AgentRunner {
             for (let idx = 0; idx < executions.length; idx++) {
               const entry = executions[idx];
               const result = results[idx] ?? "";
-              const abort = handleToolResult(entry.call, result, i + idx);
+              const abort = handleToolResult(entry.call, entry.args, result, i + idx);
               if (abort) {
                 return abort;
               }
@@ -435,7 +497,7 @@ export class AgentRunner {
           result = `ERROR: ${msg}`;
         }
 
-        const abort = handleToolResult(call, result, i);
+        const abort = handleToolResult(call, args, result, i);
         if (abort) {
           return abort;
         }
