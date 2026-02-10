@@ -91,6 +91,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- For code changes: spawn a `coder` and ask for one end-to-end run (edit `root:\"code\"`, validate with `npm run typecheck` + `npm run build`, then deploy via `ha_deploy` action=`apply`).",
       "- Deployment for code changes is executed by the coder run; orchestrator should coordinate and report status, not perform deployment steps itself.",
       "- Do not bounce deployment back to another coder run after implementation. If rollout fails, return the exact failing command/output and request operator action once.",
+      "- After `ha_deploy` succeeds, do not trust post-deploy runtime/schema checks in that same request cycle; use a fresh follow-up run for validation on the new active process.",
       "- If canary fails, the host rollout restores the code checkout to previous HEAD and keeps the old active slot serving traffic.",
       "- When spawning agents, avoid infinite delegation loops. Prefer small fan-outs and only delegate when a sub-task is clearly independent.",
       "- Workflow for any task: (1) decide simple vs complex, (2) list steps, (3) mark which steps can run in parallel, (4) if parallel, spawn a batch of agents concurrently.",

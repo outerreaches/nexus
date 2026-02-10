@@ -36,7 +36,9 @@ export const haDeploy = defineTool({
     "Trigger an HA deploy of the current code in /data/code. " +
     "action='apply' writes a deploy trigger, then polls until the host daemon completes " +
     "(build candidate → health check → commit → switch traffic). " +
-    "action='status' returns current deploy state.",
+    "action='status' returns current deploy state. " +
+    "Important: after action='apply' succeeds, this run still executes in the pre-deploy process image; " +
+    "defer post-deploy runtime/schema validation to a fresh follow-up run.",
   parameters: z.object({
     action: z.enum(["apply", "status"]),
     commitMessage: z
@@ -59,6 +61,9 @@ export const haDeploy = defineTool({
     const triggerFile = path.join(stateDir, "deploy-trigger.json");
     const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
     const lockDir = path.join(stateDir, "ha-rollout.lock");
+    const postDeployNote =
+      "NOTE: This request cycle can still run in the old process image. " +
+      "Do not validate newly deployed runtime behavior/schemas until a fresh follow-up run.";
 
     if (action === "status") {
       const lines: string[] = [];
@@ -130,12 +135,12 @@ export const haDeploy = defineTool({
         if (newState !== initialState) {
           const status = parseStateValue(newState, "LAST_STATUS");
           if (status && status.startsWith("applied_local")) {
-            return `OK: deploy completed (status=${status})\n\n${newState.trim()}`;
+            return `OK: deploy completed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
           }
           if (status && (status.includes("fail") || status.includes("rollback"))) {
             return `ERROR: deploy failed (status=${status})\n\n${newState.trim()}`;
           }
-          return `OK: deploy state changed (status=${status})\n\n${newState.trim()}`;
+          return `OK: deploy state changed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
         }
         emptyPollsWithNoStateChange += 1;
         if (emptyPollsWithNoStateChange >= 2) {

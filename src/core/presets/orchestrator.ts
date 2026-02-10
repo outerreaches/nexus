@@ -8,6 +8,7 @@ export const preset: AgentPreset = {
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
     "For code tasks, assign one coder run end-to-end (edit + validate + host rollout). Do not split implementation and deployment into separate coder handoffs.",
     "Do not spawn a follow-up coder only for deployment if a prior coder already completed validation and rollout for the same change.",
+    "If a coder run performs `ha_deploy` action='apply', avoid immediate post-deploy runtime/schema checks in the same request cycle; wait for a fresh follow-up run.",
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
     "Use the intake-manager preset for adding or updating data intake sources.",
