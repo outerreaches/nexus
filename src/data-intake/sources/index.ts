@@ -17,6 +17,7 @@ import { twelveDataSource } from "./stocks-twelvedata.js";
 import { yahooStocksSource } from "./stocks-yahoo.js";
 import { weatherSource } from "./weather.js";
 import { birdSource } from "./social-bird.js";
+import { birdBatchSource } from "./social-bird-batch.js";
 import { canadaCPISource } from "./macro-canada-cpi.js";
 import { hackerNewsSource } from "./news-hackernews.js";
 
@@ -39,5 +40,6 @@ export function registerBuiltInSources(): void {
   registerDataSource(yahooStocksSource);
   registerDataSource(weatherSource);
   registerDataSource(birdSource);
+  registerDataSource(birdBatchSource); // Batch Twitter/X fetching
   registerDataSource(canadaCPISource); // Canadian inflation data
 }
