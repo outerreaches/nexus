@@ -357,7 +357,16 @@ export class AgentRunner {
 
         // Hard workflow guard: once deploy is applied, stop this run immediately.
         // Any further runtime/schema checks in this same process can observe stale state.
-        if (toolResultIndicatesDeployApplied(call, args, result)) {
+        const deployApplied = toolResultIndicatesDeployApplied(call, args, result);
+        const isWorkerRun = Boolean(this.deps.toolContext.request?.parentRunId);
+        const shouldHandoff =
+          call.name === "spawn_agent"
+            ? deployApplied
+            : call.name === "ha_deploy"
+              ? deployApplied && !isWorkerRun
+              : false;
+
+        if (shouldHandoff) {
           const parsedSpawn = call.name === "spawn_agent" ? parseSpawnAgentResult(result) : null;
           const workerLine = parsedSpawn?.output?.trim()?.split(/\r?\n/)[0] ?? "";
           const outputLines = [
