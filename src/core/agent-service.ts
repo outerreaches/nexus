@@ -40,6 +40,7 @@ export class AgentService {
     /** Override preset for this invocation. */
     preset?: string;
   }): Promise<{
+    runId: string | null;
     sessionId: string;
     output: string;
     status: "complete" | "failed" | "budget_exhausted";
@@ -158,18 +159,21 @@ export class AgentService {
         });
       }
 
-      // If a deploy happened during this run, the host-side ha-deployer is
-      // waiting for deploy-ack before rebuilding the old primary container.
-      // Write the ack now that the orchestrator's full request cycle is done.
-      this.ackDeployIfPending({
-        runId: runId ?? null,
-        sessionId,
-        channel: params.channel,
-        channelKey: params.channelKey,
-        agentId: params.agentId,
-      });
+      // Non-Telegram channels can ack immediately after the run completes.
+      // Telegram acks are deferred until after sendOutput to avoid finalize
+      // killing the old container before reply delivery.
+      if (params.channel !== "telegram") {
+        this.ackDeployIfPending({
+          runId: runId ?? null,
+          sessionId,
+          channel: params.channel,
+          channelKey: params.channelKey,
+          agentId: params.agentId,
+        });
+      }
 
       return {
+        runId: runId ?? null,
         sessionId,
         output: result.output,
         status: result.status,
@@ -180,7 +184,7 @@ export class AgentService {
   }
 
   /** Write deploy-ack if finalize-pending exists and this run matches the pending deploy context. */
-  private ackDeployIfPending(current: {
+  ackDeployIfPending(current: {
     runId: string | null;
     sessionId: string;
     channel: string;
@@ -193,7 +197,11 @@ export class AgentService {
       if (!existsSync(finalizePending)) return;
 
       const pending = readFinalizePending(finalizePending);
-      if (pending && !shouldAckPending(pending, current)) {
+      if (!pending) {
+        this.deps.onRunnerLog?.("deploy-ack deferred: finalize-pending unreadable or missing context");
+        return;
+      }
+      if (!shouldAckPending(pending, current)) {
         this.deps.onRunnerLog?.(
           `deploy-ack deferred: pending trigger=${pending.triggerId ?? "unknown"} expectedRun=${pending.expectedAckRunId ?? pending.request?.parentRunId ?? pending.request?.runId ?? "n/a"} currentRun=${current.runId ?? "none"}`,
         );
@@ -260,17 +268,17 @@ function shouldAckPending(
     ""
   ).trim();
   if (expectedRunId) {
-    if (current.runId && current.runId === expectedRunId) return true;
-    if (!current.runId) {
-      const expectedSessionId = (pending.request?.sessionId ?? "").trim();
-      return Boolean(expectedSessionId && expectedSessionId === current.sessionId);
-    }
-    return false;
+    return Boolean(current.runId && current.runId === expectedRunId);
   }
 
   const expectedSessionId = (pending.request?.sessionId ?? "").trim();
   if (expectedSessionId) {
-    return expectedSessionId === current.sessionId;
+    if (expectedSessionId !== current.sessionId) return false;
+    const expectedChannel = (pending.request?.channel ?? "").trim();
+    const expectedChannelKey = (pending.request?.channelKey ?? "").trim();
+    if (expectedChannel && expectedChannel !== current.channel) return false;
+    if (expectedChannelKey && expectedChannelKey !== current.channelKey) return false;
+    return true;
   }
 
   const expectedChannel = (pending.request?.channel ?? "").trim();
@@ -278,7 +286,7 @@ function shouldAckPending(
   if (expectedChannel && expectedChannelKey) {
     return expectedChannel === current.channel && expectedChannelKey === current.channelKey;
   }
-  return true;
+  return false;
 }
 
 function filterToolsByPreset(allTools: Tool[], preset?: AgentPreset): Tool[] {

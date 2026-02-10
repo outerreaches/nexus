@@ -199,7 +199,7 @@ export async function startTelegramBot(deps: {
         }
 
         deps.log(`telegram: act user_id=${userId} id=${id} response_chars=${response.length}`);
-        const res = fulfillHumanAction(deps.db, {
+        const actionRes = fulfillHumanAction(deps.db, {
           id,
           responseText: response,
           respondedByChannel: "telegram",
@@ -207,21 +207,28 @@ export async function startTelegramBot(deps: {
           nowMs: Date.now(),
         });
 
-        if (!res.ok) {
-          await ctx.reply(`ERROR: unable to record action (${res.error ?? "unknown"})`);
+        if (!actionRes.ok) {
+          await ctx.reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
           return;
         }
 
         await ctx.reply(`OK: recorded action ${id}`);
 
         // Nudge the agent to continue (without leaking the secret response).
-        const { output } = await deps.agent.handleUserMessage({
+        const res = await deps.agent.handleUserMessage({
           channel: "telegram",
           channelKey: String(chatId),
           agentId: tg.agentId,
           text: `Human action ${id} is fulfilled.`,
         });
-        await sendOutput(chatId, output);
+        await sendOutput(chatId, res.output);
+        deps.agent.ackDeployIfPending({
+          runId: res.runId,
+          sessionId: res.sessionId,
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+        });
         return;
       }
 
@@ -246,14 +253,21 @@ export async function startTelegramBot(deps: {
       }
 
       deps.log(`telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${cleaned.length}`);
-      const { output } = await deps.agent.handleUserMessage({
+      const res = await deps.agent.handleUserMessage({
         channel: "telegram",
         channelKey: String(chatId),
         agentId: tg.agentId,
         text: cleaned,
       });
 
-      await sendOutput(chatId, output);
+      await sendOutput(chatId, res.output);
+      deps.agent.ackDeployIfPending({
+        runId: res.runId,
+        sessionId: res.sessionId,
+        channel: "telegram",
+        channelKey: String(chatId),
+        agentId: tg.agentId,
+      });
     } catch (err) {
       deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);
       try {
