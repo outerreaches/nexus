@@ -16,7 +16,7 @@ export const IdentitySchema = z.object({
 
 export const UserProfileSchema = z.object({
   name: z.string().optional(),
-  pronouns: z.string().optional(),
+  gender: z.boolean().default(true),
   timezone: z.string().default("UTC"),
   context: z.string().optional(),
 });
@@ -42,6 +42,7 @@ export const PERSONALIZATION_FILES = [
   USER_FILENAME,
   CODEGUIDE_FILENAME,
   HEARTBEAT_FILENAME,
+  NOTES_FILENAME,
 ] as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,7 +164,7 @@ export function getDefaultUserTemplate(user: UserProfile): string {
 
 ## Human Profile
 ${user.name ? `- **Name**: ${user.name}` : "- **Name**: (not set)"}
-${user.pronouns ? `- **Pronouns**: ${user.pronouns}` : ""}
+- **Gender**: ${user.gender ? "male" : "female"}
 - **Timezone**: ${user.timezone}
 
 ## Context

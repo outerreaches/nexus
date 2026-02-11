@@ -18,9 +18,11 @@ services:
       NEXUS_CREDENTIALS_KEY: ${NEXUS_CREDENTIALS_KEY}
       # Persist state/config/workspace/history
       NEXUS_STATE_DIR: /data/nexus
-      # Allow shell_exec inside container
+      # WARNING: enables shell_exec tool from agent runs.
       NEXUS_ALLOW_SHELL_EXEC: "1"
-      # Proactive heartbeat scheduler (always-on background ticks)
+      # WARNING: allows direct file writes under root="code".
+      NEXUS_ALLOW_CODE_WRITE: "1"
+      # WARNING: enables always-on autonomous heartbeat ticks.
       NEXUS_PROACTIVE: "1"
       # Headless browser (Chromium in-container)
       NEXUS_BROWSER_EXECUTABLE_PATH: /usr/bin/chromium

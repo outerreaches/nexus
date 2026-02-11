@@ -15,6 +15,7 @@ import { openDatabase } from "../storage/database.js";
 import { ensureConfigExists, loadConfig } from "../state/config.js";
 import { bootstrapState } from "../state/bootstrap.js";
 import { resolveRuntimePaths } from "../state/paths.js";
+import { getInitializationStatus, getInitializationErrorMessage } from "../state/onboarding.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { ProcessManager } from "../process/manager.js";
 import { startJobScheduler } from "../scheduler/job-scheduler.js";
@@ -47,6 +48,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const config = await loadConfig(params.configPath);
   await bootstrapState(config);
   const paths = await resolveRuntimePaths(config);
+  const initStatus = await getInitializationStatus(paths.stateDir);
+  if (!initStatus.initialized) {
+    throw new Error(`Gateway startup blocked. ${getInitializationErrorMessage(initStatus)}`);
+  }
   try {
     await fsp.mkdir(paths.stateDir, { recursive: true });
     logStream = fs.createWriteStream(path.join(paths.stateDir, "gateway.log"), { flags: "a" });
@@ -120,6 +125,15 @@ export async function startGateway(params: { configPath: string; port?: number; 
     scheduleProcessRestart(reason, delayMs);
   };
 
+  const allowShellExec = config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1";
+  const allowCodeEdit = config.permissions.allowCodeEdit;
+  const allowCodeWrite = config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1";
+  const proactiveEnabled = envBool("NEXUS_PROACTIVE") ?? config.proactive.enabled;
+  const proactiveNotifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? config.proactive.notifyTelegram;
+  const telegramAllowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
+  const telegramAllowFromCount = config.channels.telegram.allowFrom?.length ?? 0;
+  const telegramPairingEnabled = config.channels.telegram.pairing.enabled;
+
   const toolContext = {
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
@@ -133,15 +147,48 @@ export async function startGateway(params: { configPath: string; port?: number; 
     agentTracker,
     isolatedWorkers,
     telegram: undefined as unknown,
-    allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
-    allowCodeEdit: config.permissions.allowCodeEdit,
-    allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
+    allowShellExec,
+    allowCodeEdit,
+    allowCodeWrite,
     requestRestart: (reason: string, delayMs: number = 2500) => {
       requestRestartImpl(reason, delayMs);
     },
     nowMs: () => Date.now(),
     log,
   };
+
+  log(
+    "startup: capabilities " +
+      `shell_exec=${allowShellExec} ` +
+      `code_edit=${allowCodeEdit} ` +
+      `code_write=${allowCodeWrite} ` +
+      `proactive=${proactiveEnabled} ` +
+      `proactive_notify_telegram=${proactiveNotifyTelegram}`,
+  );
+  if (allowShellExec || allowCodeWrite || proactiveEnabled) {
+    log(
+      "startup: WARN autonomous and mutating capabilities are enabled; run only on trusted hosts/repositories and keep backups.",
+    );
+  }
+  if (config.channels.telegram.enabled) {
+    log(
+      "startup: telegram " +
+        `allow_all=${telegramAllowAll} ` +
+        `allow_from_count=${telegramAllowFromCount} ` +
+        `pairing_enabled=${telegramPairingEnabled}`,
+    );
+    if (telegramAllowAll) {
+      log("startup: WARN NEXUS_TELEGRAM_ALLOW_ALL=1 allows any Telegram user to message this bot.");
+    }
+    if (telegramAllowFromCount === 0 && !telegramPairingEnabled && !telegramAllowAll) {
+      log("startup: WARN telegram is enabled but no users can be admitted (allowFrom empty, pairing disabled).");
+    }
+    if ((allowShellExec || allowCodeWrite) && (telegramAllowAll || telegramPairingEnabled)) {
+      log(
+        "startup: WARN telegram-authenticated users can reach shell/code-mutation flows; keep allowlist/pair approvals tightly controlled.",
+      );
+    }
+  }
 
   const agent = new AgentService({
     llm,
@@ -698,6 +745,14 @@ function envInt(key: string): number | null {
   if (!raw) return null;
   const value = Number(raw);
   return Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
+function envBool(key: string): boolean | null {
+  const raw = (process.env[key] ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "y") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "n") return false;
+  return null;
 }
 
 function normalizeHttpBaseUrl(raw: string): string | null {

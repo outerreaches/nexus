@@ -43,6 +43,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { bootstrapState } = await import("../state/bootstrap.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
+      const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
       const { OpenAICompatClient } = await import("../llm/openai-compat.js");
       const { AgentService } = await import("../core/agent-service.js");
@@ -54,6 +55,12 @@ export async function runCli(argv: string[]): Promise<void> {
       const config = await loadConfig(options.config);
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
+      const initStatus = await getInitializationStatus(paths.stateDir);
+      if (!initStatus.initialized) {
+        process.stderr.write(`ERROR: ${getInitializationErrorMessage(initStatus)}\n`);
+        process.exitCode = 1;
+        return;
+      }
       const db = await openDatabase(paths.dbPath);
 
       const apiKey =
@@ -158,6 +165,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { bootstrapState } = await import("../state/bootstrap.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
+      const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
@@ -166,6 +174,12 @@ export async function runCli(argv: string[]): Promise<void> {
       const config = await loadConfig(options.config);
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
+      const initStatus = await getInitializationStatus(paths.stateDir);
+      if (!initStatus.initialized) {
+        process.stderr.write(`ERROR: ${getInitializationErrorMessage(initStatus)}\n`);
+        process.exitCode = 1;
+        return;
+      }
       const db = await openDatabase(paths.dbPath);
 
       try {
@@ -224,52 +238,66 @@ export async function runCli(argv: string[]): Promise<void> {
 
   program
     .command("init")
-    .description("Create config and bootstrap the Nexus state/workspace")
-    .option("--skip-onboarding", "Skip interactive onboarding prompts", false)
+    .description("Run required onboarding (interactive by default, optional JSON for headless setup)")
+    .option("--onboarding-json <path>", "Path to onboarding JSON for headless setup")
+    .option("--force", "Re-run initialization and overwrite onboarding files/config values", false)
     .action(async (opts) => {
       const options = program.opts<{ config: string }>();
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { bootstrapState } = await import("../state/bootstrap.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
-      const { runOnboardingIfNeeded } = await import("../state/onboarding.js");
+      const {
+        runOnboarding,
+        writeOnboardingFiles,
+        getInitializationStatus,
+        getInitializationErrorMessage,
+        loadInitOnboardingValuesFromFile,
+        applyInitTelegramConfig,
+        InitTelegramSchema,
+      } = await import("../state/onboarding.js");
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
 
-      // Run interactive onboarding if this is first time
-      await runOnboardingIfNeeded(paths.stateDir, { interactive: !opts.skipOnboarding });
-
-      process.stdout.write(`OK: initialized using config ${options.config}\n`);
-    });
-
-  program
-    .command("onboard")
-    .description("Run the interactive onboarding wizard to personalize your agent")
-    .option("--force", "Run onboarding even if files already exist", false)
-    .action(async (opts) => {
-      const options = program.opts<{ config: string }>();
-      const { ensureConfigExists, loadConfig } = await import("../state/config.js");
-      const { bootstrapState } = await import("../state/bootstrap.js");
-      const { resolveRuntimePaths } = await import("../state/paths.js");
-      const { runOnboarding, writeOnboardingFiles, shouldRunOnboarding } = await import("../state/onboarding.js");
-
-      await ensureConfigExists(options.config);
-      const config = await loadConfig(options.config);
-      await bootstrapState(config);
-      const paths = await resolveRuntimePaths(config);
-
-      const needsOnboarding = await shouldRunOnboarding(paths.stateDir);
-      if (!needsOnboarding && !opts.force) {
-        process.stdout.write("Personalization files already exist. Use --force to overwrite.\n");
+      const initStatus = await getInitializationStatus(paths.stateDir);
+      if (initStatus.initialized && !opts.force) {
+        process.stdout.write("Already initialized. Use `npm run dev -- init --force` to re-run onboarding.\n");
         return;
       }
-
-      const result = await runOnboarding(paths.stateDir);
-      if (!result.skipped) {
-        await writeOnboardingFiles(paths.stateDir, result.identity, result.userProfile);
+      if (!initStatus.initialized) {
+        process.stdout.write(`${getInitializationErrorMessage(initStatus)}\n`);
       }
+
+      let onboardingValues;
+      if (opts.onboardingJson) {
+        onboardingValues = await loadInitOnboardingValuesFromFile(String(opts.onboardingJson));
+      } else {
+        if (!process.stdin.isTTY) {
+          process.stderr.write(
+            "ERROR: interactive onboarding requires a TTY. Use --onboarding-json <path> for headless setup.\n",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const result = await runOnboarding(paths.stateDir, { includeTelegram: true });
+        if (result.skipped) {
+          process.stderr.write("ERROR: initialization canceled.\n");
+          process.exitCode = 1;
+          return;
+        }
+        onboardingValues = {
+          identity: result.identity,
+          userProfile: result.userProfile,
+          telegram: result.telegram ?? InitTelegramSchema.parse({}),
+        };
+      }
+
+      await writeOnboardingFiles(paths.stateDir, onboardingValues.identity, onboardingValues.userProfile);
+      await applyInitTelegramConfig(options.config, onboardingValues.telegram);
+
+      process.stdout.write(`OK: initialized using config ${options.config}\n`);
     });
 
   program

@@ -250,8 +250,10 @@ services:
       - NEXUS_WORKSPACE_DIR=/data/workspace
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
+      # WARNING: enables shell command execution from agent runs
       - NEXUS_ALLOW_SHELL_EXEC=1
-      - NEXUS_ALLOW_CODE_EDIT=1
+      # WARNING: enables direct code writes under root="code"
+      - NEXUS_ALLOW_CODE_WRITE=1
     env_file:
       - .env
     ports:
@@ -296,7 +298,7 @@ cat > /data/nexus/nexus.json << 'EOF'
     "openaiCompat": {
       "baseUrl": "https://openrouter.ai/api/v1",
       "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "anthropic/claude-sonnet-4"
+      "model": "moonshot/kimi-k2.5"
     }
   },
   "permissions": {

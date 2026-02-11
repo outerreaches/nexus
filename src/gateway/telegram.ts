@@ -115,8 +115,17 @@ export async function startTelegramBot(deps: {
   const bot = new Bot(token);
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
+  const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
+  const allowFrom = tg.allowFrom ?? [];
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
+  deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
+  if (allowAllUsers) {
+    deps.log("telegram: WARN allow_all is enabled; any Telegram user can reach the agent.");
+  }
+  if (allowFrom.length === 0 && !allowAllUsers && !tg.pairing.enabled) {
+    deps.log("telegram: WARN no static allowlist and pairing is disabled; no users can authenticate.");
+  }
 
   const sendOutput = async (chatId: number, output: string): Promise<void> => {
     const extracted = await extractTelegramImageAttachments(output);
@@ -144,12 +153,10 @@ export async function startTelegramBot(deps: {
       if (!userId || !chatId) return;
       deps.log(`telegram: msg user_id=${userId} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
 
-      const allowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
-      const allowFrom = tg.allowFrom ?? [];
       const allowed = isTelegramUserAllowed(deps.db, {
         userId,
         staticAllowFrom: allowFrom,
-        allowAll,
+        allowAll: allowAllUsers,
       });
       if (!allowed) {
         deps.log(`telegram: ignore user_id=${userId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);

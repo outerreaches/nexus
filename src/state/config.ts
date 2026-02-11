@@ -153,7 +153,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           openaiCompat: {
             baseUrl: "https://openrouter.ai/api/v1",
             apiKey: "${OPENROUTER_API_KEY}",
-            model: "openai/gpt-4o-mini",
+            model: "moonshot/kimi-k2.5",
           },
         },
         permissions: {

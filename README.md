@@ -3,10 +3,13 @@
 Lightweight, always-on multi-agent assistant (OpenClaw-inspired), starting with:
 - Gateway process (HTTP status + Telegram bot)
 - OpenRouter + OpenAI-compatible local models (LM Studio / Ollama) via a single OpenAI-compat client
-- Self-modifiable prompts via workspace personalization files (SOUL.md, IDENTITY.md, USER.md, etc.)
+- Self-modifiable prompts via state personalization files (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, etc.)
 - Basic tool loop (file ops, web search/fetch, guarded shell exec, managed browser, paper trade logging)
 
 ## Quick start
+
+Requirements:
+- Node.js 22+ (`package.json` enforces `>=22`)
 
 1) Install deps:
 ```bash
@@ -26,13 +29,22 @@ npm run dev -- init
 This launches an interactive onboarding wizard that creates personalized configuration files for your agent. You'll be asked for:
 - **Agent identity**: Name, emoji, personality vibe
 - **Your profile**: Name, timezone, context
+- **Telegram setup**: enable/disable, allowlist, pairing policy
 
-To skip the interactive prompts and use defaults:
+For true headless setup, provide onboarding values from JSON:
 ```bash
-npm run dev -- init --skip-onboarding
+npm run dev -- init --onboarding-json examples/init-onboarding.template.json
 ```
 
-4) Edit your config (default location is `~/.nexus/nexus.json`) and set secrets:
+An example template is included at `examples/init-onboarding.template.json`.
+Onboarding is required and gateway startup is blocked until initialization is complete.
+To re-run onboarding and overwrite generated files/config values, use:
+```bash
+npm run dev -- init --force
+```
+
+4) Configure secrets in your environment (typically `.env`) and keep placeholders in config (`~/.nexus/nexus.json`):
+- Default model is `moonshot/kimi-k2.5` (override via `llm.openaiCompat.model`).
 - `OPENROUTER_API_KEY`
 - `BRAVE_API_KEY` (optional; enables `web_search` via Brave)
 - `PERPLEXITY_API_KEY` (optional; enables `web_search` via Perplexity direct)
@@ -42,6 +54,15 @@ npm run dev -- init --skip-onboarding
 ```bash
 npm run dev -- gateway --verbose
 ```
+
+## Safety warning
+
+The default `docker-compose.yml` enables:
+- `NEXUS_PROACTIVE=1`
+- `NEXUS_ALLOW_SHELL_EXEC=1`
+- `NEXUS_ALLOW_CODE_WRITE=1`
+
+This allows autonomous background execution and direct code mutation. Run only on trusted hosts/repositories, keep backups, and lock Telegram access down with `channels.telegram.allowFrom` and/or pairing.
 
 ## Docker dev
 
@@ -108,8 +129,8 @@ Safety knob:
 Access control options (OpenClaw-style):
 - Static allowlist: set `channels.telegram.allowFrom` to your Telegram user id(s).
 - Pairing: if `channels.telegram.pairing.enabled` is true, an unknown user who DMs the bot receives a pairing code; the operator approves it via:
-  - `nexus pairing list telegram`
-  - `nexus pairing approve telegram <CODE>`
+  - `npm run dev -- pairing list telegram`
+  - `npm run dev -- pairing approve telegram <CODE>`
 
 Human-action responses (OTP/MFA/etc) without leaking secrets into the LLM:
 - The agent will create a request id via `human_request`.
@@ -132,7 +153,7 @@ For Gmail, the recommended approach is the official Gmail API (OAuth2), not brow
 
 3) Run authorization (stores tokens under `stateDir/gmail/oauth.json`):
 ```bash
-nexus gmail auth
+npm run dev -- gmail auth
 ```
 
 Docker auth example:
@@ -150,25 +171,43 @@ Agent tools:
 
 - `permissions.allowShellExec` (config) or `NEXUS_ALLOW_SHELL_EXEC=1` enables the `shell_exec` tool (disabled otherwise).
 - `permissions.allowCodeEdit` (config) controls whether `file_*` tools may target the running codebase via `root:"code"`.
+- `permissions.allowCodeWrite` (config) or `NEXUS_ALLOW_CODE_WRITE=1` enables code-root writes (`file_write`/`file_edit`/`file_edit_lines`).
 - `NEXUS_TELEGRAM_ALLOW_ALL=1` allows any Telegram user if `channels.telegram.allowFrom` is empty (not recommended).
+
+## CLI tool command
+
+Run a single tool directly from CLI:
+
+```bash
+npm run dev -- tool <tool_name> '<json_args>'
+```
+
+Example:
+```bash
+npm run dev -- tool query_data '{"instrument":"BTC","currency":"usd"}'
+```
+
+In Docker (when `nexus` binary is on PATH in the container):
+```bash
+docker exec -it nexus-nexus-1 nexus tool <tool_name> '<json_args>'
+```
 
 ## Custom tools
 
-Drop tools into `~/.nexus/tools/` and call `tools_reload` to load them without restarting:
+Drop tools into `stateDir/tools/` (default `~/.nexus/tools/`) and call `tools_reload` to load them without restarting:
 - `*.tool.json` (built-in simple types: `shell`, `http`)
 - `*.tool.mjs` (arbitrary JavaScript module; full power)
 
 ## Personalization & Soul Files
 
-Nexus uses a workspace-based personalization system inspired by [OpenClaw](https://github.com/openclaw/openclaw). All personalization files live in `~/.nexus/workspace/`:
+Nexus uses a state-based personalization system inspired by [OpenClaw](https://github.com/openclaw/openclaw). Personalization files live in `stateDir` (default `~/.nexus/`):
 
 | File | Purpose |
 |------|---------|
 | `SOUL.md` | Agent persona, philosophy, personality, boundaries |
-| `IDENTITY.md` | Agent name, emoji, avatar, vibe |
 | `USER.md` | Your profile — name, timezone, preferences, context |
 | `AGENTS.md` | Operating instructions, memory strategy, rules |
-| `TOOLS.md` | Tool usage guidelines and restrictions |
+| `CODEGUIDE.md` | Coder agent implementation and deploy workflow guidance |
 | `HEARTBEAT.md` | Optional proactive task checklist |
 | `NOTES.md` | Persistent scratchpad across sessions |
 
@@ -202,19 +241,14 @@ Config/env:
 
 ### First-Time Setup (Onboarding)
 
-When you run `nexus init` for the first time, an interactive onboarding wizard guides you through creating these files with your preferences.
-
-To re-run onboarding later:
-```bash
-npm run dev -- onboard           # Only runs if files don't exist
-npm run dev -- onboard --force   # Overwrites existing files
-```
+Run `npm run dev -- init` for guided interactive setup, or provide `--onboarding-json` for headless setup.
+Use `npm run dev -- init --force` whenever you want to re-run onboarding.
 
 ### Per-Agent Overrides
 
-For multi-agent setups, you can create agent-specific overrides in `~/.nexus/workspace/agents/<agent-id>/`:
+For multi-agent setups, you can create agent-specific overrides in `stateDir/agents/<agent-id>/` (default `~/.nexus/agents/<agent-id>/`):
 ```
-~/.nexus/workspace/
+~/.nexus/
 ├── SOUL.md                    # Default for all agents
 ├── agents/
 │   ├── researcher/
@@ -225,7 +259,7 @@ For multi-agent setups, you can create agent-specific overrides in `~/.nexus/wor
 
 ## Full self-modification
 
-- Prompts: edit personalization files in `~/.nexus/workspace/` (SOUL.md, IDENTITY.md, USER.md, etc.).
+- Prompts: edit personalization files in `stateDir` (default `~/.nexus/`) such as `SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`.
 - Code edits: `file_*` tools can target `root:"code"` (or absolute paths under the code dir). This is controlled by `permissions.allowCodeEdit` and `codeDir` in config.
 - Deploy code changes with `ha_deploy` (`action:"apply"`) in HA workflows.
 - `gateway_restart` is for non-HA restarts or emergency operations, not normal code rollout.

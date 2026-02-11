@@ -1,0 +1,22 @@
+{
+  "identity": {
+    "name": "Nexus",
+    "emoji": ":sparkles:",
+    "vibe": "Helpful, competent, direct"
+  },
+  "userProfile": {
+    "name": "Your Name",
+    "gender": true,
+    "timezone": "America/New_York",
+    "context": "Short context about your goals and environment."
+  },
+  "telegram": {
+    "enabled": true,
+    "allowFrom": [1000000001],
+    "pairing": {
+      "enabled": true,
+      "codeTtlMs": 3600000,
+      "maxPending": 3
+    }
+  }
+}
