@@ -98,9 +98,8 @@ export class OpenAICompatClient {
     );
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let res: Response;
     try {
-      res = await fetch(url, {
+      const res = await fetch(url, {
         method: "POST",
         headers: {
           ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
@@ -115,6 +114,17 @@ export class OpenAICompatClient {
         }),
         signal: controller.signal,
       });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+      }
+
+      const json = (await res.json()) as any;
+      const message = json?.choices?.[0]?.message as any;
+      const content = typeof message?.content === "string" ? message.content : null;
+      const toolCalls = normalizeToolCalls(message?.tool_calls);
+      // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
+      return { content, toolCalls };
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
         throw new Error(`LLM request timed out after ${timeoutMs}ms`);
@@ -123,18 +133,6 @@ export class OpenAICompatClient {
     } finally {
       clearTimeout(timeout);
     }
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
-    }
-
-    const json = (await res.json()) as any;
-    const message = json?.choices?.[0]?.message as any;
-    const content = typeof message?.content === "string" ? message.content : null;
-    const toolCalls = normalizeToolCalls(message?.tool_calls);
-    // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
-    return { content, toolCalls };
   }
 
   static parseToolArgs(raw: string): unknown {
