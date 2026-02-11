@@ -169,13 +169,15 @@ export async function startTelegramBot(deps: {
             ttlMs: tg.pairing.codeTtlMs,
             maxPending: tg.pairing.maxPending,
           });
-          if (req.created && req.code) {
+          if (req.status === "created") {
+            const ttlMinutes = Math.max(1, Math.ceil((req.expiresAt - nowMs) / 60_000));
             deps.log(`telegram: pairing request user_id=${userId} code=${req.code}`);
             await ctx.reply(
               [
                 "Pairing required.",
                 "",
                 `Your pairing code: ${req.code}`,
+                `Expires in about ${ttlMinutes} minute(s).`,
                 "",
                 "Ask the operator to approve it on the host running Nexus:",
                 `nexus pairing approve telegram ${req.code}`,
@@ -183,14 +185,36 @@ export async function startTelegramBot(deps: {
                 "Your messages will be ignored until approved.",
               ].join("\n"),
             );
-          } else if (req.code) {
+          } else if (req.status === "already_pending") {
+            const ttlMinutes = Math.max(1, Math.ceil((req.expiresAt - nowMs) / 60_000));
             deps.log(`telegram: pairing request already pending user_id=${userId} code=${req.code}`);
-          } else {
+            await ctx.reply(
+              [
+                "Pairing is still pending.",
+                "",
+                `Your existing pairing code: ${req.code}`,
+                `Expires in about ${ttlMinutes} minute(s).`,
+                "",
+                "Ask the operator to approve it on the host running Nexus:",
+                `nexus pairing approve telegram ${req.code}`,
+              ].join("\n"),
+            );
+          } else if (req.status === "max_pending") {
             deps.log(`telegram: pairing request not created user_id=${userId} reason=max_pending`);
+            await ctx.reply("Pairing queue is full right now. Please try again in a few minutes.");
+          } else {
+            deps.log(`telegram: pairing request not created user_id=${userId} reason=${req.reason}`);
+            await ctx.reply("Unable to issue a pairing code right now. Please try again shortly.");
           }
           return;
         }
 
+        if (tg.pairing.enabled && isGroupChat(ctx)) {
+          deps.log(`telegram: pairing request rejected user_id=${userId} reason=group_chat`);
+          await ctx.reply("Pairing is only supported in private chat. Please DM this bot and send /pair.");
+        } else {
+          await ctx.reply("You are not allowlisted for this bot.");
+        }
         return;
       }
 

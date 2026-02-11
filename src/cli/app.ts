@@ -294,7 +294,9 @@ export async function runCli(argv: string[]): Promise<void> {
         };
       }
 
-      await writeOnboardingFiles(paths.stateDir, onboardingValues.identity, onboardingValues.userProfile);
+      await writeOnboardingFiles(paths.stateDir, onboardingValues.identity, onboardingValues.userProfile, {
+        overwriteExisting: Boolean(opts.force),
+      });
       await applyInitTelegramConfig(options.config, onboardingValues.telegram);
 
       process.stdout.write(`OK: initialized using config ${options.config}\n`);
@@ -566,32 +568,41 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { allowTelegramUser, approvePairingRequest } = await import("../gateway/telegram-store.js");
+      const { allowTelegramUser, approvePairingRequest, getPairingRequest } = await import("../gateway/telegram-store.js");
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
       const paths = await resolveRuntimePaths(config);
       const db = await openDatabase(paths.dbPath);
       try {
-        const res = approvePairingRequest(db, { channel, code, nowMs: Date.now() });
-        if (!res.ok || !res.senderKey) {
-          process.stderr.write("ERROR: invalid or expired pairing code\n");
-          process.exitCode = 1;
-          return;
-        }
-
         if (channel !== "telegram") {
           process.stderr.write(`ERROR: approve is only implemented for telegram currently (got ${channel})\n`);
           process.exitCode = 1;
           return;
         }
 
-        const userId = Number(res.senderKey);
-        if (!Number.isFinite(userId)) {
-          process.stderr.write(`ERROR: pairing senderKey is not numeric: ${res.senderKey}\n`);
+        const nowMs = Date.now();
+        const pending = getPairingRequest(db, { channel, code, nowMs });
+        if (!pending?.senderKey) {
+          process.stderr.write("ERROR: invalid or expired pairing code\n");
           process.exitCode = 1;
           return;
         }
-        allowTelegramUser(db, { userId, nowMs: Date.now(), note: `paired via code ${code}` });
+
+        const userId = Number(pending.senderKey);
+        if (!Number.isFinite(userId)) {
+          process.stderr.write(`ERROR: pairing senderKey is not numeric: ${pending.senderKey}\n`);
+          process.exitCode = 1;
+          return;
+        }
+
+        const consumed = approvePairingRequest(db, { channel, code, nowMs });
+        if (!consumed.ok || !consumed.senderKey) {
+          process.stderr.write("ERROR: invalid, expired, or already-approved pairing code\n");
+          process.exitCode = 1;
+          return;
+        }
+
+        allowTelegramUser(db, { userId, nowMs, note: `paired via code ${code}` });
         process.stdout.write(`OK: allowlisted telegram user ${userId}\n`);
       } finally {
         db.close();

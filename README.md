@@ -42,6 +42,7 @@ To re-run onboarding and overwrite generated files/config values, use:
 ```bash
 npm run dev -- init --force
 ```
+Without `--force`, `init` preserves existing non-empty state markdown files and only creates missing/empty ones.
 
 4) Configure secrets in your environment (typically `.env`) and keep placeholders in config (`~/.nexus/nexus.json`):
 - Default model is `moonshot/kimi-k2.5` (override via `llm.openaiCompat.model`).

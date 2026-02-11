@@ -271,30 +271,41 @@ export async function writeOnboardingFiles(
   stateDir: string,
   identity: Identity,
   userProfile: UserProfile,
+  options: { overwriteExisting?: boolean } = {},
 ): Promise<void> {
+  const overwriteExisting = options.overwriteExisting ?? true;
+  let written = 0;
+  let kept = 0;
+
+  const writeOrKeep = async (filename: string, content: string) => {
+    if (!overwriteExisting) {
+      const existing = await readPersonalizationFile(stateDir, filename);
+      if (existing && existing.trim().length > 0) {
+        kept += 1;
+        console.log(`  ${fmt.dim("-")} ${filename} (kept existing)`);
+        return;
+      }
+    }
+    await writePersonalizationFile(stateDir, filename, content);
+    written += 1;
+    console.log(`  ${fmt.green("✓")} ${filename}`);
+  };
+
   console.log();
   console.log(fmt.dim("Creating personalization files..."));
 
-  await writePersonalizationFile(stateDir, SOUL_FILENAME, getDefaultSoulTemplate(identity));
-  console.log(`  ${fmt.green("✓")} ${SOUL_FILENAME}`);
-
-  await writePersonalizationFile(stateDir, AGENTS_FILENAME, getDefaultAgentsTemplate());
-  console.log(`  ${fmt.green("✓")} ${AGENTS_FILENAME}`);
-
-  await writePersonalizationFile(stateDir, USER_FILENAME, getDefaultUserTemplate(userProfile));
-  console.log(`  ${fmt.green("✓")} ${USER_FILENAME}`);
-
-  await writePersonalizationFile(stateDir, CODEGUIDE_FILENAME, getDefaultCodeguideTemplate());
-  console.log(`  ${fmt.green("✓")} ${CODEGUIDE_FILENAME}`);
-
-  await writePersonalizationFile(stateDir, HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
-  console.log(`  ${fmt.green("✓")} ${HEARTBEAT_FILENAME}`);
-
-  await writePersonalizationFile(stateDir, NOTES_FILENAME, getDefaultNotesTemplate());
-  console.log(`  ${fmt.green("✓")} ${NOTES_FILENAME}`);
+  await writeOrKeep(SOUL_FILENAME, getDefaultSoulTemplate(identity));
+  await writeOrKeep(AGENTS_FILENAME, getDefaultAgentsTemplate());
+  await writeOrKeep(USER_FILENAME, getDefaultUserTemplate(userProfile));
+  await writeOrKeep(CODEGUIDE_FILENAME, getDefaultCodeguideTemplate());
+  await writeOrKeep(HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
+  await writeOrKeep(NOTES_FILENAME, getDefaultNotesTemplate());
 
   console.log();
   console.log(fmt.bold(fmt.green("✓ Onboarding complete!")));
+  if (!overwriteExisting && kept > 0) {
+    console.log(fmt.dim(`  Preserved ${kept} existing file(s); wrote ${written} file(s).`));
+  }
   console.log(fmt.dim(`  Edit files in ${stateDir} to customize further.`));
   console.log();
 }
