@@ -142,6 +142,15 @@ Delivery modes:
 - `channels.telegram.mode="polling"` (default): simplest, works anywhere.
 - `channels.telegram.mode="webhook"`: requires `channels.telegram.webhookUrl` or `channels.telegram.webhookPublicUrl` and exposes `channels.telegram.webhookPath` on the gateway HTTP server.
 
+Telegram file I/O:
+- Inbound attachments auto-trigger analysis. Files are stored under `state/telegram-files/...` and indexed in blackboard entries.
+- Use `telegram_send_file` to send files back to users by path.
+- Env tuning:
+  - `NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE` (default `5`)
+  - `NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES` (default `20971520` = 20 MB)
+  - `NEXUS_TELEGRAM_FILE_BLACKBOARD_TTL_MS` (default `2592000000` = 30 days)
+  - `NEXUS_TELEGRAM_SEND_FILE_ALLOW_ANY=1` allows sending files outside `stateDir`/`workspaceDir`/`codeDir` (default: restricted to those roots)
+
 ## Gmail (OAuth API)
 
 For Gmail, the recommended approach is the official Gmail API (OAuth2), not browser-login automation.

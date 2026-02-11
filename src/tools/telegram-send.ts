@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
@@ -6,9 +9,70 @@ import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 
 type TelegramCtx = {
   sendOutput: (chatId: number, output: string) => Promise<void>;
+  sendFile: (chatId: number, filePath: string, options?: { caption?: string }) => Promise<void>;
   allowFrom: number[];
   allowAll: boolean;
 };
+
+type ToolCtx = {
+  db?: unknown;
+  telegram?: unknown;
+  request?: { channel: string; channelKey: string; agentId: string };
+  stateDir: string;
+  workspaceDir: string;
+  codeDir: string;
+};
+
+function isWithinPath(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+async function resolveTelegramFilePath(requestedPath: string, ctx: ToolCtx): Promise<string> {
+  const raw = requestedPath.trim();
+  if (!raw) throw new Error("path is required");
+
+  const candidates: string[] = [];
+  if (path.isAbsolute(raw)) {
+    candidates.push(path.resolve(raw));
+  } else {
+    if (raw.startsWith("state/")) {
+      candidates.push(path.resolve(path.join(ctx.stateDir, raw.slice("state/".length))));
+    } else if (raw.startsWith("workspace/")) {
+      candidates.push(path.resolve(path.join(ctx.workspaceDir, raw.slice("workspace/".length))));
+    } else if (raw.startsWith("code/")) {
+      candidates.push(path.resolve(path.join(ctx.codeDir, raw.slice("code/".length))));
+    }
+    candidates.push(
+      path.resolve(path.join(ctx.stateDir, raw)),
+      path.resolve(path.join(ctx.workspaceDir, raw)),
+      path.resolve(path.join(ctx.codeDir, raw)),
+      path.resolve(raw),
+    );
+  }
+
+  const allowAnyPath = process.env.NEXUS_TELEGRAM_SEND_FILE_ALLOW_ANY === "1";
+  const allowedRoots = [path.resolve(ctx.stateDir), path.resolve(ctx.workspaceDir), path.resolve(ctx.codeDir)];
+
+  for (const candidate of uniqueStrings(candidates)) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (!stat.isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    if (!allowAnyPath && !allowedRoots.some((root) => isWithinPath(candidate, root))) {
+      throw new Error("file path is outside allowed roots (set NEXUS_TELEGRAM_SEND_FILE_ALLOW_ANY=1 to override)");
+    }
+    return candidate;
+  }
+
+  throw new Error(`file not found: ${requestedPath}`);
+}
 
 async function resolveDefaultTelegramChatId(db: NexusDatabase, agentId: string): Promise<number | null> {
   try {
@@ -32,6 +96,18 @@ async function resolveDefaultTelegramChatId(db: NexusDatabase, agentId: string):
   }
 }
 
+async function resolveTelegramChatId(argsChatId: number | undefined, ctx: ToolCtx, db: NexusDatabase): Promise<number | null> {
+  let chatId: number | null = argsChatId ?? null;
+  if (!chatId && ctx.request?.channel === "telegram") {
+    const id = Number(ctx.request.channelKey);
+    if (Number.isFinite(id)) chatId = id;
+  }
+  if (!chatId && ctx.request?.agentId) {
+    chatId = await resolveDefaultTelegramChatId(db, ctx.request.agentId);
+  }
+  return chatId;
+}
+
 export const telegramSend = defineTool({
   name: "telegram_send",
   description:
@@ -41,20 +117,14 @@ export const telegramSend = defineTool({
     chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
   }),
   execute: async (args, ctx) => {
-    const db = ctx.db as NexusDatabase | undefined;
+    const toolCtx = ctx as ToolCtx;
+    const db = toolCtx.db as NexusDatabase | undefined;
     if (!db) return "ERROR: database is not available";
 
-    const tg = ctx.telegram as TelegramCtx | undefined;
+    const tg = toolCtx.telegram as TelegramCtx | undefined;
     if (!tg) return "ERROR: telegram is not configured";
 
-    let chatId: number | null = args.chatId ?? null;
-    if (!chatId && ctx.request?.channel === "telegram") {
-      const id = Number(ctx.request.channelKey);
-      if (Number.isFinite(id)) chatId = id;
-    }
-    if (!chatId && ctx.request?.agentId) {
-      chatId = await resolveDefaultTelegramChatId(db, ctx.request.agentId);
-    }
+    const chatId = await resolveTelegramChatId(args.chatId, toolCtx, db);
 
     if (!chatId) return "ERROR: missing chatId (no active/recent telegram chat found)";
     if (chatId <= 0) return "ERROR: only private-chat chatIds are supported for telegram_send";
@@ -71,3 +141,42 @@ export const telegramSend = defineTool({
   },
 });
 
+export const telegramSendFile = defineTool({
+  name: "telegram_send_file",
+  description:
+    "Send a file to Telegram. If chatId is omitted, uses the current telegram chat (if applicable) or most recent telegram chat for this agent. Supports images and documents.",
+  parameters: z.object({
+    path: z.string().min(1).describe("Absolute or repo-relative path to a file"),
+    caption: z.string().max(1024).optional().describe("Optional Telegram caption"),
+    chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
+  }),
+  execute: async (args, ctx) => {
+    const toolCtx = ctx as ToolCtx;
+    const db = toolCtx.db as NexusDatabase | undefined;
+    if (!db) return "ERROR: database is not available";
+
+    const tg = toolCtx.telegram as TelegramCtx | undefined;
+    if (!tg) return "ERROR: telegram is not configured";
+
+    const chatId = await resolveTelegramChatId(args.chatId, toolCtx, db);
+    if (!chatId) return "ERROR: missing chatId (no active/recent telegram chat found)";
+    if (chatId <= 0) return "ERROR: only private-chat chatIds are supported for telegram_send_file";
+
+    const allowed = isTelegramUserAllowed(db, { userId: chatId, staticAllowFrom: tg.allowFrom ?? [], allowAll: Boolean(tg.allowAll) });
+    if (!allowed) return "ERROR: chatId is not allowlisted";
+
+    let filePath: string;
+    try {
+      filePath = await resolveTelegramFilePath(args.path, toolCtx);
+    } catch (err) {
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    try {
+      await tg.sendFile(chatId, filePath, { caption: args.caption });
+      return `OK: sent ${path.basename(filePath)} to chat ${chatId}`;
+    } catch (err) {
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});

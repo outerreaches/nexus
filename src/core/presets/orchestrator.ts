@@ -67,6 +67,7 @@ export const preset: AgentPreset = {
     "job_delete",
     // Communication
     "telegram_send",
+    "telegram_send_file",
     "human_request",
     "human_status",
     // Credentials

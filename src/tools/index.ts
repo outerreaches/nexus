@@ -15,7 +15,7 @@ import { gmailGetMessage, gmailProfile, gmailSearch, gmailSend } from "./gmail.j
 import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
 import { humanRequest, humanStatus } from "./human-actions.js";
 import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobPause, jobResume, jobRunGet, jobRunNow, jobRuns, jobUpdate } from "./jobs.js";
-import { telegramSend } from "./telegram-send.js";
+import { telegramSend, telegramSendFile } from "./telegram-send.js";
 import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
 import { skillCreate, skillList, skillUpdate } from "./skills.js";
 import { budgetStatus } from "./budget.js";
@@ -73,6 +73,7 @@ export function getBuiltInTools(): Tool[] {
     humanRequest,
     humanStatus,
     telegramSend,
+    telegramSendFile,
     jobCreate,
     jobList,
     jobGet,

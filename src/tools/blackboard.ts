@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { cleanupManagedBlackboardAttachments } from "../storage/blackboard-attachments.js";
 import type { NexusDatabase } from "../storage/database.js";
 
 function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
@@ -127,8 +128,14 @@ export const readFromBlackboard = defineTool({
 
     const nowMs = ctx.nowMs();
 
-    // Prune expired entries on read.
-    db.db.prepare("DELETE FROM blackboard WHERE expires_at IS NOT NULL AND expires_at <= ?").run(nowMs);
+    // Prune expired entries on read and cleanup managed attachment files.
+    const expiredRows = db.db
+      .prepare("SELECT attachments_json FROM blackboard WHERE expires_at IS NOT NULL AND expires_at <= ?")
+      .all(nowMs) as { attachments_json: string | null }[];
+    if (expiredRows.length > 0) {
+      db.db.prepare("DELETE FROM blackboard WHERE expires_at IS NOT NULL AND expires_at <= ?").run(nowMs);
+      await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows: expiredRows });
+    }
 
     const scope = sessionScope(ctx);
     let rows: Record<string, unknown>[];
@@ -190,9 +197,13 @@ export const blackboardDelete = defineTool({
     if (!db) return "ERROR: database is not available";
 
     const placeholders = args.ids.map(() => "?").join(", ");
+    const rows = db.db
+      .prepare(`SELECT attachments_json FROM blackboard WHERE id IN (${placeholders})`)
+      .all(...args.ids) as { attachments_json: string | null }[];
     const stmt = db.db.prepare(`DELETE FROM blackboard WHERE id IN (${placeholders})`);
     const res = stmt.run(...args.ids);
-    return `OK: deleted ${res.changes} entries`;
+    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+    return `OK: deleted ${res.changes} entries (attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
   },
 });
 
@@ -207,13 +218,19 @@ export const blackboardClear = defineTool({
     if (!db) return "ERROR: database is not available";
 
     if (args.scope === "all") {
+      const rows = db.db.prepare("SELECT attachments_json FROM blackboard").all() as { attachments_json: string | null }[];
       const res = db.db.prepare("DELETE FROM blackboard").run();
-      return `OK: deleted ${res.changes} entries (all scopes)`;
+      const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+      return `OK: deleted ${res.changes} entries (all scopes, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
     }
 
     const scope = args.scope === "global" ? "global" : sessionScope(ctx);
+    const rows = db.db
+      .prepare("SELECT attachments_json FROM blackboard WHERE session_scope = ?")
+      .all(scope) as { attachments_json: string | null }[];
     const res = db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scope);
-    return `OK: deleted ${res.changes} entries (scope=${scope})`;
+    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+    return `OK: deleted ${res.changes} entries (scope=${scope}, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
   },
 });
 
@@ -255,8 +272,12 @@ export const blackboardPrune = defineTool({
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = db.db
+      .prepare(`SELECT attachments_json FROM blackboard ${where}`)
+      .all(...params) as { attachments_json: string | null }[];
     const res = db.db.prepare(`DELETE FROM blackboard ${where}`).run(...params);
-    return `OK: deleted ${res.changes} entries`;
+    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+    return `OK: deleted ${res.changes} entries (attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
   },
 });
 

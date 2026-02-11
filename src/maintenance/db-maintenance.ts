@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 import type { NexusDatabase } from "../storage/database.js";
+import { cleanupManagedBlackboardAttachments } from "../storage/blackboard-attachments.js";
 import { randomId } from "../data-intake/utils.js";
 
 export type MaintenanceConfig = {
@@ -140,6 +141,7 @@ export async function runMaintenance(params: {
           db,
           table,
           config: TTL_CONFIG[table]!,
+          stateDir,
           nowMs,
           dryRun,
           log,
@@ -341,11 +343,12 @@ async function ttlCleanup(params: {
   db: NexusDatabase;
   table: string;
   config: { expiresCol: string; statusCol?: string; expiredStatus?: string };
+  stateDir: string;
   nowMs: number;
   dryRun: boolean;
   log: (msg: string) => void;
 }): Promise<number> {
-  const { db, table, config, nowMs, dryRun, log } = params;
+  const { db, table, config, stateDir, nowMs, dryRun, log } = params;
   const { expiresCol, statusCol, expiredStatus } = config;
 
   // For human_actions, update status to 'expired' instead of deleting
@@ -375,7 +378,20 @@ async function ttlCleanup(params: {
   log(`maintenance: ttl ${table}: ${cnt} rows to delete`);
   if (dryRun) return cnt;
 
+  let attachmentRows: { attachments_json: string | null }[] = [];
+  if (table === "blackboard") {
+    attachmentRows = db.db
+      .prepare(`SELECT attachments_json FROM ${table} WHERE ${expiresCol} IS NOT NULL AND ${expiresCol} <= ?`)
+      .all(nowMs) as { attachments_json: string | null }[];
+  }
+
   const res = db.db.prepare(`DELETE FROM ${table} WHERE ${expiresCol} IS NOT NULL AND ${expiresCol} <= ?`).run(nowMs);
+  if (table === "blackboard" && attachmentRows.length > 0) {
+    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir, rows: attachmentRows });
+    if (cleanup.removed > 0 || cleanup.failed > 0) {
+      log(`maintenance: ttl blackboard attachments removed=${cleanup.removed} failed=${cleanup.failed}`);
+    }
+  }
   return res.changes;
 }
 

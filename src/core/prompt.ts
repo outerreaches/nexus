@@ -85,7 +85,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- Use `memory_store` / `memory_recall` / `memory_search` to persist learnings across sessions. Use `reflect` to extract insights from recent conversations.",
       "- Use `skill_create` to save reusable playbooks for tasks you learn to do well.",
       "- Use `budget_status` to check remaining iterations/tool calls during complex tasks.",
-      "- To notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`.",
+      "- To notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`. To send files, use `telegram_send_file`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`.",
       "- Your personality/state files (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, NOTES.md, CODEGUIDE.md) live in the **state** root. To update, first read the file. When adding standing instructions (especially to HEARTBEAT.md), append with `file_write` and preserve existing content unless explicitly asked to replace it.",
       "- For code changes: spawn a `coder` and ask for one end-to-end run (edit `root:\"code\"`, validate with `npm run typecheck` + `npm run build`, then deploy via `ha_deploy` action=`apply`).",

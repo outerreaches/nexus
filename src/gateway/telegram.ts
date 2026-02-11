@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
@@ -6,8 +7,34 @@ import { Bot, Context, InputFile } from "grammy";
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { getOrCreateSessionId } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
 import { fulfillHumanAction } from "../storage/human-actions.js";
+import { detectMimeType, extensionFromMime, isImageMimeType, sanitizeTelegramFilename } from "./telegram-files.js";
+
+const DEFAULT_MAX_INBOUND_FILES_PER_MESSAGE = 5;
+const DEFAULT_MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_FILE_BLACKBOARD_TTL_MS = 30 * 24 * 60 * 60_000;
+
+type IncomingAttachment = {
+  kind: string;
+  fileId: string;
+  fileUniqueId?: string;
+  mimeType?: string;
+  originalName?: string;
+  declaredSizeBytes?: number;
+};
+
+type StoredAttachment = {
+  kind: string;
+  absolutePath: string;
+  statePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  originalName: string;
+  fileId: string;
+  fileUniqueId?: string;
+};
 
 function splitTelegramMessage(text: string, maxLen: number = 3900): string[] {
   const chunks: string[] = [];
@@ -31,19 +58,52 @@ function isEnvPlaceholder(value: string): boolean {
   return /^\$\{[A-Z0-9_]+\}$/.test(value);
 }
 
-function joinPublicUrl(publicUrl: string, path: string): string {
+function joinPublicUrl(publicUrl: string, pathValue: string): string {
   const base = publicUrl.endsWith("/") ? publicUrl : `${publicUrl}/`;
-  const p = path.startsWith("/") ? path.slice(1) : path;
+  const p = pathValue.startsWith("/") ? pathValue.slice(1) : pathValue;
   return new URL(p, base).toString();
+}
+
+function toPosixPath(p: string): string {
+  return p.split(path.sep).join("/");
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let idx = 0;
+  let val = bytes;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
+  }
+  return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function envInt(name: string, fallback: number, opts: { min?: number; max?: number } = {}): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const intVal = Math.floor(parsed);
+  if (typeof opts.min === "number" && intVal < opts.min) return opts.min;
+  if (typeof opts.max === "number" && intVal > opts.max) return opts.max;
+  return intVal;
+}
+
+function sanitizeMessageText(raw: string, botUsername: string): string {
+  return raw
+    .replace(botUsername ? new RegExp(`@${botUsername}\\b`, "g") : /$^/, "")
+    .replace(/^\/nexus\b\s*/i, "")
+    .replace(/^\/n\b\s*/i, "")
+    .trim();
 }
 
 function normalizeInlineFilePath(line: string): string | null {
   let s = line.trim();
   if (!s) return null;
-  // Strip common prefixes
   s = s.replace(/^[-*]\s+/, "");
   s = s.replace(/^(screenshot|image|path)\s*:\s*/i, "");
-  // Strip common wrappers
   s = s.replace(/^`+/, "").replace(/`+$/, "");
   s = s.replace(/^"+/, "").replace(/"+$/, "");
   s = s.replace(/^'+/, "").replace(/'+$/, "");
@@ -52,7 +112,7 @@ function normalizeInlineFilePath(line: string): string | null {
     try {
       s = new URL(s).pathname;
     } catch {
-      // ignore
+      // ignore malformed URL
     }
   }
   if (!s.startsWith("/")) return null;
@@ -72,14 +132,11 @@ async function extractTelegramImageAttachments(output: string): Promise<{ text: 
       kept.push(line);
       continue;
     }
-
     const full = path.resolve(candidate);
-    // Prevent accidental exfiltration of arbitrary files: only allow under stateDir.
-    if (!(full === stateDir || full.startsWith(stateDir + path.sep))) {
+    if (!(full === stateDir || full.startsWith(`${stateDir}${path.sep}`))) {
       kept.push(line);
       continue;
     }
-
     try {
       const st = await fs.stat(full);
       if (st.isFile()) {
@@ -87,14 +144,281 @@ async function extractTelegramImageAttachments(output: string): Promise<{ text: 
         continue;
       }
     } catch {
-      // fall through
+      // ignore missing files
     }
-
     kept.push(line);
   }
 
-  const unique = Array.from(new Set(images));
-  return { text: kept.join("\n").trimEnd(), imagePaths: unique };
+  return { text: kept.join("\n").trimEnd(), imagePaths: Array.from(new Set(images)) };
+}
+
+function collectIncomingAttachments(message: Record<string, unknown> | undefined): IncomingAttachment[] {
+  if (!message) return [];
+  const out: IncomingAttachment[] = [];
+  const m = message as Record<string, any>;
+
+  const doc = m.document as Record<string, unknown> | undefined;
+  if (doc?.file_id && typeof doc.file_id === "string") {
+    out.push({
+      kind: "document",
+      fileId: doc.file_id,
+      fileUniqueId: typeof doc.file_unique_id === "string" ? doc.file_unique_id : undefined,
+      mimeType: typeof doc.mime_type === "string" ? doc.mime_type : undefined,
+      originalName: typeof doc.file_name === "string" ? doc.file_name : undefined,
+      declaredSizeBytes: typeof doc.file_size === "number" ? doc.file_size : undefined,
+    });
+  }
+
+  const photos = Array.isArray(m.photo) ? (m.photo as Record<string, unknown>[]) : [];
+  if (photos.length > 0) {
+    const chosen = photos[photos.length - 1] as Record<string, unknown>;
+    if (chosen?.file_id && typeof chosen.file_id === "string") {
+      out.push({
+        kind: "photo",
+        fileId: chosen.file_id,
+        fileUniqueId: typeof chosen.file_unique_id === "string" ? chosen.file_unique_id : undefined,
+        mimeType: "image/jpeg",
+        originalName: undefined,
+        declaredSizeBytes: typeof chosen.file_size === "number" ? chosen.file_size : undefined,
+      });
+    }
+  }
+
+  const video = m.video as Record<string, unknown> | undefined;
+  if (video?.file_id && typeof video.file_id === "string") {
+    out.push({
+      kind: "video",
+      fileId: video.file_id,
+      fileUniqueId: typeof video.file_unique_id === "string" ? video.file_unique_id : undefined,
+      mimeType: typeof video.mime_type === "string" ? video.mime_type : "video/mp4",
+      originalName: typeof video.file_name === "string" ? video.file_name : undefined,
+      declaredSizeBytes: typeof video.file_size === "number" ? video.file_size : undefined,
+    });
+  }
+
+  const audio = m.audio as Record<string, unknown> | undefined;
+  if (audio?.file_id && typeof audio.file_id === "string") {
+    out.push({
+      kind: "audio",
+      fileId: audio.file_id,
+      fileUniqueId: typeof audio.file_unique_id === "string" ? audio.file_unique_id : undefined,
+      mimeType: typeof audio.mime_type === "string" ? audio.mime_type : "audio/mpeg",
+      originalName: typeof audio.file_name === "string" ? audio.file_name : undefined,
+      declaredSizeBytes: typeof audio.file_size === "number" ? audio.file_size : undefined,
+    });
+  }
+
+  const voice = m.voice as Record<string, unknown> | undefined;
+  if (voice?.file_id && typeof voice.file_id === "string") {
+    out.push({
+      kind: "voice",
+      fileId: voice.file_id,
+      fileUniqueId: typeof voice.file_unique_id === "string" ? voice.file_unique_id : undefined,
+      mimeType: "audio/ogg",
+      originalName: undefined,
+      declaredSizeBytes: typeof voice.file_size === "number" ? voice.file_size : undefined,
+    });
+  }
+
+  const animation = m.animation as Record<string, unknown> | undefined;
+  if (animation?.file_id && typeof animation.file_id === "string") {
+    out.push({
+      kind: "animation",
+      fileId: animation.file_id,
+      fileUniqueId: typeof animation.file_unique_id === "string" ? animation.file_unique_id : undefined,
+      mimeType: typeof animation.mime_type === "string" ? animation.mime_type : "video/mp4",
+      originalName: typeof animation.file_name === "string" ? animation.file_name : undefined,
+      declaredSizeBytes: typeof animation.file_size === "number" ? animation.file_size : undefined,
+    });
+  }
+
+  const sticker = m.sticker as Record<string, unknown> | undefined;
+  if (sticker?.file_id && typeof sticker.file_id === "string") {
+    out.push({
+      kind: "sticker",
+      fileId: sticker.file_id,
+      fileUniqueId: typeof sticker.file_unique_id === "string" ? sticker.file_unique_id : undefined,
+      mimeType: typeof sticker.mime_type === "string" ? sticker.mime_type : "image/webp",
+      originalName: undefined,
+      declaredSizeBytes: typeof sticker.file_size === "number" ? sticker.file_size : undefined,
+    });
+  }
+
+  return out;
+}
+
+async function ingestIncomingAttachments(params: {
+  bot: Bot;
+  token: string;
+  stateDir: string;
+  chatId: number;
+  messageId: number;
+  nowMs: number;
+  maxFileBytes: number;
+  attachments: IncomingAttachment[];
+  log: (msg: string) => void;
+}): Promise<{ stored: StoredAttachment[]; rejected: string[] }> {
+  const { bot, token, stateDir, chatId, messageId, nowMs, maxFileBytes, attachments, log } = params;
+  const stored: StoredAttachment[] = [];
+  const rejected: string[] = [];
+  const day = new Date(nowMs).toISOString().slice(0, 10);
+  const relativeBaseDir = path.join("telegram-files", String(chatId), day, String(messageId));
+  const absoluteBaseDir = path.join(stateDir, relativeBaseDir);
+  await fs.mkdir(absoluteBaseDir, { recursive: true });
+
+  for (let i = 0; i < attachments.length; i += 1) {
+    const attachment = attachments[i]!;
+    const label = attachment.originalName ?? `${attachment.kind}-${i + 1}`;
+    if (attachment.declaredSizeBytes && attachment.declaredSizeBytes > maxFileBytes) {
+      rejected.push(`${label}: exceeds ${formatBytes(maxFileBytes)}`);
+      continue;
+    }
+
+    try {
+      const file = await bot.api.getFile(attachment.fileId);
+      if (typeof file.file_size === "number" && file.file_size > maxFileBytes) {
+        rejected.push(`${label}: exceeds ${formatBytes(maxFileBytes)}`);
+        continue;
+      }
+      const remotePath = file.file_path;
+      if (!remotePath) {
+        rejected.push(`${label}: Telegram did not return a downloadable path`);
+        continue;
+      }
+
+      const downloadUrl = `https://api.telegram.org/file/bot${token}/${remotePath}`;
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        rejected.push(`${label}: download failed (${response.status})`);
+        continue;
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > maxFileBytes) {
+        rejected.push(`${label}: exceeds ${formatBytes(maxFileBytes)} after download`);
+        continue;
+      }
+
+      let fileName = attachment.originalName ? sanitizeTelegramFilename(attachment.originalName) : "";
+      const fromRemoteExt = path.extname(remotePath);
+      const fromMimeExt = extensionFromMime(attachment.mimeType);
+      const inferredExt = fromRemoteExt || fromMimeExt || ".bin";
+      if (!fileName) fileName = `${attachment.kind}-${i + 1}${inferredExt}`;
+      if (!path.extname(fileName)) fileName = `${fileName}${inferredExt}`;
+      const prefixedFileName = `${String(i + 1).padStart(2, "0")}-${fileName}`;
+
+      const relativePath = path.join(relativeBaseDir, prefixedFileName);
+      const absolutePath = path.join(stateDir, relativePath);
+      await fs.writeFile(absolutePath, bytes);
+
+      const detectedMimeType = detectMimeType(prefixedFileName, attachment.mimeType);
+      stored.push({
+        kind: attachment.kind,
+        absolutePath,
+        statePath: toPosixPath(relativePath),
+        mimeType: detectedMimeType,
+        sizeBytes: bytes.length,
+        originalName: fileName,
+        fileId: attachment.fileId,
+        fileUniqueId: attachment.fileUniqueId,
+      });
+      log(
+        `telegram: file_ingest chat_id=${chatId} message_id=${messageId} kind=${attachment.kind} bytes=${bytes.length} path=${absolutePath}`,
+      );
+    } catch (err) {
+      rejected.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { stored, rejected };
+}
+
+function buildAttachmentDispatchText(params: {
+  cleanedText: string;
+  blackboardId: string;
+  files: StoredAttachment[];
+  rejected: string[];
+}): string {
+  const task = params.cleanedText || "Please analyze the attached file(s).";
+  const lines = [
+    "user attached file:",
+    `blackboard entry id: ${params.blackboardId}`,
+    ...params.files.map(
+      (f, i) =>
+        `${i + 1}. ${f.originalName} (${f.mimeType}, ${formatBytes(f.sizeBytes)}) at state/${f.statePath}`,
+    ),
+  ];
+  if (params.rejected.length > 0) {
+    lines.push(`skipped files: ${params.rejected.join("; ")}`);
+  }
+  return `${task}\n\n${lines.join("\n")}`;
+}
+
+function writeTelegramUploadBlackboardEntry(params: {
+  db: NexusDatabase;
+  chatId: number;
+  userId: number;
+  messageId: number;
+  sessionId: string;
+  agentId: string;
+  nowMs: number;
+  ttlMs: number;
+  captionText: string;
+  files: StoredAttachment[];
+}): string {
+  const {
+    db, chatId, userId, messageId, sessionId, agentId, nowMs, ttlMs, captionText, files,
+  } = params;
+  const id = crypto.randomUUID();
+  const expiresAt = nowMs + ttlMs;
+  const title = `Telegram upload from ${userId} (${files.length} file${files.length === 1 ? "" : "s"})`;
+  const contentLines = [
+    `Telegram upload from user ${userId} in chat ${chatId}.`,
+    captionText ? `Caption: ${captionText}` : "Caption: (none)",
+    "Files:",
+    ...files.map(
+      (f, i) => `${i + 1}. ${f.originalName} (${f.mimeType}, ${formatBytes(f.sizeBytes)}) at state/${f.statePath}`,
+    ),
+  ];
+  const attachments = files.map((f) => ({
+    path: f.absolutePath,
+    mimeType: f.mimeType,
+    statePath: f.statePath,
+    filename: f.originalName,
+    sizeBytes: f.sizeBytes,
+    kind: f.kind,
+    telegramFileId: f.fileId,
+    telegramFileUniqueId: f.fileUniqueId,
+  }));
+  const metadata = {
+    source: "telegram_upload",
+    chatId,
+    userId,
+    messageId,
+    fileCount: files.length,
+    ttlMs,
+  };
+
+  db.db
+    .prepare(
+      `INSERT INTO blackboard (id, session_scope, type, agent_id, agent_preset, title, content, attachments_json, metadata_json, created_at, last_accessed_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      sessionId,
+      "artifact",
+      agentId,
+      "telegram-upload",
+      title,
+      contentLines.join("\n"),
+      JSON.stringify(attachments),
+      JSON.stringify(metadata),
+      nowMs,
+      nowMs,
+      expiresAt,
+    );
+
+  return id;
 }
 
 export async function startTelegramBot(deps: {
@@ -104,7 +428,11 @@ export async function startTelegramBot(deps: {
   db: NexusDatabase;
   app: Hono;
   log: (msg: string) => void;
-}): Promise<{ stop: () => Promise<void>; sendOutput: (chatId: number, output: string) => Promise<void> } | null> {
+}): Promise<{
+  stop: () => Promise<void>;
+  sendOutput: (chatId: number, output: string) => Promise<void>;
+  sendFile: (chatId: number, filePath: string, options?: { caption?: string }) => Promise<void>;
+} | null> {
   const tg = deps.config.channels.telegram;
   if (!tg.enabled) return null;
   const token = tg.token && !isEnvPlaceholder(tg.token) ? tg.token : process.env.TELEGRAM_BOT_TOKEN;
@@ -117,15 +445,42 @@ export async function startTelegramBot(deps: {
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
   const allowFrom = tg.allowFrom ?? [];
+  const stateDir = process.env.NEXUS_STATE_DIR ?? "/data/nexus";
+  const maxInboundFilesPerMessage = envInt("NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE", DEFAULT_MAX_INBOUND_FILES_PER_MESSAGE, {
+    min: 1,
+    max: 20,
+  });
+  const maxInboundFileBytes = envInt("NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES", DEFAULT_MAX_INBOUND_FILE_BYTES, {
+    min: 256 * 1024,
+    max: 200 * 1024 * 1024,
+  });
+  const fileBlackboardTtlMs = envInt("NEXUS_TELEGRAM_FILE_BLACKBOARD_TTL_MS", DEFAULT_FILE_BLACKBOARD_TTL_MS, {
+    min: 60_000,
+    max: 180 * 24 * 60 * 60_000,
+  });
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
-  if (allowAllUsers) {
-    deps.log("telegram: WARN allow_all is enabled; any Telegram user can reach the agent.");
-  }
+  deps.log(
+    `telegram: file_io max_files_per_msg=${maxInboundFilesPerMessage} max_file_bytes=${maxInboundFileBytes} blackboard_ttl_ms=${fileBlackboardTtlMs}`,
+  );
+  if (allowAllUsers) deps.log("telegram: WARN allow_all is enabled; any Telegram user can reach the agent.");
   if (allowFrom.length === 0 && !allowAllUsers && !tg.pairing.enabled) {
     deps.log("telegram: WARN no static allowlist and pairing is disabled; no users can authenticate.");
   }
+
+  const sendFile = async (chatId: number, filePath: string, options?: { caption?: string }): Promise<void> => {
+    const absolute = path.resolve(filePath);
+    const stat = await fs.stat(absolute);
+    if (!stat.isFile()) throw new Error(`not a file: ${absolute}`);
+    const mimeType = detectMimeType(absolute);
+    deps.log(`telegram: send_file chat_id=${chatId} mime=${mimeType} bytes=${stat.size} path=${absolute}`);
+    if (isImageMimeType(mimeType)) {
+      await bot.api.sendPhoto(chatId, new InputFile(absolute), { caption: options?.caption });
+      return;
+    }
+    await bot.api.sendDocument(chatId, new InputFile(absolute), { caption: options?.caption });
+  };
 
   const sendOutput = async (chatId: number, output: string): Promise<void> => {
     const extracted = await extractTelegramImageAttachments(output);
@@ -137,19 +492,26 @@ export async function startTelegramBot(deps: {
     }
     for (const img of extracted.imagePaths) {
       try {
-        await bot.api.sendPhoto(chatId, new InputFile(img), { caption: path.basename(img) });
-      } catch (e) {
-        deps.log(`telegram: failed to send image ${img}: ${e instanceof Error ? e.message : String(e)}`);
+        await sendFile(chatId, img, { caption: path.basename(img) });
+      } catch (err) {
+        deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
         await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`);
       }
     }
   };
 
-  bot.on("message:text", async (ctx) => {
+  bot.on("message", async (ctx) => {
     try {
-      const text = ctx.message?.text ?? "";
+      const message = (ctx.message ?? {}) as unknown as Record<string, unknown>;
+      const text = typeof (message as { text?: unknown }).text === "string" ? String((message as { text?: unknown }).text) : "";
+      const caption =
+        typeof (message as { caption?: unknown }).caption === "string" ? String((message as { caption?: unknown }).caption) : "";
+      const rawInputText = text || caption;
       const userId = ctx.from?.id;
       const chatId = ctx.chat?.id;
+      const messageId = typeof (message as { message_id?: unknown }).message_id === "number"
+        ? Number((message as { message_id?: unknown }).message_id)
+        : Date.now();
       if (!userId || !chatId) return;
       deps.log(`telegram: msg user_id=${userId} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
 
@@ -218,8 +580,6 @@ export async function startTelegramBot(deps: {
         return;
       }
 
-      // Special command: fulfill a pending human action without sending secrets through the LLM.
-      // Usage: /act <ID> <response...>
       if (/^\/(act|action)\b/i.test(text.trim())) {
         const parts = text.trim().split(/\s+/);
         const id = parts[1] ?? "";
@@ -237,15 +597,12 @@ export async function startTelegramBot(deps: {
           respondedByKey: String(userId),
           nowMs: Date.now(),
         });
-
         if (!actionRes.ok) {
           await ctx.reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
           return;
         }
 
         await ctx.reply(`OK: recorded action ${id}`);
-
-        // Nudge the agent to continue (without leaking the secret response).
         const res = await deps.agent.handleUserMessage({
           channel: "telegram",
           channelKey: String(chatId),
@@ -264,31 +621,87 @@ export async function startTelegramBot(deps: {
       }
 
       if (isGroupChat(ctx) && tg.requireMentionInGroups) {
-        const mentioned = botUsername ? text.includes(`@${botUsername}`) : false;
-        const invoked = text.startsWith("/nexus") || text.startsWith("/n");
+        const mentioned = botUsername ? rawInputText.includes(`@${botUsername}`) : false;
+        const invoked = rawInputText.startsWith("/nexus") || rawInputText.startsWith("/n");
         if (!mentioned && !invoked) {
           deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=require_mention`);
           return;
         }
       }
 
-      const cleaned = text
-        .replace(botUsername ? new RegExp(`@${botUsername}\\b`, "g") : /$^/, "")
-        .replace(/^\/nexus\b\s*/i, "")
-        .replace(/^\/n\b\s*/i, "")
-        .trim();
+      const cleanedText = sanitizeMessageText(rawInputText, botUsername);
+      const incomingAttachments = collectIncomingAttachments(message);
+      if (incomingAttachments.length > maxInboundFilesPerMessage) {
+        await ctx.reply(`Too many attachments in one message. Max ${maxInboundFilesPerMessage} files per message.`);
+        return;
+      }
 
-      if (!cleaned) {
+      let dispatchText = cleanedText;
+      if (incomingAttachments.length > 0) {
+        const nowMs = Date.now();
+        const ingest = await ingestIncomingAttachments({
+          bot,
+          token,
+          stateDir,
+          chatId,
+          messageId,
+          nowMs,
+          maxFileBytes: maxInboundFileBytes,
+          attachments: incomingAttachments,
+          log: deps.log,
+        });
+
+        if (ingest.stored.length === 0) {
+          await ctx.reply(`Unable to ingest attached files: ${ingest.rejected.join("; ") || "unknown error"}`);
+          return;
+        }
+
+        const sessionId = getOrCreateSessionId({
+          db: deps.db,
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+          nowMs,
+        });
+        const blackboardId = writeTelegramUploadBlackboardEntry({
+          db: deps.db,
+          chatId,
+          userId,
+          messageId,
+          sessionId,
+          agentId: tg.agentId,
+          nowMs,
+          ttlMs: fileBlackboardTtlMs,
+          captionText: cleanedText,
+          files: ingest.stored,
+        });
+        deps.log(
+          `telegram: blackboard upload id=${blackboardId} user_id=${userId} chat_id=${chatId} files=${ingest.stored.length}`,
+        );
+
+        if (ingest.rejected.length > 0) {
+          await ctx.reply(`Processed ${ingest.stored.length} file(s), skipped ${ingest.rejected.length}: ${ingest.rejected.join("; ")}`);
+        }
+
+        dispatchText = buildAttachmentDispatchText({
+          cleanedText,
+          blackboardId,
+          files: ingest.stored,
+          rejected: ingest.rejected,
+        });
+      }
+
+      if (!dispatchText.trim()) {
         deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=empty_text`);
         return;
       }
 
-      deps.log(`telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${cleaned.length}`);
+      deps.log(`telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length}`);
       const res = await deps.agent.handleUserMessage({
         channel: "telegram",
         channelKey: String(chatId),
         agentId: tg.agentId,
-        text: cleaned,
+        text: dispatchText,
       });
 
       await sendOutput(chatId, res.output);
@@ -304,7 +717,7 @@ export async function startTelegramBot(deps: {
       try {
         await ctx.reply("ERROR: internal error (check gateway logs).");
       } catch {
-        // ignore
+        // ignore reply failures
       }
     }
   });
@@ -337,6 +750,7 @@ export async function startTelegramBot(deps: {
         await bot.api.deleteWebhook({ drop_pending_updates: false } as any).catch(() => {});
       },
       sendOutput,
+      sendFile,
     };
   }
 
@@ -348,5 +762,6 @@ export async function startTelegramBot(deps: {
       bot.stop();
     },
     sendOutput,
+    sendFile,
   };
 }

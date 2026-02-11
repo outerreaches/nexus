@@ -358,6 +358,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     if (tg) {
       toolContext.telegram = {
         sendOutput: tg.sendOutput,
+        sendFile: tg.sendFile,
         allowFrom: config.channels.telegram.allowFrom ?? [],
         allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
       };

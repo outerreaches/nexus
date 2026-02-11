@@ -15,6 +15,7 @@ import {
   listBlackboardScopes,
 } from "../dashboard/queries.js";
 import { renderDashboard } from "../dashboard/render.js";
+import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
 
 export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/dashboard", async (c) => {
@@ -81,9 +82,15 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const body = await c.req.parseBody();
     const scopeRaw = String(body.scope ?? "all").trim();
     if (!scopeRaw || scopeRaw === "all") {
+      const rows = deps.db.db.prepare("SELECT attachments_json FROM blackboard").all() as { attachments_json: string | null }[];
       deps.db.db.prepare("DELETE FROM blackboard").run();
+      await cleanupManagedBlackboardAttachments({ stateDir: deps.stateDir, rows });
     } else {
+      const rows = deps.db.db
+        .prepare("SELECT attachments_json FROM blackboard WHERE session_scope = ?")
+        .all(scopeRaw) as { attachments_json: string | null }[];
       deps.db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scopeRaw);
+      await cleanupManagedBlackboardAttachments({ stateDir: deps.stateDir, rows });
     }
     return c.redirect("/dashboard");
   });
