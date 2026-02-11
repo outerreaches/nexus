@@ -49,6 +49,19 @@ function safeJson(value: unknown): string {
   }
 }
 
+function isLlmTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /LLM request timed out/i.test(err.message);
+}
+
+function trimMessagesForTimeoutRetry(messages: ChatMessage[], keepRecent: number = 48): ChatMessage[] {
+  if (messages.length <= keepRecent + 1) return messages;
+  const systemMessage = messages[0]?.role === "system" ? messages[0] : null;
+  const start = systemMessage ? 1 : 0;
+  const tail = messages.slice(Math.max(start, messages.length - keepRecent));
+  return systemMessage ? [systemMessage, ...tail] : tail;
+}
+
 function toolCallSignature(call: import("./types.js").ToolCall): string {
   const hash = createHash("sha256").update(call.name).update("\n").update(call.arguments).digest("hex").slice(0, 16);
   return `${call.name}:${hash}`;
@@ -159,6 +172,7 @@ export class AgentRunner {
     this.deps.toolContext.budgetInfo = budgetInfo;
 
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
+    const runStartedAtMs = this.deps.toolContext.nowMs();
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       budgetInfo.iterationsUsed = iteration;
@@ -217,18 +231,94 @@ export class AgentRunner {
         content = res.content;
         toolCalls = res.toolCalls;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
-        const errorText = `LLM error: ${msg}`;
-        const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
-        newMessages.push(assistantMsg);
-        return {
-          status: "failed",
-          output: errorText,
-          newMessages,
-          toolCallsUsed,
-          iterationsUsed: iteration + 1,
+        const isTimeout = isLlmTimeoutError(err);
+        if (!isTimeout) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
+          const errorText = `LLM error: ${msg}`;
+          const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
+          newMessages.push(assistantMsg);
+          return {
+            status: "failed",
+            output: errorText,
+            newMessages,
+            toolCallsUsed,
+            iterationsUsed: iteration + 1,
+          };
+        }
+
+        this.deps.onLog?.("llm_timeout: attempting one recovery retry with compacted context and extended timeout");
+        let retryMessages = messages;
+        let compacted = false;
+
+        if (maxContextTokens > 0) {
+          try {
+            const compactedResult = await compactContext({
+              messages: [...messages],
+              tools: this.deps.tools,
+              llm: this.deps.llm,
+              maxContextTokens,
+              minRecentMessages: 8,
+              onLog: this.deps.onLog,
+            });
+            if (compactedResult.compacted) {
+              retryMessages = compactedResult.messages;
+              compacted = true;
+              this.deps.onLog?.(
+                `llm_timeout_recovery: compacted ${compactedResult.tokensBefore} -> ${compactedResult.tokensAfter} tokens`,
+              );
+            }
+          } catch (compErr) {
+            this.deps.onLog?.(
+              `llm_timeout_recovery: compaction failed (${compErr instanceof Error ? compErr.message : String(compErr)})`,
+            );
+          }
+        }
+
+        if (!compacted) {
+          const trimmed = trimMessagesForTimeoutRetry(messages);
+          if (trimmed.length !== messages.length) {
+            retryMessages = trimmed;
+            this.deps.onLog?.(
+              `llm_timeout_recovery: trimmed history ${messages.length} -> ${retryMessages.length} messages`,
+            );
+          }
+        }
+
+        const elapsedMs = Math.max(0, this.deps.toolContext.nowMs() - runStartedAtMs);
+        const retryInstruction: ChatMessage = {
+          role: "system",
+          content: [
+            "Previous LLM request timed out. Continue from current context.",
+            "Prioritize a concise, direct response or minimal tool calls needed to finish.",
+            `Current time: ${new Date(this.deps.toolContext.nowMs()).toISOString()}.`,
+            `Run elapsed: ${elapsedMs}ms.`,
+          ].join("\n"),
         };
+
+        try {
+          const retry = await this.deps.llm.completeChat({
+            messages: [...retryMessages, retryInstruction],
+            tools: this.deps.tools,
+            timeoutMode: "extended",
+          });
+          content = retry.content;
+          toolCalls = retry.toolCalls;
+          this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
+        } catch (retryErr) {
+          const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
+          const errorText = `LLM error: ${msg}`;
+          const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
+          newMessages.push(assistantMsg);
+          return {
+            status: "failed",
+            output: errorText,
+            newMessages,
+            toolCallsUsed,
+            iterationsUsed: iteration + 1,
+          };
+        }
       }
 
       if (toolCalls.length === 0) {

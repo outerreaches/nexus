@@ -8,6 +8,9 @@ export type OpenAICompatConfig = {
 };
 
 const DEFAULT_HTTP_TIMEOUT_MS = 120_000;
+const DEFAULT_HTTP_TIMEOUT_MAX_MS = 420_000;
+const DEFAULT_HTTP_TIMEOUT_PER_1K_TOKENS_MS = 3_000;
+const DEFAULT_HTTP_TIMEOUT_EXTENDED_MULTIPLIER = 2;
 
 function envInt(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
@@ -15,6 +18,14 @@ function envInt(name: string): number | null {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return null;
   return Math.floor(parsed);
+}
+
+function envBool(name: string): boolean | null {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
+  return null;
 }
 
 type OpenAIChatMessage =
@@ -75,6 +86,78 @@ function joinUrl(baseUrl: string, path: string): string {
   return new URL(path, normalizedBase).toString();
 }
 
+function estimateCharsForMessage(message: ChatMessage): number {
+  if (message.role === "assistant") {
+    const contentChars = typeof message.content === "string" ? message.content.length : 0;
+    const toolCallChars = (message.toolCalls ?? []).reduce(
+      (sum, call) => sum + call.name.length + call.arguments.length + call.id.length,
+      0,
+    );
+    return contentChars + toolCallChars;
+  }
+  if (message.role === "tool") {
+    return message.name.length + message.toolCallId.length + message.content.length;
+  }
+  return message.content.length;
+}
+
+function estimateRequestTokens(messages: ChatMessage[], tools: Tool[]): number {
+  const messageChars = messages.reduce((sum, message) => sum + estimateCharsForMessage(message), 0);
+  const toolSchemaChars = tools.reduce((sum, tool) => {
+    let schemaChars = 0;
+    try {
+      schemaChars = JSON.stringify(tool.jsonSchema).length;
+    } catch {
+      schemaChars = 0;
+    }
+    return sum + tool.name.length + tool.description.length + schemaChars;
+  }, 0);
+  const totalChars = messageChars + toolSchemaChars;
+  return Math.ceil(totalChars / 4);
+}
+
+function resolveHttpTimeoutMs(messages: ChatMessage[], tools: Tool[]): number {
+  const baseTimeoutMs = Math.max(
+    1_000,
+    envInt("NEXUS_LLM_HTTP_TIMEOUT_MS") ?? envInt("NEXUS_LLM_TIMEOUT_MS") ?? DEFAULT_HTTP_TIMEOUT_MS,
+  );
+  const dynamicEnabled = envBool("NEXUS_LLM_HTTP_TIMEOUT_DYNAMIC") ?? true;
+  if (!dynamicEnabled) return baseTimeoutMs;
+
+  const maxTimeoutMs = Math.max(
+    baseTimeoutMs,
+    envInt("NEXUS_LLM_HTTP_TIMEOUT_MAX_MS") ?? DEFAULT_HTTP_TIMEOUT_MAX_MS,
+  );
+  const per1kTokensMs = Math.max(
+    0,
+    envInt("NEXUS_LLM_HTTP_TIMEOUT_PER_1K_TOKENS_MS") ?? DEFAULT_HTTP_TIMEOUT_PER_1K_TOKENS_MS,
+  );
+
+  const estimatedTokens = estimateRequestTokens(messages, tools);
+  const extraMs = Math.ceil(estimatedTokens / 1_000) * per1kTokensMs;
+  return Math.min(maxTimeoutMs, baseTimeoutMs + extraMs);
+}
+
+function resolveTimeoutForMode(params: {
+  mode: "default" | "extended";
+  messages: ChatMessage[];
+  tools: Tool[];
+}): number {
+  const normalTimeoutMs = resolveHttpTimeoutMs(params.messages, params.tools);
+  if (params.mode !== "extended") return normalTimeoutMs;
+
+  const multiplier = Math.max(
+    1,
+    envInt("NEXUS_LLM_HTTP_TIMEOUT_EXTENDED_MULTIPLIER") ?? DEFAULT_HTTP_TIMEOUT_EXTENDED_MULTIPLIER,
+  );
+  const configuredExtendedMaxMs = envInt("NEXUS_LLM_HTTP_TIMEOUT_EXTENDED_MAX_MS");
+  const extendedMaxMs = Math.max(
+    normalTimeoutMs,
+    configuredExtendedMaxMs ?? Math.ceil((envInt("NEXUS_LLM_HTTP_TIMEOUT_MAX_MS") ?? DEFAULT_HTTP_TIMEOUT_MAX_MS) * 1.5),
+  );
+  return Math.min(extendedMaxMs, Math.ceil(normalTimeoutMs * multiplier));
+}
+
 export class OpenAICompatClient {
   constructor(private readonly config: OpenAICompatConfig) {}
 
@@ -82,6 +165,7 @@ export class OpenAICompatClient {
     messages: ChatMessage[];
     tools: Tool[];
     temperature?: number;
+    timeoutMode?: "default" | "extended";
   }): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");
     const tools = params.tools.map((t) => ({
@@ -92,10 +176,11 @@ export class OpenAICompatClient {
         parameters: t.jsonSchema,
       },
     }));
-    const timeoutMs = Math.max(
-      1000,
-      envInt("NEXUS_LLM_HTTP_TIMEOUT_MS") ?? envInt("NEXUS_LLM_TIMEOUT_MS") ?? DEFAULT_HTTP_TIMEOUT_MS,
-    );
+    const timeoutMs = resolveTimeoutForMode({
+      mode: params.timeoutMode ?? "default",
+      messages: params.messages,
+      tools: params.tools,
+    });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
