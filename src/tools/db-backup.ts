@@ -10,7 +10,8 @@ export const dbBackup = defineTool({
     "Create a database backup or check backup status. " +
     "Use action='status' to see backup state, last backup time, and next scheduled backup. " +
     "Use action='run' to create a manual backup immediately. " +
-    "Backups are stored in {stateDir}/backups/YYYY-MM-DD/ with automatic retention cleanup.",
+    "Backups are stored in {stateDir}/backups/YYYY-MM-DD/ with automatic retention cleanup. " +
+    "Each backup also snapshots state markdown files (SOUL/AGENTS/USER/CODEGUIDE/HEARTBEAT/NOTES and agent overrides).",
   parameters: z.object({
     action: z.enum(["run", "status"]).default("status").describe("Action to perform"),
     retentionDays: z

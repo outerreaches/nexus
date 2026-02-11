@@ -13,6 +13,8 @@ export type BackupResult = {
   id: string;
   filename: string;
   filePath: string;
+  markdownSnapshotPath?: string;
+  markdownFilesCopied?: number;
   sizeBytes: number;
   durationMs: number;
   status: "completed" | "failed";
@@ -39,6 +41,79 @@ export type BackupStatus = {
   nextScheduledBackup: number | null;
 };
 
+const PERSONALIZATION_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "CODEGUIDE.md", "HEARTBEAT.md", "NOTES.md"] as const;
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function listMarkdownFilesRecursive(rootDir: string): Promise<string[]> {
+  if (!(await pathExists(rootDir))) return [];
+  const out: string[] = [];
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+        out.push(fullPath);
+      }
+    }
+  }
+  return out.sort();
+}
+
+async function copyStateMarkdownSnapshot(params: {
+  stateDir: string;
+  snapshotDir: string;
+  log: (msg: string) => void;
+}): Promise<{ copied: number; manifestPath: string }> {
+  const { stateDir, snapshotDir, log } = params;
+  await fs.mkdir(snapshotDir, { recursive: true });
+
+  const copied: Array<{ source: string; dest: string }> = [];
+  for (const filename of PERSONALIZATION_FILES) {
+    const source = path.join(stateDir, filename);
+    if (!(await pathExists(source))) continue;
+    const dest = path.join(snapshotDir, filename);
+    await fs.copyFile(source, dest);
+    copied.push({ source, dest });
+  }
+
+  const agentRoot = path.join(stateDir, "agents");
+  const agentFiles = await listMarkdownFilesRecursive(agentRoot);
+  for (const source of agentFiles) {
+    const rel = path.relative(stateDir, source);
+    const dest = path.join(snapshotDir, rel);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.copyFile(source, dest);
+    copied.push({ source, dest });
+  }
+
+  const manifestPath = path.join(snapshotDir, "manifest.json");
+  const manifest = {
+    createdAt: Date.now(),
+    stateDir,
+    copiedFiles: copied.map((f) => ({
+      source: f.source,
+      destRelative: path.relative(snapshotDir, f.dest),
+    })),
+  };
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  log(`backup: copied ${copied.length} markdown file(s) to ${snapshotDir}`);
+  return { copied: copied.length, manifestPath };
+}
+
 export async function runBackup(params: {
   db: NexusDatabase;
   stateDir: string;
@@ -59,6 +134,7 @@ export async function runBackup(params: {
   const timestamp = date.toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const filename = `nexus-${timestamp}.db`;
   const filePath = path.join(backupDir, filename);
+  const snapshotDir = path.join(backupDir, `${path.parse(filename).name}.state`);
 
   log(`backup: starting ${backupType} backup to ${filePath}`);
 
@@ -78,6 +154,12 @@ export async function runBackup(params: {
     const stats = await fs.stat(filePath);
     const sizeBytes = stats.size;
 
+    const snapshot = await copyStateMarkdownSnapshot({
+      stateDir,
+      snapshotDir,
+      log,
+    });
+
     const durationMs = Date.now() - startMs;
 
     // Update backup record with completion
@@ -93,6 +175,8 @@ export async function runBackup(params: {
       id: backupId,
       filename,
       filePath,
+      markdownSnapshotPath: snapshotDir,
+      markdownFilesCopied: snapshot.copied,
       sizeBytes,
       durationMs,
       status: "completed",
@@ -165,6 +249,16 @@ export async function cleanupOldBackups(params: {
       log(`backup: deleted file ${backup.file_path}`);
     } catch {
       // File may already be deleted
+    }
+
+    // Delete markdown snapshot directory paired to this backup (best-effort)
+    try {
+      const parsed = path.parse(backup.file_path);
+      const snapshotDir = path.join(parsed.dir, `${parsed.name}.state`);
+      await fs.rm(snapshotDir, { recursive: true, force: true });
+      log(`backup: deleted snapshot ${snapshotDir}`);
+    } catch {
+      // ignore cleanup errors
     }
 
     // Delete record
