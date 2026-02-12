@@ -91,7 +91,7 @@ export class ModelRouter {
     }
 
     const primary = this.resolveTarget(route.primary);
-    const fallback = route.fallback ? this.resolveTarget(route.fallback) : undefined;
+    const fallback = route.fallback ? this.resolveOptionalTarget(route.fallback) : undefined;
     const fallbackDistinct =
       Boolean(fallback) &&
       (fallback!.provider !== primary.provider || fallback!.config.model !== primary.config.model);
@@ -131,6 +131,19 @@ export class ModelRouter {
       const known = Object.keys(this.providers).sort().join(", ");
       throw new Error(`Unknown LLM provider "${provider}" in model routing config. Known providers: ${known}`);
     }
+    return {
+      provider,
+      config: {
+        ...base,
+        model: target.model ?? base.model,
+      },
+    };
+  }
+
+  private resolveOptionalTarget(target: LlmRouteTarget): { provider: string; config: OpenAICompatConfig } | undefined {
+    const provider = target.provider;
+    const base = this.providers[provider];
+    if (!base) return undefined;
     return {
       provider,
       config: {
