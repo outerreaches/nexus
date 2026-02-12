@@ -24,7 +24,8 @@ import { skillCreate, skillList, skillUpdate } from "./skills.js";
 import { budgetStatus } from "./budget.js";
 import { reflect } from "./reflect.js";
 import { planTask } from "./plan.js";
-import { writeToBlackboard, readFromBlackboard, blackboardClear, blackboardDelete, blackboardPrune } from "./blackboard.js";
+import { writeToBlackboard, readFromBlackboard, blackboardManage } from "./blackboard.js";
+import { toolCatalog } from "./tool-catalog.js";
 import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
 import { spawnAgent } from "./spawn-agent.js";
@@ -103,9 +104,8 @@ export function getBuiltInTools(): Tool[] {
     planTask,
     writeToBlackboard,
     readFromBlackboard,
-    blackboardClear,
-    blackboardDelete,
-    blackboardPrune,
+    blackboardManage,
+    toolCatalog,
     dataIntakeListSources,
     dataIntakeRun,
     dataIntakeQuery,

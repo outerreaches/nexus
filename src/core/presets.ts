@@ -1,7 +1,9 @@
 import { preset as analyst } from "./presets/analyst.js";
+import { preset as credentialManager } from "./presets/credential-manager.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as intakeManager } from "./presets/intake-manager.js";
+import { preset as jobManager } from "./presets/job-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as trader } from "./presets/trader.js";
@@ -55,8 +57,10 @@ const PRESETS: Record<string, AgentPreset> = {
   researcher,
   trader,
   analyst,
+  "credential-manager": credentialManager,
   "graphic-designer": graphicDesigner,
   "intake-manager": intakeManager,
+  "job-manager": jobManager,
 };
 
 export function getPreset(name: string): AgentPreset | undefined {

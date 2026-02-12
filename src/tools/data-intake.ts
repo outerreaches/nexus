@@ -274,11 +274,12 @@ export const dataIntakeScheduleAll = defineTool({
       "",
       "Steps:",
       "1) Call data_intake_source_list with includeDisabled=false.",
-      "2) For each source instance, call data_intake_run using source_id and params_json.",
+      "2) For each source instance, spawn intake-manager to run that specific source by instance id.",
       "3) Report any failures.",
       "",
-      "Parsing params_json:",
-      "- params_json is a JSON string; parse it to an object before passing to data_intake_run.",
+      "Data format notes:",
+      "- data_intake_source_list returns camelCase fields: sourceId and params (already parsed object).",
+      "- Prefer instance id for execution so source labels/tags remain consistent.",
     ].join("\n");
 
     const nowMs = ctx.nowMs();

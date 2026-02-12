@@ -186,68 +186,78 @@ export const readFromBlackboard = defineTool({
   },
 });
 
-export const blackboardDelete = defineTool({
-  name: "blackboard_delete",
-  description: "Delete specific blackboard entries by ID.",
-  parameters: z.object({
-    ids: z.array(z.string().min(1)).min(1).max(200).describe("Blackboard entry IDs to delete"),
-  }),
+export const blackboardManage = defineTool({
+  name: "blackboard_manage",
+  description:
+    "Manage blackboard lifecycle with one tool. " +
+    "Use action='delete' for specific IDs, action='clear' to wipe a scope, and action='prune' for expired/old entries.",
+  parameters: z
+    .object({
+      action: z.enum(["delete", "clear", "prune"]).describe("Management action to run."),
+      ids: z.array(z.string().min(1)).min(1).max(200).optional().describe("Required when action='delete'."),
+      scope: z
+        .enum(["session", "global", "all"])
+        .optional()
+        .describe("Scope for action='clear' and action='prune'. Defaults to session."),
+      maxAgeMs: z
+        .number()
+        .int()
+        .min(60_000)
+        .max(30 * 24 * 60 * 60_000)
+        .optional()
+        .describe("Optional for action='prune': delete entries older than this age."),
+      includeUnexpired: z
+        .boolean()
+        .optional()
+        .describe("Optional for action='prune'. If true, prune by age even if TTL has not expired."),
+    })
+    .superRefine((args, refineCtx) => {
+      if (args.action === "delete" && (!args.ids || args.ids.length === 0)) {
+        refineCtx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ids"],
+          message: "ids is required when action='delete'",
+        });
+      }
+    }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
 
-    const placeholders = args.ids.map(() => "?").join(", ");
-    const rows = db.db
-      .prepare(`SELECT attachments_json FROM blackboard WHERE id IN (${placeholders})`)
-      .all(...args.ids) as { attachments_json: string | null }[];
-    const stmt = db.db.prepare(`DELETE FROM blackboard WHERE id IN (${placeholders})`);
-    const res = stmt.run(...args.ids);
-    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
-    return `OK: deleted ${res.changes} entries (attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
-  },
-});
-
-export const blackboardClear = defineTool({
-  name: "blackboard_clear",
-  description: "Delete all blackboard entries (optionally scoped to current session).",
-  parameters: z.object({
-    scope: z.enum(["session", "global", "all"]).default("session"),
-  }),
-  execute: async (args, ctx) => {
-    const db = requireDb(ctx);
-    if (!db) return "ERROR: database is not available";
-
-    if (args.scope === "all") {
-      const rows = db.db.prepare("SELECT attachments_json FROM blackboard").all() as { attachments_json: string | null }[];
-      const res = db.db.prepare("DELETE FROM blackboard").run();
+    if (args.action === "delete") {
+      const ids = args.ids ?? [];
+      const placeholders = ids.map(() => "?").join(", ");
+      const rows = db.db
+        .prepare(`SELECT attachments_json FROM blackboard WHERE id IN (${placeholders})`)
+        .all(...ids) as { attachments_json: string | null }[];
+      const stmt = db.db.prepare(`DELETE FROM blackboard WHERE id IN (${placeholders})`);
+      const res = stmt.run(...ids);
       const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
-      return `OK: deleted ${res.changes} entries (all scopes, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
+      return `OK: deleted ${res.changes} entries (attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
     }
 
-    const scope = args.scope === "global" ? "global" : sessionScope(ctx);
-    const rows = db.db
-      .prepare("SELECT attachments_json FROM blackboard WHERE session_scope = ?")
-      .all(scope) as { attachments_json: string | null }[];
-    const res = db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scope);
-    const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
-    return `OK: deleted ${res.changes} entries (scope=${scope}, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
-  },
-});
+    if (args.action === "clear") {
+      const requestedScope = args.scope ?? "session";
+      if (requestedScope === "all") {
+        const rows = db.db.prepare("SELECT attachments_json FROM blackboard").all() as { attachments_json: string | null }[];
+        const res = db.db.prepare("DELETE FROM blackboard").run();
+        const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+        return `OK: deleted ${res.changes} entries (all scopes, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
+      }
 
-export const blackboardPrune = defineTool({
-  name: "blackboard_prune",
-  description: "Prune expired or old blackboard entries.",
-  parameters: z.object({
-    maxAgeMs: z.number().int().min(60_000).max(30 * 24 * 60 * 60_000).optional().describe("Delete entries older than this age."),
-    scope: z.enum(["session", "global", "all"]).default("session"),
-    includeUnexpired: z.boolean().default(false).describe("If true, prune by age even if TTL has not expired."),
-  }),
-  execute: async (args, ctx) => {
-    const db = requireDb(ctx);
-    if (!db) return "ERROR: database is not available";
+      const scope = requestedScope === "global" ? "global" : sessionScope(ctx);
+      const rows = db.db
+        .prepare("SELECT attachments_json FROM blackboard WHERE session_scope = ?")
+        .all(scope) as { attachments_json: string | null }[];
+      const res = db.db.prepare("DELETE FROM blackboard WHERE session_scope = ?").run(scope);
+      const cleanup = await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows });
+      return `OK: deleted ${res.changes} entries (scope=${scope}, attachment files removed=${cleanup.removed}, failed=${cleanup.failed})`;
+    }
 
     const nowMs = ctx.nowMs();
-    const scope = args.scope === "all" ? null : args.scope === "global" ? "global" : sessionScope(ctx);
+    const requestedScope = args.scope ?? "session";
+    const scope = requestedScope === "all" ? null : requestedScope === "global" ? "global" : sessionScope(ctx);
+    const includeUnexpired = args.includeUnexpired ?? false;
 
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -259,7 +269,7 @@ export const blackboardPrune = defineTool({
 
     if (args.maxAgeMs) {
       const cutoff = nowMs - args.maxAgeMs;
-      if (args.includeUnexpired) {
+      if (includeUnexpired) {
         clauses.push("created_at <= ?");
         params.push(cutoff);
       } else {

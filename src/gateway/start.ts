@@ -227,7 +227,26 @@ export async function startGateway(params: { configPath: string; port?: number; 
     }
   }
 
-  const agent = new AgentService({
+  const interactiveAgent = new AgentService({
+    llm,
+    modelRouter,
+    getTools: () => registry.list(),
+    toolContext,
+    db,
+    stateDir: paths.stateDir,
+    agentTracker,
+    onRunnerLog: params.verbose ? log : undefined,
+    defaultPreset: "orchestrator",
+    limits: {
+      maxMessages: 40,
+      maxToolCalls: config.limits.maxToolCallsPerRun,
+      maxIterations: config.limits.maxIterationsPerRun,
+      maxConcurrent: config.limits.maxConcurrentAgents,
+      maxContextTokens: config.limits.maxContextTokens,
+    },
+  });
+
+  const backgroundAgent = new AgentService({
     llm,
     modelRouter,
     getTools: () => registry.list(),
@@ -364,6 +383,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
         enabled: config.scheduler.enabled,
         tickIntervalMs: config.scheduler.tickIntervalMs,
         maxRunsPerTick: config.scheduler.maxRunsPerTick,
+        concurrency: config.scheduler.concurrency,
         leaseTtlMs: config.scheduler.leaseTtlMs,
         maxConsecutiveFailures: config.scheduler.maxConsecutiveFailures,
         notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
@@ -391,7 +411,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let scheduler: ReturnType<typeof startJobScheduler> = null;
 
   const startServices = async () => {
-    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
+    tg = await startTelegramBot({ config, agent: interactiveAgent, configPath: params.configPath, log, db, app: http.app });
     if (!tg) log("telegram: disabled");
     if (tg) {
       toolContext.telegram = {
@@ -405,7 +425,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     proactive = startProactiveHeartbeat({
       config,
       stateDir: paths.stateDir,
-      agent,
+      agent: backgroundAgent,
       db,
       telegram: tg,
       log,
@@ -414,7 +434,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
     scheduler = startJobScheduler({
       config,
-      agent,
+      agent: backgroundAgent,
       db,
       log,
       getTools: () => registry.list(),

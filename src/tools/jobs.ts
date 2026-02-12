@@ -24,14 +24,6 @@ function currentAgentId(ctx: { request?: { agentId: string } }): string | null {
   return id ? String(id) : null;
 }
 
-function ensureJobOwner(params: { ctxAgentId: string | null; jobOwnerAgentId: string; action: string }): string | null {
-  if (!params.ctxAgentId) return null; // CLI/automation context: allow.
-  if (params.ctxAgentId !== params.jobOwnerAgentId) {
-    return `ERROR: not allowed (${params.action}) — job belongs to agent '${params.jobOwnerAgentId}'`;
-  }
-  return null;
-}
-
 function computeNextRunAt(params: { cron: string; timezone: string; afterMs: number }): number {
   const tz = validateTimeZone(params.timezone);
   const schedule = parseCron(params.cron);
@@ -102,7 +94,7 @@ export const jobCreate = defineTool({
 
 export const jobList = defineTool({
   name: "job_list",
-  description: "List scheduled jobs. By default, lists jobs owned by the current agent.",
+  description: "List scheduled jobs.",
   parameters: z.object({
     includeDisabled: z.boolean().default(true),
     limit: z.number().int().min(1).max(200).default(50),
@@ -110,14 +102,9 @@ export const jobList = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
-    const ownerAgentId = currentAgentId(ctx);
-
-    const where = ownerAgentId ? "owner_agent_id = ? AND (? = 1 OR enabled = 1)" : "(? = 1 OR enabled = 1)";
-    const sql = `SELECT * FROM jobs WHERE ${where} ORDER BY created_at DESC LIMIT ?`;
+    const sql = "SELECT * FROM jobs WHERE (? = 1 OR enabled = 1) ORDER BY created_at DESC LIMIT ?";
     const stmt = db.db.prepare(sql);
-    const rows = ownerAgentId
-      ? (stmt.all(ownerAgentId, args.includeDisabled ? 1 : 0, args.limit) as any[])
-      : (stmt.all(args.includeDisabled ? 1 : 0, args.limit) as any[]);
+    const rows = stmt.all(args.includeDisabled ? 1 : 0, args.limit) as any[];
     return JSON.stringify(rows, null, 2);
   },
 });
@@ -133,8 +120,6 @@ export const jobGet = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_get" });
-    if (ownerErr) return ownerErr;
     return JSON.stringify(row, null, 2);
   },
 });
@@ -162,12 +147,6 @@ export const jobUpdate = defineTool({
 
     const existing = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!existing) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({
-      ctxAgentId: currentAgentId(ctx),
-      jobOwnerAgentId: String(existing.owner_agent_id),
-      action: "job_update",
-    });
-    if (ownerErr) return ownerErr;
 
     const name = args.name ?? String(existing.name);
     const cron = args.cron ?? String(existing.cron);
@@ -199,16 +178,15 @@ export const jobUpdate = defineTool({
 
     const specJson = JSON.stringify(spec ?? {});
 
-    let nextRunAt: number | null = null;
-    if (enabled) {
-      if (args.nextRunAtMs !== undefined) {
-        nextRunAt = args.nextRunAtMs;
-      } else {
-        // Recalculate based on Schedule unless we are just updating metadata?
-        // Current behavior: always recalculate on update to ensure it's valid for new params.
-        // If args.nextRunAtMs is NOT provided, we stick to the schedule.
-        nextRunAt = computeNextRunAt({ cron, timezone, afterMs: nowMs });
-      }
+    const scheduleChanged = args.cron !== undefined || args.timezone !== undefined || args.enabled !== undefined;
+    let nextRunAt = existing.next_run_at as number | null;
+    if (!enabled) {
+      nextRunAt = null;
+    } else if (args.nextRunAtMs !== undefined) {
+      nextRunAt = args.nextRunAtMs;
+    } else if (scheduleChanged || nextRunAt === null) {
+      // Recompute only when schedule semantics changed or there was no next run.
+      nextRunAt = computeNextRunAt({ cron, timezone, afterMs: nowMs });
     }
 
     db.db
@@ -234,8 +212,6 @@ export const jobPause = defineTool({
     const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_pause" });
-    if (ownerErr) return ownerErr;
     db.db.prepare("UPDATE jobs SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?").run(nowMs, args.id);
     return "OK";
   },
@@ -253,8 +229,6 @@ export const jobResume = defineTool({
     const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_resume" });
-    if (ownerErr) return ownerErr;
     const nextRunAt = computeNextRunAt({ cron: String(row.cron), timezone: String(row.timezone), afterMs: nowMs });
     db.db.prepare("UPDATE jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?").run(nextRunAt, nowMs, args.id);
     return "OK";
@@ -272,8 +246,6 @@ export const jobDelete = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_delete" });
-    if (ownerErr) return ownerErr;
     const linked = db.db
       .prepare("SELECT id, source_id, label FROM data_intake_sources WHERE job_id = ? LIMIT 1")
       .get(args.id) as { id: string; source_id: string; label: string | null } | undefined;
@@ -304,8 +276,6 @@ export const jobRunNow = defineTool({
     const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_run_now" });
-    if (ownerErr) return ownerErr;
     if (Number(row.enabled) !== 1) return "ERROR: job is disabled (resume it first)";
     db.db.prepare("UPDATE jobs SET next_run_at = ?, updated_at = ? WHERE id = ?").run(nowMs, nowMs, args.id);
     return "OK";
@@ -324,8 +294,6 @@ export const jobRuns = defineTool({
     if (!db) return "ERROR: database is not available";
     const job = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!job) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(job.owner_agent_id), action: "job_runs" });
-    if (ownerErr) return ownerErr;
     const rows = db.db.prepare("SELECT * FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?").all(args.id, args.limit) as any[];
     return JSON.stringify(rows, null, 2);
   },
@@ -342,8 +310,6 @@ export const jobRunGet = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = db.db.prepare("SELECT * FROM job_runs WHERE id = ?").get(args.runId) as any;
     if (!row) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(row.owner_agent_id), action: "job_run_get" });
-    if (ownerErr) return ownerErr;
     return JSON.stringify(row, null, 2);
   },
 });
@@ -360,8 +326,6 @@ export const jobEvents = defineTool({
     if (!db) return "ERROR: database is not available";
     const job = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!job) return "ERROR: not found";
-    const ownerErr = ensureJobOwner({ ctxAgentId: currentAgentId(ctx), jobOwnerAgentId: String(job.owner_agent_id), action: "job_events" });
-    if (ownerErr) return ownerErr;
     const rows = db.db
       .prepare("SELECT * FROM job_events WHERE job_id = ? ORDER BY created_at DESC LIMIT ?")
       .all(args.id, args.limit) as any[];

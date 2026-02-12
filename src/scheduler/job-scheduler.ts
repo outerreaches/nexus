@@ -114,6 +114,10 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     1,
     envInt("NEXUS_SCHEDULER_MAX_CONSECUTIVE_FAILURES") ?? deps.config.scheduler.maxConsecutiveFailures,
   );
+  const runConcurrency = Math.max(
+    1,
+    envInt("NEXUS_SCHEDULER_CONCURRENCY") ?? deps.config.scheduler.concurrency ?? maxRunsPerTick,
+  );
   const notifyAgentOnFailure = envBool("NEXUS_SCHEDULER_NOTIFY_AGENT_ON_FAILURE") ?? deps.config.scheduler.notifyAgentOnFailure;
   const notifyCooldownMs = Math.max(0, envInt("NEXUS_SCHEDULER_NOTIFY_COOLDOWN_MS") ?? deps.config.scheduler.notifyCooldownMs);
 
@@ -219,6 +223,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       channel: "job",
       channelKey: job.id,
       agentId: job.owner_agent_id,
+      preset: "job-manager",
       text,
     });
 
@@ -266,6 +271,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         channel: "job",
         channelKey: job.id,
         agentId: job.owner_agent_id,
+        preset: "orchestrator",
         text: userText,
       });
 
@@ -502,16 +508,26 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         )
         .all(nowMs, maxRunsPerTick) as JobRow[];
 
-      for (const job of due) {
-        if (!acquireLease(job.id, nowMs)) continue;
-        try {
-          await runJob(job, nowMs);
-        } catch (e) {
-          deps.log(`scheduler: run error job=${job.id} err=${e instanceof Error ? e.message : String(e)}`);
-        } finally {
-          releaseLease(job.id);
+      let nextIndex = 0;
+      const workerCount = Math.min(runConcurrency, due.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (true) {
+          const idx = nextIndex;
+          nextIndex += 1;
+          if (idx >= due.length) return;
+          const job = due[idx];
+          if (!job) return;
+          if (!acquireLease(job.id, nowMs)) continue;
+          try {
+            await runJob(job, nowMs);
+          } catch (e) {
+            deps.log(`scheduler: run error job=${job.id} err=${e instanceof Error ? e.message : String(e)}`);
+          } finally {
+            releaseLease(job.id);
+          }
         }
-      }
+      });
+      await Promise.all(workers);
     } catch (e) {
       deps.log(`scheduler: tick error ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -523,7 +539,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure}`,
   );
 
   // Start shortly after boot.

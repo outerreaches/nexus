@@ -307,10 +307,10 @@ export class OpenAICompatClient implements LLMClient {
           },
           body: JSON.stringify({
             model: this.config.model,
-            messages: toOpenAIMessages(activeMessages),
             tools,
             tool_choice: "auto",
             temperature: params.temperature ?? 0.2,
+            messages: toOpenAIMessages(activeMessages),
           }),
           signal: controller.signal,
         });
