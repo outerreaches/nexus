@@ -4,30 +4,86 @@ import type { ChatMessage } from "../core/types.js";
 import { renderUserContentForStorage } from "../core/message-content.js";
 import type { NexusDatabase } from "./database.js";
 
-function sanitizeHistory(history: ChatMessage[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
+const ANCHOR_ROLLOVER_MULTIPLIER = 2;
+const ANCHOR_FETCH_MULTIPLIER = 6;
+
+type HistoryEntry = {
+  id: number;
+  message: ChatMessage;
+};
+
+type MessageRow = {
+  id: number;
+  role: string;
+  content: string;
+  name: string | null;
+  tool_call_id: string | null;
+  tool_calls_json: string | null;
+};
+
+function sanitizeHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
+  const out: HistoryEntry[] = [];
   let openToolCallIds = new Set<string>();
 
-  for (const msg of history) {
+  for (const entry of entries) {
+    const msg = entry.message;
     if (msg.role === "assistant") {
-      out.push(msg);
+      out.push(entry);
       openToolCallIds = new Set((msg.toolCalls ?? []).map((tc) => tc.id).filter(Boolean));
       continue;
     }
 
     if (msg.role === "tool") {
       if (msg.toolCallId && openToolCallIds.has(msg.toolCallId)) {
-        out.push(msg);
+        out.push(entry);
         openToolCallIds.delete(msg.toolCallId);
       }
       continue;
     }
 
-    out.push(msg);
+    out.push(entry);
     openToolCallIds.clear();
   }
 
   return out;
+}
+
+function rowToHistoryEntry(row: MessageRow): HistoryEntry {
+  if (row.role === "tool") {
+    return {
+      id: row.id,
+      message: { role: "tool", content: row.content, name: row.name ?? "", toolCallId: row.tool_call_id ?? "" },
+    };
+  }
+  if (row.role === "assistant") {
+    if (row.tool_calls_json) {
+      try {
+        const toolCalls = JSON.parse(row.tool_calls_json) as unknown;
+        return {
+          id: row.id,
+          message: {
+            role: "assistant",
+            content: row.content,
+            toolCalls: Array.isArray(toolCalls) ? (toolCalls as any) : undefined,
+          },
+        };
+      } catch {
+        return { id: row.id, message: { role: "assistant", content: row.content } };
+      }
+    }
+    return { id: row.id, message: { role: "assistant", content: row.content } };
+  }
+  if (row.role === "system") {
+    return { id: row.id, message: { role: "system", content: row.content } };
+  }
+  return { id: row.id, message: { role: "user", content: row.content } };
+}
+
+function findSliceStart(entries: HistoryEntry[], preferredStart: number): number {
+  let start = Math.max(0, preferredStart);
+  while (start < entries.length && entries[start]?.message.role === "tool") start += 1;
+  if (start < entries.length) return start;
+  return Math.max(0, entries.length - 1);
 }
 
 export function getOrCreateSessionId(params: {
@@ -102,51 +158,69 @@ export function loadRecentHistory(params: {
   db: NexusDatabase;
   sessionId: string;
   maxMessages: number;
+  nowMs?: number;
+  anchorRolloverMessages?: number;
 }): ChatMessage[] {
-  const fetchLimit = Math.max(params.maxMessages * 3, params.maxMessages + 50);
-  const rows = params.db.db
+  const nowMs = params.nowMs ?? Date.now();
+  const rolloverLimit = Math.max(
+    params.maxMessages + 8,
+    params.anchorRolloverMessages ?? params.maxMessages * ANCHOR_ROLLOVER_MULTIPLIER,
+  );
+  const fetchLimit = Math.max(rolloverLimit * ANCHOR_FETCH_MULTIPLIER, params.maxMessages + 120);
+
+  const sessionRow = params.db.db
+    .prepare("SELECT history_anchor_message_id FROM sessions WHERE id = ?")
+    .get(params.sessionId) as { history_anchor_message_id: number | null } | undefined;
+  let anchorId = sessionRow?.history_anchor_message_id ?? null;
+
+  if (!anchorId) {
+    const first = params.db.db
+      .prepare("SELECT id FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1")
+      .get(params.sessionId) as { id: number } | undefined;
+    if (!first) return [];
+    anchorId = first.id;
+    params.db.db
+      .prepare("UPDATE sessions SET history_anchor_message_id = ?, history_anchor_updated_at = ? WHERE id = ?")
+      .run(anchorId, nowMs, params.sessionId);
+  }
+
+  let rows = params.db.db
     .prepare(
-      "SELECT role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+      "SELECT id, role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? AND id >= ? ORDER BY id ASC LIMIT ?",
     )
-    .all(params.sessionId, fetchLimit) as {
-    role: string;
-    content: string;
-    name: string | null;
-    tool_call_id: string | null;
-    tool_calls_json: string | null;
-  }[];
+    .all(params.sessionId, anchorId, fetchLimit) as MessageRow[];
 
-  const history: ChatMessage[] = rows
-    .reverse()
-    .map((r): ChatMessage => {
-      if (r.role === "tool") {
-        return { role: "tool", content: r.content, name: r.name ?? "", toolCallId: r.tool_call_id ?? "" };
-      }
-      if (r.role === "assistant") {
-        if (r.tool_calls_json) {
-          try {
-            const toolCalls = JSON.parse(r.tool_calls_json) as unknown;
-            return {
-              role: "assistant",
-              content: r.content,
-              toolCalls: Array.isArray(toolCalls) ? (toolCalls as any) : undefined,
-            };
-          } catch {
-            return { role: "assistant", content: r.content };
-          }
-        }
-        return { role: "assistant", content: r.content };
-      }
-      if (r.role === "system") {
-        return { role: "system", content: r.content };
-      }
-      return { role: "user", content: r.content };
-    });
+  if (rows.length === 0) {
+    const fallbackRows = params.db.db
+      .prepare(
+        "SELECT id, role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+      )
+      .all(params.sessionId, fetchLimit) as MessageRow[];
+    if (fallbackRows.length === 0) return [];
+    rows = fallbackRows.reverse();
+    const fallbackAnchorId = rows[0]?.id;
+    if (typeof fallbackAnchorId === "number") {
+      params.db.db
+        .prepare("UPDATE sessions SET history_anchor_message_id = ?, history_anchor_updated_at = ? WHERE id = ?")
+        .run(fallbackAnchorId, nowMs, params.sessionId);
+      anchorId = fallbackAnchorId;
+    }
+  }
 
-  const sanitized = sanitizeHistory(history);
-  if (sanitized.length <= params.maxMessages) return sanitized;
+  const sanitized = sanitizeHistoryEntries(rows.map(rowToHistoryEntry));
+  if (sanitized.length === 0) return [];
 
-  let start = sanitized.length - params.maxMessages;
-  while (start < sanitized.length && sanitized[start]?.role === "tool") start += 1;
-  return sanitized.slice(start);
+  if (sanitized.length > rolloverLimit) {
+    const preferredStart = Math.max(0, sanitized.length - params.maxMessages);
+    const start = findSliceStart(sanitized, preferredStart);
+    const nextAnchorId = sanitized[start]?.id;
+    if (typeof nextAnchorId === "number" && nextAnchorId !== anchorId) {
+      params.db.db
+        .prepare("UPDATE sessions SET history_anchor_message_id = ?, history_anchor_updated_at = ? WHERE id = ?")
+        .run(nextAnchorId, nowMs, params.sessionId);
+    }
+    return sanitized.slice(start).map((entry) => entry.message);
+  }
+
+  return sanitized.map((entry) => entry.message);
 }

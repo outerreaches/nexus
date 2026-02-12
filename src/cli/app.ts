@@ -144,7 +144,7 @@ export async function runCli(argv: string[]): Promise<void> {
         stateDir: paths.stateDir,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
         limits: {
-          maxMessages: 80,
+          maxMessages: 40,
           maxToolCalls: config.limits.maxToolCallsPerRun,
           maxIterations: config.limits.maxIterationsPerRun,
           maxConcurrent: 1,

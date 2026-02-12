@@ -16,8 +16,17 @@ export type LLMCompleteChatParams = {
   allowImageFallback?: boolean;
 };
 
+export type LLMUsage = {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedPromptTokens?: number;
+  cacheWritePromptTokens?: number;
+  reasoningTokens?: number;
+};
+
 export interface LLMClient {
-  completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[] }>;
+  completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }>;
 }
 
 const DEFAULT_HTTP_TIMEOUT_MS = 120_000;
@@ -103,6 +112,55 @@ function normalizeToolCalls(toolCalls: unknown): ToolCall[] {
     out.push({ id, name, arguments: args });
   }
   return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const n = Math.floor(value);
+  if (n < 0) return undefined;
+  return n;
+}
+
+function normalizeUsage(raw: unknown): LLMUsage | undefined {
+  if (!isRecord(raw)) return undefined;
+  const usage = raw;
+  const promptTokens = toNonNegativeInt(usage.prompt_tokens ?? usage.input_tokens);
+  const completionTokens = toNonNegativeInt(usage.completion_tokens ?? usage.output_tokens);
+  const promptDetails = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
+  const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : undefined;
+  const cachedPromptTokens = toNonNegativeInt(promptDetails?.cached_tokens ?? usage.cached_tokens);
+  const cacheWritePromptTokens = toNonNegativeInt(promptDetails?.cache_write_tokens ?? usage.cache_write_tokens);
+  const reasoningTokens = toNonNegativeInt(completionDetails?.reasoning_tokens ?? usage.reasoning_tokens);
+  const explicitTotal = toNonNegativeInt(usage.total_tokens);
+  const totalTokens =
+    explicitTotal ??
+    (typeof promptTokens === "number" && typeof completionTokens === "number"
+      ? promptTokens + completionTokens
+      : undefined);
+
+  if (
+    typeof promptTokens !== "number" &&
+    typeof completionTokens !== "number" &&
+    typeof totalTokens !== "number" &&
+    typeof cachedPromptTokens !== "number" &&
+    typeof cacheWritePromptTokens !== "number" &&
+    typeof reasoningTokens !== "number"
+  ) {
+    return undefined;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    cachedPromptTokens,
+    cacheWritePromptTokens,
+    reasoningTokens,
+  };
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -217,7 +275,7 @@ function shouldRetryWithoutImages(params: { status: number; statusText: string; 
 export class OpenAICompatClient implements LLMClient {
   constructor(private readonly config: OpenAICompatConfig) {}
 
-  async completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
+  async completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");
     const tools = params.tools.map((t) => ({
       type: "function",
@@ -274,8 +332,9 @@ export class OpenAICompatClient implements LLMClient {
         const message = json?.choices?.[0]?.message as any;
         const content = normalizeAssistantContent(message?.content);
         const toolCalls = normalizeToolCalls(message?.tool_calls);
+        const usage = normalizeUsage(json?.usage);
         // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
-        return { content, toolCalls };
+        return { content, toolCalls, usage };
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           throw new Error(`LLM request timed out after ${timeoutMs}ms`);

@@ -68,6 +68,7 @@ export class AgentService {
         db: this.deps.db,
         sessionId,
         maxMessages: this.deps.limits.maxMessages,
+        nowMs,
       });
 
       // Resolve preset and filter tools

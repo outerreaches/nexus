@@ -1,6 +1,6 @@
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContent } from "./types.js";
-import { OpenAICompatClient, type LLMClient } from "../llm/openai-compat.js";
+import { OpenAICompatClient, type LLMClient, type LLMUsage } from "../llm/openai-compat.js";
 import { createHash } from "node:crypto";
 import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -47,6 +47,77 @@ function safeJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function buildInvalidToolArgsError(call: ToolCall, raw: string, reason: string): string {
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  const preview = normalized ? truncate(normalized, 220) : "<empty>";
+  return (
+    `ERROR: invalid tool arguments for '${call.name}' (${reason}). ` +
+    `Received: ${safeJson(preview)}. ` +
+    `Retry this tool call with a valid JSON object for arguments.`
+  );
+}
+
+type ParsedToolArgsResult =
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; errorResult: string; argsForLog: unknown };
+
+function parseToolArgsForExecution(call: ToolCall): ParsedToolArgsResult {
+  let parsed: unknown;
+  try {
+    parsed = OpenAICompatClient.parseToolArgs(call.arguments);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      errorResult: buildInvalidToolArgsError(call, call.arguments, reason || "parse failed"),
+      argsForLog: call.arguments,
+    };
+  }
+
+  if (typeof parsed === "string") {
+    return {
+      ok: false,
+      errorResult: buildInvalidToolArgsError(call, parsed, "not valid JSON"),
+      argsForLog: parsed,
+    };
+  }
+
+  if (!isPlainObject(parsed)) {
+    const kind = parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed;
+    return {
+      ok: false,
+      errorResult: buildInvalidToolArgsError(call, call.arguments, `expected object, got ${kind}`),
+      argsForLog: parsed,
+    };
+  }
+
+  return { ok: true, args: parsed };
+}
+
+function formatLlmUsage(usage?: LLMUsage): string | null {
+  if (!usage) return null;
+  const parts: string[] = [];
+  if (typeof usage.promptTokens === "number") parts.push(`prompt=${usage.promptTokens}`);
+  if (typeof usage.completionTokens === "number") parts.push(`completion=${usage.completionTokens}`);
+  if (typeof usage.totalTokens === "number") parts.push(`total=${usage.totalTokens}`);
+  if (typeof usage.cachedPromptTokens === "number") parts.push(`cached_prompt=${usage.cachedPromptTokens}`);
+  if (typeof usage.cacheWritePromptTokens === "number") parts.push(`cache_write_prompt=${usage.cacheWritePromptTokens}`);
+  if (
+    typeof usage.cachedPromptTokens === "number" &&
+    typeof usage.promptTokens === "number" &&
+    usage.promptTokens > 0
+  ) {
+    const pct = (usage.cachedPromptTokens / usage.promptTokens) * 100;
+    parts.push(`cache_hit=${pct.toFixed(1)}%`);
+  }
+  if (typeof usage.reasoningTokens === "number") parts.push(`reasoning=${usage.reasoningTokens}`);
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 function isLlmTimeoutError(err: unknown): boolean {
@@ -230,6 +301,8 @@ export class AgentRunner {
         });
         content = res.content;
         toolCalls = res.toolCalls;
+        const usageLine = formatLlmUsage(res.usage);
+        if (usageLine) this.deps.onLog?.(`llm_usage mode=default ${usageLine}`);
       } catch (err) {
         const isTimeout = isLlmTimeoutError(err);
         if (!isTimeout) {
@@ -304,6 +377,8 @@ export class AgentRunner {
           });
           content = retry.content;
           toolCalls = retry.toolCalls;
+          const usageLine = formatLlmUsage(retry.usage);
+          if (usageLine) this.deps.onLog?.(`llm_usage mode=extended ${usageLine}`);
           this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
         } catch (retryErr) {
           const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -527,13 +602,21 @@ export class AgentRunner {
                 continue;
               }
 
-              let args: unknown = {};
-              try {
-                args = OpenAICompatClient.parseToolArgs(batchCall.arguments);
-              } catch {
-                args = {};
+              const parsedArgs = parseToolArgsForExecution(batchCall);
+              if (!parsedArgs.ok) {
+                this.deps.onLog?.(
+                  `tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(parsedArgs.argsForLog))} args_valid=false`,
+                );
+                executions.push({
+                  call: batchCall,
+                  tool,
+                  args: {},
+                  promise: Promise.resolve(parsedArgs.errorResult),
+                });
+                continue;
               }
 
+              const args = parsedArgs.args;
               this.deps.onLog?.(`tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))}`);
               const promise = tool
                 .execute(args, this.deps.toolContext)
@@ -580,13 +663,19 @@ export class AgentRunner {
           continue;
         }
 
-        let args: unknown = {};
-        try {
-          args = OpenAICompatClient.parseToolArgs(call.arguments);
-        } catch {
-          args = {};
+        const parsedArgs = parseToolArgsForExecution(call);
+        if (!parsedArgs.ok) {
+          this.deps.onLog?.(
+            `tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(parsedArgs.argsForLog))} args_valid=false`,
+          );
+          const abort = handleToolResult(call, {}, parsedArgs.errorResult, i);
+          if (abort) {
+            return abort;
+          }
+          continue;
         }
 
+        const args = parsedArgs.args;
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         let result: string;
         try {

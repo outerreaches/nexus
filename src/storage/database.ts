@@ -22,6 +22,8 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       channel_key TEXT NOT NULL,
       agent_id TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      history_anchor_message_id INTEGER,
+      history_anchor_updated_at INTEGER,
       UNIQUE(channel, channel_key, agent_id)
     );
 
@@ -345,6 +347,18 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE sessions ADD COLUMN history_anchor_message_id INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE sessions ADD COLUMN history_anchor_updated_at INTEGER;");
   } catch {
     // already exists
   }

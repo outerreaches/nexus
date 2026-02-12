@@ -238,7 +238,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
     limits: {
-      maxMessages: 80,
+      maxMessages: 40,
       maxToolCalls: config.limits.maxToolCallsPerRun,
       maxIterations: config.limits.maxIterationsPerRun,
       maxConcurrent: config.limits.maxConcurrentAgents,
