@@ -45,7 +45,8 @@ export async function runCli(argv: string[]): Promise<void> {
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { OpenAICompatClient } = await import("../llm/openai-compat.js");
+      const { ModelRouter } = await import("../llm/model-router.js");
+      const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
       const { BrowserManager } = await import("../browser/manager.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
@@ -63,11 +64,37 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       const db = await openDatabase(paths.dbPath);
 
-      const apiKey =
-        config.llm.openaiCompat.apiKey && /^\$\{[A-Z0-9_]+\}$/.test(config.llm.openaiCompat.apiKey)
-          ? undefined
-          : config.llm.openaiCompat.apiKey;
-      const llm = new OpenAICompatClient({ ...config.llm.openaiCompat, apiKey });
+      const resolveApiKey = (value?: string): string | undefined => {
+        if (!value) return value;
+        return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
+      };
+      const defaultLlmConfig = {
+        ...config.llm.openaiCompat,
+        apiKey: resolveApiKey(config.llm.openaiCompat.apiKey),
+      };
+      const llmProviderConfigs = Object.fromEntries(
+        Object.entries(config.llm.providers).map(([name, provider]) => [
+          name,
+          {
+            ...provider,
+            apiKey: resolveApiKey(provider.apiKey),
+          },
+        ]),
+      );
+      const modelRouter = new ModelRouter({
+        defaultProvider: defaultLlmConfig,
+        providers: llmProviderConfigs,
+        routing: config.llm.routing,
+      });
+      const startupRoute = modelRouter.resolve({
+        agentId: String(opts.agent ?? "main"),
+        preset: "orchestrator",
+        mode: "default",
+        presetLlm: getPreset("orchestrator")?.llm,
+      });
+      const llm = modelRouter.createClient(startupRoute, {
+        onFallback: (line) => log(line),
+      });
 
       const browserPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? config.port + 2);
       const browser = new BrowserManager({
@@ -89,6 +116,10 @@ export async function runCli(argv: string[]): Promise<void> {
         stateDir: paths.stateDir,
         codeDir: paths.codeDir,
         llm,
+        llmConfig: startupRoute.primary,
+        fallbackLlmConfig: startupRoute.fallback,
+        modelRouter,
+        modelMode: startupRoute.mode,
         db,
         browser,
         registry,
@@ -106,6 +137,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
       const agent = new AgentService({
         llm,
+        modelRouter,
         getTools: () => registry.list(),
         toolContext,
         db,

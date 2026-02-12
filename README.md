@@ -47,6 +47,10 @@ Without `--force`, `init` preserves existing non-empty state markdown files and 
 4) Configure secrets in your environment (typically `.env`) and keep placeholders in config (`~/.nexus/nexus.json`):
 - Default model is `moonshot/kimi-k2.5` (override via `llm.openaiCompat.model`).
 - `OPENROUTER_API_KEY`
+- Optional local/OpenAI-compatible endpoint (for local-only routing or fallback):
+  - `NEXUS_LOCAL_LLM_BASE_URL`
+  - `NEXUS_LOCAL_LLM_API_KEY`
+  - `NEXUS_LOCAL_LLM_MODEL`
 - `BRAVE_API_KEY` (optional; enables `web_search` via Brave)
 - `PERPLEXITY_API_KEY` (optional; enables `web_search` via Perplexity direct)
 - `TELEGRAM_BOT_TOKEN`
@@ -54,6 +58,51 @@ Without `--force`, `init` preserves existing non-empty state markdown files and 
 5) Start the gateway:
 ```bash
 npm run dev -- gateway --verbose
+```
+
+## Model routing and fallback
+
+Nexus supports per-agent/per-preset model routing with optional fallback providers.
+
+Route resolution order:
+1. `llm.routing.byAgent[agentId]`
+2. `llm.routing.byPreset[preset]`
+3. `llm.routing.default`
+
+`spawn_agent` also supports `modelMode: "local_only"` to force local-provider routing for privacy-sensitive work. Nested workers inherit `modelMode` unless explicitly overridden.
+
+Example:
+```json
+{
+  "llm": {
+    "openaiCompat": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "model": "moonshot/kimi-k2.5"
+    },
+    "providers": {
+      "local": {
+        "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
+        "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}",
+        "model": "${NEXUS_LOCAL_LLM_MODEL}"
+      }
+    },
+    "routing": {
+      "default": {
+        "primary": { "provider": "default" },
+        "fallback": { "provider": "local" }
+      },
+      "byPreset": {
+        "coder": {
+          "primary": { "provider": "default", "model": "moonshot/kimi-k2.5" },
+          "fallback": { "provider": "local" }
+        }
+      },
+      "byAgent": {},
+      "localProvider": "local"
+    }
+  }
+}
 ```
 
 ## Safety warning
@@ -150,6 +199,7 @@ Telegram file I/O:
   - If provider/model rejects image parts (e.g., non-vision route), Nexus retries once automatically with text-only content.
 - Use `telegram_send_file` to send files back to users by path.
 - Use `image_analyze` to analyze existing images from a direct path or blackboard attachment (`blackboardId` + `attachmentIndex`).
+- Use `image_generate` to create image files via the active model route, persist them, optionally write a blackboard artifact, and optionally send them to Telegram.
 - Env tuning:
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE` (default `5`)
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES` (default `20971520` = 20 MB)

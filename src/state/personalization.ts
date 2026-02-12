@@ -106,6 +106,7 @@ Use \`spawn_agent\` to delegate to these specialists:
 | **researcher** | Web research, browsing, document analysis | web_search, data_intake_query, image_analyze |
 | **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
 | **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze |
+| **graphic-designer** | Visual concepting and image asset generation | image_generate, image_analyze, web_search, telegram_send_file |
 
 Tool list note:
 - The runtime function-calling tool schema is authoritative.

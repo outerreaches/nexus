@@ -17,6 +17,11 @@ export type WorkerConfig = {
     apiKey?: string;
     model: string;
   };
+  fallbackLlmConfig?: {
+    baseUrl: string;
+    apiKey?: string;
+    model: string;
+  };
 
   // Permissions
   allowShellExec: boolean;
@@ -44,6 +49,7 @@ export type WorkerConfig = {
   sessionId: string;
   channel: string;
   channelKey: string;
+  modelMode: "default" | "local_only";
 
   // Depth enforcement
   currentDepth: number;

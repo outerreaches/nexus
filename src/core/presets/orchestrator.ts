@@ -3,6 +3,10 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
+  llm: {
+    primary: { provider: "default" },
+    fallback: { provider: "local" },
+  },
   systemPrompt: [
     "As part of assisting the user, you manage jobs, schedules, data sources, memory, and other agents.",
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
@@ -11,6 +15,7 @@ export const preset: AgentPreset = {
     "If a coder run performs `ha_deploy` action='apply', avoid immediate post-deploy runtime/schema checks in the same request cycle; wait for a fresh follow-up run.",
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
+    "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
     "Use the intake-manager preset for adding or updating data intake sources.",
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",

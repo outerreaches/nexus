@@ -10,7 +10,7 @@ import "../env.js";
 import path from "node:path";
 
 import { openDatabase } from "../storage/database.js";
-import { OpenAICompatClient } from "../llm/openai-compat.js";
+import { createRoutedClientFromConfigs } from "../llm/model-router.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { AgentTracker } from "./agent-tracker.js";
 import { AgentRunner } from "./agent-runner.js";
@@ -40,7 +40,13 @@ process.on("message", async (msg: ParentMessage) => {
     // Set busy timeout for WAL mode concurrent access
     db.db.pragma("busy_timeout = 10000");
 
-    const llm = new OpenAICompatClient(cfg.llmConfig);
+    const llm = createRoutedClientFromConfigs({
+      primary: cfg.llmConfig,
+      fallback: cfg.fallbackLlmConfig,
+      primaryLabel: cfg.llmConfig.model,
+      fallbackLabel: cfg.fallbackLlmConfig?.model,
+      onFallback: (line) => log(line),
+    });
     const builtIns = getBuiltInTools();
     const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir });
     await registry.init();
@@ -67,6 +73,8 @@ process.on("message", async (msg: ParentMessage) => {
       codeDir: cfg.codeDir,
       llm,
       llmConfig: cfg.llmConfig,
+      fallbackLlmConfig: cfg.fallbackLlmConfig,
+      modelMode: cfg.modelMode,
       db,
       browser: undefined, // Workers do NOT get a browser instance
       registry,
@@ -83,6 +91,7 @@ process.on("message", async (msg: ParentMessage) => {
         sessionId: cfg.sessionId,
         runId: cfg.runId ?? undefined,
         parentRunId: cfg.parentRunId ?? undefined,
+        modelMode: cfg.modelMode,
       },
       planState: undefined,
       budgetInfo: {

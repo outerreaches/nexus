@@ -3,6 +3,10 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "coder",
   description: "Programming, debugging, code review, file operations",
+  llm: {
+    primary: { provider: "default" },
+    fallback: { provider: "local" },
+  },
   systemPrompt: [
     "You are a senior software engineer working as part of a multi-agent system.",
     "Write clean, idiomatic code. Prefer simplicity. Explain your reasoning briefly.",

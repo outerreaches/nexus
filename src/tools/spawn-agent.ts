@@ -14,6 +14,7 @@ import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
+import type { ModelRoutingMode } from "../llm/model-router.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +44,7 @@ export const spawnAgent = defineTool({
     preset: z
       .string()
       .min(1)
-      .describe("Worker preset name (coder, researcher, trader, analyst, intake-manager)"),
+      .describe("Worker preset name (see available presets list in this tool description)"),
     task: z
       .string()
       .min(1)
@@ -62,6 +63,10 @@ export const spawnAgent = defineTool({
       .optional()
       .describe("Override preset budget limits"),
     parentRunId: z.string().min(1).optional().describe("Optional parent run id for hierarchical agent graphs"),
+    modelMode: z
+      .enum(["default", "local_only"])
+      .optional()
+      .describe("Optional model routing mode for this worker (`local_only` forces local provider routing)"),
   }),
   execute: async (args, ctx) => {
     // Resolve preset
@@ -73,13 +78,11 @@ export const spawnAgent = defineTool({
     if (args.preset === "orchestrator") {
       return "ERROR: cannot spawn another orchestrator";
     }
+    const workerModelMode: ModelRoutingMode = args.modelMode ?? ctx.request?.modelMode ?? ctx.modelMode ?? "default";
 
     // Get dependencies from context
     const registry = ctx.registry as ToolRegistry | undefined;
     if (!registry) return "ERROR: tool registry not available";
-
-    const llm = ctx.llm;
-    if (!llm) return "ERROR: LLM client not available for worker agents";
 
     const db = ctx.db as NexusDatabase | undefined;
 
@@ -193,6 +196,7 @@ export const spawnAgent = defineTool({
         agentId,
         workerDepth,
         maxDepth,
+        modelMode: workerModelMode,
         tracker,
         blackboardTitle,
       });
@@ -205,6 +209,8 @@ export const spawnAgent = defineTool({
         budget,
         runId: runId ?? null,
         parentRunId: effectiveParentRunId,
+        agentId,
+        modelMode: workerModelMode,
         workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
         tracker,
         blackboardTitle,
@@ -227,16 +233,49 @@ async function runInProcess(params: {
   budget: { maxToolCalls: number; maxIterations: number; maxContextTokens: number };
   runId: string | null;
   parentRunId: string | null;
+  agentId: string;
+  modelMode: ModelRoutingMode;
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
 }): Promise<string> {
-  const { ctx, preset, systemPrompt, task, budget, runId, parentRunId, workerTools, tracker, blackboardTitle } = params;
-  const llm = ctx.llm!;
+  const { ctx, preset, systemPrompt, task, budget, runId, parentRunId, agentId, modelMode, workerTools, tracker, blackboardTitle } = params;
+  const log = ctx.log;
+  const onLog = log
+    ? (line: string) => log(`worker[${preset.name}] ${line}`)
+    : undefined;
+
+  let llm = ctx.llm;
+  let llmConfig = ctx.llmConfig;
+  let fallbackLlmConfig = ctx.fallbackLlmConfig;
+  if (ctx.modelRouter) {
+    const route = ctx.modelRouter.resolve({
+      agentId,
+      preset: preset.name,
+      mode: modelMode,
+      presetLlm: preset.llm,
+    });
+    llm = ctx.modelRouter.createClient(route, { onFallback: onLog });
+    llmConfig = route.primary;
+    fallbackLlmConfig = route.fallback;
+    const fallbackLabel = route.fallbackProvider && route.fallback
+      ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
+      : "";
+    onLog?.(
+      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+    );
+  }
+  if (!llm) {
+    return "ERROR: LLM client not available for worker agent";
+  }
 
   // Create worker ToolContext (inherit from orchestrator but with worker identity)
   const workerCtx: ToolContext = {
     ...ctx,
+    llm,
+    llmConfig,
+    fallbackLlmConfig,
+    modelMode,
     // Workers start with a fresh planState — don't inherit parent's completed plan
     planState: undefined,
     request: ctx.request
@@ -245,6 +284,7 @@ async function runInProcess(params: {
           agentId: `${ctx.request.agentId}:${preset.name}`,
           runId: runId ?? undefined,
           parentRunId: parentRunId ?? undefined,
+          modelMode,
         }
       : undefined,
     // Workers get their own budget info
@@ -255,11 +295,6 @@ async function runInProcess(params: {
       maxToolCalls: budget.maxToolCalls,
     },
   };
-
-  const log = ctx.log;
-  const onLog = log
-    ? (line: string) => log(`worker[${preset.name}] ${line}`)
-    : undefined;
 
   // Create and run worker
   const runner = new AgentRunner({
@@ -325,6 +360,7 @@ async function runIsolated(params: {
   agentId: string;
   workerDepth: number;
   maxDepth: number;
+  modelMode: ModelRoutingMode;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
 }): Promise<string> {
@@ -339,17 +375,35 @@ async function runIsolated(params: {
     agentId,
     workerDepth,
     maxDepth,
+    modelMode,
     tracker,
     blackboardTitle,
   } = params;
 
-  // Require llmConfig to serialize for the worker
-  if (!ctx.llmConfig) {
-    return "ERROR: llmConfig not available on context (required for isolated workers)";
-  }
-
   const log = ctx.log;
   const logWorker = (line: string) => log?.(`worker[${preset.name}] ${line}`);
+
+  let llmConfig = ctx.llmConfig;
+  let fallbackLlmConfig = ctx.fallbackLlmConfig;
+  if (ctx.modelRouter) {
+    const route = ctx.modelRouter.resolve({
+      agentId,
+      preset: preset.name,
+      mode: modelMode,
+      presetLlm: preset.llm,
+    });
+    llmConfig = route.primary;
+    fallbackLlmConfig = route.fallback;
+    const fallbackLabel = route.fallbackProvider && route.fallback
+      ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
+      : "";
+    logWorker(
+      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+    );
+  }
+  if (!llmConfig) {
+    return "ERROR: llmConfig not available on context (required for isolated workers)";
+  }
 
   // Calculate timeout: maxIterations * 60s, capped at NEXUS_WORKER_TIMEOUT_MS or 30 min
   const defaultTimeoutMs = 30 * 60 * 1000; // 30 minutes
@@ -479,7 +533,8 @@ async function runIsolated(params: {
       workspaceDir: ctx.workspaceDir,
       codeDir: ctx.codeDir,
       dbPath: path.join(ctx.stateDir, "nexus.db"),
-      llmConfig: ctx.llmConfig!,
+      llmConfig,
+      fallbackLlmConfig,
       allowShellExec: ctx.allowShellExec ?? false,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: ctx.allowCodeWrite ?? false,
@@ -493,6 +548,7 @@ async function runIsolated(params: {
       sessionId: ctx.request?.sessionId ?? "unknown",
       channel: ctx.request?.channel ?? "worker",
       channelKey: ctx.request?.channelKey ?? "worker",
+      modelMode,
       currentDepth: workerDepth,
       maxDepth,
     };

@@ -10,7 +10,7 @@
 
 import type { ChatMessage, ToolCall } from "./types.js";
 import type { Tool } from "./tools.js";
-import type { OpenAICompatClient } from "../llm/openai-compat.js";
+import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "./message-content.js";
 
@@ -139,7 +139,7 @@ function truncateStr(s: string, max: number): string {
 export async function compactContext(params: {
   messages: ChatMessage[];
   tools: Tool[];
-  llm: OpenAICompatClient;
+  llm: LLMClient;
   maxContextTokens: number;
   /** Minimum recent messages to preserve (default: 10) */
   minRecentMessages?: number;
@@ -215,7 +215,7 @@ export async function compactContext(params: {
  * Use the LLM to generate a concise summary of conversation messages.
  * Uses a minimal context (no tools) to keep the summarization call small.
  */
-async function generateSummary(llm: OpenAICompatClient, messages: ChatMessage[]): Promise<string> {
+async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise<string> {
   const conversationText = messagesToText(messages, 800);
 
   // Cap the text we send for summarization to ~30k chars (~8k tokens)

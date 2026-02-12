@@ -3,6 +3,10 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "intake-manager",
   description: "Manages data intake sources (add/update/dedup/rate-limited)",
+  llm: {
+    primary: { provider: "default" },
+    fallback: { provider: "local" },
+  },
   systemPrompt: [
     "You manage data intake sources only.",
     "Add or update sources when requested; do not ask for optional confirmation.",

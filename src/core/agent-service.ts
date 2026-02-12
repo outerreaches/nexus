@@ -5,19 +5,21 @@ import { AgentRunner } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContentPart } from "./types.js";
-import { OpenAICompatClient } from "../llm/openai-compat.js";
+import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
 import type { AgentTracker } from "./agent-tracker.js";
+import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 
 export class AgentService {
   private readonly semaphore: Semaphore;
 
   constructor(
     private readonly deps: {
-      llm: OpenAICompatClient;
+      llm: LLMClient;
+      modelRouter?: ModelRouter;
       getTools: () => Tool[];
       toolContext: ToolContext;
       db: NexusDatabase;
@@ -40,6 +42,8 @@ export class AgentService {
     contentParts?: ChatUserContentPart[];
     /** Override preset for this invocation. */
     preset?: string;
+    /** Override model routing mode (default/local_only). */
+    modelMode?: ModelRoutingMode;
   }): Promise<{
     runId: string | null;
     sessionId: string;
@@ -69,6 +73,7 @@ export class AgentService {
       // Resolve preset and filter tools
       const presetName = params.preset ?? this.deps.defaultPreset;
       const preset = presetName ? getPreset(presetName) : undefined;
+      const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.toolContext.modelMode ?? "default";
 
       const systemPrompt = !preset || preset.name === "orchestrator"
         ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId })
@@ -87,6 +92,29 @@ export class AgentService {
           );
         }
         : undefined;
+
+      let llm: LLMClient = this.deps.llm;
+      let llmConfig = this.deps.toolContext.llmConfig;
+      let fallbackLlmConfig = this.deps.toolContext.fallbackLlmConfig;
+      if (this.deps.modelRouter) {
+        const route = this.deps.modelRouter.resolve({
+          agentId: params.agentId,
+          preset: presetName,
+          mode: runModelMode,
+          presetLlm: preset?.llm,
+        });
+        llm = this.deps.modelRouter.createClient(route, {
+          onFallback: onRunnerLog,
+        });
+        llmConfig = route.primary;
+        fallbackLlmConfig = route.fallback;
+        const fallbackLabel = route.fallbackProvider && route.fallback
+          ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
+          : "";
+        onRunnerLog?.(
+          `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+        );
+      }
 
       const tools = filterToolsByPreset(this.deps.getTools(), preset);
 
@@ -109,18 +137,23 @@ export class AgentService {
 
       const toolContext: ToolContext = {
         ...this.deps.toolContext,
-        llm: this.deps.llm,
+        llm,
+        llmConfig,
+        fallbackLlmConfig,
+        modelRouter: this.deps.modelRouter,
+        modelMode: runModelMode,
         request: {
           channel: params.channel,
           channelKey: params.channelKey,
           agentId: params.agentId,
           sessionId,
           runId,
+          modelMode: runModelMode,
         },
       };
 
       const runner = new AgentRunner({
-        llm: this.deps.llm,
+        llm,
         tools,
         budget,
         toolContext,

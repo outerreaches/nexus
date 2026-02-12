@@ -8,6 +8,18 @@ export type OpenAICompatConfig = {
   model: string;
 };
 
+export type LLMCompleteChatParams = {
+  messages: ChatMessage[];
+  tools: Tool[];
+  temperature?: number;
+  timeoutMode?: "default" | "extended";
+  allowImageFallback?: boolean;
+};
+
+export interface LLMClient {
+  completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[] }>;
+}
+
 const DEFAULT_HTTP_TIMEOUT_MS = 120_000;
 const DEFAULT_HTTP_TIMEOUT_MAX_MS = 420_000;
 const DEFAULT_HTTP_TIMEOUT_PER_1K_TOKENS_MS = 3_000;
@@ -202,16 +214,10 @@ function shouldRetryWithoutImages(params: { status: number; statusText: string; 
   );
 }
 
-export class OpenAICompatClient {
+export class OpenAICompatClient implements LLMClient {
   constructor(private readonly config: OpenAICompatConfig) {}
 
-  async completeChat(params: {
-    messages: ChatMessage[];
-    tools: Tool[];
-    temperature?: number;
-    timeoutMode?: "default" | "extended";
-    allowImageFallback?: boolean;
-  }): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
+  async completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");
     const tools = params.tools.map((t) => ({
       type: "function",

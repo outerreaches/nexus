@@ -1,5 +1,6 @@
 import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
+import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as intakeManager } from "./presets/intake-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
@@ -12,6 +13,18 @@ import { preset as trader } from "./presets/trader.js";
 export interface AgentPreset {
   name: string;
   description: string;
+  /** Optional LLM routing override for this preset. Omit to use global default route. */
+  llm?: {
+    primary?: {
+      provider?: string;
+      model?: string;
+    };
+    /** Set to null to disable fallback for this preset. */
+    fallback?: {
+      provider?: string;
+      model?: string;
+    } | null;
+  };
   /** Extra system prompt appended after any preset prompt files. */
   systemPrompt?: string;
   /** Optional prompt files to append to this preset's system prompt. */
@@ -40,6 +53,7 @@ const PRESETS: Record<string, AgentPreset> = {
   researcher,
   trader,
   analyst,
+  "graphic-designer": graphicDesigner,
   "intake-manager": intakeManager,
 };
 

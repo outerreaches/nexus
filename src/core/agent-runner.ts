@@ -1,6 +1,6 @@
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContent } from "./types.js";
-import { OpenAICompatClient } from "../llm/openai-compat.js";
+import { OpenAICompatClient, type LLMClient } from "../llm/openai-compat.js";
 import { createHash } from "node:crypto";
 import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -145,7 +145,7 @@ export type AgentResult = {
 export class AgentRunner {
   constructor(
     private readonly deps: {
-      llm: OpenAICompatClient;
+      llm: LLMClient;
       tools: Tool[];
       budget: AgentBudget;
       toolContext: ToolContext;

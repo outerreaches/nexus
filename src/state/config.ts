@@ -72,6 +72,29 @@ const OpenAICompatProviderSchema = z
   })
   .default({});
 
+const LlmRouteTargetSchema = z
+  .object({
+    provider: z.string().min(1).default("default"),
+    model: z.string().optional(),
+  })
+  .default({ provider: "default" });
+
+const LlmRouteSchema = z
+  .object({
+    primary: LlmRouteTargetSchema.default({ provider: "default" }),
+    fallback: LlmRouteTargetSchema.optional(),
+  })
+  .default({ primary: { provider: "default" } });
+
+const LlmRoutingSchema = z
+  .object({
+    default: LlmRouteSchema.default({ primary: { provider: "default" } }),
+    byPreset: z.record(LlmRouteSchema).default({}),
+    byAgent: z.record(LlmRouteSchema).default({}),
+    localProvider: z.string().min(1).default("local"),
+  })
+  .default({});
+
 export const ConfigSchema = z.object({
   port: z.number().int().positive().default(18789),
   stateDir: EnvString.optional(),
@@ -80,8 +103,10 @@ export const ConfigSchema = z.object({
   llm: z
     .object({
       openaiCompat: OpenAICompatProviderSchema,
+      providers: z.record(OpenAICompatProviderSchema).default({}),
+      routing: LlmRoutingSchema,
     })
-    .default({ openaiCompat: {} }),
+    .default({ openaiCompat: {}, providers: {}, routing: {} }),
   channels: z
     .object({
       telegram: TelegramChannelSchema,
@@ -154,6 +179,23 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
             baseUrl: "https://openrouter.ai/api/v1",
             apiKey: "${OPENROUTER_API_KEY}",
             model: "moonshot/kimi-k2.5",
+          },
+          providers: {
+            local: {
+              baseUrl: "${NEXUS_LOCAL_LLM_BASE_URL}",
+              apiKey: "${NEXUS_LOCAL_LLM_API_KEY}",
+              model: "${NEXUS_LOCAL_LLM_MODEL}",
+            },
+          },
+          routing: {
+            default: {
+              primary: {
+                provider: "default",
+              },
+            },
+            byPreset: {},
+            byAgent: {},
+            localProvider: "local",
           },
         },
         permissions: {

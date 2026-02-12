@@ -9,6 +9,7 @@ import { processList, processLogs, processStart, processStatus, processStop } fr
 import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
 import { imageAnalyze } from "./image-analyze.js";
+import { imageGenerate } from "./image-generate.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
 import { haDeploy } from "./ha-deploy.js";
@@ -51,6 +52,7 @@ export function getBuiltInTools(): Tool[] {
     webFetch,
     webSearch,
     imageAnalyze,
+    imageGenerate,
     shellExec,
     processStart,
     processList,

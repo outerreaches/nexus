@@ -3,15 +3,22 @@ import type { ChildProcess } from "node:child_process";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTracker } from "./agent-tracker.js";
-import type { OpenAICompatClient } from "../llm/openai-compat.js";
+import type { LLMClient, OpenAICompatConfig } from "../llm/openai-compat.js";
+import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 
 export type ToolContext = {
   workspaceDir: string;
   stateDir: string;
   codeDir: string;
-  llm?: OpenAICompatClient;
+  llm?: LLMClient;
   /** Serializable LLM config for passing to isolated workers. */
-  llmConfig?: { baseUrl: string; apiKey?: string; model: string };
+  llmConfig?: OpenAICompatConfig;
+  /** Optional fallback LLM config for passing to isolated workers. */
+  fallbackLlmConfig?: OpenAICompatConfig;
+  /** Optional model router for per-agent/preset model selection. */
+  modelRouter?: ModelRouter;
+  /** Resolved model mode for this run (default/local_only). */
+  modelMode?: ModelRoutingMode;
   db?: unknown;
   browser?: unknown;
   registry?: unknown;
@@ -29,6 +36,7 @@ export type ToolContext = {
     sessionId: string;
     runId?: string;
     parentRunId?: string;
+    modelMode?: ModelRoutingMode;
   };
   planState?: {
     completed: boolean;

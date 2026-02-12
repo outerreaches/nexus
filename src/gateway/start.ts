@@ -10,7 +10,8 @@ import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
-import { OpenAICompatClient } from "../llm/openai-compat.js";
+import { getPreset } from "../core/presets.js";
+import { ModelRouter } from "../llm/model-router.js";
 import { openDatabase } from "../storage/database.js";
 import { ensureConfigExists, loadConfig } from "../state/config.js";
 import { bootstrapState } from "../state/bootstrap.js";
@@ -94,12 +95,45 @@ export async function startGateway(params: { configPath: string; port?: number; 
     noSandbox: process.env.NEXUS_BROWSER_NO_SANDBOX === "1",
   });
 
-  const apiKey =
-    config.llm.openaiCompat.apiKey && /^\$\{[A-Z0-9_]+\}$/.test(config.llm.openaiCompat.apiKey)
-      ? undefined
-      : config.llm.openaiCompat.apiKey;
-  const llmConfig = { ...config.llm.openaiCompat, apiKey };
-  const llm = new OpenAICompatClient(llmConfig);
+  const resolveApiKey = (value?: string): string | undefined => {
+    if (!value) return value;
+    return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
+  };
+  const defaultLlmConfig = {
+    ...config.llm.openaiCompat,
+    apiKey: resolveApiKey(config.llm.openaiCompat.apiKey),
+  };
+  const llmProviderConfigs = Object.fromEntries(
+    Object.entries(config.llm.providers).map(([name, provider]) => [
+      name,
+      {
+        ...provider,
+        apiKey: resolveApiKey(provider.apiKey),
+      },
+    ]),
+  );
+  const modelRouter = new ModelRouter({
+    defaultProvider: defaultLlmConfig,
+    providers: llmProviderConfigs,
+    routing: config.llm.routing,
+  });
+  const startupRoute = modelRouter.resolve({
+    agentId: "gateway:start",
+    preset: "orchestrator",
+    mode: "default",
+    presetLlm: getPreset("orchestrator")?.llm,
+  });
+  const fallbackLabel = startupRoute.fallbackProvider && startupRoute.fallback
+    ? ` fallback=${startupRoute.fallbackProvider}/${startupRoute.fallback.model}`
+    : "";
+  log(
+    `startup: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model}${fallbackLabel} source=${startupRoute.source}`,
+  );
+  const llm = modelRouter.createClient(startupRoute, {
+    onFallback: (line) => log(line),
+  });
+  const llmConfig = startupRoute.primary;
+  const fallbackLlmConfig = startupRoute.fallback;
   const builtIns = getBuiltInTools();
   const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
   await registry.init();
@@ -140,6 +174,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
     codeDir: paths.codeDir,
     llm,
     llmConfig,
+    fallbackLlmConfig,
+    modelRouter,
+    modelMode: startupRoute.mode,
     db,
     browser,
     registry,
@@ -192,6 +229,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const agent = new AgentService({
     llm,
+    modelRouter,
     getTools: () => registry.list(),
     toolContext,
     db,
