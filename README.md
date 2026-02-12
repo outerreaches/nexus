@@ -144,11 +144,17 @@ Delivery modes:
 
 Telegram file I/O:
 - Inbound attachments auto-trigger analysis. Files are stored under `state/telegram-files/...` and indexed in blackboard entries.
+- Supported image attachments are also forwarded to the LLM as multimodal `image_url` parts (inline data URLs), with size/count caps.
+  - Inline MIME allowlist: `image/png`, `image/jpeg`, `image/webp`, `image/gif` (OpenRouter-compatible).
+  - Use a vision-capable model on your OpenRouter route; non-vision models may ignore image parts.
+  - If provider/model rejects image parts (e.g., non-vision route), Nexus retries once automatically with text-only content.
 - Use `telegram_send_file` to send files back to users by path.
 - Env tuning:
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE` (default `5`)
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES` (default `20971520` = 20 MB)
   - `NEXUS_TELEGRAM_FILE_BLACKBOARD_TTL_MS` (default `2592000000` = 30 days)
+  - `NEXUS_TELEGRAM_LLM_MAX_INLINE_IMAGES` (default `3`)
+  - `NEXUS_TELEGRAM_LLM_MAX_INLINE_IMAGE_BYTES` (default `4194304` = 4 MB)
   - `NEXUS_TELEGRAM_SEND_FILE_ALLOW_ANY=1` allows sending files outside `stateDir`/`workspaceDir`/`codeDir` (default: restricted to those roots)
 
 ## Gmail (OAuth API)

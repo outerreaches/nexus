@@ -1,5 +1,6 @@
 import type { ChatMessage, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
+import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
 
 export type OpenAICompatConfig = {
   baseUrl: string;
@@ -30,12 +31,23 @@ function envBool(name: string): boolean | null {
 
 type OpenAIChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | {
+    role: "user";
+    content:
+      | string
+      | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+  }
   | { role: "assistant"; content: string | null; tool_calls?: unknown[] }
   | { role: "tool"; content: string; tool_call_id: string; name: string };
 
 function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
   return messages.map((m) => {
+    if (m.role === "user") {
+      return {
+        role: "user",
+        content: m.content,
+      };
+    }
     if (m.role === "assistant") {
       if (m.toolCalls && m.toolCalls.length > 0) {
         return {
@@ -98,6 +110,9 @@ function estimateCharsForMessage(message: ChatMessage): number {
   if (message.role === "tool") {
     return message.name.length + message.toolCallId.length + message.content.length;
   }
+  if (message.role === "user") {
+    return estimateUserContentPayloadChars(message.content);
+  }
   return message.content.length;
 }
 
@@ -158,6 +173,35 @@ function resolveTimeoutForMode(params: {
   return Math.min(extendedMaxMs, Math.ceil(normalTimeoutMs * multiplier));
 }
 
+function messagesContainImageParts(messages: ChatMessage[]): boolean {
+  for (const message of messages) {
+    if (message.role !== "user" || typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type === "image_url") return true;
+    }
+  }
+  return false;
+}
+
+function toTextOnlyUserMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "user" || typeof message.content === "string") return message;
+    const rendered = renderUserContentForText(message.content, { includeImageUrls: false });
+    return {
+      role: "user",
+      content: rendered || "[image attachment omitted for non-vision model]",
+    };
+  });
+}
+
+function shouldRetryWithoutImages(params: { status: number; statusText: string; body: string }): boolean {
+  if (![400, 415, 422].includes(params.status)) return false;
+  const haystack = `${params.statusText}\n${params.body}`.toLowerCase();
+  return /image_url|vision|multimodal|does not support image|doesn't support image|image input|unsupported image|invalid image/.test(
+    haystack,
+  );
+}
+
 export class OpenAICompatClient {
   constructor(private readonly config: OpenAICompatConfig) {}
 
@@ -176,47 +220,62 @@ export class OpenAICompatClient {
         parameters: t.jsonSchema,
       },
     }));
-    const timeoutMs = resolveTimeoutForMode({
-      mode: params.timeoutMode ?? "default",
-      messages: params.messages,
-      tools: params.tools,
-    });
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: this.config.model,
-          messages: toOpenAIMessages(params.messages),
-          tools,
-          tool_choice: "auto",
-          temperature: params.temperature ?? 0.2,
-        }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
-      }
+    const hasImages = messagesContainImageParts(params.messages);
+    let fallbackAttempted = false;
+    let activeMessages = params.messages;
 
-      const json = (await res.json()) as any;
-      const message = json?.choices?.[0]?.message as any;
-      const content = typeof message?.content === "string" ? message.content : null;
-      const toolCalls = normalizeToolCalls(message?.tool_calls);
-      // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
-      return { content, toolCalls };
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new Error(`LLM request timed out after ${timeoutMs}ms`);
+    while (true) {
+      const timeoutMs = resolveTimeoutForMode({
+        mode: params.timeoutMode ?? "default",
+        messages: activeMessages,
+        tools: params.tools,
+      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: this.config.model,
+            messages: toOpenAIMessages(activeMessages),
+            tools,
+            tool_choice: "auto",
+            temperature: params.temperature ?? 0.2,
+          }),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const body = await res.text().catch(() => "");
+          if (!fallbackAttempted && hasImages && shouldRetryWithoutImages({
+            status: res.status,
+            statusText: res.statusText,
+            body,
+          })) {
+            fallbackAttempted = true;
+            activeMessages = toTextOnlyUserMessages(params.messages);
+            continue;
+          }
+          throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+        }
+
+        const json = (await res.json()) as any;
+        const message = json?.choices?.[0]?.message as any;
+        const content = normalizeAssistantContent(message?.content);
+        const toolCalls = normalizeToolCalls(message?.tool_calls);
+        // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
+        return { content, toolCalls };
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw new Error(`LLM request timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeout);
       }
-      throw err;
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
@@ -224,4 +283,30 @@ export class OpenAICompatClient {
     const parsed = safeJsonParse(raw);
     return typeof parsed === "string" ? safeJsonParse(parsed) : parsed;
   }
+}
+
+function normalizeAssistantContent(raw: unknown): string | null {
+  if (typeof raw === "string") return raw;
+  if (!Array.isArray(raw)) return null;
+
+  const textParts: string[] = [];
+  for (const part of raw) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    if (typeof p.text === "string") {
+      textParts.push(p.text);
+      continue;
+    }
+    if (typeof p.content === "string") {
+      textParts.push(p.content);
+      continue;
+    }
+    if (typeof p.type === "string" && p.type === "text" && typeof p.text === "object" && p.text) {
+      const textObj = p.text as Record<string, unknown>;
+      if (typeof textObj.value === "string") textParts.push(textObj.value);
+    }
+  }
+
+  const out = textParts.join("\n").trim();
+  return out.length > 0 ? out : null;
 }

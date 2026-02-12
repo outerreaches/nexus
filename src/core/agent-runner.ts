@@ -1,5 +1,5 @@
 import type { Tool, ToolContext } from "./tools.js";
-import type { ChatMessage } from "./types.js";
+import type { ChatMessage, ChatUserContent } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
 import { createHash } from "node:crypto";
 import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
@@ -153,7 +153,7 @@ export class AgentRunner {
     },
   ) {}
 
-  async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: string }): Promise<AgentResult> {
+  async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     const baseMessages: ChatMessage[] = [{ role: "system", content: params.systemPrompt }, ...params.history];
     const newMessages: ChatMessage[] = [{ role: "user", content: params.userMessage }];
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];

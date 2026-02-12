@@ -12,6 +12,7 @@ import type { ChatMessage, ToolCall } from "./types.js";
 import type { Tool } from "./tools.js";
 import type { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { estimateUserContentPayloadChars, renderUserContentForText } from "./message-content.js";
 
 // ─── Token estimation ────────────────────────────────────────────────────────
 
@@ -47,6 +48,8 @@ export function estimateMessageTokens(messages: ChatMessage[]): number {
       }
     } else if (m.role === "tool") {
       chars += m.content.length + (m.name?.length ?? 0) + (m.toolCallId?.length ?? 0) + 20;
+    } else if (m.role === "user") {
+      chars += estimateUserContentPayloadChars(m.content);
     } else {
       chars += m.content.length;
     }
@@ -106,7 +109,8 @@ function messagesToText(messages: ChatMessage[], maxCharsPerMessage: number = 15
   const lines: string[] = [];
   for (const m of messages) {
     if (m.role === "user") {
-      lines.push(`[User]: ${truncateStr(m.content, maxCharsPerMessage)}`);
+      const text = renderUserContentForText(m.content, { includeImageUrls: false });
+      lines.push(`[User]: ${truncateStr(text, maxCharsPerMessage)}`);
     } else if (m.role === "assistant") {
       const text = m.content ?? "";
       if (m.toolCalls && m.toolCalls.length > 0) {
@@ -258,8 +262,10 @@ function heuristicSummary(messages: ChatMessage[]): string {
   const points: string[] = [];
 
   for (const m of messages) {
-    if (m.role === "user" && m.content.length > 10) {
-      const preview = m.content.slice(0, 200).replace(/\n/g, " ").trim();
+    if (m.role === "user") {
+      const text = renderUserContentForText(m.content, { includeImageUrls: false });
+      if (text.length <= 10) continue;
+      const preview = text.slice(0, 200).replace(/\n/g, " ").trim();
       points.push(`- User: ${preview}`);
     } else if (m.role === "assistant" && m.content && !m.toolCalls?.length) {
       // Only include final assistant messages (not tool-calling ones)

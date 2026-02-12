@@ -6,15 +6,24 @@ import { Bot, Context, InputFile } from "grammy";
 
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
+import type { ChatUserContentPart } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
 import { fulfillHumanAction } from "../storage/human-actions.js";
-import { detectMimeType, extensionFromMime, isImageMimeType, sanitizeTelegramFilename } from "./telegram-files.js";
+import {
+  detectMimeType,
+  extensionFromMime,
+  isImageMimeType,
+  isOpenRouterInlineImageMimeType,
+  sanitizeTelegramFilename,
+} from "./telegram-files.js";
 
 const DEFAULT_MAX_INBOUND_FILES_PER_MESSAGE = 5;
 const DEFAULT_MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_FILE_BLACKBOARD_TTL_MS = 30 * 24 * 60 * 60_000;
+const DEFAULT_MAX_INLINE_IMAGES_FOR_LLM = 3;
+const DEFAULT_MAX_INLINE_IMAGE_BYTES_FOR_LLM = 4 * 1024 * 1024;
 
 type IncomingAttachment = {
   kind: string;
@@ -353,6 +362,62 @@ function buildAttachmentDispatchText(params: {
   return `${task}\n\n${lines.join("\n")}`;
 }
 
+async function buildUserContentPartsWithInlineImages(params: {
+  dispatchText: string;
+  files: StoredAttachment[];
+  maxInlineImages: number;
+  maxInlineImageBytes: number;
+  log: (msg: string) => void;
+}): Promise<{ parts: ChatUserContentPart[]; inlineImagesAdded: number; inlineImagesSkipped: number }> {
+  const parts: ChatUserContentPart[] = [{ type: "text", text: params.dispatchText }];
+  let inlineImagesAdded = 0;
+  let inlineImagesSkipped = 0;
+  if (params.maxInlineImages <= 0) return { parts, inlineImagesAdded, inlineImagesSkipped };
+
+  for (const file of params.files) {
+    if (!isImageMimeType(file.mimeType)) continue;
+    if (!isOpenRouterInlineImageMimeType(file.mimeType)) {
+      inlineImagesSkipped += 1;
+      params.log(`telegram: inline_image_skip path=${file.absolutePath} reason=unsupported_mime mime=${file.mimeType}`);
+      continue;
+    }
+    if (inlineImagesAdded >= params.maxInlineImages) {
+      inlineImagesSkipped += 1;
+      continue;
+    }
+    if (file.sizeBytes > params.maxInlineImageBytes) {
+      inlineImagesSkipped += 1;
+      continue;
+    }
+
+    try {
+      const bytes = await fs.readFile(file.absolutePath);
+      if (bytes.length > params.maxInlineImageBytes) {
+        inlineImagesSkipped += 1;
+        continue;
+      }
+      const dataUrl = `data:${file.mimeType};base64,${bytes.toString("base64")}`;
+      parts.push({ type: "image_url", image_url: { url: dataUrl } });
+      inlineImagesAdded += 1;
+    } catch (err) {
+      inlineImagesSkipped += 1;
+      params.log(`telegram: inline_image_skip path=${file.absolutePath} reason=${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (inlineImagesSkipped > 0) {
+    const summary = `\n\n[media note] ${inlineImagesSkipped} image(s) were not inlined due to limits; use file paths from blackboard if needed.`;
+    const textPart = parts[0];
+    if (textPart?.type === "text") {
+      textPart.text += summary;
+    } else {
+      parts.unshift({ type: "text", text: summary.trim() });
+    }
+  }
+
+  return { parts, inlineImagesAdded, inlineImagesSkipped };
+}
+
 function writeTelegramUploadBlackboardEntry(params: {
   db: NexusDatabase;
   chatId: number;
@@ -458,11 +523,26 @@ export async function startTelegramBot(deps: {
     min: 60_000,
     max: 180 * 24 * 60 * 60_000,
   });
+  const maxInlineImagesForLlm = envInt("NEXUS_TELEGRAM_LLM_MAX_INLINE_IMAGES", DEFAULT_MAX_INLINE_IMAGES_FOR_LLM, {
+    min: 0,
+    max: 12,
+  });
+  const maxInlineImageBytesForLlm = envInt(
+    "NEXUS_TELEGRAM_LLM_MAX_INLINE_IMAGE_BYTES",
+    DEFAULT_MAX_INLINE_IMAGE_BYTES_FOR_LLM,
+    {
+      min: 64 * 1024,
+      max: 32 * 1024 * 1024,
+    },
+  );
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
   deps.log(
     `telegram: file_io max_files_per_msg=${maxInboundFilesPerMessage} max_file_bytes=${maxInboundFileBytes} blackboard_ttl_ms=${fileBlackboardTtlMs}`,
+  );
+  deps.log(
+    `telegram: llm_media max_inline_images=${maxInlineImagesForLlm} max_inline_image_bytes=${maxInlineImageBytesForLlm}`,
   );
   if (allowAllUsers) deps.log("telegram: WARN allow_all is enabled; any Telegram user can reach the agent.");
   if (allowFrom.length === 0 && !allowAllUsers && !tg.pairing.enabled) {
@@ -637,6 +717,7 @@ export async function startTelegramBot(deps: {
       }
 
       let dispatchText = cleanedText;
+      let storedFiles: StoredAttachment[] = [];
       if (incomingAttachments.length > 0) {
         const nowMs = Date.now();
         const ingest = await ingestIncomingAttachments({
@@ -689,6 +770,7 @@ export async function startTelegramBot(deps: {
           files: ingest.stored,
           rejected: ingest.rejected,
         });
+        storedFiles = ingest.stored;
       }
 
       if (!dispatchText.trim()) {
@@ -696,12 +778,34 @@ export async function startTelegramBot(deps: {
         return;
       }
 
-      deps.log(`telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length}`);
+      let contentParts: ChatUserContentPart[] | undefined;
+      if (storedFiles.length > 0) {
+        const media = await buildUserContentPartsWithInlineImages({
+          dispatchText,
+          files: storedFiles,
+          maxInlineImages: maxInlineImagesForLlm,
+          maxInlineImageBytes: maxInlineImageBytesForLlm,
+          log: deps.log,
+        });
+        if (media.inlineImagesAdded > 0) {
+          contentParts = media.parts;
+          deps.log(
+            `telegram: dispatch_media chat_id=${chatId} inline_images=${media.inlineImagesAdded} skipped=${media.inlineImagesSkipped}`,
+          );
+        } else if (media.inlineImagesSkipped > 0) {
+          deps.log(`telegram: dispatch_media chat_id=${chatId} inline_images=0 skipped=${media.inlineImagesSkipped}`);
+        }
+      }
+
+      deps.log(
+        `telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
+      );
       const res = await deps.agent.handleUserMessage({
         channel: "telegram",
         channelKey: String(chatId),
         agentId: tg.agentId,
         text: dispatchText,
+        contentParts,
       });
 
       await sendOutput(chatId, res.output);

@@ -70,9 +70,19 @@ export function isImageMimeType(mimeType: string): boolean {
   return /^image\//i.test(mimeType);
 }
 
+const OPENROUTER_INLINE_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+
+export function isOpenRouterInlineImageMimeType(mimeType: string): boolean {
+  return OPENROUTER_INLINE_IMAGE_MIME_TYPES.has(mimeType.trim().toLowerCase());
+}
+
 export function sanitizeTelegramFilename(name: string): string {
   const trimmed = name.trim();
   const sanitized = trimmed.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/_+/g, "_");
   return sanitized.length > 0 ? sanitized : "file";
 }
-

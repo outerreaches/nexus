@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ChatMessage } from "../core/types.js";
+import { renderUserContentForStorage } from "../core/message-content.js";
 import type { NexusDatabase } from "./database.js";
 
 function sanitizeHistory(history: ChatMessage[]): ChatMessage[] {
@@ -86,7 +87,15 @@ export function appendMessage(params: {
     .prepare(
       "INSERT INTO messages (session_id, role, content, name, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .run(params.sessionId, params.message.role, params.message.content, null, null, null, params.nowMs);
+    .run(
+      params.sessionId,
+      params.message.role,
+      params.message.role === "user" ? renderUserContentForStorage(params.message.content) : params.message.content,
+      null,
+      null,
+      null,
+      params.nowMs,
+    );
 }
 
 export function loadRecentHistory(params: {

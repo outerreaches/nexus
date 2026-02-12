@@ -6,9 +6,14 @@ export type ToolCall = {
   arguments: string;
 };
 
+export type ChatUserContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export type ChatUserContent = string | ChatUserContentPart[];
+
 export type ChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: ChatUserContent }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
   | { role: "tool"; content: string; toolCallId: string; name: string };
-

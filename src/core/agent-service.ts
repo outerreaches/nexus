@@ -4,7 +4,7 @@ import path from "node:path";
 import { AgentRunner } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import type { Tool, ToolContext } from "./tools.js";
-import type { ChatMessage } from "./types.js";
+import type { ChatMessage, ChatUserContentPart } from "./types.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
@@ -37,6 +37,7 @@ export class AgentService {
     channelKey: string;
     agentId: string;
     text: string;
+    contentParts?: ChatUserContentPart[];
     /** Override preset for this invocation. */
     preset?: string;
   }): Promise<{
@@ -131,7 +132,7 @@ export class AgentService {
         result = await runner.run({
           systemPrompt,
           history: history.filter((m) => m.role !== "system"),
-          userMessage: params.text,
+          userMessage: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
         });
       } catch (err) {
         if (runId && this.deps.agentTracker) {
