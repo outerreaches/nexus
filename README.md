@@ -200,6 +200,7 @@ Telegram file I/O:
 - Use `telegram_send_file` to send files back to users by path.
 - Use `image_analyze` to analyze existing images from a direct path or blackboard attachment (`blackboardId` + `attachmentIndex`).
 - Use `image_generate` to create image files via the active model route, persist them, optionally write a blackboard artifact, and optionally send them to Telegram.
+- Use `image_edit` to edit an existing image (from file path or blackboard attachment), persist outputs, optionally write a blackboard artifact, and optionally send them to Telegram.
 - Env tuning:
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE` (default `5`)
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES` (default `20971520` = 20 MB)
