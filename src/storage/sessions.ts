@@ -5,7 +5,6 @@ import { renderUserContentForStorage } from "../core/message-content.js";
 import type { NexusDatabase } from "./database.js";
 
 const ANCHOR_ROLLOVER_MULTIPLIER = 2;
-const ANCHOR_FETCH_MULTIPLIER = 6;
 
 type HistoryEntry = {
   id: number;
@@ -86,6 +85,14 @@ function findSliceStart(entries: HistoryEntry[], preferredStart: number): number
   return Math.max(0, entries.length - 1);
 }
 
+function findAnchorStart(entries: HistoryEntry[], preferredStart: number): number {
+  const start = Math.max(0, preferredStart);
+  for (let i = start; i < entries.length; i++) {
+    if (entries[i]?.message.role === "user") return i;
+  }
+  return findSliceStart(entries, start);
+}
+
 export function getOrCreateSessionId(params: {
   db: NexusDatabase;
   channel: string;
@@ -162,11 +169,11 @@ export function loadRecentHistory(params: {
   anchorRolloverMessages?: number;
 }): ChatMessage[] {
   const nowMs = params.nowMs ?? Date.now();
+  const activeWindow = Math.max(1, params.maxMessages);
   const rolloverLimit = Math.max(
-    params.maxMessages + 8,
-    params.anchorRolloverMessages ?? params.maxMessages * ANCHOR_ROLLOVER_MULTIPLIER,
+    activeWindow + 1,
+    params.anchorRolloverMessages ?? activeWindow * ANCHOR_ROLLOVER_MULTIPLIER,
   );
-  const fetchLimit = Math.max(rolloverLimit * ANCHOR_FETCH_MULTIPLIER, params.maxMessages + 120);
 
   const sessionRow = params.db.db
     .prepare("SELECT history_anchor_message_id FROM sessions WHERE id = ?")
@@ -186,16 +193,17 @@ export function loadRecentHistory(params: {
 
   let rows = params.db.db
     .prepare(
-      "SELECT id, role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? AND id >= ? ORDER BY id ASC LIMIT ?",
+      "SELECT id, role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? AND id >= ? ORDER BY id ASC",
     )
-    .all(params.sessionId, anchorId, fetchLimit) as MessageRow[];
+    .all(params.sessionId, anchorId) as MessageRow[];
 
   if (rows.length === 0) {
+    const fallbackLimit = Math.max(rolloverLimit + activeWindow + 8, activeWindow * 3);
     const fallbackRows = params.db.db
       .prepare(
         "SELECT id, role, content, name, tool_call_id, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
       )
-      .all(params.sessionId, fetchLimit) as MessageRow[];
+      .all(params.sessionId, fallbackLimit) as MessageRow[];
     if (fallbackRows.length === 0) return [];
     rows = fallbackRows.reverse();
     const fallbackAnchorId = rows[0]?.id;
@@ -207,20 +215,30 @@ export function loadRecentHistory(params: {
     }
   }
 
-  const sanitized = sanitizeHistoryEntries(rows.map(rowToHistoryEntry));
-  if (sanitized.length === 0) return [];
-
-  if (sanitized.length > rolloverLimit) {
-    const preferredStart = Math.max(0, sanitized.length - params.maxMessages);
-    const start = findSliceStart(sanitized, preferredStart);
-    const nextAnchorId = sanitized[start]?.id;
-    if (typeof nextAnchorId === "number" && nextAnchorId !== anchorId) {
-      params.db.db
-        .prepare("UPDATE sessions SET history_anchor_message_id = ?, history_anchor_updated_at = ? WHERE id = ?")
-        .run(nextAnchorId, nowMs, params.sessionId);
-    }
-    return sanitized.slice(start).map((entry) => entry.message);
+  let sanitized = sanitizeHistoryEntries(rows.map(rowToHistoryEntry));
+  if (sanitized.length === 0) {
+    return [];
   }
 
-  return sanitized.map((entry) => entry.message);
+  let nextAnchorId = anchorId;
+  if (sanitized.length > rolloverLimit) {
+    const shiftSteps = Math.ceil((sanitized.length - rolloverLimit) / activeWindow);
+    const preferredAnchorStart = Math.min(sanitized.length - 1, shiftSteps * activeWindow);
+    const anchorStart = findAnchorStart(sanitized, preferredAnchorStart);
+    const candidateAnchorId = sanitized[anchorStart]?.id;
+    if (typeof candidateAnchorId === "number") {
+      nextAnchorId = candidateAnchorId;
+      sanitized = sanitized.slice(anchorStart);
+    }
+  }
+
+  if (typeof nextAnchorId === "number" && nextAnchorId !== anchorId) {
+    params.db.db
+      .prepare("UPDATE sessions SET history_anchor_message_id = ?, history_anchor_updated_at = ? WHERE id = ?")
+      .run(nextAnchorId, nowMs, params.sessionId);
+  }
+
+  const preferredRecentStart = Math.max(0, sanitized.length - activeWindow);
+  const recentStart = findSliceStart(sanitized, preferredRecentStart);
+  return sanitized.slice(recentStart).map((entry) => entry.message);
 }
