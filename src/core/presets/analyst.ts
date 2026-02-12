@@ -22,6 +22,7 @@ export const preset: AgentPreset = {
   tools: [
     "web_search",
     "web_fetch",
+    "image_analyze",
     "data_intake_query",
     "query_data",
     "read_from_blackboard",

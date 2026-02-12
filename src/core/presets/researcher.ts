@@ -44,6 +44,7 @@ export const preset: AgentPreset = {
   ].join("\n"),
   tools: [
     "web_search",
+    "image_analyze",
     "data_intake_query",
     "read_from_blackboard",
     "write_to_blackboard",

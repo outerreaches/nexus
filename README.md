@@ -149,6 +149,7 @@ Telegram file I/O:
   - Use a vision-capable model on your OpenRouter route; non-vision models may ignore image parts.
   - If provider/model rejects image parts (e.g., non-vision route), Nexus retries once automatically with text-only content.
 - Use `telegram_send_file` to send files back to users by path.
+- Use `image_analyze` to analyze existing images from a direct path or blackboard attachment (`blackboardId` + `attachmentIndex`).
 - Env tuning:
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE` (default `5`)
   - `NEXUS_TELEGRAM_MAX_INBOUND_FILE_BYTES` (default `20971520` = 20 MB)

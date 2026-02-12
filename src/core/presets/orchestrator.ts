@@ -23,6 +23,7 @@ export const preset: AgentPreset = {
     "file_edit",
     "file_edit_lines",
     "file_list",
+    "image_analyze",
     // Swarm coordination
     "spawn_agent",
     "read_from_blackboard",

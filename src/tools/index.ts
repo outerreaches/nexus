@@ -8,6 +8,7 @@ import { shellExec } from "./system.js";
 import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
 import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
+import { imageAnalyze } from "./image-analyze.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
 import { haDeploy } from "./ha-deploy.js";
@@ -49,6 +50,7 @@ export function getBuiltInTools(): Tool[] {
     fileList,
     webFetch,
     webSearch,
+    imageAnalyze,
     shellExec,
     processStart,
     processList,

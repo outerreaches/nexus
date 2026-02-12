@@ -210,6 +210,7 @@ export class OpenAICompatClient {
     tools: Tool[];
     temperature?: number;
     timeoutMode?: "default" | "extended";
+    allowImageFallback?: boolean;
   }): Promise<{ content: string | null; toolCalls: ToolCall[] }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");
     const tools = params.tools.map((t) => ({
@@ -221,6 +222,7 @@ export class OpenAICompatClient {
       },
     }));
     const hasImages = messagesContainImageParts(params.messages);
+    const allowImageFallback = params.allowImageFallback ?? true;
     let fallbackAttempted = false;
     let activeMessages = params.messages;
 
@@ -250,7 +252,7 @@ export class OpenAICompatClient {
         });
         if (!res.ok) {
           const body = await res.text().catch(() => "");
-          if (!fallbackAttempted && hasImages && shouldRetryWithoutImages({
+          if (!fallbackAttempted && hasImages && allowImageFallback && shouldRetryWithoutImages({
             status: res.status,
             statusText: res.statusText,
             body,
