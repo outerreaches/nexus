@@ -133,6 +133,43 @@ type ImageGenerationResult = {
   images: GeneratedImage[];
 };
 
+type NoImageOutputClassification = "policy_refusal" | "capability_mismatch" | "empty_output";
+
+class NoImageOutputError extends Error {
+  readonly classification: NoImageOutputClassification;
+  readonly modelText: string | null;
+  readonly finishReason: string | null;
+  readonly responseId: string | null;
+
+  constructor(params: {
+    operation: string;
+    classification: NoImageOutputClassification;
+    modelText: string | null;
+    finishReason: string | null;
+    responseId: string | null;
+  }) {
+    const details = [
+      `${params.operation} response did not include images`,
+      `classification=${params.classification}`,
+      ...(params.finishReason ? [`finish_reason=${params.finishReason}`] : []),
+      ...(params.responseId ? [`response_id=${params.responseId}`] : []),
+      ...(params.modelText ? [`model_text="${params.modelText}"`] : []),
+    ];
+    super(details.join("; "));
+    this.name = "NoImageOutputError";
+    this.classification = params.classification;
+    this.modelText = params.modelText;
+    this.finishReason = params.finishReason;
+    this.responseId = params.responseId;
+  }
+}
+
+function truncateForError(raw: string, maxChars = 240): string {
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 1)}…`;
+}
+
 function normalizeTextContent(raw: unknown): string | null {
   if (typeof raw === "string") return raw.trim() || null;
   if (!Array.isArray(raw)) return null;
@@ -151,34 +188,114 @@ function normalizeTextContent(raw: unknown): string | null {
   return joined || null;
 }
 
-function extractImageUrls(message: unknown): string[] {
-  if (!message || typeof message !== "object") return [];
-  const msg = message as Record<string, unknown>;
-  const urls: string[] = [];
-  const add = (val: unknown) => {
-    if (typeof val === "string" && val.trim().length > 0) urls.push(val.trim());
+function maybeString(raw: unknown): string | null {
+  return typeof raw === "string" ? raw.trim() || null : null;
+}
+
+function detectImageMimeType(raw: unknown): string | null {
+  const value = maybeString(raw);
+  if (!value) return null;
+  const normalized = value.toLowerCase().split(";")[0]?.trim() ?? "";
+  if (normalized.startsWith("image/")) return normalized;
+  return null;
+}
+
+function looksLikeBase64(raw: string): boolean {
+  const compact = raw.replace(/\s+/g, "");
+  if (compact.length < 256) return false;
+  if (compact.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/=]+$/.test(compact);
+}
+
+function toImageReference(raw: unknown, mimeTypeHint?: string | null): string | null {
+  const value = maybeString(raw);
+  if (!value) return null;
+  if (value.startsWith("data:")) return value;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (!looksLikeBase64(value)) return null;
+  const mimeType = detectImageMimeType(mimeTypeHint) ?? "image/png";
+  return `data:${mimeType};base64,${value.replace(/\s+/g, "")}`;
+}
+
+function extractImageUrls(message: unknown, responseJson?: Record<string, unknown>): string[] {
+  const addFromObject = (obj: Record<string, unknown>, urls: string[]): void => {
+    const mimeTypeHint = detectImageMimeType(obj.mime_type ?? obj.mimeType ?? obj.type);
+    const imageUrlObj = (obj.image_url ?? obj.imageUrl) as Record<string, unknown> | undefined;
+    const nestedImageObj = (obj.image ?? obj.output_image) as Record<string, unknown> | undefined;
+    const candidates: unknown[] = [
+      imageUrlObj?.url,
+      obj.url,
+      obj.b64_json,
+      obj.base64,
+      obj.image_base64,
+      obj.data,
+      nestedImageObj?.url,
+      nestedImageObj?.b64_json,
+      nestedImageObj?.base64,
+      nestedImageObj?.data,
+    ];
+    for (const candidate of candidates) {
+      const imageRef = toImageReference(candidate, mimeTypeHint);
+      if (imageRef) urls.push(imageRef);
+    }
   };
 
-  const images = Array.isArray(msg.images) ? msg.images : [];
-  for (const image of images) {
-    if (!image || typeof image !== "object") continue;
-    const item = image as Record<string, unknown>;
-    const imageUrlObj = (item.image_url ?? item.imageUrl) as Record<string, unknown> | undefined;
-    add(imageUrlObj?.url);
-    add(item.url);
+  const urls: string[] = [];
+  if (message && typeof message === "object") {
+    const msg = message as Record<string, unknown>;
+    const images = Array.isArray(msg.images) ? msg.images : [];
+    for (const image of images) {
+      if (!image || typeof image !== "object") continue;
+      addFromObject(image as Record<string, unknown>, urls);
+    }
+
+    const content = Array.isArray(msg.content) ? msg.content : [];
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      addFromObject(part as Record<string, unknown>, urls);
+    }
   }
 
-  const content = Array.isArray(msg.content) ? msg.content : [];
-  for (const part of content) {
-    if (!part || typeof part !== "object") continue;
-    const p = part as Record<string, unknown>;
-    if (p.type === "image_url") {
-      const imageUrlObj = (p.image_url ?? p.imageUrl) as Record<string, unknown> | undefined;
-      add(imageUrlObj?.url);
+  if (responseJson) {
+    const output = Array.isArray(responseJson.output) ? responseJson.output : [];
+    for (const item of output) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      addFromObject(obj, urls);
+      const content = Array.isArray(obj.content) ? obj.content : [];
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        addFromObject(part as Record<string, unknown>, urls);
+      }
     }
   }
 
   return Array.from(new Set(urls));
+}
+
+function classifyNoImageOutput(text: string | null, finishReason: string | null): NoImageOutputClassification {
+  if (finishReason?.toLowerCase() === "content_filter") return "policy_refusal";
+  const haystack = `${text ?? ""} ${finishReason ?? ""}`.toLowerCase();
+  if (/(policy|safety|refus|cannot|can't|unable|disallow|not allowed|copyright|public figure)/i.test(haystack)) {
+    return "policy_refusal";
+  }
+  if (/(modalit|unsupported|no endpoints|does not support|can't generate|text-only|tool use)/i.test(haystack)) {
+    return "capability_mismatch";
+  }
+  return "empty_output";
+}
+
+function formatImageToolError(err: unknown): string {
+  if (err instanceof NoImageOutputError) {
+    if (err.classification === "policy_refusal") {
+      return `${err.message}. Hint: request a policy-safe transformation or a non-protected style.`;
+    }
+    if (err.classification === "capability_mismatch") {
+      return `${err.message}. Hint: try a different image model/provider route.`;
+    }
+    return `${err.message}. Hint: retry with a shorter, explicit image-output prompt.`;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function generateImagesWithConfig(params: {
@@ -219,11 +336,20 @@ async function generateImagesWithConfig(params: {
   }
 
   const json = (await res.json()) as Record<string, unknown>;
-  const message = ((json.choices as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined)?.message;
+  const choice = (json.choices as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined;
+  const message = choice?.message as Record<string, unknown> | undefined;
   const text = normalizeTextContent((message as Record<string, unknown> | undefined)?.content);
-  const imageUrls = extractImageUrls(message);
+  const finishReason = maybeString(choice?.finish_reason);
+  const responseId = maybeString(json.id);
+  const imageUrls = extractImageUrls(message, json);
   if (imageUrls.length === 0) {
-    throw new Error("image generation response did not include images");
+    throw new NoImageOutputError({
+      operation: "image generation",
+      classification: classifyNoImageOutput(text, finishReason),
+      modelText: text ? truncateForError(text) : null,
+      finishReason,
+      responseId,
+    });
   }
   return {
     text,
@@ -380,8 +506,15 @@ export const imageGenerate = defineTool({
         timeoutMs,
       });
     } catch (primaryErr) {
+      if (primaryErr instanceof NoImageOutputError) {
+        ctx.log(
+          `image_generate: no_image_output classification=${primaryErr.classification} model=${selectedModel}` +
+          `${primaryErr.finishReason ? ` finish_reason=${primaryErr.finishReason}` : ""}` +
+          `${primaryErr.responseId ? ` response_id=${primaryErr.responseId}` : ""}`,
+        );
+      }
       if (!fallback || !shouldFallbackFromError(primaryErr)) {
-        return `ERROR: ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`;
+        return `ERROR: ${formatImageToolError(primaryErr)}`;
       }
       ctx.log(`image_generate: primary failed, falling back (${primary.model} -> ${fallback.model})`);
       try {
@@ -395,9 +528,7 @@ export const imageGenerate = defineTool({
         });
         routeUsed = `fallback:${fallback.model}`;
       } catch (fallbackErr) {
-        return `ERROR: primary and fallback image generation failed: ${
-          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
-        }`;
+        return `ERROR: primary and fallback image generation failed: ${formatImageToolError(fallbackErr)}`;
       }
     }
 
