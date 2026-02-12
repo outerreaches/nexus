@@ -13,6 +13,8 @@ import { preset as trader } from "./presets/trader.js";
 export interface AgentPreset {
   name: string;
   description: string;
+  /** Optional default image model for image tools used by this preset. */
+  imageModel?: string;
   /** Optional LLM routing override for this preset. Omit to use global default route. */
   llm?: {
     primary?: {

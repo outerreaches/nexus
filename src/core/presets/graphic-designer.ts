@@ -3,6 +3,7 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "graphic-designer",
   description: "Visual design specialist for image concepts, art direction, and asset delivery",
+  imageModel: "google/gemini-3-pro-image-preview",
   llm: {
     // The agent runtime needs tool-calling support; use the default routed model.
     primary: { provider: "default" },

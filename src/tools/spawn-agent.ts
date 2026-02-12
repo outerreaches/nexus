@@ -282,6 +282,7 @@ async function runInProcess(params: {
       ? {
           ...ctx.request,
           agentId: `${ctx.request.agentId}:${preset.name}`,
+          preset: preset.name,
           runId: runId ?? undefined,
           parentRunId: parentRunId ?? undefined,
           modelMode,

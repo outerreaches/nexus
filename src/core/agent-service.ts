@@ -147,6 +147,7 @@ export class AgentService {
           channel: params.channel,
           channelKey: params.channelKey,
           agentId: params.agentId,
+          preset: preset?.name ?? presetName,
           sessionId,
           runId,
           modelMode: runModelMode,

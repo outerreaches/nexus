@@ -33,6 +33,7 @@ export type ToolContext = {
     channel: string;
     channelKey: string;
     agentId: string;
+    preset?: string;
     sessionId: string;
     runId?: string;
     parentRunId?: string;

@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { getPreset } from "../core/presets.js";
 import type { OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
@@ -126,6 +127,18 @@ function resolveTimeoutMs(override?: number): number {
   return Math.max(10_000, envInt("NEXUS_LLM_IMAGE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
 }
 
+function resolveDefaultImageModel(ctx: { request?: { preset?: string } }, llm: OpenAICompatConfig): string {
+  const presetName = ctx.request?.preset?.trim();
+  if (presetName) {
+    const preset = getPreset(presetName);
+    const presetModel = preset?.imageModel?.trim();
+    if (presetModel) return presetModel;
+  }
+  const envModel = (process.env.NEXUS_IMAGE_MODEL ?? "").trim();
+  if (envModel) return envModel;
+  return llm.model;
+}
+
 function shouldFallbackFromError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   if (/request timed out|abort/i.test(message)) return true;
@@ -213,14 +226,13 @@ async function generateEditedImagesWithConfig(params: {
   llm: OpenAICompatConfig;
   prompt: string;
   inputImageDataUrl: string;
-  modelOverride?: string;
+  model: string;
   size?: "1K" | "2K" | "4K";
   aspectRatio?: string;
   timeoutMs: number;
 }): Promise<ImageGenerationResult> {
   const url = joinUrl(params.llm.baseUrl, "chat/completions");
-  const model = (params.modelOverride ?? params.llm.model).trim();
-  const isOpenRouter = /openrouter\.ai/i.test(params.llm.baseUrl);
+  const model = params.model.trim();
   const payload: Record<string, unknown> = {
     model,
     messages: [
@@ -233,13 +245,9 @@ async function generateEditedImagesWithConfig(params: {
       },
     ],
     modalities: ["image", "text"],
-    tool_choice: "none",
-  };
-  if (isOpenRouter) {
-    payload.provider = { require_parameters: true };
   }
   const imageConfig: Record<string, unknown> = {};
-  if (params.size) imageConfig.size = params.size;
+  if (params.size) imageConfig.image_size = params.size;
   if (params.aspectRatio) imageConfig.aspect_ratio = params.aspectRatio;
   if (Object.keys(imageConfig).length > 0) payload.image_config = imageConfig;
 
@@ -510,14 +518,15 @@ export const imageEdit = defineTool({
     if (!ctx.llmConfig) return "ERROR: llmConfig is not available";
 
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
+    const selectedModel = (args.model ?? resolveDefaultImageModel(ctx, ctx.llmConfig)).trim();
     const primary = {
       ...ctx.llmConfig,
-      model: args.model ?? ctx.llmConfig.model,
+      model: selectedModel,
     };
     const fallback = ctx.fallbackLlmConfig
       ? {
           ...ctx.fallbackLlmConfig,
-          model: args.model ?? ctx.fallbackLlmConfig.model,
+          model: selectedModel,
         }
       : undefined;
 
@@ -576,7 +585,7 @@ export const imageEdit = defineTool({
         llm: primary,
         prompt: args.prompt,
         inputImageDataUrl,
-        modelOverride: args.model,
+        model: selectedModel,
         size: args.size,
         aspectRatio: args.aspectRatio,
         timeoutMs,
@@ -591,7 +600,7 @@ export const imageEdit = defineTool({
           llm: fallback,
           prompt: args.prompt,
           inputImageDataUrl,
-          modelOverride: args.model,
+          model: selectedModel,
           size: args.size,
           aspectRatio: args.aspectRatio,
           timeoutMs,
@@ -694,7 +703,7 @@ export const imageEdit = defineTool({
       ];
       const metadata: Record<string, unknown> = {
         source: "image_edit",
-        model: args.model ?? primary.model,
+        model: selectedModel,
         routeUsed,
         count: savedFiles.length,
         size: args.size,
@@ -757,7 +766,7 @@ export const imageEdit = defineTool({
     return JSON.stringify(
       {
         status: "ok",
-        model: args.model ?? primary.model,
+        model: selectedModel,
         routeUsed,
         prompt: args.prompt,
         input: {
