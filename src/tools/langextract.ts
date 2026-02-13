@@ -58,7 +58,6 @@ type PythonResult = {
     source_kind?: string;
     source_is_url?: boolean;
     version?: string;
-    openai_provider_warning?: string;
   };
   extractions?: unknown[];
 };
@@ -141,61 +140,52 @@ def _serialize_extraction(value):
         "description": getattr(value, "description", None),
     }
 
+def _build_openai_model(payload):
+    from langextract.providers.openai import OpenAILanguageModel
+
+    model_id = payload.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise ValueError("model_id is required for OpenAI provider")
+
+    init_kwargs = {"model_id": model_id.strip()}
+    model_url = payload.get("model_url")
+    if isinstance(model_url, str) and model_url.strip():
+        init_kwargs["base_url"] = model_url.strip()
+    api_key = payload.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        init_kwargs["api_key"] = api_key.strip()
+
+    return OpenAILanguageModel(**init_kwargs)
+
 def _supports_parameter(sig, name):
     if name in sig.parameters:
         return True
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
-def _build_openai_language_model_type_and_params(payload):
-    try:
-        from langextract.providers.openai import OpenAILanguageModel
-    except Exception:
-        return None, None, "OpenAILanguageModel provider is unavailable (langextract[openai] may be missing)."
+def _resolve_documents(lx, source_kind, source_value, source_is_url):
+    if source_kind == "text":
+        return source_value
 
-    model_id = payload.get("model_id")
-    if not isinstance(model_id, str) or not model_id.strip():
-        return None, None, "model_id is missing"
+    # For document sources, try to wrap in langextract Document objects.
+    doc_cls = getattr(getattr(lx, "data", None), "Document", None)
+    if doc_cls is not None:
+        try:
+            sig = inspect.signature(doc_cls)
+            params = list(sig.parameters.keys())
+            # Try constructing with known param patterns
+            if source_is_url:
+                if "url" in params:
+                    return [doc_cls(url=source_value)]
+                if "path" in params:
+                    return [doc_cls(path=source_value)]
+            else:
+                if "path" in params:
+                    return [doc_cls(path=source_value)]
+        except Exception:
+            pass
 
-    params = {"model_id": model_id.strip()}
-    model_url = payload.get("model_url")
-    if isinstance(model_url, str) and model_url.strip():
-        params["base_url"] = model_url.strip()
-
-    api_key = payload.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        params["api_key"] = api_key.strip()
-
-    return OpenAILanguageModel, params, None
-
-def _build_openai_model(lx, payload):
-    factory = getattr(lx, "factory", None)
-    if factory is None:
-        return None
-
-    create_model = getattr(factory, "create_model", None)
-    model_config_cls = getattr(factory, "ModelConfig", None)
-    if create_model is None or model_config_cls is None:
-        return None
-
-    model_id = payload.get("model_id")
-    if not isinstance(model_id, str) or not model_id.strip():
-        return None
-
-    provider_kwargs = {}
-    model_url = payload.get("model_url")
-    if isinstance(model_url, str) and model_url.strip():
-        provider_kwargs["base_url"] = model_url.strip()
-
-    api_key = payload.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        provider_kwargs["api_key"] = api_key.strip()
-
-    config = model_config_cls(
-        model_id=model_id.strip(),
-        provider="OpenAILanguageModel",
-        provider_kwargs=provider_kwargs,
-    )
-    return create_model(config)
+    # Fallback: pass raw string in list (works with older versions)
+    return [source_value]
 
 def main():
     payload = json.load(sys.stdin)
@@ -225,13 +215,17 @@ def main():
         if not prompt_description:
             raise ValueError("prompt_description is required")
 
-        text_or_documents = source_value if source_kind == "text" else [source_value]
+        # Build OpenAI model — fail hard if this doesn't work.
+        model = _build_openai_model(payload)
+
+        text_or_documents = _resolve_documents(lx, source_kind, source_value, source_is_url)
         examples = _build_examples(lx, payload)
 
         kwargs = {
             "text_or_documents": text_or_documents,
             "prompt_description": prompt_description,
             "examples": examples,
+            "model": model,
         }
 
         sig = inspect.signature(lx.extract)
@@ -241,45 +235,6 @@ def main():
             "fence_output": payload.get("fence_output"),
             "use_schema_constraints": payload.get("use_schema_constraints"),
         }
-
-        model_build_errors = []
-        model_forced = False
-
-        # Newer/alternate API style: language_model_type + language_model_params.
-        if _supports_parameter(sig, "language_model_type") and _supports_parameter(sig, "language_model_params"):
-            try:
-                openai_type, openai_params, openai_err = _build_openai_language_model_type_and_params(payload)
-                if openai_err:
-                    model_build_errors.append(openai_err)
-                elif openai_type is not None and openai_params is not None:
-                    kwargs["language_model_type"] = openai_type
-                    kwargs["language_model_params"] = openai_params
-                    model_forced = True
-            except Exception as exc:
-                model_build_errors.append(str(exc))
-
-        # Factory model path: model object built from provider config.
-        if not model_forced and _supports_parameter(sig, "model"):
-            try:
-                model = _build_openai_model(lx, payload)
-                if model is not None:
-                    kwargs["model"] = model
-                    model_forced = True
-            except Exception as exc:
-                model_build_errors.append(str(exc))
-
-        # Legacy style: pass model hints directly; provider auto-selection decides.
-        openai_provider_warning = None
-        if not model_forced:
-            option_values.update({
-                "model_id": payload.get("model_id"),
-                "model_url": payload.get("model_url"),
-                "model_type": payload.get("model_type"),
-                "api_key": payload.get("api_key"),
-            })
-            if model_build_errors:
-                openai_provider_warning = "; ".join(model_build_errors)
-
         for key, value in option_values.items():
             if value is None:
                 continue
@@ -292,7 +247,9 @@ def main():
         all_extractions = [_serialize_extraction(e) for e in (getattr(result, "extractions", None) or [])]
         limited = all_extractions[:max_result_extractions]
 
-        meta = {
+        print(json.dumps({
+            "ok": True,
+            "meta": {
                 "total_extractions": len(all_extractions),
                 "returned_extractions": len(limited),
                 "truncated": len(limited) < len(all_extractions),
@@ -300,12 +257,7 @@ def main():
                 "source_kind": source_kind,
                 "source_is_url": source_is_url,
                 "version": getattr(lx, "__version__", None),
-            }
-        if openai_provider_warning:
-            meta["openai_provider_warning"] = openai_provider_warning
-        print(json.dumps({
-            "ok": True,
-            "meta": meta,
+            },
             "extractions": limited,
         }, ensure_ascii=False))
     except Exception as exc:
@@ -780,17 +732,6 @@ export const langextractExtract = defineTool({
         if ((parsed.error ?? "").toLowerCase().includes("failed to import langextract")) {
           return "ERROR: langextract is not installed in the runtime python environment. Install with `pip install langextract`.";
         }
-        const lowerError = (parsed.error ?? "").toLowerCase();
-        if (
-          lowerError.includes("gemini models require either") ||
-          lowerError.includes("google_api_key") ||
-          lowerError.includes("vertex ai")
-        ) {
-          return (
-            "ERROR: langextract fell back to Gemini instead of OpenAI-compatible routing. " +
-            "Install OpenAI extras (`pip install 'langextract[openai]'`) and verify OpenRouter model/base URL/API key configuration."
-          );
-        }
         const extra = [
           parsed.error ? `error=${parsed.error}` : "",
           parsed.traceback ? `traceback=${truncateForError(parsed.traceback, 3000)}` : "",
@@ -798,10 +739,6 @@ export const langextractExtract = defineTool({
         ].filter(Boolean).join("; ");
         return `ERROR: langextract extraction failed${extra ? ` (${extra})` : ""}`;
       }
-
-      const providerWarning = typeof parsed.meta?.openai_provider_warning === "string"
-        ? parsed.meta.openai_provider_warning
-        : undefined;
 
       const nowIso = new Date(ctx.nowMs()).toISOString();
       const day = nowIso.slice(0, 10);
@@ -877,7 +814,7 @@ export const langextractExtract = defineTool({
       }
 
       const preview = extractionRows.slice(0, 5);
-      const result: Record<string, unknown> = {
+      return JSON.stringify({
         ok: true,
         source: source.sourceLabel,
         outputPath: outputAbsPath,
@@ -885,11 +822,7 @@ export const langextractExtract = defineTool({
         returnedCount,
         blackboardId,
         preview,
-      };
-      if (providerWarning) {
-        result.warning = `OpenAI provider routing failed; langextract used its own provider auto-selection which may not be OpenAI-compatible. Details: ${providerWarning}`;
-      }
-      return JSON.stringify(result, null, 2);
+      }, null, 2);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/ENOENT/i.test(message) && /python/i.test(message)) {
