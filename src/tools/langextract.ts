@@ -21,6 +21,7 @@ const DEFAULT_CHUNK_TRIGGER_CHARS = 16_000;
 const DEFAULT_CHUNK_MAX_CHARS = 12_000;
 const DEFAULT_CHUNK_OVERLAP_CHARS = 800;
 const DEFAULT_MAX_CHUNKS = 8;
+const DEFAULT_EST_CHUNK_MS = 60_000;
 const MAX_CUSTOM_EXAMPLE_COMPLEXITY = 12_000;
 const MAX_STDIO_BYTES = 5 * 1024 * 1024;
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -106,6 +107,13 @@ function estimateExamplesComplexity(examples: LangextractExample[]): number {
     }
   }
   return total;
+}
+
+function computeAdaptiveMaxChunks(timeoutMs: number, configuredMaxChunks: number): number {
+  const estimatePerChunkMs = Math.max(10_000, envInt("NEXUS_LANGEXTRACT_EST_CHUNK_MS", DEFAULT_EST_CHUNK_MS));
+  const budgetMs = Math.max(10_000, Math.floor(timeoutMs * 0.7));
+  const budgetChunks = Math.max(1, Math.floor(budgetMs / estimatePerChunkMs));
+  return Math.max(1, Math.min(configuredMaxChunks, budgetChunks));
 }
 
 const PYTHON_RUNNER = String.raw`from __future__ import annotations
@@ -951,6 +959,8 @@ export const langextractExtract = defineTool({
         apiKeyOverride: args.apiKey,
       });
       const timeoutMs = Math.max(10_000, args.timeoutMs || envInt("NEXUS_LANGEXTRACT_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
+      const configuredMaxChunks = envInt("NEXUS_LANGEXTRACT_MAX_CHUNKS", DEFAULT_MAX_CHUNKS);
+      const adaptiveMaxChunks = computeAdaptiveMaxChunks(timeoutMs, configuredMaxChunks);
 
       if (!resolvedLlm.baseUrl) {
         return "ERROR: missing OpenRouter base URL for langextract_extract. Configure llm.openaiCompat.baseUrl.";
@@ -980,7 +990,7 @@ export const langextractExtract = defineTool({
         chunk_trigger_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_TRIGGER_CHARS", DEFAULT_CHUNK_TRIGGER_CHARS),
         chunk_max_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_MAX_CHARS", DEFAULT_CHUNK_MAX_CHARS),
         chunk_overlap_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_OVERLAP_CHARS", DEFAULT_CHUNK_OVERLAP_CHARS),
-        max_chunks: envInt("NEXUS_LANGEXTRACT_MAX_CHUNKS", DEFAULT_MAX_CHUNKS),
+        max_chunks: adaptiveMaxChunks,
         max_result_extractions: args.maxResultExtractions,
       };
 
@@ -1114,6 +1124,8 @@ export const langextractExtract = defineTool({
           chunkMaxChars: pyPayload.chunk_max_chars,
           chunkOverlapChars: pyPayload.chunk_overlap_chars,
           maxChunks: pyPayload.max_chunks,
+          configuredMaxChunks,
+          adaptiveMaxChunks,
           fenceOutput: effectiveFenceOutput,
           requestedFenceOutput: args.fenceOutput,
           useSchemaConstraints: effectiveUseSchemaConstraints,
