@@ -85,6 +85,7 @@ const McpProfileCreateSchema = z.object({
   serverId: z.string().min(1).max(80),
   description: z.string().max(400).optional(),
   toolNames: z.array(z.string().min(1)).min(1).max(200),
+  allowNonMcpTools: z.boolean().default(false),
   hidden: z.boolean().default(true),
   ephemeral: z.boolean().default(true),
   enabled: z.boolean().default(true),
@@ -97,6 +98,7 @@ const McpProfileUpdateSchema = z.object({
   name: z.string().min(1).max(80).optional(),
   description: z.string().max(400).optional(),
   toolNames: z.array(z.string().min(1)).max(200).optional(),
+  allowNonMcpTools: z.boolean().optional(),
   hidden: z.boolean().optional(),
   ephemeral: z.boolean().optional(),
   enabled: z.boolean().optional(),
@@ -104,14 +106,46 @@ const McpProfileUpdateSchema = z.object({
   budget: McpProfileBudgetSchema,
 });
 
-function sanitizeProfileToolNames(toolNames: string[]): string[] {
-  return Array.from(
+function normalizeRequestedToolNames(params: {
+  toolNames: string[];
+  allowNonMcpTools: boolean;
+  registry: ToolRegistry | null;
+}): { toolNames: string[]; error?: string } {
+  const normalized = Array.from(
     new Set(
-      toolNames
+      params.toolNames
         .map((name) => name.trim())
-        .filter((name) => name.startsWith("mcp.")),
+        .filter(Boolean),
     ),
   );
+  if (normalized.length === 0) {
+    return {
+      toolNames: [],
+      error: "at least one tool name is required.",
+    };
+  }
+
+  const nonMcp = normalized.filter((name) => !name.startsWith("mcp."));
+  if (!params.allowNonMcpTools && nonMcp.length > 0) {
+    return {
+      toolNames: normalized,
+      error:
+        `non-MCP tools are disabled by default. Re-run with allowNonMcpTools=true to include: ${nonMcp.join(", ")}`,
+    };
+  }
+
+  if (params.allowNonMcpTools && nonMcp.length > 0 && params.registry) {
+    const known = new Set(params.registry.list().map((t) => t.name));
+    const unknownNonMcp = nonMcp.filter((name) => !known.has(name));
+    if (unknownNonMcp.length > 0) {
+      return {
+        toolNames: normalized,
+        error: `unknown non-MCP tools: ${unknownNonMcp.join(", ")}`,
+      };
+    }
+  }
+
+  return { toolNames: normalized };
 }
 
 function normalizeDelegateTask(task: string, blackboardTitle?: string): string {
@@ -128,6 +162,7 @@ const McpDelegateSchema = z.object({
   serverId: z.string().min(1).optional(),
   profile: z.string().min(1).optional(),
   toolNames: z.array(z.string().min(1)).max(200).optional(),
+  allowNonMcpTools: z.boolean().default(false),
   profileName: z.string().min(1).max(80).optional(),
   blackboardTitle: z.string().min(1).max(200).optional(),
   budget: z.object({
@@ -356,17 +391,22 @@ export const mcpProfileCreate = defineTool({
   execute: async (args, ctx) => {
     try {
       const db = ctx.db as any;
+      const registry = requireRegistry(ctx);
       if (!db) return "ERROR: database unavailable";
-      const safeToolNames = sanitizeProfileToolNames(args.toolNames);
-      if (safeToolNames.length === 0) {
-        return "ERROR: profile requires at least one MCP-prefixed tool name (mcp.<server>.<tool>).";
+      const normalized = normalizeRequestedToolNames({
+        toolNames: args.toolNames,
+        allowNonMcpTools: args.allowNonMcpTools,
+        registry,
+      });
+      if (normalized.error) {
+        return `ERROR: ${normalized.error}`;
       }
       const created = createMcpProfile(db, {
         id: args.id,
         name: args.name,
         serverId: args.serverId,
         description: args.description,
-        toolNames: safeToolNames,
+        toolNames: normalized.toolNames,
         hidden: args.hidden,
         ephemeral: args.ephemeral,
         enabled: args.enabled,
@@ -396,15 +436,24 @@ export const mcpProfileUpdate = defineTool({
   execute: async (args, ctx) => {
     try {
       const db = ctx.db as any;
+      const registry = requireRegistry(ctx);
       if (!db) return "ERROR: database unavailable";
-      const safeToolNames = args.toolNames ? sanitizeProfileToolNames(args.toolNames) : undefined;
-      if (args.toolNames && (safeToolNames?.length ?? 0) === 0) {
-        return "ERROR: profile requires at least one MCP-prefixed tool name (mcp.<server>.<tool>).";
+      let normalizedToolNames: string[] | undefined;
+      if (args.toolNames) {
+        const normalized = normalizeRequestedToolNames({
+          toolNames: args.toolNames,
+          allowNonMcpTools: args.allowNonMcpTools ?? false,
+          registry,
+        });
+        if (normalized.error) {
+          return `ERROR: ${normalized.error}`;
+        }
+        normalizedToolNames = normalized.toolNames;
       }
       const updated = updateMcpProfile(db, args.idOrName, {
         name: args.name,
         description: args.description,
-        toolNames: safeToolNames,
+        toolNames: normalizedToolNames,
         hidden: args.hidden,
         ephemeral: args.ephemeral,
         enabled: args.enabled,
@@ -474,7 +523,17 @@ export const mcpDelegate = defineTool({
         const server = getMcpServer(db, args.serverId);
         if (!server) return `ERROR: MCP server not found: ${args.serverId}`;
         const toolNames = (args.toolNames && args.toolNames.length > 0)
-          ? sanitizeProfileToolNames(args.toolNames)
+          ? (() => {
+            const normalized = normalizeRequestedToolNames({
+              toolNames: args.toolNames,
+              allowNonMcpTools: args.allowNonMcpTools,
+              registry,
+            });
+            if (normalized.error) {
+              throw new Error(normalized.error);
+            }
+            return normalized.toolNames;
+          })()
           : manager.getToolNamesForServer(server.id);
         if (toolNames.length === 0) {
           return `ERROR: no MCP tools available for server '${server.id}'. Activate/probe first or pass toolNames.`;
