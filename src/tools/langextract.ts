@@ -738,13 +738,41 @@ export const langextractExtract = defineTool({
         max_result_extractions: args.maxResultExtractions,
       };
 
-      const { parsed, stderr } = await runLangextractPython({
+      let effectiveFenceOutput = args.fenceOutput;
+      let { parsed, stderr } = await runLangextractPython({
         pythonBin,
         timeoutMs,
         payload: pyPayload,
         env: process.env,
         cwd: ctx.workspaceDir,
       });
+
+      // Some OpenAI-compatible routes/models return non-fenced JSON (or empty fenced blocks)
+      // despite prompt instructions. If parsing fails in the first pass, retry once with
+      // fence_output disabled to accept raw JSON/YAML payloads.
+      if (!parsed.ok) {
+        const parseError = String(parsed.error ?? "");
+        if (effectiveFenceOutput && /failed to parse json content/i.test(parseError)) {
+          const retryPayload: Record<string, unknown> = {
+            ...pyPayload,
+            fence_output: false,
+          };
+          const retryRun = await runLangextractPython({
+            pythonBin,
+            timeoutMs,
+            payload: retryPayload,
+            env: process.env,
+            cwd: ctx.workspaceDir,
+          });
+          if (retryRun.parsed.ok) {
+            parsed = retryRun.parsed;
+            stderr = [stderr, retryRun.stderr].filter(Boolean).join("\n");
+            effectiveFenceOutput = false;
+          } else {
+            stderr = [stderr, retryRun.stderr].filter(Boolean).join("\n");
+          }
+        }
+      }
 
       if (!parsed.ok) {
         if ((parsed.error ?? "").toLowerCase().includes("failed to import langextract")) {
@@ -783,7 +811,8 @@ export const langextractExtract = defineTool({
           modelUrl: resolvedLlm.baseUrl,
           maxWorkers: args.maxWorkers,
           extractionPasses: args.extractionPasses,
-          fenceOutput: args.fenceOutput,
+          fenceOutput: effectiveFenceOutput,
+          requestedFenceOutput: args.fenceOutput,
           useSchemaConstraints: args.useSchemaConstraints,
           maxResultExtractions: args.maxResultExtractions,
           timeoutMs,
