@@ -396,6 +396,16 @@ function resolveOpenRouterDefaults(params: {
   return { model, baseUrl, apiKey };
 }
 
+function isLangextractParseLikeError(raw: string | undefined): boolean {
+  const text = String(raw ?? "").toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes("failed to parse json content") ||
+    text.includes("resolverparsingerror") ||
+    text.includes("formatparseerror")
+  );
+}
+
 function maybeJsonParse(raw: string): PythonResult | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -711,7 +721,7 @@ export const langextractExtract = defineTool({
       const timeoutMs = Math.max(10_000, args.timeoutMs || envInt("NEXUS_LANGEXTRACT_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
 
       if (!resolvedLlm.baseUrl) {
-        return "ERROR: missing OpenRouter base URL for langextract_extract. Configure llm.openaiCompat.baseUrl in Nexus config or set NEXUS_LANGEXTRACT_OPENROUTER_BASE_URL.";
+        return "ERROR: missing OpenRouter base URL for langextract_extract. Configure llm.openaiCompat.baseUrl.";
       }
       if (!resolvedLlm.model) {
         return "ERROR: missing OpenRouter model for langextract_extract. Configure llm.openaiCompat.model in Nexus config or pass `model`.";
@@ -738,40 +748,87 @@ export const langextractExtract = defineTool({
         max_result_extractions: args.maxResultExtractions,
       };
 
-      let effectiveFenceOutput = args.fenceOutput;
-      let { parsed, stderr } = await runLangextractPython({
-        pythonBin,
-        timeoutMs,
-        payload: pyPayload,
-        env: process.env,
-        cwd: ctx.workspaceDir,
+      const routedModel = ctx.llmConfig?.model?.trim();
+      const fallbackModel = ctx.fallbackLlmConfig?.model?.trim();
+      const attemptsRaw: Array<{ model: string; fenceOutput: boolean; useSchemaConstraints: boolean; reason: string }> = [
+        {
+          model: resolvedLlm.model,
+          fenceOutput: args.fenceOutput,
+          useSchemaConstraints: args.useSchemaConstraints,
+          reason: "primary",
+        },
+      ];
+      if (args.fenceOutput) {
+        attemptsRaw.push({
+          model: resolvedLlm.model,
+          fenceOutput: false,
+          useSchemaConstraints: args.useSchemaConstraints,
+          reason: "primary_no_fence",
+        });
+      }
+      if (routedModel && routedModel !== resolvedLlm.model) {
+        attemptsRaw.push({
+          model: routedModel,
+          fenceOutput: false,
+          useSchemaConstraints: true,
+          reason: "routed_model_fallback",
+        });
+      }
+      if (fallbackModel && fallbackModel !== resolvedLlm.model && fallbackModel !== routedModel) {
+        attemptsRaw.push({
+          model: fallbackModel,
+          fenceOutput: false,
+          useSchemaConstraints: true,
+          reason: "route_fallback_model",
+        });
+      }
+
+      const attempts = attemptsRaw.filter((attempt, idx, arr) => {
+        const key = `${attempt.model}::${attempt.fenceOutput}::${attempt.useSchemaConstraints}`;
+        return arr.findIndex((entry) => `${entry.model}::${entry.fenceOutput}::${entry.useSchemaConstraints}` === key) === idx;
       });
 
-      // Some OpenAI-compatible routes/models return non-fenced JSON (or empty fenced blocks)
-      // despite prompt instructions. If parsing fails in the first pass, retry once with
-      // fence_output disabled to accept raw JSON/YAML payloads.
-      if (!parsed.ok) {
-        const parseError = String(parsed.error ?? "");
-        if (effectiveFenceOutput && /failed to parse json content/i.test(parseError)) {
-          const retryPayload: Record<string, unknown> = {
-            ...pyPayload,
-            fence_output: false,
-          };
-          const retryRun = await runLangextractPython({
-            pythonBin,
-            timeoutMs,
-            payload: retryPayload,
-            env: process.env,
-            cwd: ctx.workspaceDir,
-          });
-          if (retryRun.parsed.ok) {
-            parsed = retryRun.parsed;
-            stderr = [stderr, retryRun.stderr].filter(Boolean).join("\n");
-            effectiveFenceOutput = false;
-          } else {
-            stderr = [stderr, retryRun.stderr].filter(Boolean).join("\n");
-          }
+      let effectiveFenceOutput = args.fenceOutput;
+      let effectiveUseSchemaConstraints = args.useSchemaConstraints;
+      let effectiveModelId = resolvedLlm.model;
+      let parsed: PythonResult | null = null;
+      let stderr = "";
+      const failureSummaries: string[] = [];
+
+      for (let i = 0; i < attempts.length; i += 1) {
+        const attempt = attempts[i]!;
+        const payloadForAttempt: Record<string, unknown> = {
+          ...pyPayload,
+          model_id: attempt.model,
+          fence_output: attempt.fenceOutput,
+          use_schema_constraints: attempt.useSchemaConstraints,
+        };
+        const run = await runLangextractPython({
+          pythonBin,
+          timeoutMs,
+          payload: payloadForAttempt,
+          env: process.env,
+          cwd: ctx.workspaceDir,
+        });
+        stderr = [stderr, run.stderr].filter(Boolean).join("\n");
+        if (run.parsed.ok) {
+          parsed = run.parsed;
+          effectiveFenceOutput = attempt.fenceOutput;
+          effectiveUseSchemaConstraints = attempt.useSchemaConstraints;
+          effectiveModelId = attempt.model;
+          break;
         }
+        const err = String(run.parsed.error ?? "unknown extraction error");
+        failureSummaries.push(`${attempt.reason}:${attempt.model}:${err}`);
+        const shouldContinue = isLangextractParseLikeError(err);
+        if (!shouldContinue || i === attempts.length - 1) {
+          parsed = run.parsed;
+          break;
+        }
+      }
+
+      if (!parsed) {
+        return "ERROR: langextract execution produced no result.";
       }
 
       if (!parsed.ok) {
@@ -781,6 +838,7 @@ export const langextractExtract = defineTool({
         const extra = [
           parsed.error ? `error=${parsed.error}` : "",
           parsed.traceback ? `traceback=${truncateForError(parsed.traceback, 3000)}` : "",
+          failureSummaries.length ? `attempts=${truncateForError(failureSummaries.join(" | "), 1500)}` : "",
           stderr.trim() ? `stderr=${truncateForError(stderr, 1500)}` : "",
         ].filter(Boolean).join("; ");
         return `ERROR: langextract extraction failed${extra ? ` (${extra})` : ""}`;
@@ -807,13 +865,15 @@ export const langextractExtract = defineTool({
           promptDescription: args.promptDescription,
           extractionClasses: args.extractionClasses,
           modelType: "openai",
-          modelId: resolvedLlm.model,
+          modelId: effectiveModelId,
+          requestedModelId: resolvedLlm.model,
           modelUrl: resolvedLlm.baseUrl,
           maxWorkers: args.maxWorkers,
           extractionPasses: args.extractionPasses,
           fenceOutput: effectiveFenceOutput,
           requestedFenceOutput: args.fenceOutput,
-          useSchemaConstraints: args.useSchemaConstraints,
+          useSchemaConstraints: effectiveUseSchemaConstraints,
+          requestedUseSchemaConstraints: args.useSchemaConstraints,
           maxResultExtractions: args.maxResultExtractions,
           timeoutMs,
         },
@@ -851,7 +911,8 @@ export const langextractExtract = defineTool({
             tool: "langextract_extract",
             sourceLabel: source.sourceLabel,
             modelType: "openai",
-            modelId: resolvedLlm.model,
+            modelId: effectiveModelId,
+            requestedModelId: resolvedLlm.model,
             modelUrl: resolvedLlm.baseUrl,
             totalExtractions: totalCount,
             returnedExtractions: returnedCount,
