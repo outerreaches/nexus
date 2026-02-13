@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "coder",
   description: "Programming, debugging, code review, file operations",
   llm: {
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "minimax/minimax-m2.5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
