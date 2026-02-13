@@ -130,6 +130,29 @@ def _supports_parameter(sig, name):
         return True
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
+def _build_model_config(payload):
+    model_id = str(payload.get("model_id") or "").strip()
+    if not model_id:
+        raise ValueError("model_id is required for OpenAI provider")
+
+    provider = str(payload.get("provider") or "").strip() or "openai"
+    provider_kwargs = {}
+
+    model_url = payload.get("model_url")
+    if isinstance(model_url, str) and model_url.strip():
+        provider_kwargs["base_url"] = model_url.strip()
+
+    api_key = payload.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        provider_kwargs["api_key"] = api_key.strip()
+
+    from langextract import factory
+    return factory.ModelConfig(
+        model_id=model_id,
+        provider=provider,
+        provider_kwargs=provider_kwargs,
+    )
+
 def _resolve_documents(lx, source_kind, source_value, source_is_url):
     if source_kind == "text":
         return source_value
@@ -195,18 +218,21 @@ def main():
         text_or_documents = _resolve_documents(lx, source_kind, source_value, source_is_url)
         examples = _build_examples(lx, payload)
 
+        sig = inspect.signature(lx.extract)
         kwargs = {
             "text_or_documents": text_or_documents,
             "prompt_description": prompt_description,
             "examples": examples,
-            "model_id": model_id,
         }
-        if isinstance(model_url, str) and model_url.strip():
-            kwargs["model_url"] = model_url.strip()
-        if isinstance(api_key, str) and api_key.strip():
-            kwargs["api_key"] = api_key.strip()
+        if _supports_parameter(sig, "config"):
+            kwargs["config"] = _build_model_config(payload)
+        else:
+            kwargs["model_id"] = model_id
+            if isinstance(model_url, str) and model_url.strip():
+                kwargs["model_url"] = model_url.strip()
+            if isinstance(api_key, str) and api_key.strip():
+                kwargs["api_key"] = api_key.strip()
 
-        sig = inspect.signature(lx.extract)
         option_values = {
             "max_workers": payload.get("max_workers"),
             "extraction_passes": payload.get("extraction_passes"),
@@ -705,6 +731,7 @@ export const langextractExtract = defineTool({
         prompt_description: args.promptDescription,
         extraction_classes: args.extractionClasses,
         examples: args.examples,
+        provider: "openai",
         model_id: resolvedLlm.model,
         model_url: resolvedLlm.baseUrl,
         api_key: resolvedLlm.apiKey,
