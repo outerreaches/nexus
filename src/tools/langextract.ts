@@ -58,6 +58,7 @@ type PythonResult = {
     source_kind?: string;
     source_is_url?: boolean;
     version?: string;
+    openai_provider_warning?: string;
   };
   extractions?: unknown[];
 };
@@ -266,6 +267,7 @@ def main():
                 model_build_errors.append(str(exc))
 
         # Legacy style: pass model hints directly; provider auto-selection decides.
+        openai_provider_warning = None
         if not model_forced:
             option_values.update({
                 "model_id": payload.get("model_id"),
@@ -274,18 +276,13 @@ def main():
                 "api_key": payload.get("api_key"),
             })
             if model_build_errors:
-                kwargs["_nexus_openai_provider_warning"] = "; ".join(model_build_errors)
+                openai_provider_warning = "; ".join(model_build_errors)
 
         for key, value in option_values.items():
             if value is None:
                 continue
-            if key.startswith("_"):
-                continue
             if _supports_parameter(sig, key):
                 kwargs[key] = value
-
-        # Drop internal warning key if it leaked into kwargs.
-        kwargs.pop("_nexus_openai_provider_warning", None)
         if source_is_url and _supports_parameter(sig, "fetch_urls"):
             kwargs["fetch_urls"] = True
 
@@ -293,9 +290,7 @@ def main():
         all_extractions = [_serialize_extraction(e) for e in (getattr(result, "extractions", None) or [])]
         limited = all_extractions[:max_result_extractions]
 
-        print(json.dumps({
-            "ok": True,
-            "meta": {
+        meta = {
                 "total_extractions": len(all_extractions),
                 "returned_extractions": len(limited),
                 "truncated": len(limited) < len(all_extractions),
@@ -303,7 +298,12 @@ def main():
                 "source_kind": source_kind,
                 "source_is_url": source_is_url,
                 "version": getattr(lx, "__version__", None),
-            },
+            }
+        if openai_provider_warning:
+            meta["openai_provider_warning"] = openai_provider_warning
+        print(json.dumps({
+            "ok": True,
+            "meta": meta,
             "extractions": limited,
         }, ensure_ascii=False))
     except Exception as exc:
@@ -548,7 +548,6 @@ async function runLangextractPython(params: {
     proc.stderr.setEncoding("utf8");
 
     proc.stdout.on("data", (chunk: string) => {
-      if (stdoutOverflow) return;
       stdout += chunk;
       if (stdout.length > MAX_STDIO_BYTES) {
         stdoutOverflow = true;
@@ -557,7 +556,6 @@ async function runLangextractPython(params: {
     });
 
     proc.stderr.on("data", (chunk: string) => {
-      if (stderrOverflow) return;
       stderr += chunk;
       if (stderr.length > MAX_STDIO_BYTES) {
         stderrOverflow = true;
@@ -573,7 +571,7 @@ async function runLangextractPython(params: {
     proc.on("close", (code, signal) => {
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`langextract timed out after ${params.timeoutMs}ms`));
+        reject(new Error(`langextract timed out after ${params.timeoutMs}ms. Retry with a larger timeoutMs or reduce input size.`));
         return;
       }
       if (code !== 0) {
@@ -709,11 +707,14 @@ export const langextractExtract = defineTool({
           defaultRoot: rootDir(ctx, args.root),
           roots: allowedRoots(ctx),
         });
+        const fileContent = await fs.readFile(absolutePath, "utf8");
+        if (!fileContent.trim()) {
+          return "ERROR: source file is empty";
+        }
         source = {
-          type: "document",
-          value: absolutePath,
+          type: "text",
+          value: fileContent,
           sourceLabel: `file:${absolutePath}`,
-          sourceIsUrl: false,
         };
       } else if (typeof args.url === "string" && args.url.trim()) {
         source = {
@@ -800,6 +801,10 @@ export const langextractExtract = defineTool({
         return `ERROR: langextract extraction failed${extra ? ` (${extra})` : ""}`;
       }
 
+      const providerWarning = typeof parsed.meta?.openai_provider_warning === "string"
+        ? parsed.meta.openai_provider_warning
+        : undefined;
+
       const nowIso = new Date(ctx.nowMs()).toISOString();
       const day = nowIso.slice(0, 10);
       const stamp = nowIso.replace(/[:.]/g, "-");
@@ -874,7 +879,7 @@ export const langextractExtract = defineTool({
       }
 
       const preview = extractionRows.slice(0, 5);
-      return JSON.stringify({
+      const result: Record<string, unknown> = {
         ok: true,
         source: source.sourceLabel,
         outputPath: outputAbsPath,
@@ -882,7 +887,11 @@ export const langextractExtract = defineTool({
         returnedCount,
         blackboardId,
         preview,
-      }, null, 2);
+      };
+      if (providerWarning) {
+        result.warning = `OpenAI provider routing failed; langextract used its own provider auto-selection which may not be OpenAI-compatible. Details: ${providerWarning}`;
+      }
+      return JSON.stringify(result, null, 2);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/ENOENT/i.test(message) && /python/i.test(message)) {
