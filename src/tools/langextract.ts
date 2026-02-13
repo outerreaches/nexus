@@ -143,6 +143,36 @@ def _serialize_extraction(value):
 def _supports_parameter(sig, name):
     return name in sig.parameters
 
+def _build_openai_model(lx, payload):
+    factory = getattr(lx, "factory", None)
+    if factory is None:
+        return None
+
+    create_model = getattr(factory, "create_model", None)
+    model_config_cls = getattr(factory, "ModelConfig", None)
+    if create_model is None or model_config_cls is None:
+        return None
+
+    model_id = payload.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+
+    provider_kwargs = {}
+    model_url = payload.get("model_url")
+    if isinstance(model_url, str) and model_url.strip():
+        provider_kwargs["base_url"] = model_url.strip()
+
+    api_key = payload.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        provider_kwargs["api_key"] = api_key.strip()
+
+    config = model_config_cls(
+        model_id=model_id.strip(),
+        provider="OpenAILanguageModel",
+        provider_kwargs=provider_kwargs,
+    )
+    return create_model(config)
+
 def main():
     payload = json.load(sys.stdin)
     try:
@@ -182,15 +212,37 @@ def main():
 
         sig = inspect.signature(lx.extract)
         option_values = {
-            "model_id": payload.get("model_id"),
-            "model_url": payload.get("model_url"),
-            "model_type": payload.get("model_type"),
             "max_workers": payload.get("max_workers"),
             "extraction_passes": payload.get("extraction_passes"),
             "fence_output": payload.get("fence_output"),
             "use_schema_constraints": payload.get("use_schema_constraints"),
-            "api_key": payload.get("api_key"),
         }
+
+        model_build_error = None
+        if _supports_parameter(sig, "model"):
+            try:
+                model = _build_openai_model(lx, payload)
+            except Exception as exc:
+                model_build_error = str(exc)
+                model = None
+            if model is not None:
+                kwargs["model"] = model
+
+        if "model" not in kwargs:
+            option_values.update({
+                "model_id": payload.get("model_id"),
+                "model_url": payload.get("model_url"),
+                "model_type": payload.get("model_type"),
+                "api_key": payload.get("api_key"),
+            })
+
+        if model_build_error:
+            raise RuntimeError(
+                "Failed to configure OpenAI provider for langextract. "
+                "Install OpenAI extras (pip install 'langextract[openai]') "
+                f"and verify model/base URL/API key. Details: {model_build_error}"
+            )
+
         for key, value in option_values.items():
             if value is None:
                 continue
@@ -690,6 +742,17 @@ export const langextractExtract = defineTool({
       if (!parsed.ok) {
         if ((parsed.error ?? "").toLowerCase().includes("failed to import langextract")) {
           return "ERROR: langextract is not installed in the runtime python environment. Install with `pip install langextract`.";
+        }
+        const lowerError = (parsed.error ?? "").toLowerCase();
+        if (
+          lowerError.includes("gemini models require either") ||
+          lowerError.includes("google_api_key") ||
+          lowerError.includes("vertex ai")
+        ) {
+          return (
+            "ERROR: langextract fell back to Gemini instead of OpenAI-compatible routing. " +
+            "Install OpenAI extras (`pip install 'langextract[openai]'`) and verify OpenRouter model/base URL/API key configuration."
+          );
         }
         const extra = [
           parsed.error ? `error=${parsed.error}` : "",
