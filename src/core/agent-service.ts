@@ -26,6 +26,14 @@ type HistoryScope =
       mode: "latest_telegram_for_agent";
     };
 
+function clampPositiveInt(value: number): number {
+  return Math.max(1, Math.floor(value));
+}
+
+function clampNonNegativeInt(value: number): number {
+  return Math.max(0, Math.floor(value));
+}
+
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
@@ -61,6 +69,25 @@ export class AgentService {
 
   private defaultLaneForChannel(channel: string): ExecutionLane {
     return channel === "telegram" || channel === "cli" ? "interactive" : "background";
+  }
+
+  private globalRuntimeLimits(): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
+    return {
+      maxToolCalls: clampPositiveInt(this.deps.limits.maxToolCalls),
+      maxIterations: clampPositiveInt(this.deps.limits.maxIterations),
+      maxContextTokens: clampNonNegativeInt(this.deps.limits.maxContextTokens ?? 0),
+    };
+  }
+
+  private resolveRunBudget(preset?: AgentPreset): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
+    const global = this.globalRuntimeLimits();
+    const presetToolCalls = preset?.budget?.maxToolCalls;
+    const presetIterations = preset?.budget?.maxIterations;
+    return {
+      maxToolCalls: Math.min(global.maxToolCalls, clampPositiveInt(presetToolCalls ?? global.maxToolCalls)),
+      maxIterations: Math.min(global.maxIterations, clampPositiveInt(presetIterations ?? global.maxIterations)),
+      maxContextTokens: global.maxContextTokens,
+    };
   }
 
   private resolveHistoryScope(params: {
@@ -212,12 +239,9 @@ export class AgentService {
 
       const tools = filterToolsByPreset(this.deps.getTools(), preset);
 
-      // Resolve budget from preset or global limits
-      const budget = {
-        maxToolCalls: preset?.budget?.maxToolCalls ?? this.deps.limits.maxToolCalls,
-        maxIterations: preset?.budget?.maxIterations ?? this.deps.limits.maxIterations,
-        maxContextTokens: this.deps.limits.maxContextTokens ?? 0,
-      };
+      // Resolve budget: global limits are hard caps; presets can only tighten.
+      const budget = this.resolveRunBudget(preset);
+      const runtimeLimits = this.globalRuntimeLimits();
 
       // Build tool context — inject LLM reference so spawn_agent can create workers
       const runId = this.deps.agentTracker?.startRun({
@@ -236,6 +260,7 @@ export class AgentService {
         fallbackLlmConfig,
         modelRouter: this.deps.modelRouter,
         modelMode: runModelMode,
+        runtimeLimits,
         request: {
           channel: params.channel,
           channelKey: params.channelKey,

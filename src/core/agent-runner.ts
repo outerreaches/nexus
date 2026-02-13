@@ -673,23 +673,18 @@ export class AgentRunner {
           } else {
             const executions: {
               call: import("./types.js").ToolCall;
-              tool: Tool;
               args: unknown;
               promise: Promise<string>;
             }[] = [];
 
             for (const batchCall of batch) {
-              toolCallsUsed += 1;
               const tool = this.deps.tools.find((t) => t.name === batchCall.name);
               if (!tool) {
-                const msg: ChatMessage = {
-                  role: "tool",
-                  name: batchCall.name,
-                  toolCallId: batchCall.id,
-                  content: `ERROR: unknown tool '${batchCall.name}'`,
-                };
-                messages.push(msg);
-                newMessages.push(msg);
+                executions.push({
+                  call: batchCall,
+                  args: {},
+                  promise: Promise.resolve(`ERROR: unknown tool '${batchCall.name}'`),
+                });
                 continue;
               }
 
@@ -700,7 +695,6 @@ export class AgentRunner {
                 );
                 executions.push({
                   call: batchCall,
-                  tool,
                   args: {},
                   promise: Promise.resolve(parsedArgs.errorResult),
                 });
@@ -712,12 +706,22 @@ export class AgentRunner {
               const promise = tool
                 .execute(args, this.deps.toolContext)
                 .catch((err) => `ERROR: ${err instanceof Error ? err.message : String(err)}`);
-              executions.push({ call: batchCall, tool, args, promise });
+              executions.push({ call: batchCall, args, promise });
             }
 
             const results = await Promise.all(executions.map((e) => e.promise));
             for (let idx = 0; idx < executions.length; idx++) {
               const entry = executions[idx];
+              toolCallsUsed += 1;
+              if (toolCallsUsed > this.deps.budget.maxToolCalls) {
+                return {
+                  status: "budget_exhausted",
+                  output: "Budget exhausted while executing tools.",
+                  newMessages,
+                  toolCallsUsed,
+                  iterationsUsed: iteration + 1,
+                };
+              }
               const result = results[idx] ?? "";
               const abort = handleToolResult(entry.call, entry.args, result, i + idx);
               if (abort) {

@@ -112,13 +112,35 @@ export const spawnAgent = defineTool({
 
     const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 4;
 
-    // Resolve budget
-    const maxContextTokens = envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? 128_000;
+    // Resolve budget (global runtime limits are hard caps; preset and override can only tighten).
+    const runtimeLimits = resolveRuntimeLimits(ctx);
+    const presetMaxToolCalls = clampPositiveInt(preset.budget?.maxToolCalls ?? runtimeLimits.maxToolCalls, runtimeLimits.maxToolCalls);
+    const presetMaxIterations = clampPositiveInt(preset.budget?.maxIterations ?? runtimeLimits.maxIterations, runtimeLimits.maxIterations);
+    const requestedMaxToolCalls = args.budget?.maxToolCalls;
+    const requestedMaxIterations = args.budget?.maxIterations;
     const budget = {
-      maxToolCalls: args.budget?.maxToolCalls ?? preset.budget?.maxToolCalls ?? 50,
-      maxIterations: args.budget?.maxIterations ?? preset.budget?.maxIterations ?? 20,
-      maxContextTokens,
+      maxToolCalls:
+        requestedMaxToolCalls === undefined
+          ? Math.min(runtimeLimits.maxToolCalls, presetMaxToolCalls)
+          : Math.min(runtimeLimits.maxToolCalls, presetMaxToolCalls, clampPositiveInt(requestedMaxToolCalls, presetMaxToolCalls)),
+      maxIterations:
+        requestedMaxIterations === undefined
+          ? Math.min(runtimeLimits.maxIterations, presetMaxIterations)
+          : Math.min(runtimeLimits.maxIterations, presetMaxIterations, clampPositiveInt(requestedMaxIterations, presetMaxIterations)),
+      maxContextTokens: runtimeLimits.maxContextTokens,
     };
+    if (requestedMaxToolCalls !== undefined && budget.maxToolCalls < requestedMaxToolCalls) {
+      ctx.log(
+        `spawn_agent: clamped maxToolCalls ${requestedMaxToolCalls} -> ${budget.maxToolCalls} ` +
+        `(global=${runtimeLimits.maxToolCalls}, preset=${presetMaxToolCalls})`,
+      );
+    }
+    if (requestedMaxIterations !== undefined && budget.maxIterations < requestedMaxIterations) {
+      ctx.log(
+        `spawn_agent: clamped maxIterations ${requestedMaxIterations} -> ${budget.maxIterations} ` +
+        `(global=${runtimeLimits.maxIterations}, preset=${presetMaxIterations})`,
+      );
+    }
 
     const tracker = ctx.agentTracker as AgentTracker | undefined;
     const parent = ctx.request;
@@ -374,6 +396,7 @@ async function runIsolated(params: {
 
   const log = ctx.log;
   const logWorker = (line: string) => log?.(`worker[${preset.name}] ${line}`);
+  const runtimeLimits = resolveRuntimeLimits(ctx);
 
   let llmConfig = ctx.llmConfig;
   let fallbackLlmConfig = ctx.fallbackLlmConfig;
@@ -534,6 +557,7 @@ async function runIsolated(params: {
       systemPrompt,
       userMessage: task,
       budget,
+      runtimeLimits,
       parentRunId: effectiveParentRunId,
       runId,
       agentId,
@@ -572,6 +596,26 @@ function envInt(name: string): number | null {
   const n = Number(raw);
   if (!Number.isFinite(n)) return null;
   return Math.floor(n);
+}
+
+function clampPositiveInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return Math.max(1, Math.floor(fallback));
+  return Math.max(1, Math.floor(value));
+}
+
+function clampNonNegativeInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return Math.max(0, Math.floor(fallback));
+  return Math.max(0, Math.floor(value));
+}
+
+function resolveRuntimeLimits(ctx: ToolContext): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
+  const defaults = { maxToolCalls: 120, maxIterations: 40, maxContextTokens: 128_000 };
+  const fromCtx = ctx.runtimeLimits ?? defaults;
+  return {
+    maxToolCalls: clampPositiveInt(fromCtx.maxToolCalls, defaults.maxToolCalls),
+    maxIterations: clampPositiveInt(fromCtx.maxIterations, defaults.maxIterations),
+    maxContextTokens: clampNonNegativeInt(fromCtx.maxContextTokens, defaults.maxContextTokens),
+  };
 }
 
 function computeRunDepth(db: NexusDatabase, runId: string): number {

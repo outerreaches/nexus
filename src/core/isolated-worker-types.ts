@@ -41,6 +41,11 @@ export type WorkerConfig = {
     maxIterations: number;
     maxContextTokens: number;
   };
+  runtimeLimits: {
+    maxToolCalls: number;
+    maxIterations: number;
+    maxContextTokens: number;
+  };
 
   // Tracking context
   parentRunId: string | null;

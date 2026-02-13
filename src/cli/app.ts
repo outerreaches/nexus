@@ -3,6 +3,14 @@ import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
 
+function envInt(name: string): number | null {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.floor(n);
+}
+
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command()
     .name("nexus")
@@ -110,6 +118,7 @@ export async function runCli(argv: string[]): Promise<void> {
       await registry.init();
 
       const processManager = new ProcessManager({ stateDir: paths.stateDir });
+      const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
 
       const toolContext = {
         workspaceDir: paths.workspaceDir,
@@ -131,6 +140,11 @@ export async function runCli(argv: string[]): Promise<void> {
           log(`restart: ${reason}`);
           setTimeout(() => process.exit(0), delayMs);
         },
+        runtimeLimits: {
+          maxToolCalls: config.limits.maxToolCallsPerRun,
+          maxIterations: config.limits.maxIterationsPerRun,
+          maxContextTokens,
+        },
         nowMs: () => Date.now(),
         log,
       };
@@ -147,6 +161,7 @@ export async function runCli(argv: string[]): Promise<void> {
           maxMessages: 40,
           maxToolCalls: config.limits.maxToolCallsPerRun,
           maxIterations: config.limits.maxIterationsPerRun,
+          maxContextTokens,
           maxConcurrent: 1,
         },
       });
@@ -256,6 +271,11 @@ export async function runCli(argv: string[]): Promise<void> {
           allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
           allowCodeEdit: config.permissions.allowCodeEdit,
           allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
+          runtimeLimits: {
+            maxToolCalls: config.limits.maxToolCallsPerRun,
+            maxIterations: config.limits.maxIterationsPerRun,
+            maxContextTokens: Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens),
+          },
           nowMs: () => Date.now(),
           log,
         };

@@ -162,6 +162,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const allowShellExec = config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1";
   const allowCodeEdit = config.permissions.allowCodeEdit;
   const allowCodeWrite = config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1";
+  const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
   const proactiveEnabled = envBool("NEXUS_PROACTIVE") ?? config.proactive.enabled;
   const proactiveNotifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? config.proactive.notifyTelegram;
   const telegramAllowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
@@ -189,6 +190,11 @@ export async function startGateway(params: { configPath: string; port?: number; 
     allowCodeWrite,
     requestRestart: (reason: string, delayMs: number = 2500) => {
       requestRestartImpl(reason, delayMs);
+    },
+    runtimeLimits: {
+      maxToolCalls: config.limits.maxToolCallsPerRun,
+      maxIterations: config.limits.maxIterationsPerRun,
+      maxContextTokens,
     },
     nowMs: () => Date.now(),
     log,
@@ -244,7 +250,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
       maxConcurrent: config.limits.maxConcurrentAgents,
       maxConcurrentInteractive: config.limits.maxConcurrentAgents,
       maxConcurrentBackground: Math.max(1, config.scheduler.concurrency),
-      maxContextTokens: config.limits.maxContextTokens,
+      maxContextTokens,
     },
   });
 

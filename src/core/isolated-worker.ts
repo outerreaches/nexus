@@ -94,6 +94,7 @@ process.on("message", async (msg: ParentMessage) => {
         parentRunId: cfg.parentRunId ?? undefined,
         modelMode: cfg.modelMode,
       },
+      runtimeLimits: cfg.runtimeLimits,
       nowMs: () => Date.now(),
       log,
     };

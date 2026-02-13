@@ -39,6 +39,12 @@ export type ToolContext = {
     parentRunId?: string;
     modelMode?: ModelRoutingMode;
   };
+  /** Global runtime caps for agent budgets; worker budgets should not exceed these. */
+  runtimeLimits?: {
+    maxToolCalls: number;
+    maxIterations: number;
+    maxContextTokens: number;
+  };
   nowMs: () => number;
   log: (msg: string) => void;
   /** Active isolated worker child processes (for shutdown cleanup). */
