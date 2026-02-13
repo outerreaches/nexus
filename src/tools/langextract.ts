@@ -142,7 +142,9 @@ def _serialize_extraction(value):
     }
 
 def _supports_parameter(sig, name):
-    return name in sig.parameters
+    if name in sig.parameters:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
 def _build_openai_language_model_type_and_params(payload):
     try:
@@ -536,8 +538,6 @@ async function runLangextractPython(params: {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    let stdoutOverflow = false;
-    let stderrOverflow = false;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -550,7 +550,6 @@ async function runLangextractPython(params: {
     proc.stdout.on("data", (chunk: string) => {
       stdout += chunk;
       if (stdout.length > MAX_STDIO_BYTES) {
-        stdoutOverflow = true;
         stdout = stdout.slice(-MAX_STDIO_BYTES);
       }
     });
@@ -558,7 +557,6 @@ async function runLangextractPython(params: {
     proc.stderr.on("data", (chunk: string) => {
       stderr += chunk;
       if (stderr.length > MAX_STDIO_BYTES) {
-        stderrOverflow = true;
         stderr = stderr.slice(-MAX_STDIO_BYTES);
       }
     });
