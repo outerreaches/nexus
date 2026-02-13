@@ -343,6 +343,73 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cleanup_summaries_table ON cleanup_summaries(table_name, created_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- MCP servers/profiles (dynamic tooling control plane)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      transport TEXT NOT NULL DEFAULT 'stdio',
+      command TEXT,
+      args_json TEXT NOT NULL DEFAULT '[]',
+      env_json TEXT NOT NULL DEFAULT '{}',
+      url TEXT,
+      headers_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      active INTEGER NOT NULL DEFAULT 0,
+      trust_level TEXT NOT NULL DEFAULT 'read_only',
+      capability_tags_json TEXT NOT NULL DEFAULT '[]',
+      timeout_ms INTEGER NOT NULL DEFAULT 45000,
+      max_concurrency INTEGER NOT NULL DEFAULT 2,
+      idle_ttl_ms INTEGER NOT NULL DEFAULT 600000,
+      last_discovered_tools_json TEXT NOT NULL DEFAULT '[]',
+      last_error TEXT,
+      last_error_at INTEGER,
+      last_used_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled, active, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS mcp_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      server_id TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      tool_names_json TEXT NOT NULL DEFAULT '[]',
+      hidden INTEGER NOT NULL DEFAULT 1,
+      ephemeral INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      llm_primary_provider TEXT,
+      llm_primary_model TEXT,
+      llm_fallback_provider TEXT,
+      llm_fallback_model TEXT,
+      llm_disable_fallback INTEGER NOT NULL DEFAULT 0,
+      budget_max_tool_calls INTEGER,
+      budget_max_iterations INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      FOREIGN KEY(server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_profiles_server ON mcp_profiles(server_id, enabled, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mcp_profiles_name ON mcp_profiles(name);
+
+    CREATE TABLE IF NOT EXISTS mcp_events (
+      id TEXT PRIMARY KEY,
+      server_id TEXT,
+      profile_id TEXT,
+      kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_events_created ON mcp_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_mcp_events_server ON mcp_events(server_id, created_at DESC);
   `);
 
   try {
@@ -479,6 +546,36 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("ALTER TABLE data_intake_sources ADD COLUMN job_id TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled, active, updated_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_profiles_server ON mcp_profiles(server_id, enabled, updated_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_profiles_name ON mcp_profiles(name);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_events_created ON mcp_events(created_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_events_server ON mcp_events(server_id, created_at DESC);");
   } catch {
     // already exists
   }

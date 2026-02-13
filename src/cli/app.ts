@@ -59,6 +59,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { BrowserManager } = await import("../browser/manager.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
+      const { McpManager } = await import("../mcp/manager.js");
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
@@ -114,7 +115,9 @@ export async function runCli(argv: string[]): Promise<void> {
       });
 
       const builtIns = getBuiltInTools();
-      const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
+      const mcp = new McpManager({ db, log });
+      await mcp.init();
+      const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
       await registry.init();
 
       const processManager = new ProcessManager({ stateDir: paths.stateDir });
@@ -133,6 +136,7 @@ export async function runCli(argv: string[]): Promise<void> {
         browser,
         registry,
         processManager,
+        mcp,
         allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
         allowCodeEdit: config.permissions.allowCodeEdit,
         allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
@@ -193,6 +197,7 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         rl.close();
       } finally {
+        await mcp.close();
         db.close();
       }
     });
@@ -216,6 +221,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { openDatabase } = await import("../storage/database.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
+      const { McpManager } = await import("../mcp/manager.js");
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
@@ -228,10 +234,13 @@ export async function runCli(argv: string[]): Promise<void> {
         return;
       }
       const db = await openDatabase(paths.dbPath);
+      let mcp: InstanceType<typeof McpManager> | null = null;
 
       try {
         const builtIns = getBuiltInTools();
-        const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
+        mcp = new McpManager({ db, log });
+        await mcp.init();
+        const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
         await registry.init();
 
         let raw = String(argsJson ?? "{}").trim();
@@ -268,6 +277,7 @@ export async function runCli(argv: string[]): Promise<void> {
           codeDir: paths.codeDir,
           db,
           registry,
+          mcp,
           allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
           allowCodeEdit: config.permissions.allowCodeEdit,
           allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
@@ -284,6 +294,7 @@ export async function runCli(argv: string[]): Promise<void> {
         process.stdout.write(result.trimEnd() + "\n");
         if (result.startsWith("ERROR:")) process.exitCode = 1;
       } finally {
+        if (mcp) await mcp.close();
         db.close();
       }
     });

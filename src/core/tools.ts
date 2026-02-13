@@ -23,6 +23,7 @@ export type ToolContext = {
   browser?: unknown;
   registry?: unknown;
   processManager?: unknown;
+  mcp?: unknown;
   agentTracker?: AgentTracker;
   telegram?: unknown;
   allowShellExec?: boolean;

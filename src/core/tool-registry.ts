@@ -1,5 +1,6 @@
 import type { Tool } from "./tools.js";
 import { loadCustomTools } from "../tools/custom.js";
+import type { McpManager } from "../mcp/manager.js";
 
 export class ToolRegistry {
   private tools: Tool[] = [];
@@ -8,6 +9,7 @@ export class ToolRegistry {
     private readonly deps: {
       builtIns: Tool[];
       stateDir: string;
+      mcp?: McpManager;
     },
   ) {}
 
@@ -20,11 +22,14 @@ export class ToolRegistry {
   }
 
   async reload(): Promise<void> {
+    if (this.deps.mcp) {
+      await this.deps.mcp.reload();
+    }
     const custom = await loadCustomTools(this.deps.stateDir);
-    const combined = [...this.deps.builtIns, ...custom];
+    const mcpTools = this.deps.mcp ? this.deps.mcp.listTools() : [];
+    const combined = [...this.deps.builtIns, ...custom, ...mcpTools];
     const byName = new Map<string, Tool>();
     for (const t of combined) byName.set(t.name, t);
     this.tools = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 }
-

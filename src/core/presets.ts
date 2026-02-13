@@ -4,6 +4,7 @@ import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as intakeManager } from "./presets/intake-manager.js";
 import { preset as jobManager } from "./presets/job-manager.js";
+import { preset as mcpManager } from "./presets/mcp-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as trader } from "./presets/trader.js";
@@ -15,6 +16,10 @@ import { preset as trader } from "./presets/trader.js";
 export interface AgentPreset {
   name: string;
   description: string;
+  /** Optional source tag for runtime-managed presets. */
+  source?: string;
+  /** Hide from generic preset listings/prompt injection when true. */
+  hidden?: boolean;
   /** Optional default image model for image tools used by this preset. */
   imageModel?: string;
   /** Optional LLM routing override for this preset. Omit to use global default route. */
@@ -61,18 +66,40 @@ const PRESETS: Record<string, AgentPreset> = {
   "graphic-designer": graphicDesigner,
   "intake-manager": intakeManager,
   "job-manager": jobManager,
+  "mcp-manager": mcpManager,
 };
 
+const DYNAMIC_PRESETS = new Map<string, AgentPreset>();
+
 export function getPreset(name: string): AgentPreset | undefined {
-  return PRESETS[name];
+  return DYNAMIC_PRESETS.get(name) ?? PRESETS[name];
 }
 
 export function listPresets(): AgentPreset[] {
-  return Object.values(PRESETS);
+  return [...Object.values(PRESETS), ...DYNAMIC_PRESETS.values()];
 }
 
-export function getPresetNames(): string[] {
-  return Object.keys(PRESETS);
+export function getPresetNames(opts: { includeHidden?: boolean } = {}): string[] {
+  const includeHidden = opts.includeHidden ?? false;
+  return listPresets()
+    .filter((p) => includeHidden || !p.hidden)
+    .map((p) => p.name);
+}
+
+export function registerDynamicPreset(preset: AgentPreset): void {
+  DYNAMIC_PRESETS.set(preset.name, { ...preset });
+}
+
+export function unregisterDynamicPreset(name: string): void {
+  DYNAMIC_PRESETS.delete(name);
+}
+
+export function clearDynamicPresetsBySource(source: string): void {
+  for (const [name, preset] of DYNAMIC_PRESETS.entries()) {
+    if (preset.source === source) {
+      DYNAMIC_PRESETS.delete(name);
+    }
+  }
 }
 
 /** Format presets list for injection into the orchestrator system prompt. */
@@ -83,8 +110,8 @@ export function formatPresetsForPrompt(): string {
     "Use `spawn_agent` to delegate tasks to specialized workers:",
     "",
   ];
-  for (const p of Object.values(PRESETS)) {
-    if (p.name === "orchestrator") continue; // Don't list self
+  for (const p of listPresets()) {
+    if (p.name === "orchestrator" || p.hidden) continue; // Don't list self or hidden profiles
     lines.push(`- **${p.name}**: ${p.description} (tools: ${p.tools.filter(t => t !== "read_from_blackboard" && t !== "write_to_blackboard").join(", ")})`);
   }
   lines.push("");

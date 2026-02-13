@@ -17,6 +17,7 @@ import { AgentRunner } from "./agent-runner.js";
 import { ProcessManager } from "../process/manager.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
+import { McpManager } from "../mcp/manager.js";
 import type { ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
@@ -48,7 +49,12 @@ process.on("message", async (msg: ParentMessage) => {
       onFallback: (line) => log(line),
     });
     const builtIns = getBuiltInTools();
-    const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir });
+    const mcp = new McpManager({
+      db,
+      log: (line) => log(line),
+    });
+    await mcp.init();
+    const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir, mcp });
     await registry.init();
     const processManager = new ProcessManager({ stateDir: cfg.stateDir });
     const agentTracker = new AgentTracker({ db });
@@ -79,6 +85,7 @@ process.on("message", async (msg: ParentMessage) => {
       browser: undefined, // Workers do NOT get a browser instance
       registry,
       processManager,
+      mcp,
       agentTracker,
       telegram: undefined,
       allowShellExec: cfg.allowShellExec,
@@ -172,6 +179,7 @@ process.on("message", async (msg: ParentMessage) => {
       },
     });
 
+    await mcp.close();
     db.close();
     process.exit(0);
   } catch (err) {

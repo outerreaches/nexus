@@ -27,6 +27,21 @@ import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
 import { spawnAgent } from "./spawn-agent.js";
 import {
+  mcpDelegate,
+  mcpOverview,
+  mcpProfileCreate,
+  mcpProfileDelete,
+  mcpProfileList,
+  mcpProfileUpdate,
+  mcpServerActivate,
+  mcpServerAdd,
+  mcpServerDeactivate,
+  mcpServerList,
+  mcpServerProbe,
+  mcpServerRemove,
+  mcpServerUpdate,
+} from "./mcp.js";
+import {
   dataIntakeListSources,
   dataIntakePrune,
   dataIntakeQuery,
@@ -113,5 +128,18 @@ export function getBuiltInTools(): Tool[] {
     spawnAgent,
     dbMaintenance,
     dbBackup,
+    mcpOverview,
+    mcpServerList,
+    mcpServerAdd,
+    mcpServerUpdate,
+    mcpServerProbe,
+    mcpServerActivate,
+    mcpServerDeactivate,
+    mcpServerRemove,
+    mcpProfileList,
+    mcpProfileCreate,
+    mcpProfileUpdate,
+    mcpProfileDelete,
+    mcpDelegate,
   ];
 }

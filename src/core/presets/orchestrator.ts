@@ -19,6 +19,8 @@ export const preset: AgentPreset = {
     "Use the intake-manager preset for all mutating data intake operations (add/update/delete/run/schedule/prune).",
     "Use the job-manager preset for all job and scheduling operations (create/update/pause/resume/run/list/delete).",
     "Use the credential-manager preset for all credential vault operations (set/generate/list/delete).",
+    "Use the mcp-manager preset for MCP server/profile setup and all MCP-backed delegation runs.",
+    "Use mcp_overview to inspect MCP topology (servers/profiles/health) before delegating.",
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",
     "Researcher/analyst workers should not spawn further agents; keep subtasking at the orchestrator.",
@@ -33,6 +35,7 @@ export const preset: AgentPreset = {
     "image_analyze",
     // Swarm coordination
     "spawn_agent",
+    "mcp_overview",
     "read_from_blackboard",
     "write_to_blackboard",
     "blackboard_manage",

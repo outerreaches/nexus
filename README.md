@@ -5,6 +5,7 @@ Lightweight, always-on multi-agent assistant (OpenClaw-inspired), starting with:
 - OpenRouter + OpenAI-compatible local models (LM Studio / Ollama) via a single OpenAI-compat client
 - Self-modifiable prompts via state personalization files (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, etc.)
 - Basic tool loop (file ops, web search/fetch, guarded shell exec, managed browser, paper trade logging)
+- Dynamic MCP integration via `mcp-manager` and runtime MCP profiles
 
 ## Quick start
 
@@ -104,6 +105,28 @@ Example:
   }
 }
 ```
+
+## MCP integration
+
+Nexus now supports runtime-managed MCP servers and dynamic MCP worker profiles without bloating the orchestrator prompt/tool schema.
+
+Design:
+- The orchestrator only gets `mcp_overview` (read-only summary).
+- MCP lifecycle + delegation is handled by the `mcp-manager` preset.
+- MCP worker presets are stored as dynamic profiles and are hidden by default.
+- Only active MCP servers are connected and loaded into the tool registry.
+
+Core MCP tools:
+- `mcp_overview`
+- `mcp_server_list|add|update|probe|activate|deactivate|remove`
+- `mcp_profile_list|create|update|delete`
+- `mcp_delegate` (activate/provision profile + spawn scoped worker + optional cleanup)
+
+Recommended flow:
+1. Orchestrator calls `mcp_overview`.
+2. Orchestrator spawns `mcp-manager` for setup/delegation.
+3. `mcp-manager` uses `mcp_delegate` to run a scoped worker on MCP tools.
+4. Results are exchanged via blackboard IDs between workers.
 
 ## Safety warning
 

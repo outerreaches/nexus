@@ -11,6 +11,7 @@ import { AgentTracker } from "../core/agent-tracker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
 import { getPreset } from "../core/presets.js";
+import { McpManager } from "../mcp/manager.js";
 import { ModelRouter } from "../llm/model-router.js";
 import { openDatabase } from "../storage/database.js";
 import { ensureConfigExists, loadConfig } from "../state/config.js";
@@ -135,7 +136,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const llmConfig = startupRoute.primary;
   const fallbackLlmConfig = startupRoute.fallback;
   const builtIns = getBuiltInTools();
-  const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir });
+  const mcp = new McpManager({ db, log });
+  await mcp.init();
+  const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
   await registry.init();
 
   const processManager = new ProcessManager({ stateDir: paths.stateDir });
@@ -182,6 +185,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     browser,
     registry,
     processManager,
+    mcp,
     agentTracker,
     isolatedWorkers,
     telegram: undefined as unknown,
@@ -766,6 +770,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
     await deactivateServices("shutdown");
     await http.stop();
+    await mcp.close();
     db.close();
   };
 

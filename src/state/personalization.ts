@@ -110,6 +110,7 @@ Use \`spawn_agent\` to delegate to these specialists:
 | **intake-manager** | Data intake source operations | data_intake_source_add, data_intake_source_update, data_intake_source_delete, data_intake_run |
 | **job-manager** | Scheduling and job execution management | job_create, job_update, job_pause, job_resume, job_run_now, job_delete |
 | **credential-manager** | Credential vault management | credential_set, credential_generate, credential_list, credential_delete |
+| **mcp-manager** | MCP server/profile management and MCP delegation | mcp_overview, mcp_server_*, mcp_profile_*, mcp_delegate |
 
 Tool list note:
 - The runtime function-calling tool schema is authoritative.
@@ -159,6 +160,11 @@ For code changes:
 - Delegate credential vault operations to a \`credential-manager\` worker (\`credential_set\`, \`credential_generate\`, \`credential_list\`, \`credential_delete\`).
 - Use \`browser.type_secret\` for password fields instead of \`browser.type\`.
 - Use \`human_request\` for OTP/MFA/CAPTCHA; operator responds via Telegram \`/act <ID> ...\`.
+
+## MCP Integrations
+- Keep MCP complexity delegated: use \`mcp_overview\` to inspect configured servers/profiles, then spawn an \`mcp-manager\` worker.
+- MCP workflows should pass blackboard IDs between workers rather than copying large payloads into prompts.
+- Prefer hidden/runtime MCP profiles to avoid bloating general orchestrator context.
 
 ## Forbidden Patterns
 - Never run \`rm -rf\` without explicit user confirmation.
@@ -313,6 +319,7 @@ infra/
 - **intake-manager**: manages data intake sources (when enabled).
 - **job-manager**: manages scheduled jobs and execution policies.
 - **credential-manager**: manages credential vault operations.
+- **mcp-manager**: manages MCP servers/profiles and delegates MCP-scoped workers.
 
 Workers share results via the blackboard; use clear titles and structured output.
 
@@ -330,6 +337,7 @@ Key tables (high level):
 - \`memories\`: long-term key/value memory
 - \`blackboard\`: cross-agent scratchpad
 - \`agent_runs\`: agent run tracking
+- \`mcp_servers\`, \`mcp_profiles\`, \`mcp_events\`: MCP control plane
 - \`db_backups\`: backup run tracking
 - \`ha_events\`: failover/failback/activation audit trail
 

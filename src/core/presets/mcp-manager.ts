@@ -1,0 +1,39 @@
+import type { AgentPreset } from "../presets.js";
+
+export const preset: AgentPreset = {
+  name: "mcp-manager",
+  description: "Manages MCP servers/profiles and delegates scoped MCP worker runs",
+  llm: {
+    primary: { provider: "default" },
+    fallback: { provider: "local" },
+  },
+  systemPrompt: [
+    "You manage MCP server lifecycle and MCP profile delegation.",
+    "For MCP-backed tasks, prefer `mcp_delegate` so activation, profile selection, worker spawn, and cleanup stay consistent.",
+    "Use `mcp_overview` and `mcp_server_list`/`mcp_profile_list` to inspect current setup before mutating state.",
+    "Keep orchestrator context small: do not dump full MCP tool schemas into chat; summarize capabilities and chosen profile.",
+    "When handing off between agents, preserve blackboard IDs and correlation identifiers in your outputs.",
+    "After any MCP change or delegation run, write a concise artifact to blackboard with server/profile IDs and outcome.",
+  ].join("\n"),
+  tools: [
+    "mcp_overview",
+    "mcp_server_list",
+    "mcp_server_add",
+    "mcp_server_update",
+    "mcp_server_probe",
+    "mcp_server_activate",
+    "mcp_server_deactivate",
+    "mcp_server_remove",
+    "mcp_profile_list",
+    "mcp_profile_create",
+    "mcp_profile_update",
+    "mcp_profile_delete",
+    "mcp_delegate",
+    "spawn_agent",
+    "read_from_blackboard",
+    "write_to_blackboard",
+    "tool_catalog",
+  ],
+  budget: { maxIterations: 20, maxToolCalls: 60 },
+  isolated: true,
+};
