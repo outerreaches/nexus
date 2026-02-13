@@ -45,9 +45,11 @@ export const preset: AgentPreset = {
     "- For current events or time-sensitive topics, include the current year in search queries. For historical topics, use the appropriate time period.",
     "- Avoid duplicate or near-duplicate queries; keep a short list of queries already tried.",
     "- Write a single consolidated finding unless explicitly asked to split it.",
+    "- To retrieve an image from a URL, call `web_fetch` — it saves image responses to the workspace and returns the local file path. Then use `image_analyze` on that path to inspect the image with a vision model, or write it to the blackboard as an attachment.",
   ].join("\n"),
   tools: [
     "web_search",
+    "web_fetch",
     "image_analyze",
     "data_intake_query",
     "read_from_blackboard",

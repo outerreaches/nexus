@@ -169,7 +169,7 @@ Convenience actions:
 ## Web tools
 
 - `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
-- `web_fetch`: keyless HTTP fetch + basic extraction (timeouts, redirect limits, small cache)
+- `web_fetch`: keyless HTTP fetch + text extraction (timeouts, redirect limits, small cache). Image responses are saved to the workspace and return a local file path for use with `image_analyze`
 
 Safety knob:
 - `NEXUS_ALLOW_PRIVATE_WEB_FETCH=1` allows fetching private/loopback hostnames and IPs (disabled by default).
