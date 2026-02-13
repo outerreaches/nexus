@@ -555,7 +555,11 @@ export async function startTelegramBot(deps: {
     if (!stat.isFile()) throw new Error(`not a file: ${absolute}`);
     const mimeType = detectMimeType(absolute);
     deps.log(`telegram: send_file chat_id=${chatId} mime=${mimeType} bytes=${stat.size} path=${absolute}`);
-    if (isImageMimeType(mimeType)) {
+    // Telegram sendPhoto only supports JPEG, PNG, and GIF (≤10 MB).
+    // Other image formats (SVG, WebP, BMP, TIFF, etc.) must go through
+    // sendDocument so Telegram receives them as file attachments.
+    const TELEGRAM_PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif"]);
+    if (TELEGRAM_PHOTO_MIME_TYPES.has(mimeType)) {
       await bot.api.sendPhoto(chatId, new InputFile(absolute), { caption: options?.caption });
       return;
     }
