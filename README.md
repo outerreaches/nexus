@@ -201,7 +201,7 @@ Convenience actions:
 
 - `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
 - `web_fetch`: keyless HTTP fetch + text extraction (timeouts, redirect limits, small cache). Non-text binaries (images, PDFs, etc.) are saved to the workspace and return a local file path instead of inlining payloads.
-- `langextract_extract`: structured entity/field extraction via Python LangExtract. Supports text/path/url/blackboard input, writes a JSON artifact to disk, and can write a blackboard artifact reference for downstream agents. Uses OpenRouter by default (existing Nexus model route), with optional per-call model override. Requires LangExtract with OpenAI extras in the runtime Python environment (`pip install 'langextract[openai]'`).
+- `langextract_extract`: structured entity/field extraction via Python LangExtract. Supports text/path/url/blackboard input, writes a JSON artifact to disk, and can write a blackboard artifact reference for downstream agents. Uses OpenRouter by default (existing Nexus model route), with optional per-call model override. Requires explicit `examples` in each call and LangExtract with OpenAI extras in the runtime Python environment (`pip install 'langextract[openai]'`).
 
 Safety knob:
 - `NEXUS_ALLOW_PRIVATE_WEB_FETCH=1` allows fetching private/loopback hostnames and IPs (disabled by default).

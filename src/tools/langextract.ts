@@ -80,40 +80,24 @@ def _to_str_dict(raw):
 
 def _build_examples(lx, payload):
     user_examples = payload.get("examples") or []
-    if user_examples:
-        built = []
-        for item in user_examples:
-            text = str(item.get("text") or "").strip()
-            rows = item.get("extractions") or []
-            exts = []
-            for row in rows:
-                exts.append(
-                    lx.data.Extraction(
-                        extraction_class=str(row.get("extractionClass") or "entity"),
-                        extraction_text=str(row.get("extractionText") or ""),
-                        attributes=_to_str_dict(row.get("attributes")),
-                    )
+    if not user_examples:
+        raise ValueError("examples are required and must contain at least one item")
+
+    built = []
+    for item in user_examples:
+        text = str(item.get("text") or "").strip()
+        rows = item.get("extractions") or []
+        exts = []
+        for row in rows:
+            exts.append(
+                lx.data.Extraction(
+                    extraction_class=str(row.get("extractionClass") or "entity"),
+                    extraction_text=str(row.get("extractionText") or ""),
+                    attributes=_to_str_dict(row.get("attributes")),
                 )
-            built.append(lx.data.ExampleData(text=text, extractions=exts))
-        return built
-
-    classes = payload.get("extraction_classes") or ["entity"]
-    classes = [str(c).strip() for c in classes if str(c).strip()]
-    if not classes:
-        classes = ["entity"]
-
-    tokens = [f"sample_{i+1}" for i in range(len(classes))]
-    example_text = " ".join(tokens)
-    exts = []
-    for cls, token in zip(classes, tokens):
-        exts.append(
-            lx.data.Extraction(
-                extraction_class=cls,
-                extraction_text=token,
-                attributes={},
             )
-        )
-    return [lx.data.ExampleData(text=example_text, extractions=exts)]
+        built.append(lx.data.ExampleData(text=text, extractions=exts))
+    return built
 
 def _serialize_char_interval(value):
     if value is None:
@@ -140,42 +124,6 @@ def _serialize_extraction(value):
         "groupIndex": getattr(value, "group_index", None),
         "description": getattr(value, "description", None),
     }
-
-def _load_openai_language_model_class():
-    import importlib
-    candidates = [
-        ("langextract.providers.openai", "OpenAILanguageModel"),
-        ("langextract.providers", "OpenAILanguageModel"),
-        ("langextract.inference", "OpenAILanguageModel"),
-    ]
-    errors = []
-    for module_name, attr_name in candidates:
-        try:
-            module = importlib.import_module(module_name)
-            cls = getattr(module, attr_name, None)
-            if cls is not None:
-                return cls
-            errors.append(f"{module_name}.{attr_name} not found")
-        except Exception as exc:
-            errors.append(f"{module_name}: {exc}")
-    raise ImportError("Unable to import OpenAILanguageModel. Tried: " + "; ".join(errors))
-
-def _build_openai_model(payload):
-    OpenAILanguageModel = _load_openai_language_model_class()
-
-    model_id = payload.get("model_id")
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("model_id is required for OpenAI provider")
-
-    init_kwargs = {"model_id": model_id.strip()}
-    model_url = payload.get("model_url")
-    if isinstance(model_url, str) and model_url.strip():
-        init_kwargs["base_url"] = model_url.strip()
-    api_key = payload.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        init_kwargs["api_key"] = api_key.strip()
-
-    return OpenAILanguageModel(**init_kwargs)
 
 def _supports_parameter(sig, name):
     if name in sig.parameters:
@@ -238,8 +186,11 @@ def main():
         if not prompt_description:
             raise ValueError("prompt_description is required")
 
-        # Build OpenAI model — fail hard if this doesn't work.
-        model = _build_openai_model(payload)
+        model_id = str(payload.get("model_id") or "").strip()
+        if not model_id:
+            raise ValueError("model_id is required for OpenAI provider")
+        model_url = payload.get("model_url")
+        api_key = payload.get("api_key")
 
         text_or_documents = _resolve_documents(lx, source_kind, source_value, source_is_url)
         examples = _build_examples(lx, payload)
@@ -248,8 +199,12 @@ def main():
             "text_or_documents": text_or_documents,
             "prompt_description": prompt_description,
             "examples": examples,
-            "model": model,
+            "model_id": model_id,
         }
+        if isinstance(model_url, str) and model_url.strip():
+            kwargs["model_url"] = model_url.strip()
+        if isinstance(api_key, str) and api_key.strip():
+            kwargs["api_key"] = api_key.strip()
 
         sig = inspect.signature(lx.extract)
         option_values = {
@@ -404,6 +359,19 @@ function isLangextractParseLikeError(raw: string | undefined): boolean {
     text.includes("resolverparsingerror") ||
     text.includes("formatparseerror")
   );
+}
+
+function isLangextractExtractionShapeError(raw: string | undefined): boolean {
+  const text = String(raw ?? "").toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes("extraction text must be a string") ||
+    text.includes("found: <class 'nonetype'>")
+  );
+}
+
+function isLangextractRetryableError(raw: string | undefined): boolean {
+  return isLangextractParseLikeError(raw) || isLangextractExtractionShapeError(raw);
 }
 
 function maybeJsonParse(raw: string): PythonResult | null {
@@ -642,7 +610,7 @@ export const langextractExtract = defineTool({
         extractionText: z.string().min(1).max(500),
         attributes: z.record(z.string()).default({}),
       })).min(1).max(100),
-    })).max(10).optional().describe("Optional LangExtract examples. If omitted, synthetic examples are generated."),
+    })).min(1).max(10).describe("Required LangExtract examples."),
 
     model: z.string().max(200).optional().describe("Optional OpenRouter model override (e.g. openai/gpt-4.1-mini)."),
     modelId: z.string().max(200).optional().describe("Alias for `model` (deprecated)."),
@@ -737,7 +705,6 @@ export const langextractExtract = defineTool({
         prompt_description: args.promptDescription,
         extraction_classes: args.extractionClasses,
         examples: args.examples,
-        model_type: "openai",
         model_id: resolvedLlm.model,
         model_url: resolvedLlm.baseUrl,
         api_key: resolvedLlm.apiKey,
@@ -770,7 +737,7 @@ export const langextractExtract = defineTool({
         attemptsRaw.push({
           model: routedModel,
           fenceOutput: false,
-          useSchemaConstraints: true,
+          useSchemaConstraints: args.useSchemaConstraints,
           reason: "routed_model_fallback",
         });
       }
@@ -778,7 +745,7 @@ export const langextractExtract = defineTool({
         attemptsRaw.push({
           model: fallbackModel,
           fenceOutput: false,
-          useSchemaConstraints: true,
+          useSchemaConstraints: args.useSchemaConstraints,
           reason: "route_fallback_model",
         });
       }
@@ -820,7 +787,7 @@ export const langextractExtract = defineTool({
         }
         const err = String(run.parsed.error ?? "unknown extraction error");
         failureSummaries.push(`${attempt.reason}:${attempt.model}:${err}`);
-        const shouldContinue = isLangextractParseLikeError(err);
+        const shouldContinue = isLangextractRetryableError(err);
         if (!shouldContinue || i === attempts.length - 1) {
           parsed = run.parsed;
           break;

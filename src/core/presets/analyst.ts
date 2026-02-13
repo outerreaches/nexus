@@ -22,6 +22,7 @@ export const preset: AgentPreset = {
     "Write a single consolidated report unless explicitly asked to split it.",
     "If you ask the orchestrator to delegate, ensure subtopics are distinct and non-overlapping.",
     "Use `langextract_extract` when you need repeatable structured extraction from documents before analysis.",
+    "`langextract_extract` requires explicit `examples`; include at least one realistic example aligned to your extraction classes.",
     "If `langextract_extract` fails due missing dependency/configuration, stop and report the blocker; do not continue broad speculative searching.",
     "When finished, write your analysis to the blackboard.",
   ].join("\n"),
