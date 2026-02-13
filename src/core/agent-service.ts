@@ -13,8 +13,22 @@ import { getPreset, type AgentPreset } from "./presets.js";
 import type { AgentTracker } from "./agent-tracker.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 
+type ExecutionLane = "interactive" | "background";
+
+type HistoryScope =
+  | {
+      mode: "exact";
+      channel: string;
+      channelKey: string;
+      agentId?: string;
+    }
+  | {
+      mode: "latest_telegram_for_agent";
+    };
+
 export class AgentService {
-  private readonly semaphore: Semaphore;
+  private readonly interactiveSemaphore: Semaphore;
+  private readonly backgroundSemaphore: Semaphore;
 
   constructor(
     private readonly deps: {
@@ -24,14 +38,78 @@ export class AgentService {
       toolContext: ToolContext;
       db: NexusDatabase;
       stateDir: string;
-      limits: { maxMessages: number; maxToolCalls: number; maxIterations: number; maxConcurrent: number; maxContextTokens?: number };
+      limits: {
+        maxMessages: number;
+        maxToolCalls: number;
+        maxIterations: number;
+        maxConcurrent: number;
+        maxConcurrentInteractive?: number;
+        maxConcurrentBackground?: number;
+        maxContextTokens?: number;
+      };
       agentTracker?: AgentTracker;
       onRunnerLog?: (line: string) => void;
       /** Default preset name for agents (e.g. "orchestrator"). If unset, all tools are used. */
       defaultPreset?: string;
     },
   ) {
-    this.semaphore = new Semaphore(deps.limits.maxConcurrent);
+    const interactiveMax = Math.max(1, deps.limits.maxConcurrentInteractive ?? deps.limits.maxConcurrent);
+    const backgroundMax = Math.max(1, deps.limits.maxConcurrentBackground ?? deps.limits.maxConcurrent);
+    this.interactiveSemaphore = new Semaphore(interactiveMax);
+    this.backgroundSemaphore = new Semaphore(backgroundMax);
+  }
+
+  private defaultLaneForChannel(channel: string): ExecutionLane {
+    return channel === "telegram" || channel === "cli" ? "interactive" : "background";
+  }
+
+  private resolveHistoryScope(params: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    historyScope?: HistoryScope;
+  }): { channel: string; channelKey: string; agentId: string; source: string } {
+    const fallback = {
+      channel: params.channel,
+      channelKey: params.channelKey,
+      agentId: params.agentId,
+      source: "request",
+    };
+
+    const scope = params.historyScope;
+    if (!scope) return fallback;
+
+    if (scope.mode === "exact") {
+      return {
+        channel: scope.channel,
+        channelKey: scope.channelKey,
+        agentId: scope.agentId ?? params.agentId,
+        source: "exact",
+      };
+    }
+
+    const latestTelegram = this.deps.db.db
+      .prepare(
+        `SELECT s.channel_key AS channel_key
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.id
+         WHERE s.channel = 'telegram' AND s.agent_id = ?
+         GROUP BY s.id
+         ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
+         LIMIT 1`,
+      )
+      .get(params.agentId) as { channel_key: string } | undefined;
+
+    if (latestTelegram?.channel_key) {
+      return {
+        channel: "telegram",
+        channelKey: latestTelegram.channel_key,
+        agentId: params.agentId,
+        source: "latest_telegram_for_agent",
+      };
+    }
+
+    return { ...fallback, source: "latest_telegram_for_agent:fallback" };
   }
 
   async handleUserMessage(params: {
@@ -44,6 +122,10 @@ export class AgentService {
     preset?: string;
     /** Override model routing mode (default/local_only). */
     modelMode?: ModelRoutingMode;
+    /** Queue lane for this run. Defaults by channel (telegram/cli=interactive, others=background). */
+    executionLane?: ExecutionLane;
+    /** Optional history scope override for session continuity across channels. */
+    historyScope?: HistoryScope;
   }): Promise<{
     runId: string | null;
     sessionId: string;
@@ -52,13 +134,21 @@ export class AgentService {
     toolCallsUsed: number;
     iterationsUsed: number;
   }> {
-    return await this.semaphore.withLock(async () => {
+    const lane = params.executionLane ?? this.defaultLaneForChannel(params.channel);
+    const semaphore = lane === "background" ? this.backgroundSemaphore : this.interactiveSemaphore;
+    return await semaphore.withLock(async () => {
       const nowMs = this.deps.toolContext.nowMs();
-      const sessionId = getOrCreateSessionId({
-        db: this.deps.db,
+      const historyScope = this.resolveHistoryScope({
         channel: params.channel,
         channelKey: params.channelKey,
         agentId: params.agentId,
+        historyScope: params.historyScope,
+      });
+      const sessionId = getOrCreateSessionId({
+        db: this.deps.db,
+        channel: historyScope.channel,
+        channelKey: historyScope.channelKey,
+        agentId: historyScope.agentId,
         nowMs,
       });
 
@@ -93,6 +183,9 @@ export class AgentService {
           );
         }
         : undefined;
+      onRunnerLog?.(
+        `history_scope source=${historyScope.source} channel=${historyScope.channel} key=${historyScope.channelKey} lane=${lane} messages=${history.length}`,
+      );
 
       let llm: LLMClient = this.deps.llm;
       let llmConfig = this.deps.toolContext.llmConfig;

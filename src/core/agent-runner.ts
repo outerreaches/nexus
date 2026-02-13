@@ -139,10 +139,21 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
 }
 
 type ToolExecutionStatus = "ok" | "error";
+type ToolErrorClass =
+  | "validation_error"
+  | "rate_limited"
+  | "not_found"
+  | "capability_mismatch"
+  | "transient_provider_error"
+  | "unknown_error";
+type ToolRetryPolicy = "no" | "yes" | "after_backoff";
 
 type ToolResultClassification = {
   status: ToolExecutionStatus;
   errorSummary?: string;
+  errorClass?: ToolErrorClass;
+  retryPolicy?: ToolRetryPolicy;
+  retryGuidance?: string;
 };
 
 type ParsedSpawnAgentResult = {
@@ -165,9 +176,102 @@ function parseSpawnAgentResult(result: string): ParsedSpawnAgentResult | null {
   }
 }
 
+function classifyToolError(summary: string): {
+  errorClass: ToolErrorClass;
+  retryPolicy: ToolRetryPolicy;
+  retryGuidance: string;
+} {
+  const text = summary.toLowerCase();
+
+  const has = (...needles: string[]): boolean => needles.some((needle) => text.includes(needle));
+  const hasAnyRegex = (...patterns: RegExp[]): boolean => patterns.some((p) => p.test(text));
+
+  if (
+    has("rate limit", "too many requests", "retry after") ||
+    hasAnyRegex(/\b429\b/, /\bhttp\s*429\b/)
+  ) {
+    return {
+      errorClass: "rate_limited",
+      retryPolicy: "after_backoff",
+      retryGuidance: "Wait/back off, reduce request volume, then retry once.",
+    };
+  }
+
+  if (
+    has(
+      "invalid tool arguments",
+      "not valid json",
+      "expected object",
+      "required",
+      "must be",
+      "out of range",
+      "non-empty",
+      "parse failed",
+      "zoderror",
+      "invalid",
+    )
+  ) {
+    return {
+      errorClass: "validation_error",
+      retryPolicy: "no",
+      retryGuidance: "Fix arguments/inputs before retrying.",
+    };
+  }
+
+  if (
+    has("not found", "no such file or directory", "unknown tool", "unknown preset", "source not found", "not a file")
+  ) {
+    return {
+      errorClass: "not_found",
+      retryPolicy: "no",
+      retryGuidance: "Verify identifiers/paths/resources exist, then retry.",
+    };
+  }
+
+  if (
+    has(
+      "disabled by policy",
+      "not configured",
+      "not available",
+      "allowlisted",
+      "unsupported",
+      "outside current session scope",
+      "no endpoints found that support",
+      "cannot spawn another orchestrator",
+      "code root is disabled by policy",
+      "code root is read-only",
+    )
+  ) {
+    return {
+      errorClass: "capability_mismatch",
+      retryPolicy: "no",
+      retryGuidance: "Use a compatible tool/model/permission context instead of retrying unchanged.",
+    };
+  }
+
+  if (
+    has("timed out", "timeout", "service unavailable", "connection reset", "temporarily unavailable") ||
+    hasAnyRegex(/\b5\d\d\b/, /\beconnreset\b/, /\bhttp\s*50[0-9]\b/)
+  ) {
+    return {
+      errorClass: "transient_provider_error",
+      retryPolicy: "yes",
+      retryGuidance: "Retry once with reduced scope/context; escalate if it fails again.",
+    };
+  }
+
+  return {
+    errorClass: "unknown_error",
+    retryPolicy: "no",
+    retryGuidance: "Diagnose first (inspect full error/output) before retrying.",
+  };
+}
+
 export function classifyToolResultStatus(call: ToolCall, result: string): ToolResultClassification {
   if (result.startsWith("ERROR:")) {
-    return { status: "error", errorSummary: result.split(/\r?\n/)[0] ?? "ERROR" };
+    const errorSummary = result.split(/\r?\n/)[0] ?? "ERROR";
+    const normalized = classifyToolError(errorSummary);
+    return { status: "error", errorSummary, ...normalized };
   }
   if (call.name !== "spawn_agent") return { status: "ok" };
 
@@ -177,9 +281,12 @@ export function classifyToolResultStatus(call: ToolCall, result: string): ToolRe
   if (status === "complete" || status === "completed") return { status: "ok" };
 
   const summarySource = parsed?.output?.trim() ? parsed.output.trim() : `spawn_agent status=${parsed?.status ?? status}`;
+  const errorSummary = summarySource.split(/\r?\n/)[0] ?? summarySource;
+  const normalized = classifyToolError(errorSummary);
   return {
     status: "error",
-    errorSummary: summarySource.split(/\r?\n/)[0] ?? summarySource,
+    errorSummary,
+    ...normalized,
   };
 }
 
@@ -440,8 +547,16 @@ export class AgentRunner {
         const classification = classifyToolResultStatus(call, result);
         const status = classification.status;
         const errorFirstLine = classification.errorSummary ?? result.split(/\r?\n/)[0] ?? "";
+        const errorClass = classification.errorClass;
+        const retryPolicy = classification.retryPolicy;
         const errPreview = status === "error" ? ` msg=${safeJson(truncate(errorFirstLine, 200))}` : "";
-        this.deps.onLog?.(`tool_result name=${call.name} id=${call.id} status=${status} chars=${result.length}${errPreview}`);
+        const errMeta =
+          status === "error" && errorClass
+            ? ` class=${errorClass}${retryPolicy ? ` retry=${retryPolicy}` : ""}`
+            : "";
+        this.deps.onLog?.(
+          `tool_result name=${call.name} id=${call.id} status=${status}${errMeta} chars=${result.length}${errPreview}`,
+        );
 
         const toolResultMsg: ChatMessage = {
           role: "tool",
@@ -449,6 +564,11 @@ export class AgentRunner {
           toolCallId: call.id,
           content: result,
         };
+        if (status === "error" && errorClass) {
+          const retryLine = retryPolicy ? ` retry=${retryPolicy}` : "";
+          const guidanceLine = classification.retryGuidance ? ` ${classification.retryGuidance}` : "";
+          toolResultMsg.content += `\n\n[ERROR_CLASS=${errorClass}${retryLine}]${guidanceLine}`;
+        }
         messages.push(toolResultMsg);
         newMessages.push(toolResultMsg);
 

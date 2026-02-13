@@ -219,17 +219,22 @@ export function loadRecentHistory(params: {
   if (sanitized.length === 0) {
     return [];
   }
+  // Ensure deterministic chronological order before windowing.
+  sanitized = sanitized.sort((a, b) => a.id - b.id);
 
   let nextAnchorId = anchorId;
-  if (sanitized.length > rolloverLimit) {
-    const shiftSteps = Math.ceil((sanitized.length - rolloverLimit) / activeWindow);
-    const preferredAnchorStart = Math.min(sanitized.length - 1, shiftSteps * activeWindow);
+  // Rolling anchor policy:
+  // - Keep an active window of latest `activeWindow` messages.
+  // - Keep up to `rolloverLimit` messages from anchor.
+  // - When exceeded, advance the anchor in `activeWindow` steps.
+  while (sanitized.length > rolloverLimit) {
+    const preferredAnchorStart = Math.min(sanitized.length - 1, activeWindow);
     const anchorStart = findAnchorStart(sanitized, preferredAnchorStart);
     const candidateAnchorId = sanitized[anchorStart]?.id;
-    if (typeof candidateAnchorId === "number") {
-      nextAnchorId = candidateAnchorId;
-      sanitized = sanitized.slice(anchorStart);
-    }
+    if (typeof candidateAnchorId !== "number") break;
+    if (anchorStart <= 0) break;
+    nextAnchorId = candidateAnchorId;
+    sanitized = sanitized.slice(anchorStart);
   }
 
   if (typeof nextAnchorId === "number" && nextAnchorId !== anchorId) {

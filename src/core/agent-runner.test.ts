@@ -17,6 +17,7 @@ test("classifyToolResultStatus marks plain ERROR-prefixed output as error", () =
   const result = classifyToolResultStatus(call, "ERROR: write failed");
   assert.equal(result.status, "error");
   assert.equal(result.errorSummary, "ERROR: write failed");
+  assert.equal(result.errorClass, "unknown_error");
 });
 
 test("classifyToolResultStatus marks spawn_agent failed JSON status as error", () => {
@@ -30,6 +31,8 @@ test("classifyToolResultStatus marks spawn_agent failed JSON status as error", (
   const result = classifyToolResultStatus(call, payload);
   assert.equal(result.status, "error");
   assert.equal(result.errorSummary, "ERROR: worker process timed out");
+  assert.equal(result.errorClass, "transient_provider_error");
+  assert.equal(result.retryPolicy, "yes");
 });
 
 test("classifyToolResultStatus marks spawn_agent budget_exhausted JSON status as error", () => {
@@ -41,6 +44,7 @@ test("classifyToolResultStatus marks spawn_agent budget_exhausted JSON status as
   const result = classifyToolResultStatus(call, payload);
   assert.equal(result.status, "error");
   assert.equal(result.errorSummary, "Budget exhausted while iterating.");
+  assert.equal(result.errorClass, "unknown_error");
 });
 
 test("classifyToolResultStatus keeps spawn_agent complete JSON status as ok", () => {
@@ -61,6 +65,38 @@ test("classifyToolResultStatus does not parse non-spawn JSON payloads", () => {
   });
   const result = classifyToolResultStatus(call, payload);
   assert.equal(result.status, "ok");
+});
+
+test("classifyToolResultStatus classifies validation errors", () => {
+  const call = makeCall("spawn_agent");
+  const result = classifyToolResultStatus(call, "ERROR: invalid tool arguments for 'spawn_agent' (not valid JSON)");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorClass, "validation_error");
+  assert.equal(result.retryPolicy, "no");
+});
+
+test("classifyToolResultStatus classifies rate limit errors", () => {
+  const call = makeCall("web_search");
+  const result = classifyToolResultStatus(call, "ERROR: web search failed: 429 Too Many Requests");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorClass, "rate_limited");
+  assert.equal(result.retryPolicy, "after_backoff");
+});
+
+test("classifyToolResultStatus classifies capability mismatch errors", () => {
+  const call = makeCall("image_edit");
+  const result = classifyToolResultStatus(call, "ERROR: No endpoints found that support the requested output modalities");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorClass, "capability_mismatch");
+  assert.equal(result.retryPolicy, "no");
+});
+
+test("classifyToolResultStatus classifies not_found errors", () => {
+  const call = makeCall("file_read");
+  const result = classifyToolResultStatus(call, "ERROR: no such file or directory");
+  assert.equal(result.status, "error");
+  assert.equal(result.errorClass, "not_found");
+  assert.equal(result.retryPolicy, "no");
 });
 
 test("toolResultIndicatesDeployApplied detects direct ha_deploy apply success", () => {

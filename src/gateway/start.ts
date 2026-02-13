@@ -242,6 +242,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
       maxToolCalls: config.limits.maxToolCallsPerRun,
       maxIterations: config.limits.maxIterationsPerRun,
       maxConcurrent: config.limits.maxConcurrentAgents,
+      maxConcurrentInteractive: config.limits.maxConcurrentAgents,
+      maxConcurrentBackground: Math.max(1, config.scheduler.concurrency),
       maxContextTokens: config.limits.maxContextTokens,
     },
   });

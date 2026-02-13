@@ -154,6 +154,8 @@ export function startProactiveHeartbeat(
         channelKey: "gateway",
         agentId,
         text,
+        executionLane: "background",
+        historyScope: { mode: "latest_telegram_for_agent" },
       });
 
       const idle = isIdleOutput(res.output);

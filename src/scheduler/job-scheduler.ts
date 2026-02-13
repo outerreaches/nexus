@@ -225,6 +225,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       agentId: job.owner_agent_id,
       preset: "job-manager",
       text,
+      executionLane: "background",
     });
 
     insertEvent({
@@ -273,6 +274,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         agentId: job.owner_agent_id,
         preset: "orchestrator",
         text: userText,
+        executionLane: "background",
+        historyScope: { mode: "latest_telegram_for_agent" },
       });
 
       const marker = parseJobStatusMarker(res.output);
