@@ -143,6 +143,27 @@ def _serialize_extraction(value):
 def _supports_parameter(sig, name):
     return name in sig.parameters
 
+def _build_openai_language_model_type_and_params(payload):
+    try:
+        from langextract.providers.openai import OpenAILanguageModel
+    except Exception:
+        return None, None, "OpenAILanguageModel provider is unavailable (langextract[openai] may be missing)."
+
+    model_id = payload.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None, None, "model_id is missing"
+
+    params = {"model_id": model_id.strip()}
+    model_url = payload.get("model_url")
+    if isinstance(model_url, str) and model_url.strip():
+        params["base_url"] = model_url.strip()
+
+    api_key = payload.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        params["api_key"] = api_key.strip()
+
+    return OpenAILanguageModel, params, None
+
 def _build_openai_model(lx, payload):
     factory = getattr(lx, "factory", None)
     if factory is None:
@@ -218,36 +239,53 @@ def main():
             "use_schema_constraints": payload.get("use_schema_constraints"),
         }
 
-        model_build_error = None
-        if _supports_parameter(sig, "model"):
+        model_build_errors = []
+        model_forced = False
+
+        # Newer/alternate API style: language_model_type + language_model_params.
+        if _supports_parameter(sig, "language_model_type") and _supports_parameter(sig, "language_model_params"):
+            try:
+                openai_type, openai_params, openai_err = _build_openai_language_model_type_and_params(payload)
+                if openai_err:
+                    model_build_errors.append(openai_err)
+                elif openai_type is not None and openai_params is not None:
+                    kwargs["language_model_type"] = openai_type
+                    kwargs["language_model_params"] = openai_params
+                    model_forced = True
+            except Exception as exc:
+                model_build_errors.append(str(exc))
+
+        # Factory model path: model object built from provider config.
+        if not model_forced and _supports_parameter(sig, "model"):
             try:
                 model = _build_openai_model(lx, payload)
+                if model is not None:
+                    kwargs["model"] = model
+                    model_forced = True
             except Exception as exc:
-                model_build_error = str(exc)
-                model = None
-            if model is not None:
-                kwargs["model"] = model
+                model_build_errors.append(str(exc))
 
-        if "model" not in kwargs:
+        # Legacy style: pass model hints directly; provider auto-selection decides.
+        if not model_forced:
             option_values.update({
                 "model_id": payload.get("model_id"),
                 "model_url": payload.get("model_url"),
                 "model_type": payload.get("model_type"),
                 "api_key": payload.get("api_key"),
             })
-
-        if model_build_error:
-            raise RuntimeError(
-                "Failed to configure OpenAI provider for langextract. "
-                "Install OpenAI extras (pip install 'langextract[openai]') "
-                f"and verify model/base URL/API key. Details: {model_build_error}"
-            )
+            if model_build_errors:
+                kwargs["_nexus_openai_provider_warning"] = "; ".join(model_build_errors)
 
         for key, value in option_values.items():
             if value is None:
                 continue
+            if key.startswith("_"):
+                continue
             if _supports_parameter(sig, key):
                 kwargs[key] = value
+
+        # Drop internal warning key if it leaked into kwargs.
+        kwargs.pop("_nexus_openai_provider_warning", None)
         if source_is_url and _supports_parameter(sig, "fetch_urls"):
             kwargs["fetch_urls"] = True
 

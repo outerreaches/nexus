@@ -420,11 +420,14 @@ Proactive task checklist reviewed on each heartbeat tick.
   > monitoring thresholds, or recurring checks, append them using \`file_write\` with \`mode: "append"\`
   > and \`root: "state"\`. Only edit or replace existing items if explicitly requested.
   > This ensures instructions persist across restarts.
+  > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`),
+  > always set \`root: "state"\` on every file tool call. Example:
+  > \`file_read({ root: "state", path: "NOTES.md", limit: 50 })\`
 
 ## Per-Tick Review
 - [ ] If there were meaningful learnings outside the daily reflection run, store them with \`memory_store\`
 - [ ] Check memories for stale or contradictory entries (\`memory_search\`)
-- [ ] Check NOTES.md for pending items
+- [ ] Check \`NOTES.md\` for pending items using \`file_read({ root: "state", path: "NOTES.md", limit: 50 })\`
 
 ## Daily Tasks
 - [ ] Review recent session history for unfinished work
