@@ -14,6 +14,8 @@ import type {
   DataIntakeRow,
   HAEventRow,
   BackupRow,
+  LlmSessionRow,
+  LlmMessageRow,
 } from "./types.js";
 
 export function listProcesses(manager: ProcessManager | undefined, nowMs: number, windowMs: number): ManagedProcessInfo[] {
@@ -147,6 +149,92 @@ export function getLastBackup(db: NexusDatabase | undefined): BackupRow | null {
   } catch {
     return null;
   }
+}
+
+export function listLlmSessions(
+  db: NexusDatabase | undefined,
+  params: {
+    limit: number;
+    channel?: string | null;
+    channelKey?: string | null;
+    agentId?: string | null;
+  },
+): LlmSessionRow[] {
+  if (!db) return [];
+  const clauses: string[] = [];
+  const args: unknown[] = [];
+  const channel = params.channel?.trim();
+  const channelKey = params.channelKey?.trim();
+  const agentId = params.agentId?.trim();
+
+  if (channel) {
+    clauses.push("s.channel = ?");
+    args.push(channel);
+  }
+  if (channelKey) {
+    clauses.push("s.channel_key = ?");
+    args.push(channelKey);
+  }
+  if (agentId) {
+    clauses.push("s.agent_id = ?");
+    args.push(agentId);
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  return db.db
+    .prepare(
+      `SELECT
+         s.id,
+         s.channel,
+         s.channel_key,
+         s.agent_id,
+         s.created_at,
+         COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
+         COUNT(m.id) AS message_count
+       FROM sessions s
+       LEFT JOIN messages m ON m.session_id = s.id
+       ${where}
+       GROUP BY s.id
+       ORDER BY last_message_at DESC
+       LIMIT ?`,
+    )
+    .all(...args, params.limit) as LlmSessionRow[];
+}
+
+export function listLlmMessages(
+  db: NexusDatabase | undefined,
+  params: {
+    sessionId: string;
+    limit: number;
+    beforeId?: number | null;
+  },
+): { messages: LlmMessageRow[]; hasMore: boolean; nextBeforeId: number | null } {
+  if (!db) return { messages: [], hasMore: false, nextBeforeId: null };
+  const hasBefore = typeof params.beforeId === "number" && Number.isFinite(params.beforeId) && params.beforeId > 0;
+  const sql = hasBefore
+    ? `SELECT id, session_id, role, content, name, tool_call_id, tool_calls_json, created_at
+       FROM messages
+       WHERE session_id = ? AND id < ?
+       ORDER BY id DESC
+       LIMIT ?`
+    : `SELECT id, session_id, role, content, name, tool_call_id, tool_calls_json, created_at
+       FROM messages
+       WHERE session_id = ?
+       ORDER BY id DESC
+       LIMIT ?`;
+
+  const rows = hasBefore
+    ? db.db.prepare(sql).all(params.sessionId, params.beforeId, params.limit + 1) as LlmMessageRow[]
+    : db.db.prepare(sql).all(params.sessionId, params.limit + 1) as LlmMessageRow[];
+  const hasMore = rows.length > params.limit;
+  const page = hasMore ? rows.slice(0, params.limit) : rows;
+  const ordered = page.reverse();
+  const nextBeforeId = hasMore && ordered.length > 0 ? ordered[0]!.id : null;
+  return {
+    messages: ordered,
+    hasMore,
+    nextBeforeId,
+  };
 }
 
 export function clampInt(value: string | undefined, min: number, max: number): number | null {

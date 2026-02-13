@@ -3,7 +3,14 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import type { GatewayHttpDeps } from "../http.js";
 import type { AgentRunInfo } from "../dashboard/types.js";
-import { clampInt, listAgents, listAgentGraph, listJobRuns } from "../dashboard/queries.js";
+import {
+  clampInt,
+  listAgents,
+  listAgentGraph,
+  listJobRuns,
+  listLlmSessions,
+  listLlmMessages,
+} from "../dashboard/queries.js";
 
 export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/status", async (c) => c.json(await deps.getStatus()));
@@ -68,6 +75,42 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       }
       return c.text(`ERROR: ${err instanceof Error ? err.message : String(err)}`, 500);
     }
+  });
+
+  app.get("/api/llm/sessions", async (c) => {
+    const limit = clampInt(c.req.query("limit"), 1, 200) ?? 50;
+    const channel = c.req.query("channel") ?? null;
+    const channelKey = c.req.query("channelKey") ?? null;
+    const agentId = c.req.query("agentId") ?? null;
+    const sessions = listLlmSessions(deps.db, {
+      limit,
+      channel,
+      channelKey,
+      agentId,
+    });
+    return c.json({ sessions, timestamp: Date.now() });
+  });
+
+  app.get("/api/llm/messages", async (c) => {
+    const sessionId = String(c.req.query("sessionId") ?? "").trim();
+    if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
+    const limit = clampInt(c.req.query("limit"), 1, 500) ?? 200;
+    const beforeIdRaw = String(c.req.query("beforeId") ?? "").trim();
+    const beforeId = beforeIdRaw ? Number(beforeIdRaw) : null;
+    const before = Number.isFinite(beforeId) && (beforeId ?? 0) > 0 ? Math.floor(beforeId as number) : null;
+
+    const result = listLlmMessages(deps.db, {
+      sessionId,
+      limit,
+      beforeId: before,
+    });
+    return c.json({
+      sessionId,
+      messages: result.messages,
+      hasMore: result.hasMore,
+      nextBeforeId: result.nextBeforeId,
+      timestamp: Date.now(),
+    });
   });
 
   app.get("/api/job-runs/export.csv", async (c) => {

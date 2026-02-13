@@ -148,6 +148,7 @@ export function renderDashboard(params: {
           <div class="tab-bar">
             <button class="tab-btn active" data-tab="agents-view">Agents</button>
             <button class="tab-btn" data-tab="docker-logs">Logs</button>
+            <button class="tab-btn" data-tab="llm-raw">LLM Raw</button>
           </div>
         </div>
         <div class="graph-wrap">
@@ -181,6 +182,26 @@ export function renderDashboard(params: {
               </label>
             </div>
             <pre id="docker-logs" class="log-viewer">Loading logs…</pre>
+          </div>
+          <div class="tab-panel" id="tab-llm-raw">
+            <div class="log-controls">
+              <button class="graph-btn" id="llm-sessions-refresh">Sessions</button>
+              <button class="graph-btn" id="llm-messages-refresh">Messages</button>
+              <button class="graph-btn" id="llm-messages-older">Older</button>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                Session limit
+                <input id="llm-sessions-limit" class="inline-input" type="number" min="1" max="200" step="1" value="50" />
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                Message limit
+                <input id="llm-messages-limit" class="inline-input" type="number" min="1" max="500" step="1" value="200" />
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px; min-width: 320px;">
+                Session
+                <select id="llm-session-select" class="inline-input" style="min-width: 320px;"></select>
+              </label>
+            </div>
+            <pre id="llm-raw" class="log-viewer">Loading session list…</pre>
           </div>
         </div>
         <div class="split">
@@ -315,12 +336,21 @@ export function renderDashboard(params: {
       const tabPanels = {
         "agents-view": document.getElementById("tab-agents-view"),
         "docker-logs": document.getElementById("tab-docker-logs"),
+        "llm-raw": document.getElementById("tab-llm-raw"),
       };
       const logsPanel = tabPanels["docker-logs"];
       const logsPre = document.getElementById("docker-logs");
       const logsRefreshBtn = document.getElementById("logs-refresh");
       const logsAutoToggle = document.getElementById("logs-auto");
       const logsMaxInput = document.getElementById("logs-max");
+      const llmPanel = tabPanels["llm-raw"];
+      const llmPre = document.getElementById("llm-raw");
+      const llmSessionsRefreshBtn = document.getElementById("llm-sessions-refresh");
+      const llmMessagesRefreshBtn = document.getElementById("llm-messages-refresh");
+      const llmOlderBtn = document.getElementById("llm-messages-older");
+      const llmSessionsLimitInput = document.getElementById("llm-sessions-limit");
+      const llmMessagesLimitInput = document.getElementById("llm-messages-limit");
+      const llmSessionSelect = document.getElementById("llm-session-select");
 
       const escapeLogHtml = (value) =>
         String(value ?? "")
@@ -413,6 +443,170 @@ export function renderDashboard(params: {
         }
       };
 
+      const llmState = {
+        sessions: [],
+        selectedSessionId: null,
+        rows: [],
+        hasMore: false,
+        nextBeforeId: null,
+      };
+
+      const readBoundedInt = (input, fallback, min, max) => {
+        const n = Number(input?.value ?? fallback);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(max, Math.max(min, Math.floor(n)));
+      };
+
+      const formatIso = (ms) => {
+        if (!ms) return "-";
+        try {
+          return new Date(ms).toISOString();
+        } catch {
+          return "-";
+        }
+      };
+
+      const updateLlmOlderButton = () => {
+        if (!llmOlderBtn) return;
+        llmOlderBtn.disabled = !llmState.hasMore || !llmState.selectedSessionId;
+      };
+
+      const renderLlmRows = () => {
+        if (!llmPre) return;
+        const selected = llmState.sessions.find((s) => s.id === llmState.selectedSessionId) ?? null;
+        const headerLines = [];
+        if (selected) {
+          headerLines.push(
+            "session_id=" + selected.id,
+            "channel=" + selected.channel + ":" + selected.channel_key,
+            "agent_id=" + selected.agent_id,
+            "last_message_at=" + formatIso(selected.last_message_at),
+            "message_count=" + selected.message_count,
+            "",
+          );
+        }
+        if (!llmState.rows || llmState.rows.length === 0) {
+          llmPre.innerHTML = '<span class="log-empty">' + escapeLogHtml(headerLines.concat(["No messages found."]).join("\\n")) + "</span>";
+          updateLlmOlderButton();
+          return;
+        }
+        const body = llmState.rows.map((row) => {
+          let toolCalls = row.tool_calls_json;
+          if (toolCalls) {
+            try {
+              toolCalls = JSON.stringify(JSON.parse(toolCalls), null, 2);
+            } catch {
+              // keep raw
+            }
+          }
+          const chunks = [
+            "#"+ row.id + " " + row.role + " created_at=" + formatIso(row.created_at),
+            row.name ? "name=" + row.name : "",
+            row.tool_call_id ? "tool_call_id=" + row.tool_call_id : "",
+            "",
+            "content:",
+            row.content ?? "",
+          ];
+          if (toolCalls) {
+            chunks.push("", "tool_calls_json:", toolCalls);
+          }
+          return chunks.filter((line) => line !== "").join("\\n");
+        }).join("\\n\\n----------------------------------------\\n\\n");
+        llmPre.innerHTML = escapeLogHtml(headerLines.join("\\n") + body);
+        updateLlmOlderButton();
+      };
+
+      const renderLlmSessionOptions = () => {
+        if (!llmSessionSelect) return;
+        const sessions = llmState.sessions;
+        if (!sessions || sessions.length === 0) {
+          llmSessionSelect.innerHTML = "";
+          return;
+        }
+        llmSessionSelect.innerHTML = sessions.map((session) => {
+          const label = [
+            session.channel + ":" + session.channel_key,
+            session.agent_id,
+            formatIso(session.last_message_at),
+            session.message_count + " msgs",
+            session.id.slice(0, 8),
+          ].join(" | ");
+          const selected = session.id === llmState.selectedSessionId ? ' selected="selected"' : "";
+          return '<option value="' + escapeLogHtml(session.id) + '"' + selected + ">" + escapeLogHtml(label) + "</option>";
+        }).join("");
+      };
+
+      const fetchLlmMessages = async (opts = { reset: true }) => {
+        if (!llmPre) return;
+        const sessionId = llmState.selectedSessionId;
+        if (!sessionId) {
+          llmState.rows = [];
+          llmState.hasMore = false;
+          llmState.nextBeforeId = null;
+          llmPre.innerHTML = '<span class="log-empty">No sessions found.</span>';
+          updateLlmOlderButton();
+          return;
+        }
+
+        const limit = readBoundedInt(llmMessagesLimitInput, 200, 1, 500);
+        if (llmMessagesLimitInput) llmMessagesLimitInput.value = String(limit);
+        let url = "/api/llm/messages?sessionId=" + encodeURIComponent(sessionId) + "&limit=" + limit;
+        if (!opts.reset && llmState.nextBeforeId) {
+          url += "&beforeId=" + encodeURIComponent(String(llmState.nextBeforeId));
+        }
+        try {
+          const res = await fetch(url);
+          if (!res.ok) {
+            llmPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
+            return;
+          }
+          const payload = await res.json();
+          const rows = Array.isArray(payload?.messages) ? payload.messages : [];
+          if (opts.reset) {
+            llmState.rows = rows;
+          } else {
+            llmState.rows = rows.concat(llmState.rows);
+          }
+          llmState.hasMore = Boolean(payload?.hasMore);
+          llmState.nextBeforeId = payload?.nextBeforeId ?? null;
+          renderLlmRows();
+        } catch (err) {
+          llmPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+        }
+      };
+
+      const fetchLlmSessions = async (opts = { preserveSelection: true, refreshMessages: true }) => {
+        if (!llmPre) return;
+        const limit = readBoundedInt(llmSessionsLimitInput, 50, 1, 200);
+        if (llmSessionsLimitInput) llmSessionsLimitInput.value = String(limit);
+        const previousSessionId = llmState.selectedSessionId;
+        try {
+          const res = await fetch("/api/llm/sessions?limit=" + limit);
+          if (!res.ok) {
+            llmPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
+            return;
+          }
+          const payload = await res.json();
+          const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+          llmState.sessions = sessions;
+          if (opts.preserveSelection && previousSessionId && sessions.some((s) => s.id === previousSessionId)) {
+            llmState.selectedSessionId = previousSessionId;
+          } else {
+            llmState.selectedSessionId = sessions[0]?.id ?? null;
+          }
+          llmState.nextBeforeId = null;
+          llmState.hasMore = false;
+          renderLlmSessionOptions();
+          if (opts.refreshMessages) {
+            await fetchLlmMessages({ reset: true });
+          } else {
+            renderLlmRows();
+          }
+        } catch (err) {
+          llmPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+        }
+      };
+
       const setActiveTab = (name) => {
         tabButtons.forEach((btn) => {
           const isActive = btn.getAttribute("data-tab") === name;
@@ -424,6 +618,8 @@ export function renderDashboard(params: {
         });
         if (name === "docker-logs") {
           fetchLogs();
+        } else if (name === "llm-raw") {
+          fetchLlmSessions({ preserveSelection: true, refreshMessages: true });
         }
       };
 
@@ -436,6 +632,29 @@ export function renderDashboard(params: {
 
       if (logsRefreshBtn) {
         logsRefreshBtn.addEventListener("click", fetchLogs);
+      }
+      if (llmSessionsRefreshBtn) {
+        llmSessionsRefreshBtn.addEventListener("click", () => {
+          fetchLlmSessions({ preserveSelection: true, refreshMessages: true });
+        });
+      }
+      if (llmMessagesRefreshBtn) {
+        llmMessagesRefreshBtn.addEventListener("click", () => {
+          fetchLlmMessages({ reset: true });
+        });
+      }
+      if (llmOlderBtn) {
+        llmOlderBtn.addEventListener("click", () => {
+          fetchLlmMessages({ reset: false });
+        });
+      }
+      if (llmSessionSelect) {
+        llmSessionSelect.addEventListener("change", () => {
+          llmState.selectedSessionId = llmSessionSelect.value || null;
+          llmState.nextBeforeId = null;
+          llmState.hasMore = false;
+          fetchLlmMessages({ reset: true });
+        });
       }
 
       // Update stats display

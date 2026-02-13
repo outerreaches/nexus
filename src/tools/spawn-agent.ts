@@ -113,7 +113,7 @@ export const spawnAgent = defineTool({
     const maxDepth = envInt("NEXUS_MAX_AGENT_DEPTH") ?? 4;
 
     // Resolve budget
-    const maxContextTokens = envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? 64_000;
+    const maxContextTokens = envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? 128_000;
     const budget = {
       maxToolCalls: args.budget?.maxToolCalls ?? preset.budget?.maxToolCalls ?? 50,
       maxIterations: args.budget?.maxIterations ?? preset.budget?.maxIterations ?? 20,

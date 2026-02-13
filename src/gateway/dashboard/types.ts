@@ -105,3 +105,24 @@ export type BackupRow = {
   status: string;
   backup_type: string;
 };
+
+export type LlmSessionRow = {
+  id: string;
+  channel: string;
+  channel_key: string;
+  agent_id: string;
+  created_at: number;
+  last_message_at: number;
+  message_count: number;
+};
+
+export type LlmMessageRow = {
+  id: number;
+  session_id: string;
+  role: string;
+  content: string;
+  name: string | null;
+  tool_call_id: string | null;
+  tool_calls_json: string | null;
+  created_at: number;
+};
