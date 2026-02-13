@@ -33,9 +33,14 @@ const DAILY_REFLECTION_TASK = [
   "2) Identify important decisions, preferences, and lessons learned.",
   "3) Check existing memories first (memory_search/memory_recall) to avoid duplicates.",
   "4) Store only high-signal memories via memory_store with stable, specific keys.",
-  "5) If there are actionable follow-ups, append concise bullets to NOTES.md with file_write (root=\"state\", mode=\"append\").",
-  "6) If durable behavior rules should change, edit AGENTS.md in root=\"state\" with minimal, reversible updates.",
-  "7) If there are no meaningful new learnings, say so explicitly.",
+  "5) File I/O requirements (mandatory): ALWAYS use root=\"state\" when reading or writing NOTES.md or AGENTS.md.",
+  "   - Example read: file_read({ root: \"state\", path: \"NOTES.md\" })",
+  "   - Example append: file_write({ root: \"state\", path: \"NOTES.md\", mode: \"append\", content: \"...\" })",
+  "   - Example edit: file_edit({ root: \"state\", path: \"AGENTS.md\", find: \"...\", replace: \"...\" })",
+  "6) If NOTES.md does not exist, create it in root=\"state\" and continue (do not fail the reflection run).",
+  "7) If there are actionable follow-ups, append concise bullets to NOTES.md.",
+  "8) If durable behavior rules should change, edit AGENTS.md with minimal, reversible updates.",
+  "9) If there are no meaningful new learnings, say so explicitly.",
   "",
   "Output requirements:",
   "- Briefly summarize what was learned and what was stored/updated.",
@@ -68,8 +73,8 @@ const SYSTEM_JOBS: SystemJobSpec[] = [
   {
     id: "SYS_REFLECTION_DAILY",
     name: "System: Daily Reflection",
-    cron: "0 4 * * *", // Daily at 4am UTC
-    timezone: "UTC",
+    cron: "0 3 * * *", // Daily at 3am America/New_York
+    timezone: "America/New_York",
     ownerAgentId: "main",
     spec: {
       mode: "agent_task",
