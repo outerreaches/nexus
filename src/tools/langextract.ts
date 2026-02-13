@@ -130,28 +130,39 @@ def _supports_parameter(sig, name):
         return True
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
-def _build_model_config(payload):
+def _load_openai_language_model_class():
+    import importlib
+    candidates = [
+        ("langextract.providers.openai", "OpenAILanguageModel"),
+        ("langextract.providers", "OpenAILanguageModel"),
+        ("langextract.inference", "OpenAILanguageModel"),
+    ]
+    errors = []
+    for module_name, attr_name in candidates:
+        try:
+            module = importlib.import_module(module_name)
+            cls = getattr(module, attr_name, None)
+            if cls is not None:
+                return cls
+            errors.append(f"{module_name}.{attr_name} not found")
+        except Exception as exc:
+            errors.append(f"{module_name}: {exc}")
+    raise ImportError("Unable to import OpenAILanguageModel. Tried: " + "; ".join(errors))
+
+def _build_openai_model(payload):
+    OpenAILanguageModel = _load_openai_language_model_class()
     model_id = str(payload.get("model_id") or "").strip()
     if not model_id:
         raise ValueError("model_id is required for OpenAI provider")
-
-    provider = str(payload.get("provider") or "").strip() or "openai"
-    provider_kwargs = {}
+    init_kwargs = {"model_id": model_id}
 
     model_url = payload.get("model_url")
     if isinstance(model_url, str) and model_url.strip():
-        provider_kwargs["base_url"] = model_url.strip()
-
+        init_kwargs["base_url"] = model_url.strip()
     api_key = payload.get("api_key")
     if isinstance(api_key, str) and api_key.strip():
-        provider_kwargs["api_key"] = api_key.strip()
-
-    from langextract import factory
-    return factory.ModelConfig(
-        model_id=model_id,
-        provider=provider,
-        provider_kwargs=provider_kwargs,
-    )
+        init_kwargs["api_key"] = api_key.strip()
+    return OpenAILanguageModel(**init_kwargs)
 
 def _resolve_documents(lx, source_kind, source_value, source_is_url):
     if source_kind == "text":
@@ -224,14 +235,7 @@ def main():
             "prompt_description": prompt_description,
             "examples": examples,
         }
-        if _supports_parameter(sig, "config"):
-            kwargs["config"] = _build_model_config(payload)
-        else:
-            kwargs["model_id"] = model_id
-            if isinstance(model_url, str) and model_url.strip():
-                kwargs["model_url"] = model_url.strip()
-            if isinstance(api_key, str) and api_key.strip():
-                kwargs["api_key"] = api_key.strip()
+        kwargs["model"] = _build_openai_model(payload)
 
         option_values = {
             "max_workers": payload.get("max_workers"),
@@ -731,7 +735,6 @@ export const langextractExtract = defineTool({
         prompt_description: args.promptDescription,
         extraction_classes: args.extractionClasses,
         examples: args.examples,
-        provider: "openai",
         model_id: resolvedLlm.model,
         model_url: resolvedLlm.baseUrl,
         api_key: resolvedLlm.apiKey,
