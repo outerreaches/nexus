@@ -186,28 +186,29 @@ def _resolve_documents(lx, source_kind, source_value, source_is_url):
     if source_kind == "text":
         return source_value
 
-    # For document sources, try to wrap in langextract Document objects.
+    # For URL document sources, pass the URL string directly.
+    # Newer LangExtract versions expect a string URL (not list[str]) so it can
+    # fetch text internally when fetch_urls=True.
+    if source_is_url:
+        return source_value
+
+    # For non-URL document sources, try to wrap in langextract Document objects.
     doc_cls = getattr(getattr(lx, "data", None), "Document", None)
     if doc_cls is not None:
         try:
             sig = inspect.signature(doc_cls)
             params = list(sig.parameters.keys())
             # Try constructing with known param patterns
-            if source_is_url:
-                if "url" in params:
-                    return [doc_cls(url=source_value)]
-                if "path" in params:
-                    return [doc_cls(path=source_value)]
-            else:
-                if "path" in params:
-                    return [doc_cls(path=source_value)]
-                if "uri" in params:
-                    return [doc_cls(uri=source_value)]
+            if "path" in params:
+                return [doc_cls(path=source_value)]
+            if "uri" in params:
+                return [doc_cls(uri=source_value)]
         except Exception:
             pass
 
-    # Fallback: pass raw string in list (works with older versions)
-    return [source_value]
+    # Fallback: pass as plain string (avoid iterable[str] path that causes
+    # "'str' object has no attribute 'document_id'" in newer versions).
+    return source_value
 
 def main():
     payload = json.load(sys.stdin)
