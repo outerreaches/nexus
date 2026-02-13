@@ -71,8 +71,7 @@ import os
 from pathlib import Path
 import traceback
 from urllib import parse as _urlparse
-
-import requests
+from urllib import request as _urlrequest
 
 def _to_str_dict(raw):
     if not isinstance(raw, dict):
@@ -136,39 +135,58 @@ def _supports_parameter(sig, name):
         return True
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
-def _load_openai_language_model_class():
-    import importlib
-    candidates = [
-        ("langextract.providers.openai", "OpenAILanguageModel"),
-        ("langextract.providers", "OpenAILanguageModel"),
-        ("langextract.inference", "OpenAILanguageModel"),
-    ]
-    errors = []
-    for module_name, attr_name in candidates:
-        try:
-            module = importlib.import_module(module_name)
-            cls = getattr(module, attr_name, None)
-            if cls is not None:
-                return cls
-            errors.append(f"{module_name}.{attr_name} not found")
-        except Exception as exc:
-            errors.append(f"{module_name}: {exc}")
-    raise ImportError("Unable to import OpenAILanguageModel. Tried: " + "; ".join(errors))
+def _register_openrouter_provider(lx):
+    """Register an OpenRouter provider plugin class at runtime."""
+    from langextract.providers import router
+    from langextract.providers.openai import OpenAILanguageModel
 
-def _build_openai_model(payload):
-    OpenAILanguageModel = _load_openai_language_model_class()
+    @router.register(
+        r"^OpenRouterLanguageModel$",
+        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.:-]+$",
+        priority=50,
+    )
+    class OpenRouterLanguageModel(OpenAILanguageModel):
+        def __init__(
+            self,
+            model_id: str = "openai/gpt-4.1-mini",
+            api_key: str | None = None,
+            base_url: str | None = None,
+            **kwargs,
+        ):
+            super().__init__(
+                model_id=model_id,
+                api_key=api_key,
+                base_url=base_url or "https://openrouter.ai/api/v1",
+                **kwargs,
+            )
+
+    return OpenRouterLanguageModel
+
+def _build_model_config(payload):
     model_id = str(payload.get("model_id") or "").strip()
     if not model_id:
-        raise ValueError("model_id is required for OpenAI provider")
-    init_kwargs = {"model_id": model_id}
-
+        raise ValueError("model_id is required")
     model_url = payload.get("model_url")
-    if isinstance(model_url, str) and model_url.strip():
-        init_kwargs["base_url"] = model_url.strip()
     api_key = payload.get("api_key")
+
+    provider_kwargs = {}
+    if isinstance(model_url, str) and model_url.strip():
+        provider_kwargs["base_url"] = model_url.strip()
     if isinstance(api_key, str) and api_key.strip():
-        init_kwargs["api_key"] = api_key.strip()
-    return OpenAILanguageModel(**init_kwargs)
+        provider_kwargs["api_key"] = api_key.strip()
+
+    provider = str(payload.get("provider") or "").strip()
+    if not provider and "/" in model_id:
+        provider = "OpenRouterLanguageModel"
+
+    from langextract import factory
+    config_kwargs = {
+        "model_id": model_id,
+        "provider_kwargs": provider_kwargs,
+    }
+    if provider:
+        config_kwargs["provider"] = provider
+    return factory.ModelConfig(**config_kwargs)
 
 def _looks_like_pdf_url(value):
     if not isinstance(value, str) or not value:
@@ -205,9 +223,9 @@ def _extract_text_from_pdf_url(url):
             "URL PDF extraction requires pypdf in the runtime environment."
         ) from exc
 
-    response = requests.get(url, timeout=120)
-    response.raise_for_status()
-    reader = PdfReader(_io.BytesIO(response.content))
+    with _urlrequest.urlopen(url, timeout=120) as response:
+        content = response.read()
+    reader = PdfReader(_io.BytesIO(content))
     chunks = []
     for page in reader.pages:
         chunks.append(page.extract_text() or "")
@@ -245,6 +263,7 @@ def main():
     payload = json.load(sys.stdin)
     try:
         import langextract as lx
+        _register_openrouter_provider(lx)
     except Exception as exc:
         print(json.dumps({
             "ok": False,
@@ -284,7 +303,14 @@ def main():
             "prompt_description": prompt_description,
             "examples": examples,
         }
-        kwargs["model"] = _build_openai_model(payload)
+        if _supports_parameter(sig, "config"):
+            kwargs["config"] = _build_model_config(payload)
+        else:
+            kwargs["model_id"] = model_id
+            if isinstance(model_url, str) and model_url.strip():
+                kwargs["model_url"] = model_url.strip()
+            if isinstance(api_key, str) and api_key.strip():
+                kwargs["api_key"] = api_key.strip()
 
         option_values = {
             "max_workers": payload.get("max_workers"),
