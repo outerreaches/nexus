@@ -18,6 +18,7 @@ const DEFAULT_MAX_WORKERS = 8;
 const DEFAULT_EXTRACTION_PASSES = 1;
 const DEFAULT_MAX_RESULT_EXTRACTIONS = 500;
 const MAX_STDIO_BYTES = 5 * 1024 * 1024;
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 type BlackboardRow = {
   id: string;
@@ -385,12 +386,10 @@ function resolveOpenRouterDefaults(params: {
     routed?.model?.trim();
   const baseUrl =
     params.baseUrlOverride?.trim() ||
-    envString("NEXUS_LANGEXTRACT_OPENROUTER_BASE_URL") ||
-    envString("NEXUS_LANGEXTRACT_MODEL_URL") ||
-    routed?.baseUrl?.trim();
+    routed?.baseUrl?.trim() ||
+    DEFAULT_OPENROUTER_BASE_URL;
   const apiKey =
     params.apiKeyOverride?.trim() ||
-    envString("NEXUS_LANGEXTRACT_OPENROUTER_API_KEY") ||
     routed?.apiKey?.trim() ||
     envString("OPENROUTER_API_KEY");
   return { model, baseUrl, apiKey };
@@ -717,7 +716,7 @@ export const langextractExtract = defineTool({
         return "ERROR: missing OpenRouter model for langextract_extract. Configure llm.openaiCompat.model in Nexus config or pass `model`.";
       }
       if (!resolvedLlm.apiKey) {
-        return "ERROR: missing OpenRouter API key for langextract_extract. Set OPENROUTER_API_KEY (or NEXUS_LANGEXTRACT_OPENROUTER_API_KEY).";
+        return "ERROR: missing OpenRouter API key for langextract_extract. Set OPENROUTER_API_KEY (or llm.openaiCompat.apiKey).";
       }
 
       const pyPayload: Record<string, unknown> = {
