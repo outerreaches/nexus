@@ -17,6 +17,11 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_WORKERS = 8;
 const DEFAULT_EXTRACTION_PASSES = 1;
 const DEFAULT_MAX_RESULT_EXTRACTIONS = 500;
+const DEFAULT_CHUNK_TRIGGER_CHARS = 16_000;
+const DEFAULT_CHUNK_MAX_CHARS = 12_000;
+const DEFAULT_CHUNK_OVERLAP_CHARS = 800;
+const DEFAULT_MAX_CHUNKS = 8;
+const MAX_CUSTOM_EXAMPLE_COMPLEXITY = 12_000;
 const MAX_STDIO_BYTES = 5 * 1024 * 1024;
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -62,6 +67,46 @@ type PythonResult = {
   };
   extractions?: unknown[];
 };
+
+type LangextractExample = {
+  text: string;
+  extractions: Array<{
+    extractionClass: string;
+    extractionText: string;
+    attributes: Record<string, string>;
+  }>;
+};
+
+function buildAutoExamples(extractionClasses: string[]): LangextractExample[] {
+  const classes = extractionClasses
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const body = classes.map((klass, idx) => `${klass.replace(/_/g, " ")} value ${idx + 1}`).join("; ");
+  const text = `Extracted fields: ${body}.`;
+  return [
+    {
+      text,
+      extractions: classes.map((klass, idx) => ({
+        extractionClass: klass,
+        extractionText: `${klass.replace(/_/g, " ")} value ${idx + 1}`,
+        attributes: {},
+      })),
+    },
+  ];
+}
+
+function estimateExamplesComplexity(examples: LangextractExample[]): number {
+  let total = 0;
+  for (const example of examples) {
+    total += example.text.length;
+    for (const extraction of example.extractions) {
+      total += extraction.extractionClass.length + extraction.extractionText.length;
+      total += Object.keys(extraction.attributes).length * 16;
+    }
+  }
+  return total;
+}
 
 const PYTHON_RUNNER = String.raw`from __future__ import annotations
 import io as _io
@@ -129,6 +174,63 @@ def _serialize_extraction(value):
         "groupIndex": getattr(value, "group_index", None),
         "description": getattr(value, "description", None),
     }
+
+def _offset_char_interval(row, offset):
+    interval = row.get("charInterval")
+    if not isinstance(interval, dict):
+        return row
+    start_pos = interval.get("start_pos")
+    end_pos = interval.get("end_pos")
+    if isinstance(start_pos, int):
+        interval["start_pos"] = start_pos + offset
+    if isinstance(end_pos, int):
+        interval["end_pos"] = end_pos + offset
+    row["charInterval"] = interval
+    return row
+
+def _dedupe_serialized_rows(rows):
+    seen = set()
+    out = []
+    for row in rows:
+        klass = str(row.get("extractionClass") or "").strip().lower()
+        text = str(row.get("extractionText") or "").strip().lower()
+        attrs = row.get("attributes")
+        if not isinstance(attrs, dict):
+            attrs = {}
+        attrs_key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
+        key = (klass, text, attrs_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+def _normalize_int(value, default_value, min_value):
+    try:
+        parsed = int(value)
+    except Exception:
+        return max(default_value, min_value)
+    if parsed < min_value:
+        return min_value
+    return parsed
+
+def _chunk_text(text, max_chars, overlap_chars, max_chunks):
+    max_chars = _normalize_int(max_chars, 12000, 1000)
+    overlap_chars = _normalize_int(overlap_chars, 800, 0)
+    max_chunks = _normalize_int(max_chunks, 24, 1)
+    if overlap_chars >= max_chars:
+        overlap_chars = max_chars // 4
+    spans = []
+    start = 0
+    text_len = len(text)
+    while start < text_len and len(spans) < max_chunks:
+        end = min(start + max_chars, text_len)
+        spans.append((start, text[start:end]))
+        if end >= text_len:
+            break
+        start = max(0, end - overlap_chars)
+    truncated = bool(spans) and (spans[-1][0] + len(spans[-1][1]) < text_len)
+    return spans, truncated
 
 def _supports_parameter(sig, name):
     if name in sig.parameters:
@@ -298,19 +400,18 @@ def main():
         examples = _build_examples(lx, payload)
 
         sig = inspect.signature(lx.extract)
-        kwargs = {
-            "text_or_documents": text_or_documents,
+        base_kwargs = {
             "prompt_description": prompt_description,
             "examples": examples,
         }
         if _supports_parameter(sig, "config"):
-            kwargs["config"] = _build_model_config(payload)
+            base_kwargs["config"] = _build_model_config(payload)
         else:
-            kwargs["model_id"] = model_id
+            base_kwargs["model_id"] = model_id
             if isinstance(model_url, str) and model_url.strip():
-                kwargs["model_url"] = model_url.strip()
+                base_kwargs["model_url"] = model_url.strip()
             if isinstance(api_key, str) and api_key.strip():
-                kwargs["api_key"] = api_key.strip()
+                base_kwargs["api_key"] = api_key.strip()
 
         option_values = {
             "max_workers": payload.get("max_workers"),
@@ -322,12 +423,50 @@ def main():
             if value is None:
                 continue
             if _supports_parameter(sig, key):
-                kwargs[key] = value
-        if source_is_url and _supports_parameter(sig, "fetch_urls"):
-            kwargs["fetch_urls"] = True
+                base_kwargs[key] = value
 
-        result = lx.extract(**kwargs)
-        all_extractions = [_serialize_extraction(e) for e in (getattr(result, "extractions", None) or [])]
+        chunk_mode = bool(payload.get("chunk_mode", True))
+        chunk_trigger_chars = _normalize_int(payload.get("chunk_trigger_chars"), 16000, 1000)
+        chunk_max_chars = _normalize_int(payload.get("chunk_max_chars"), 12000, 1000)
+        chunk_overlap_chars = _normalize_int(payload.get("chunk_overlap_chars"), 800, 0)
+        max_chunks = _normalize_int(payload.get("max_chunks"), 24, 1)
+
+        can_chunk_text = (
+            isinstance(text_or_documents, str)
+            and not (source_kind == "document" and source_is_url and not _looks_like_pdf_url(source_value))
+        )
+        used_kwargs = []
+        chunked = False
+        chunk_count = 0
+        chunk_truncated = False
+
+        if can_chunk_text and chunk_mode and len(text_or_documents) > chunk_trigger_chars:
+            chunked = True
+            chunk_spans, chunk_truncated = _chunk_text(
+                text_or_documents,
+                chunk_max_chars,
+                chunk_overlap_chars,
+                max_chunks,
+            )
+            chunk_count = len(chunk_spans)
+            serialized_rows = []
+            for offset, chunk_text in chunk_spans:
+                call_kwargs = dict(base_kwargs)
+                call_kwargs["text_or_documents"] = chunk_text
+                result = lx.extract(**call_kwargs)
+                used_kwargs = sorted(list(call_kwargs.keys()))
+                rows = [_serialize_extraction(e) for e in (getattr(result, "extractions", None) or [])]
+                for row in rows:
+                    serialized_rows.append(_offset_char_interval(row, offset))
+            all_extractions = _dedupe_serialized_rows(serialized_rows)
+        else:
+            call_kwargs = dict(base_kwargs)
+            call_kwargs["text_or_documents"] = text_or_documents
+            if source_is_url and _supports_parameter(sig, "fetch_urls"):
+                call_kwargs["fetch_urls"] = True
+            result = lx.extract(**call_kwargs)
+            used_kwargs = sorted(list(call_kwargs.keys()))
+            all_extractions = [_serialize_extraction(e) for e in (getattr(result, "extractions", None) or [])]
         limited = all_extractions[:max_result_extractions]
 
         print(json.dumps({
@@ -336,9 +475,16 @@ def main():
                 "total_extractions": len(all_extractions),
                 "returned_extractions": len(limited),
                 "truncated": len(limited) < len(all_extractions),
-                "used_kwargs": sorted(list(kwargs.keys())),
+                "used_kwargs": used_kwargs,
                 "source_kind": source_kind,
                 "source_is_url": source_is_url,
+                "chunked": chunked,
+                "chunk_count": chunk_count,
+                "chunk_truncated": chunk_truncated,
+                "chunk_trigger_chars": chunk_trigger_chars,
+                "chunk_max_chars": chunk_max_chars,
+                "chunk_overlap_chars": chunk_overlap_chars,
+                "max_chunks": max_chunks,
                 "version": getattr(lx, "__version__", None),
             },
             "extractions": limited,
@@ -708,6 +854,8 @@ export const langextractExtract = defineTool({
     promptDescription: z.string().min(1).max(4000).describe("What information to extract."),
     extractionClasses: z.array(z.string().min(1).max(120)).min(1).max(50).default(["entity"])
       .describe("Target extraction classes."),
+    autoExamples: z.boolean().default(true)
+      .describe("When true, use compact auto-generated few-shot examples (also used automatically if provided examples are overly large)."),
     examples: z.array(z.object({
       text: z.string().min(1).max(12_000),
       extractions: z.array(z.object({
@@ -715,7 +863,7 @@ export const langextractExtract = defineTool({
         extractionText: z.string().min(1).max(500),
         attributes: z.record(z.string()).default({}),
       })).min(1).max(100),
-    })).min(1).max(10).describe("Required LangExtract examples."),
+    })).min(1).max(10).optional().describe("Optional LangExtract examples. If omitted, compact examples can be auto-generated."),
 
     model: z.string().max(200).optional().describe("Optional OpenRouter model override (e.g. openai/gpt-4.1-mini)."),
     modelId: z.string().max(200).optional().describe("Alias for `model` (deprecated)."),
@@ -784,6 +932,17 @@ export const langextractExtract = defineTool({
         return "ERROR: missing valid source input";
       }
 
+      const providedExamples = Array.isArray(args.examples) ? args.examples : [];
+      const providedComplexity = estimateExamplesComplexity(providedExamples);
+      const autoExamplesApplied =
+        args.autoExamples && (providedExamples.length === 0 || providedComplexity > MAX_CUSTOM_EXAMPLE_COMPLEXITY);
+      const examples = autoExamplesApplied
+        ? buildAutoExamples(args.extractionClasses)
+        : providedExamples;
+      if (!examples.length) {
+        return "ERROR: examples are required. Provide `examples` or enable `autoExamples`.";
+      }
+
       const pythonBin = (process.env.NEXUS_LANGEXTRACT_PYTHON ?? "python3").trim() || "python3";
       const resolvedLlm = resolveOpenRouterDefaults({
         ctx,
@@ -809,7 +968,7 @@ export const langextractExtract = defineTool({
         source_is_url: source.type === "document" ? source.sourceIsUrl : false,
         prompt_description: args.promptDescription,
         extraction_classes: args.extractionClasses,
-        examples: args.examples,
+        examples,
         model_id: resolvedLlm.model,
         model_url: resolvedLlm.baseUrl,
         api_key: resolvedLlm.apiKey,
@@ -817,6 +976,11 @@ export const langextractExtract = defineTool({
         extraction_passes: args.extractionPasses,
         fence_output: args.fenceOutput,
         use_schema_constraints: args.useSchemaConstraints,
+        chunk_mode: true,
+        chunk_trigger_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_TRIGGER_CHARS", DEFAULT_CHUNK_TRIGGER_CHARS),
+        chunk_max_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_MAX_CHARS", DEFAULT_CHUNK_MAX_CHARS),
+        chunk_overlap_chars: envInt("NEXUS_LANGEXTRACT_CHUNK_OVERLAP_CHARS", DEFAULT_CHUNK_OVERLAP_CHARS),
+        max_chunks: envInt("NEXUS_LANGEXTRACT_MAX_CHUNKS", DEFAULT_MAX_CHUNKS),
         max_result_extractions: args.maxResultExtractions,
       };
 
@@ -936,12 +1100,20 @@ export const langextractExtract = defineTool({
         request: {
           promptDescription: args.promptDescription,
           extractionClasses: args.extractionClasses,
+          autoExamples: args.autoExamples,
+          autoExamplesApplied,
+          providedExampleComplexity: providedComplexity,
+          exampleCount: examples.length,
           modelType: "openai",
           modelId: effectiveModelId,
           requestedModelId: resolvedLlm.model,
           modelUrl: resolvedLlm.baseUrl,
           maxWorkers: args.maxWorkers,
           extractionPasses: args.extractionPasses,
+          chunkTriggerChars: pyPayload.chunk_trigger_chars,
+          chunkMaxChars: pyPayload.chunk_max_chars,
+          chunkOverlapChars: pyPayload.chunk_overlap_chars,
+          maxChunks: pyPayload.max_chunks,
           fenceOutput: effectiveFenceOutput,
           requestedFenceOutput: args.fenceOutput,
           useSchemaConstraints: effectiveUseSchemaConstraints,

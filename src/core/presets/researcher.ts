@@ -47,7 +47,7 @@ export const preset: AgentPreset = {
     "- Write a single consolidated finding unless explicitly asked to split it.",
     "- To retrieve an image from a URL, call `web_fetch` — it saves image responses to the workspace and returns the local file path. Then use `image_analyze` on that path to inspect the image with a vision model, or write it to the blackboard as an attachment.",
     "- For structured extraction from long text/documents (entities, fields, attributes), use `langextract_extract` and share the output artifact via blackboard.",
-    "- `langextract_extract` requires explicit `examples`; include at least one realistic example aligned to your extraction classes.",
+    "- Keep `langextract_extract` payloads compact: concise extraction classes + prompt; let the tool auto-generate few-shot examples unless custom examples are truly needed.",
     "- If `langextract_extract` fails due missing dependency/configuration, stop and report the blocker; do not continue broad speculative searching.",
   ].join("\n"),
   tools: [
