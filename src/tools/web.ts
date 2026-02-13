@@ -1,5 +1,7 @@
 import dns from "node:dns/promises";
+import fs from "node:fs/promises";
 import net from "node:net";
+import path from "node:path";
 
 import { z } from "zod";
 
@@ -12,6 +14,47 @@ const FETCH_CACHE = new Map<string, CacheEntry<string>>();
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_MAX_REDIRECTS = 3;
+const DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+const IMAGE_MIME_PREFIXES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "image/bmp"];
+
+function isImageContentType(ct: string): boolean {
+  const normalized = ct.toLowerCase().split(";")[0]?.trim() ?? "";
+  return IMAGE_MIME_PREFIXES.some((prefix) => normalized === prefix) || normalized.startsWith("image/");
+}
+
+function extensionFromMime(mimeType: string): string {
+  const normalized = mimeType.toLowerCase().split(";")[0]?.trim() ?? "";
+  if (normalized === "image/jpeg") return ".jpg";
+  if (normalized === "image/webp") return ".webp";
+  if (normalized === "image/gif") return ".gif";
+  if (normalized === "image/svg+xml") return ".svg";
+  if (normalized === "image/bmp") return ".bmp";
+  if (normalized === "image/png") return ".png";
+  return ".bin";
+}
+
+function sanitizeFilename(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    const basename = path.basename(parsed.pathname);
+    const cleaned = basename.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 80);
+    if (cleaned && cleaned !== "-") return cleaned;
+  } catch { /* ignore */ }
+  return "image";
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let idx = 0;
+  let val = bytes;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx += 1;
+  }
+  return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
 
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
@@ -127,7 +170,10 @@ async function fetchWithRedirects(params: {
 
 export const webFetch = defineTool({
   name: "web_fetch",
-  description: "Fetch a URL and return extracted text (best-effort). Uses timeouts, redirect limits, and a small cache.",
+  description:
+    "Fetch a URL and return extracted text (best-effort), or save images to disk when the response is an image. " +
+    "For image responses, returns JSON with the local file path, mime type, and size. " +
+    "Use image_analyze on the returned path to inspect the image with a vision model.",
   parameters: z.object({
     url: z.string().url().max(4096),
     maxChars: z.number().int().positive().default(12000),
@@ -136,19 +182,65 @@ export const webFetch = defineTool({
     maxRedirects: z.number().int().min(0).max(10).default(DEFAULT_MAX_REDIRECTS),
     userAgent: z.string().max(500).default(DEFAULT_USER_AGENT),
     acceptLanguage: z.string().max(200).default(DEFAULT_ACCEPT_LANGUAGE),
+    maxImageBytes: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_MAX_IMAGE_BYTES)
+      .describe("Maximum image file size in bytes (only applies to image responses)."),
   }),
-  execute: async ({ url, maxChars, timeoutMs, cacheTtlMs, maxRedirects, userAgent, acceptLanguage }) => {
+  execute: async (args, ctx) => {
+    const { url, maxChars, timeoutMs, cacheTtlMs, maxRedirects, userAgent, acceptLanguage, maxImageBytes } = args;
     const cacheKey = normalizeCacheKey(`${url}::${maxChars}`);
     const cached = readCache(FETCH_CACHE, cacheKey);
     if (cached) return cached;
 
-    const { res } = await fetchWithRedirects({ url, timeoutMs, maxRedirects, userAgent, acceptLanguage });
+    const { res, finalUrl } = await fetchWithRedirects({ url, timeoutMs, maxRedirects, userAgent, acceptLanguage });
     if (!res.ok) {
       const detail = await readResponseText(res);
       throw new Error(`web_fetch failed: ${res.status} ${res.statusText}${detail ? ` — ${truncateText(detail, 800)}` : ""}`);
     }
 
     const ct = res.headers.get("content-type") ?? "";
+
+    if (isImageContentType(ct)) {
+      const mimeType = ct.toLowerCase().split(";")[0]?.trim() ?? "image/png";
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > maxImageBytes) {
+        throw new Error(
+          `Image too large: ${formatBytes(buf.length)} (limit: ${formatBytes(maxImageBytes)}). ` +
+            "Increase maxImageBytes if needed.",
+        );
+      }
+
+      const ext = extensionFromMime(mimeType);
+      const baseName = sanitizeFilename(finalUrl);
+      const stem = path.parse(baseName).ext ? path.parse(baseName).name : baseName;
+      const day = new Date().toISOString().slice(0, 10);
+      const stamp = Date.now().toString(36);
+      const fileName = `${stem}-${stamp}${path.parse(baseName).ext || ext}`;
+      const relDir = path.join("fetched-images", day);
+      const absDir = path.join(ctx.workspaceDir, relDir);
+      await fs.mkdir(absDir, { recursive: true });
+      const absPath = path.join(absDir, fileName);
+      await fs.writeFile(absPath, buf);
+
+      const out = JSON.stringify(
+        {
+          type: "image",
+          url: finalUrl,
+          path: absPath,
+          mimeType,
+          size: buf.length,
+          sizeHuman: formatBytes(buf.length),
+        },
+        null,
+        2,
+      );
+      writeCache(FETCH_CACHE, cacheKey, out, cacheTtlMs);
+      return out;
+    }
+
     const body = await res.text();
     const text = ct.toLowerCase().includes("text/html") ? stripHtml(body) : body;
     const out = truncateText(text.trim(), maxChars);
