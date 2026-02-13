@@ -47,6 +47,7 @@ export const preset: AgentPreset = {
     "- Write a single consolidated finding unless explicitly asked to split it.",
     "- To retrieve an image from a URL, call `web_fetch` — it saves image responses to the workspace and returns the local file path. Then use `image_analyze` on that path to inspect the image with a vision model, or write it to the blackboard as an attachment.",
     "- For structured extraction from long text/documents (entities, fields, attributes), use `langextract_extract` and share the output artifact via blackboard.",
+    "- If `langextract_extract` fails due missing dependency/configuration, stop and report the blocker; do not continue broad speculative searching.",
   ].join("\n"),
   tools: [
     "web_search",
@@ -57,6 +58,6 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
   ],
-  budget: { maxIterations: 25, maxToolCalls: 50 },
+  budget: { maxIterations: 30, maxToolCalls: 60 },
   isolated: true,
 };

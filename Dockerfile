@@ -27,6 +27,11 @@ COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
 RUN npm run build
 
+# Python runtime for LangExtract-backed extraction tool
+RUN python3 -m venv /opt/nexus-py \
+  && /opt/nexus-py/bin/pip install --no-cache-dir --upgrade pip \
+  && /opt/nexus-py/bin/pip install --no-cache-dir langextract
+
 # Make the CLI available on PATH inside the container (so `docker exec ... nexus ...` works)
 RUN printf '%s\n' '#!/bin/sh' 'exec node /app/dist/index.js "$@"' > /usr/local/bin/nexus \
   && chmod +x /usr/local/bin/nexus
@@ -35,6 +40,7 @@ ENV NEXUS_STATE_DIR=/data/nexus
 ENV NEXUS_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NEXUS_BROWSER_HEADLESS=1
 ENV NEXUS_BROWSER_NO_SANDBOX=1
+ENV NEXUS_LANGEXTRACT_PYTHON=/opt/nexus-py/bin/python
 
 EXPOSE 18789
 

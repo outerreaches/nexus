@@ -23,6 +23,7 @@ export const preset: AgentPreset = {
     "Use mcp_overview to inspect MCP topology (servers/profiles/health) before delegating.",
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",
+    "Do not set overly tight spawn budgets by default; use preset defaults unless the user explicitly requests stricter limits.",
     "Researcher/analyst workers should not spawn further agents; keep subtasking at the orchestrator.",
   ].join("\n"),
   tools: [
@@ -58,5 +59,5 @@ export const preset: AgentPreset = {
     "human_request",
     "human_status",
   ],
-  budget: { maxIterations: 40, maxToolCalls: 120 },
+  budget: { maxIterations: 50, maxToolCalls: 140 },
 };

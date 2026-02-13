@@ -22,6 +22,7 @@ export const preset: AgentPreset = {
     "Write a single consolidated report unless explicitly asked to split it.",
     "If you ask the orchestrator to delegate, ensure subtopics are distinct and non-overlapping.",
     "Use `langextract_extract` when you need repeatable structured extraction from documents before analysis.",
+    "If `langextract_extract` fails due missing dependency/configuration, stop and report the blocker; do not continue broad speculative searching.",
     "When finished, write your analysis to the blackboard.",
   ].join("\n"),
   tools: [
@@ -34,5 +35,5 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
   ],
-  budget: { maxIterations: 20, maxToolCalls: 40 },
+  budget: { maxIterations: 25, maxToolCalls: 50 },
 };

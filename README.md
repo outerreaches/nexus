@@ -200,7 +200,7 @@ Convenience actions:
 ## Web tools
 
 - `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
-- `web_fetch`: keyless HTTP fetch + text extraction (timeouts, redirect limits, small cache). Image responses are saved to the workspace and return a local file path for use with `image_analyze`
+- `web_fetch`: keyless HTTP fetch + text extraction (timeouts, redirect limits, small cache). Non-text binaries (images, PDFs, etc.) are saved to the workspace and return a local file path instead of inlining payloads.
 - `langextract_extract`: structured entity/field extraction via Python LangExtract. Supports text/path/url/blackboard input, writes a JSON artifact to disk, and can write a blackboard artifact reference for downstream agents. Uses OpenRouter by default (existing Nexus model route), with optional per-call model override. Requires `langextract` in the runtime Python environment (`pip install langextract`).
 
 Safety knob:
@@ -326,6 +326,7 @@ Enable via env (simplest in Docker):
 - `NEXUS_PROACTIVE=1`
 - Optional tuning: `NEXUS_PROACTIVE_INTERVAL_MS`, `NEXUS_PROACTIVE_MAX_INTERVAL_MS`, `NEXUS_PROACTIVE_JITTER_MS`
 - `NEXUS_PROACTIVE_NOTIFY_TELEGRAM=1` sends non-idle outputs to allowlisted Telegram user ids
+- `NEXUS_SPAWN_BUDGET_MIN_RATIO` (default `0.75`) sets a floor for explicit spawn budget overrides as a fraction of preset budget (helps prevent accidental ultra-low worker budgets).
 
 Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalMs`, etc.
 

@@ -57,8 +57,8 @@ export const spawnAgent = defineTool({
       .describe("Blackboard entry IDs to inject as context for the worker"),
     budget: z
       .object({
-        maxToolCalls: z.number().int().min(1).max(100).optional(),
-        maxIterations: z.number().int().min(1).max(40).optional(),
+        maxToolCalls: z.number().int().min(1).max(200).optional(),
+        maxIterations: z.number().int().min(1).max(80).optional(),
       })
       .optional()
       .describe("Override preset budget limits"),
@@ -118,15 +118,22 @@ export const spawnAgent = defineTool({
     const presetMaxIterations = clampPositiveInt(preset.budget?.maxIterations ?? runtimeLimits.maxIterations, runtimeLimits.maxIterations);
     const requestedMaxToolCalls = args.budget?.maxToolCalls;
     const requestedMaxIterations = args.budget?.maxIterations;
+    const minOverrideRatio = resolveMinOverrideBudgetRatio();
+    const minOverrideToolCalls = Math.max(1, Math.ceil(presetMaxToolCalls * minOverrideRatio));
+    const minOverrideIterations = Math.max(1, Math.ceil(presetMaxIterations * minOverrideRatio));
+    const adjustedRequestedMaxToolCalls =
+      requestedMaxToolCalls === undefined ? undefined : Math.max(requestedMaxToolCalls, minOverrideToolCalls);
+    const adjustedRequestedMaxIterations =
+      requestedMaxIterations === undefined ? undefined : Math.max(requestedMaxIterations, minOverrideIterations);
     const budget = {
       maxToolCalls:
-        requestedMaxToolCalls === undefined
+        adjustedRequestedMaxToolCalls === undefined
           ? Math.min(runtimeLimits.maxToolCalls, presetMaxToolCalls)
-          : Math.min(runtimeLimits.maxToolCalls, presetMaxToolCalls, clampPositiveInt(requestedMaxToolCalls, presetMaxToolCalls)),
+          : Math.min(runtimeLimits.maxToolCalls, presetMaxToolCalls, clampPositiveInt(adjustedRequestedMaxToolCalls, presetMaxToolCalls)),
       maxIterations:
-        requestedMaxIterations === undefined
+        adjustedRequestedMaxIterations === undefined
           ? Math.min(runtimeLimits.maxIterations, presetMaxIterations)
-          : Math.min(runtimeLimits.maxIterations, presetMaxIterations, clampPositiveInt(requestedMaxIterations, presetMaxIterations)),
+          : Math.min(runtimeLimits.maxIterations, presetMaxIterations, clampPositiveInt(adjustedRequestedMaxIterations, presetMaxIterations)),
       maxContextTokens: runtimeLimits.maxContextTokens,
     };
     if (requestedMaxToolCalls !== undefined && budget.maxToolCalls < requestedMaxToolCalls) {
@@ -139,6 +146,18 @@ export const spawnAgent = defineTool({
       ctx.log(
         `spawn_agent: clamped maxIterations ${requestedMaxIterations} -> ${budget.maxIterations} ` +
         `(global=${runtimeLimits.maxIterations}, preset=${presetMaxIterations})`,
+      );
+    }
+    if (requestedMaxToolCalls !== undefined && adjustedRequestedMaxToolCalls !== undefined && adjustedRequestedMaxToolCalls > requestedMaxToolCalls) {
+      ctx.log(
+        `spawn_agent: raised low maxToolCalls ${requestedMaxToolCalls} -> ${adjustedRequestedMaxToolCalls} ` +
+        `(min_ratio=${minOverrideRatio.toFixed(2)}, preset=${presetMaxToolCalls})`,
+      );
+    }
+    if (requestedMaxIterations !== undefined && adjustedRequestedMaxIterations !== undefined && adjustedRequestedMaxIterations > requestedMaxIterations) {
+      ctx.log(
+        `spawn_agent: raised low maxIterations ${requestedMaxIterations} -> ${adjustedRequestedMaxIterations} ` +
+        `(min_ratio=${minOverrideRatio.toFixed(2)}, preset=${presetMaxIterations})`,
       );
     }
 
@@ -598,6 +617,14 @@ function envInt(name: string): number | null {
   return Math.floor(n);
 }
 
+function envFloat(name: string): number | null {
+  const raw = (process.env[name] ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
 function clampPositiveInt(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return Math.max(1, Math.floor(fallback));
   return Math.max(1, Math.floor(value));
@@ -608,8 +635,22 @@ function clampNonNegativeInt(value: number, fallback: number): number {
   return Math.max(0, Math.floor(value));
 }
 
+function clampRatio(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function resolveMinOverrideBudgetRatio(): number {
+  const fallback = 0.75;
+  const configured = envFloat("NEXUS_SPAWN_BUDGET_MIN_RATIO");
+  if (configured === null) return fallback;
+  return clampRatio(configured, fallback);
+}
+
 function resolveRuntimeLimits(ctx: ToolContext): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
-  const defaults = { maxToolCalls: 120, maxIterations: 40, maxContextTokens: 128_000 };
+  const defaults = { maxToolCalls: 120, maxIterations: 60, maxContextTokens: 128_000 };
   const fromCtx = ctx.runtimeLimits ?? defaults;
   return {
     maxToolCalls: clampPositiveInt(fromCtx.maxToolCalls, defaults.maxToolCalls),

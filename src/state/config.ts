@@ -127,7 +127,7 @@ export const ConfigSchema = z.object({
     .object({
       maxConcurrentAgents: z.number().int().positive().default(5),
       maxToolCallsPerRun: z.number().int().positive().default(120),
-      maxIterationsPerRun: z.number().int().positive().default(40),
+      maxIterationsPerRun: z.number().int().positive().default(60),
       maxContextTokens: z.number().int().min(0).default(128_000),
     })
     .default({}),

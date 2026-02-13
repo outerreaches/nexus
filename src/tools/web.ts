@@ -15,16 +15,45 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_MAX_REDIRECTS = 3;
 const DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_BINARY_BYTES = 25 * 1024 * 1024;
 
 const IMAGE_MIME_PREFIXES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "image/bmp"];
+const TEXT_MIME_EXACT = new Set([
+  "application/json",
+  "application/ld+json",
+  "application/xml",
+  "application/xhtml+xml",
+  "application/javascript",
+  "application/x-javascript",
+  "application/ecmascript",
+  "application/csv",
+  "application/x-ndjson",
+]);
+const TEXT_MIME_PREFIXES = ["text/"];
 
 function isImageContentType(ct: string): boolean {
   const normalized = ct.toLowerCase().split(";")[0]?.trim() ?? "";
   return IMAGE_MIME_PREFIXES.some((prefix) => normalized === prefix) || normalized.startsWith("image/");
 }
 
+function normalizeContentType(ct: string): string {
+  return ct.toLowerCase().split(";")[0]?.trim() ?? "";
+}
+
+function isLikelyTextContentType(ct: string): boolean {
+  const normalized = normalizeContentType(ct);
+  if (!normalized) return true;
+  if (TEXT_MIME_EXACT.has(normalized)) return true;
+  return TEXT_MIME_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
 function extensionFromMime(mimeType: string): string {
   const normalized = mimeType.toLowerCase().split(";")[0]?.trim() ?? "";
+  if (normalized === "application/pdf") return ".pdf";
+  if (normalized === "application/json") return ".json";
+  if (normalized === "text/plain") return ".txt";
+  if (normalized === "text/csv" || normalized === "application/csv") return ".csv";
+  if (normalized === "application/xml" || normalized === "text/xml") return ".xml";
   if (normalized === "image/jpeg") return ".jpg";
   if (normalized === "image/webp") return ".webp";
   if (normalized === "image/gif") return ".gif";
@@ -41,7 +70,7 @@ function sanitizeFilename(urlStr: string): string {
     const cleaned = basename.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 80);
     if (cleaned && cleaned !== "-") return cleaned;
   } catch { /* ignore */ }
-  return "image";
+  return "file";
 }
 
 function formatBytes(bytes: number): string {
@@ -171,9 +200,9 @@ async function fetchWithRedirects(params: {
 export const webFetch = defineTool({
   name: "web_fetch",
   description:
-    "Fetch a URL and return extracted text (best-effort), or save images to disk when the response is an image. " +
-    "For image responses, returns JSON with the local file path, mime type, and size. " +
-    "Use image_analyze on the returned path to inspect the image with a vision model.",
+    "Fetch a URL and return extracted text (best-effort). For non-text binary responses (images, PDFs, archives, etc.), " +
+    "save the file to disk and return JSON metadata with a local file path. " +
+    "Use image_analyze on returned image paths to inspect with a vision model.",
   parameters: z.object({
     url: z.string().url().max(4096),
     maxChars: z.number().int().positive().default(12000),
@@ -188,10 +217,16 @@ export const webFetch = defineTool({
       .positive()
       .default(DEFAULT_MAX_IMAGE_BYTES)
       .describe("Maximum image file size in bytes (only applies to image responses)."),
+    maxBinaryBytes: z
+      .number()
+      .int()
+      .positive()
+      .default(DEFAULT_MAX_BINARY_BYTES)
+      .describe("Maximum non-text binary file size in bytes (PDF, ZIP, etc.)."),
   }),
   execute: async (args, ctx) => {
-    const { url, maxChars, timeoutMs, cacheTtlMs, maxRedirects, userAgent, acceptLanguage, maxImageBytes } = args;
-    const cacheKey = normalizeCacheKey(`${url}::${maxChars}`);
+    const { url, maxChars, timeoutMs, cacheTtlMs, maxRedirects, userAgent, acceptLanguage, maxImageBytes, maxBinaryBytes } = args;
+    const cacheKey = normalizeCacheKey(`${url}::${maxChars}::${maxBinaryBytes}`);
     const cached = readCache(FETCH_CACHE, cacheKey);
     if (cached) return cached;
 
@@ -202,9 +237,9 @@ export const webFetch = defineTool({
     }
 
     const ct = res.headers.get("content-type") ?? "";
+    const mimeType = normalizeContentType(ct) || "application/octet-stream";
 
     if (isImageContentType(ct)) {
-      const mimeType = ct.toLowerCase().split(";")[0]?.trim() ?? "image/png";
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length > maxImageBytes) {
         throw new Error(
@@ -228,6 +263,43 @@ export const webFetch = defineTool({
       const out = JSON.stringify(
         {
           type: "image",
+          url: finalUrl,
+          path: absPath,
+          mimeType,
+          size: buf.length,
+          sizeHuman: formatBytes(buf.length),
+        },
+        null,
+        2,
+      );
+      writeCache(FETCH_CACHE, cacheKey, out, cacheTtlMs);
+      return out;
+    }
+
+    if (!isLikelyTextContentType(ct)) {
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > maxBinaryBytes) {
+        throw new Error(
+          `Binary file too large: ${formatBytes(buf.length)} (limit: ${formatBytes(maxBinaryBytes)}). ` +
+            "Increase maxBinaryBytes if needed.",
+        );
+      }
+
+      const ext = extensionFromMime(mimeType);
+      const baseName = sanitizeFilename(finalUrl);
+      const stem = path.parse(baseName).ext ? path.parse(baseName).name : baseName;
+      const day = new Date().toISOString().slice(0, 10);
+      const stamp = Date.now().toString(36);
+      const fileName = `${stem}-${stamp}${path.parse(baseName).ext || ext}`;
+      const relDir = path.join("fetched-files", day);
+      const absDir = path.join(ctx.workspaceDir, relDir);
+      await fs.mkdir(absDir, { recursive: true });
+      const absPath = path.join(absDir, fileName);
+      await fs.writeFile(absPath, buf);
+
+      const out = JSON.stringify(
+        {
+          type: "binary",
           url: finalUrl,
           path: absPath,
           mimeType,
