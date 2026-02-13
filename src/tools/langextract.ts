@@ -140,8 +140,27 @@ def _serialize_extraction(value):
         "description": getattr(value, "description", None),
     }
 
+def _load_openai_language_model_class():
+    import importlib
+    candidates = [
+        ("langextract.providers.openai", "OpenAILanguageModel"),
+        ("langextract.providers", "OpenAILanguageModel"),
+        ("langextract.inference", "OpenAILanguageModel"),
+    ]
+    errors = []
+    for module_name, attr_name in candidates:
+        try:
+            module = importlib.import_module(module_name)
+            cls = getattr(module, attr_name, None)
+            if cls is not None:
+                return cls
+            errors.append(f"{module_name}.{attr_name} not found")
+        except Exception as exc:
+            errors.append(f"{module_name}: {exc}")
+    raise ImportError("Unable to import OpenAILanguageModel. Tried: " + "; ".join(errors))
+
 def _build_openai_model(payload):
-    from langextract.providers.openai import OpenAILanguageModel
+    OpenAILanguageModel = _load_openai_language_model_class()
 
     model_id = payload.get("model_id")
     if not isinstance(model_id, str) or not model_id.strip():
@@ -181,6 +200,8 @@ def _resolve_documents(lx, source_kind, source_value, source_is_url):
             else:
                 if "path" in params:
                     return [doc_cls(path=source_value)]
+                if "uri" in params:
+                    return [doc_cls(uri=source_value)]
         except Exception:
             pass
 
@@ -657,14 +678,11 @@ export const langextractExtract = defineTool({
           defaultRoot: rootDir(ctx, args.root),
           roots: allowedRoots(ctx),
         });
-        const fileContent = await fs.readFile(absolutePath, "utf8");
-        if (!fileContent.trim()) {
-          return "ERROR: source file is empty";
-        }
         source = {
-          type: "text",
-          value: fileContent,
+          type: "document",
+          value: absolutePath,
           sourceLabel: `file:${absolutePath}`,
+          sourceIsUrl: false,
         };
       } else if (typeof args.url === "string" && args.url.trim()) {
         source = {
