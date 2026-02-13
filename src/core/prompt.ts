@@ -87,6 +87,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- For data intake, use list/query tools directly. Delegate all mutating operations (add/update/delete/run/schedule/prune) to an `intake-manager` worker via `spawn_agent`.",
       "- For credential vault operations, delegate to a `credential-manager` worker via `spawn_agent`.",
       "- For MCP integrations, inspect `mcp_overview` then delegate setup/execution to an `mcp-manager` worker.",
+      "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, have `mcp-manager` explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
       "- For periodic/scheduled tasks, delegate to a `job-manager` worker. Prefer `mode: \"tool_call\"` (zero token cost) for recurring tool executions or `mode: \"script\"` for maintenance scripts. Use `mode: \"agent_task\"` only when LLM reasoning is required for each run.",
       "- Use `memory_store` / `memory_recall` / `memory_search` to persist learnings across sessions.",
       "- Use `skill_create` to save reusable playbooks for tasks you learn to do well.",

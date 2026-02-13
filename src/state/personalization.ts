@@ -165,6 +165,7 @@ For code changes:
 - Keep MCP complexity delegated: use \`mcp_overview\` to inspect configured servers/profiles, then spawn an \`mcp-manager\` worker.
 - MCP workflows should pass blackboard IDs between workers rather than copying large payloads into prompts.
 - Prefer hidden/runtime MCP profiles to avoid bloating general orchestrator context.
+- MCP profiles are MCP-only by default. If non-MCP tools are required for a specific task, explicitly set \`allowNonMcpTools=true\` with only the minimum named tools.
 
 ## Forbidden Patterns
 - Never run \`rm -rf\` without explicit user confirmation.

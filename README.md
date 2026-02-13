@@ -122,6 +122,14 @@ Core MCP tools:
 - `mcp_profile_list|create|update|delete`
 - `mcp_delegate` (activate/provision profile + spawn scoped worker + optional cleanup)
 
+MCP profile tool policy:
+- By default, profile `toolNames` are expected to be MCP tools (`mcp.<server>.<tool>`).
+- You can include non-MCP tools on demand by setting `allowNonMcpTools=true` in:
+  - `mcp_profile_create`
+  - `mcp_profile_update`
+  - `mcp_delegate` (when creating an ephemeral profile via `toolNames`)
+- Keep non-MCP additions minimal and task-specific.
+
 Recommended flow:
 1. Orchestrator calls `mcp_overview`.
 2. Orchestrator spawns `mcp-manager` for setup/delegation.
