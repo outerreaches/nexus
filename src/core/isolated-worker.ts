@@ -94,13 +94,6 @@ process.on("message", async (msg: ParentMessage) => {
         parentRunId: cfg.parentRunId ?? undefined,
         modelMode: cfg.modelMode,
       },
-      planState: undefined,
-      budgetInfo: {
-        iterationsUsed: 0,
-        maxIterations: cfg.budget.maxIterations,
-        toolCallsUsed: 0,
-        maxToolCalls: cfg.budget.maxToolCalls,
-      },
       nowMs: () => Date.now(),
       log,
     };

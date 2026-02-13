@@ -340,22 +340,10 @@ export class AgentRunner {
     const repeatedFailures = new Map<string, number>();
     const maxSameToolFailures = 4;
 
-    // Live budget info accessible by tools (e.g. budget_status).
-    const budgetInfo = {
-      iterationsUsed: 0,
-      maxIterations: this.deps.budget.maxIterations,
-      toolCallsUsed: 0,
-      maxToolCalls: this.deps.budget.maxToolCalls,
-    };
-    this.deps.toolContext.budgetInfo = budgetInfo;
-
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
     const runStartedAtMs = this.deps.toolContext.nowMs();
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
-      budgetInfo.iterationsUsed = iteration;
-      budgetInfo.toolCallsUsed = toolCallsUsed;
-
       // ── Context compaction ─────────────────────────────────────────────
       if (maxContextTokens > 0) {
         const estimated = estimateTotalTokens(messages, this.deps.tools);
@@ -515,23 +503,6 @@ export class AgentRunner {
           toolCallsUsed,
           iterationsUsed: iteration + 1,
         };
-      }
-
-      // Soft plan nudge: if plan_task is available but hasn't been called yet,
-      // and the agent is making a complex multi-tool call, inject a hint.
-      // We no longer hard-block tool execution — the plan is advisory.
-      if (
-        !this.deps.toolContext.planState?.completed &&
-        toolCalls.length >= 3 &&
-        toolCalls.every((c) => c.name !== "plan_task") &&
-        this.deps.tools.some((t) => t.name === "plan_task")
-      ) {
-        const nudge: ChatMessage = {
-          role: "system",
-          content: "Tip: consider calling plan_task first for complex multi-step tasks to organize your approach.",
-        };
-        messages.push(nudge);
-        newMessages.push(nudge);
       }
 
       const toolCallingMsg: ChatMessage = { role: "assistant", content: content ?? null, toolCalls };

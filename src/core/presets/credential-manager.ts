@@ -21,7 +21,6 @@ export const preset: AgentPreset = {
     "credential_delete",
     "read_from_blackboard",
     "write_to_blackboard",
-    "plan_task",
   ],
   budget: { maxIterations: 12, maxToolCalls: 30 },
 };

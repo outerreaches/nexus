@@ -276,8 +276,6 @@ async function runInProcess(params: {
     llmConfig,
     fallbackLlmConfig,
     modelMode,
-    // Workers start with a fresh planState — don't inherit parent's completed plan
-    planState: undefined,
     request: ctx.request
       ? {
           ...ctx.request,
@@ -288,13 +286,6 @@ async function runInProcess(params: {
           modelMode,
         }
       : undefined,
-    // Workers get their own budget info
-    budgetInfo: {
-      iterationsUsed: 0,
-      maxIterations: budget.maxIterations,
-      toolCallsUsed: 0,
-      maxToolCalls: budget.maxToolCalls,
-    },
   };
 
   // Create and run worker

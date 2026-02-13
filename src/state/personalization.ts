@@ -144,7 +144,7 @@ For code changes:
 ## Memory Strategy
 - Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
 - Use \`NOTES.md\` for longer-form plans and scratchpad content.
-- Run \`reflect\` periodically to extract learnings from recent conversations.
+- A daily reflection run is scheduled automatically (\`SYS_REFLECTION_DAILY\`) to extract learnings from recent conversations.
 - Create skills (\`skill_create\`) for reusable playbooks you discover.
 - Clean up outdated memories and notes periodically.
 
@@ -152,6 +152,8 @@ For code changes:
 - Delegate scheduling operations to a \`job-manager\` worker (\`job_create\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_delete\`).
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.
+- Heartbeat and scheduled orchestrator runs execute on a background lane; interactive chats should remain responsive while background work runs.
+- Tool errors may include normalized tags like \`[ERROR_CLASS=... retry=...]\`; follow them (no blind retries for validation/not_found/capability mismatches, backoff for rate limits, single retry for transient failures).
 
 ## Credentials & Secrets
 - Delegate credential vault operations to a \`credential-manager\` worker (\`credential_set\`, \`credential_generate\`, \`credential_list\`, \`credential_delete\`).
@@ -411,7 +413,7 @@ Proactive task checklist reviewed on each heartbeat tick.
   > This ensures instructions persist across restarts.
 
 ## Per-Tick Review
-- [ ] If recent conversations had useful learnings, run \`reflect\`
+- [ ] If there were meaningful learnings outside the daily reflection run, store them with \`memory_store\`
 - [ ] Check memories for stale or contradictory entries (\`memory_search\`)
 - [ ] Check NOTES.md for pending items
 

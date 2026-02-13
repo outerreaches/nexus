@@ -262,9 +262,12 @@ docker exec -it nexus-nexus-1 nexus tool <tool_name> '<json_args>'
 
 ## Custom tools
 
-Drop tools into `stateDir/tools/` (default `~/.nexus/tools/`) and call `tools_reload` to load them without restarting:
+Drop tools into `stateDir/tools/` (default `~/.nexus/tools/`):
 - `*.tool.json` (built-in simple types: `shell`, `http`)
 - `*.tool.mjs` (arbitrary JavaScript module; full power)
+
+Then run `tools_reload` to load them without restarting.  
+Note: `tools_reload` is exposed to the `coder` preset only; the orchestrator should delegate reloads to a coder run.
 
 ## Personalization & Soul Files
 
@@ -283,6 +286,10 @@ Nexus uses a state-based personalization system inspired by [OpenClaw](https://g
 
 When enabled, the gateway runs periodic **proactive heartbeat ticks** that prompt the agent to review `HEARTBEAT.md` and take small, high-value actions. If there is nothing to do, the agent should respond `IDLE` and the scheduler will back off automatically.
 
+Execution behavior:
+- Heartbeat runs use a background execution lane (separate from interactive Telegram/CLI requests).
+- Heartbeat orchestrator runs reuse the latest Telegram thread context for the same agent to maintain continuity.
+
 Enable via env (simplest in Docker):
 - `NEXUS_PROACTIVE=1`
 - Optional tuning: `NEXUS_PROACTIVE_INTERVAL_MS`, `NEXUS_PROACTIVE_MAX_INTERVAL_MS`, `NEXUS_PROACTIVE_JITTER_MS`
@@ -297,6 +304,8 @@ Nexus includes an internal **cron scheduler** (no external cron or Python script
 Key behavior:
 - Jobs are **owned by the agent that creates them** (important for future multi-agent swarms).
 - When a job run fails, the gateway notifies the **owning agent** (not the user) so it can self-heal and decide whether to notify you.
+- Scheduler-triggered orchestrator `agent_task` runs execute in the background lane and reuse the latest Telegram thread context for the same agent.
+- Tool failures may include normalized tags like `[ERROR_CLASS=... retry=...]` to guide retry/backoff decisions.
 
 Tools:
 - `job_create`, `job_list`, `job_get`, `job_update`, `job_pause`, `job_resume`

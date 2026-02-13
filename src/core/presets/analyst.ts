@@ -31,7 +31,6 @@ export const preset: AgentPreset = {
     "query_data",
     "read_from_blackboard",
     "write_to_blackboard",
-    "plan_task",
   ],
   budget: { maxIterations: 20, maxToolCalls: 40 },
 };

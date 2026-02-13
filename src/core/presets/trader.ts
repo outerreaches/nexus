@@ -34,7 +34,6 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",
-    "plan_task",
   ],
   budget: { maxIterations: 15, maxToolCalls: 30 },
 };

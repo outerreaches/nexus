@@ -39,14 +39,6 @@ export type ToolContext = {
     parentRunId?: string;
     modelMode?: ModelRoutingMode;
   };
-  planState?: {
-    completed: boolean;
-    complexity: "simple" | "complex";
-    steps: string[];
-    parallelGroups?: string[][];
-    createdAt: number;
-  };
-  budgetInfo?: { iterationsUsed: number; maxIterations: number; toolCallsUsed: number; maxToolCalls: number };
   nowMs: () => number;
   log: (msg: string) => void;
   /** Active isolated worker child processes (for shutdown cleanup). */

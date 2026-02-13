@@ -40,25 +40,20 @@ export const preset: AgentPreset = {
     "data_intake_list_sources",
     "data_intake_query",
     "data_intake_source_list",
-    "plan_task",
-    // Memory & reflection
+    // Memory
     "memory_store",
     "memory_recall",
     "memory_search",
     "memory_delete",
-    "reflect",
     // Skills
     "skill_create",
     "skill_list",
     "skill_update",
-    // Budget
-    "budget_status",
     // Communication
     "telegram_send",
     "telegram_send_file",
     "human_request",
     "human_status",
-    "tools_reload",
   ],
   budget: { maxIterations: 40, maxToolCalls: 120 },
 };

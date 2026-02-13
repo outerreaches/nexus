@@ -21,9 +21,6 @@ import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobPause, jobResume, 
 import { telegramSend, telegramSendFile } from "./telegram-send.js";
 import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
 import { skillCreate, skillList, skillUpdate } from "./skills.js";
-import { budgetStatus } from "./budget.js";
-import { reflect } from "./reflect.js";
-import { planTask } from "./plan.js";
 import { writeToBlackboard, readFromBlackboard, blackboardManage } from "./blackboard.js";
 import { toolCatalog } from "./tool-catalog.js";
 import { dbMaintenance } from "./db-maintenance.js";
@@ -99,9 +96,6 @@ export function getBuiltInTools(): Tool[] {
     skillCreate,
     skillList,
     skillUpdate,
-    budgetStatus,
-    reflect,
-    planTask,
     writeToBlackboard,
     readFromBlackboard,
     blackboardManage,

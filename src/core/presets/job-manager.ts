@@ -12,6 +12,7 @@ export const preset: AgentPreset = {
     "Handle create/update/pause/resume/run-now/delete/list/inspect operations for jobs.",
     "Use tool_catalog (preset=orchestrator) to inspect what tools are available for scheduled tool_call jobs.",
     "Prefer safe, reversible updates; avoid destructive deletes unless requested.",
+    "When tool output includes `[ERROR_CLASS=...]` and `retry=...`, follow that policy: no blind retries for validation/not_found/capability_mismatch; back off on rate_limited; retry transient_provider_error once.",
     "After any change, report job ids and next steps on the blackboard.",
   ].join("\n"),
   tools: [
@@ -29,8 +30,6 @@ export const preset: AgentPreset = {
     "job_delete",
     "read_from_blackboard",
     "write_to_blackboard",
-    "plan_task",
   ],
   budget: { maxIterations: 14, maxToolCalls: 40 },
 };
-
