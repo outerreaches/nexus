@@ -30,7 +30,7 @@ RUN npm run build
 # Python runtime for LangExtract-backed extraction tool
 RUN python3 -m venv /opt/nexus-py \
   && /opt/nexus-py/bin/pip install --no-cache-dir --upgrade pip \
-  && /opt/nexus-py/bin/pip install --no-cache-dir 'langextract[openai]'
+  && /opt/nexus-py/bin/pip install --no-cache-dir 'langextract[openai]' pypdf
 
 # Make the CLI available on PATH inside the container (so `docker exec ... nexus ...` works)
 RUN printf '%s\n' '#!/bin/sh' 'exec node /app/dist/index.js "$@"' > /usr/local/bin/nexus \

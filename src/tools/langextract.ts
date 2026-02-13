@@ -64,9 +64,15 @@ type PythonResult = {
 };
 
 const PYTHON_RUNNER = String.raw`from __future__ import annotations
+import io as _io
 import inspect
 import json
+import os
+from pathlib import Path
 import traceback
+from urllib import parse as _urlparse
+
+import requests
 
 def _to_str_dict(raw):
     if not isinstance(raw, dict):
@@ -164,32 +170,75 @@ def _build_openai_model(payload):
         init_kwargs["api_key"] = api_key.strip()
     return OpenAILanguageModel(**init_kwargs)
 
+def _looks_like_pdf_url(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = _urlparse.urlparse(value)
+    except Exception:
+        return False
+    path = (parsed.path or "").lower()
+    return path.endswith(".pdf")
+
+def _extract_text_from_local_pdf(file_path):
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        raise ValueError(
+            "Local PDF extraction requires pypdf in the runtime environment."
+        ) from exc
+
+    reader = PdfReader(file_path)
+    chunks = []
+    for page in reader.pages:
+        chunks.append(page.extract_text() or "")
+    text = "\n".join(chunks).strip()
+    if not text:
+        raise ValueError(f"Could not extract text from local PDF: {file_path}")
+    return text
+
+def _extract_text_from_pdf_url(url):
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        raise ValueError(
+            "URL PDF extraction requires pypdf in the runtime environment."
+        ) from exc
+
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+    reader = PdfReader(_io.BytesIO(response.content))
+    chunks = []
+    for page in reader.pages:
+        chunks.append(page.extract_text() or "")
+    text = "\n".join(chunks).strip()
+    if not text:
+        raise ValueError(f"Could not extract text from URL PDF: {url}")
+    return text
+
 def _resolve_documents(lx, source_kind, source_value, source_is_url):
     if source_kind == "text":
         return source_value
 
-    # For URL document sources, pass the URL string directly.
-    # Newer LangExtract versions expect a string URL (not list[str]) so it can
-    # fetch text internally when fetch_urls=True.
+    # For URL sources, keep text URLs as URLs; for PDF URLs, pre-extract text.
     if source_is_url:
+        if _looks_like_pdf_url(source_value):
+            return _extract_text_from_pdf_url(source_value)
         return source_value
 
-    # For non-URL document sources, try to wrap in langextract Document objects.
-    doc_cls = getattr(getattr(lx, "data", None), "Document", None)
-    if doc_cls is not None:
+    # For local file paths, convert to raw text content.
+    if isinstance(source_value, str) and os.path.isfile(source_value):
+        ext = Path(source_value).suffix.lower()
+        if ext == ".pdf":
+            return _extract_text_from_local_pdf(source_value)
         try:
-            sig = inspect.signature(doc_cls)
-            params = list(sig.parameters.keys())
-            # Try constructing with known param patterns
-            if "path" in params:
-                return [doc_cls(path=source_value)]
-            if "uri" in params:
-                return [doc_cls(uri=source_value)]
-        except Exception:
-            pass
+            with open(source_value, "r", encoding="utf-8") as f:
+                return f.read()
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "Local file is not UTF-8 text. Use a URL for remote docs or convert the file to text first."
+            ) from exc
 
-    # Fallback: pass as plain string (avoid iterable[str] path that causes
-    # "'str' object has no attribute 'document_id'" in newer versions).
     return source_value
 
 def main():
