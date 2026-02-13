@@ -227,26 +227,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     }
   }
 
-  const interactiveAgent = new AgentService({
-    llm,
-    modelRouter,
-    getTools: () => registry.list(),
-    toolContext,
-    db,
-    stateDir: paths.stateDir,
-    agentTracker,
-    onRunnerLog: params.verbose ? log : undefined,
-    defaultPreset: "orchestrator",
-    limits: {
-      maxMessages: 40,
-      maxToolCalls: config.limits.maxToolCallsPerRun,
-      maxIterations: config.limits.maxIterationsPerRun,
-      maxConcurrent: config.limits.maxConcurrentAgents,
-      maxContextTokens: config.limits.maxContextTokens,
-    },
-  });
-
-  const backgroundAgent = new AgentService({
+  const agent = new AgentService({
     llm,
     modelRouter,
     getTools: () => registry.list(),
@@ -411,7 +392,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let scheduler: ReturnType<typeof startJobScheduler> = null;
 
   const startServices = async () => {
-    tg = await startTelegramBot({ config, agent: interactiveAgent, configPath: params.configPath, log, db, app: http.app });
+    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
     if (!tg) log("telegram: disabled");
     if (tg) {
       toolContext.telegram = {
@@ -425,7 +406,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     proactive = startProactiveHeartbeat({
       config,
       stateDir: paths.stateDir,
-      agent: backgroundAgent,
+      agent,
       db,
       telegram: tg,
       log,
@@ -434,7 +415,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
     scheduler = startJobScheduler({
       config,
-      agent: backgroundAgent,
+      agent,
       db,
       log,
       getTools: () => registry.list(),
