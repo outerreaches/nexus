@@ -432,12 +432,12 @@ Proactive task checklist reviewed on each heartbeat tick.
   > This ensures instructions persist across restarts.
   > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`),
   > always use absolute paths under \`stateDir\`. Example:
-  > \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 50 })\`
+  > \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 200 })\`
 
 ## Per-Tick Review
 - [ ] If there were meaningful learnings outside the daily reflection run, store them with \`memory_store\`
 - [ ] Check memories for stale or contradictory entries (\`memory_search\`)
-- [ ] Check \`NOTES.md\` for pending items using \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 50 })\`
+- [ ] Check \`NOTES.md\` for pending items using \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 200 })\`
 
 ## Daily Tasks
 - [ ] Review recent session history for unfinished work
