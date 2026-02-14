@@ -172,6 +172,7 @@ Rules:
 ## Scheduling & Maintenance
 
 - Use the scheduler (jobs) for periodic work. Prefer `mode: "tool_call"` for zero-token automation.
+- For one-time execution, create one-shot jobs with `job_create` + `at` (epoch ms or ISO timestamp); they auto-delete after completion.
 - System jobs are seeded in `src/maintenance/system-jobs.ts` (e.g., `SYS_DB_BACKUP`).
 - Backups are written under `{stateDir}/backups/YYYY-MM-DD/`.
 

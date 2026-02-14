@@ -82,6 +82,7 @@ export function renderProcessTable(rows: ManagedProcessInfo[]): string {
 
 export function renderJobsTable(rows: JobRow[]): string {
   if (rows.length === 0) return `<div class="no-data">No jobs found.</div>`;
+  const oneShotCron = "@once";
   return `<table>
     <thead>
       <tr>
@@ -109,9 +110,16 @@ export function renderJobsTable(rows: JobRow[]): string {
         const deleteConfirm = `return confirm('Permanently delete job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"? This cannot be undone.')`;
 
         let mode = "agent_task";
+        let scheduleLabel = j.cron;
+        let timezoneLabel = j.timezone;
         try {
           const spec = JSON.parse(j.spec_json || "{}");
           if (spec.mode) mode = spec.mode;
+          if (j.cron === oneShotCron) {
+            const atMs = Number(spec.oneShotAtMs);
+            scheduleLabel = Number.isFinite(atMs) ? `one-shot @ ${formatTime(Math.floor(atMs))}` : "one-shot";
+            timezoneLabel = "-";
+          }
         } catch { }
 
         const modeBadgeClass = mode === "agent_task" ? "status-running" : mode === "tool_call" ? "status-enabled" : "status-complete";
@@ -121,8 +129,8 @@ export function renderJobsTable(rows: JobRow[]): string {
             <td><span class="badge ${modeBadgeClass}">${escapeHtml(mode)}</span></td>
             <td>${escapeHtml(j.id)}</td>
             <td>${escapeHtml(j.name)}</td>
-            <td>${escapeHtml(j.cron)}</td>
-            <td>${escapeHtml(j.timezone)}</td>
+            <td>${escapeHtml(scheduleLabel)}</td>
+            <td>${escapeHtml(timezoneLabel)}</td>
             <td>${escapeHtml(j.next_run_at ? formatTime(j.next_run_at) : "-")}</td>
             <td>${escapeHtml(j.last_run_at ? formatTime(j.last_run_at) : "-")}</td>
             <td>${escapeHtml(String(j.consecutive_failures ?? 0))}</td>

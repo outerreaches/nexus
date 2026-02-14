@@ -6,6 +6,8 @@ import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "../scheduler/cron.js";
 
+const ONE_SHOT_CRON = "@once";
+
 function randomId(prefix: string): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const bytes = crypto.randomBytes(10);
@@ -30,22 +32,69 @@ function computeNextRunAt(params: { cron: string; timezone: string; afterMs: num
   return nextCronTimeMs({ schedule, afterMs: params.afterMs, timeZone: tz });
 }
 
+function isOneShotCron(cron: string): boolean {
+  return cron.trim() === ONE_SHOT_CRON;
+}
+
+function parseAtTimestamp(input: number | string): number {
+  if (typeof input === "number") {
+    if (!Number.isFinite(input)) throw new Error("invalid 'at' timestamp");
+    return Math.max(0, Math.floor(input));
+  }
+
+  const raw = input.trim();
+  if (!raw) throw new Error("invalid 'at' timestamp");
+
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) throw new Error("invalid 'at' timestamp");
+    return Math.max(0, Math.floor(n));
+  }
+
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) throw new Error("invalid 'at' timestamp (use epoch ms or ISO-8601)");
+  return Math.max(0, Math.floor(parsed));
+}
+
+function getOneShotAtMs(spec: unknown): number | null {
+  if (!spec || typeof spec !== "object") return null;
+  const value = (spec as { oneShotAtMs?: unknown }).oneShotAtMs;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+
 export const jobCreate = defineTool({
   name: "job_create",
   description:
-    "Create a scheduled job (cron). PREFERRED for all periodic tasks (price checks, monitoring, reports). " +
-    "Jobs are executed by the orchestrator agent in background lane. No external scripts needed — specify a task description and cron schedule.",
-  parameters: z.object({
-    name: z.string().min(1).max(120),
-    cron: z.string().min(1).max(120).describe("5-field cron: min hour dom mon dow"),
-    timezone: z.string().max(64).default("UTC").describe("IANA timezone, e.g. UTC or America/New_York"),
-    enabled: z.boolean().default(true),
-    mode: z.enum(["agent_task", "script", "tool_call"]).default("agent_task").describe("Execution mode"),
-    task: z.string().max(4000).optional().describe("For agent_task mode: instructions for the agent"),
-    command: z.string().optional().describe("For script mode: shell command to run"),
-    tool: z.string().optional().describe("For tool_call mode: tool name"),
-    args: z.record(z.any()).optional().describe("For tool_call mode: tool arguments"),
-  }),
+    "Create a scheduled job. Use `cron` for recurring jobs, or `at` for a one-shot run (auto-deletes after completion). " +
+    "Jobs are executed by the orchestrator agent in background lane.",
+  parameters: z
+    .object({
+      name: z.string().min(1).max(120),
+      cron: z.string().min(1).max(120).optional().describe("5-field cron: min hour dom mon dow (recurring jobs)"),
+      at: z
+        .union([z.number().int().min(0), z.string().min(1)])
+        .optional()
+        .describe("One-shot run timestamp (epoch ms or ISO-8601). Mutually exclusive with cron."),
+      timezone: z.string().max(64).default("UTC").describe("IANA timezone, e.g. UTC or America/New_York"),
+      enabled: z.boolean().default(true),
+      mode: z.enum(["agent_task", "script", "tool_call"]).default("agent_task").describe("Execution mode"),
+      task: z.string().max(4000).optional().describe("For agent_task mode: instructions for the agent"),
+      command: z.string().optional().describe("For script mode: shell command to run"),
+      tool: z.string().optional().describe("For tool_call mode: tool name"),
+      args: z.record(z.any()).optional().describe("For tool_call mode: tool arguments"),
+    })
+    .superRefine((value, issueCtx) => {
+      const hasCron = typeof value.cron === "string" && value.cron.trim().length > 0;
+      const hasAt = value.at !== undefined;
+      if (hasCron === hasAt) {
+        issueCtx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide exactly one of `cron` (recurring) or `at` (one-shot).",
+          path: ["cron"],
+        });
+      }
+    }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
@@ -53,7 +102,24 @@ export const jobCreate = defineTool({
 
     const nowMs = ctx.nowMs();
     const id = randomId("J");
-    const nextRunAt = args.enabled ? computeNextRunAt({ cron: args.cron, timezone: args.timezone, afterMs: nowMs }) : null;
+    const hasAt = args.at !== undefined;
+    let oneShotAtMs: number | null = null;
+    if (hasAt) {
+      try {
+        oneShotAtMs = parseAtTimestamp(args.at as number | string);
+      } catch (e) {
+        return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    const cron = hasAt ? ONE_SHOT_CRON : String(args.cron ?? "").trim();
+    if (!hasAt && !cron) return "ERROR: `cron` is required for recurring jobs";
+    if (!hasAt && isOneShotCron(cron)) return `ERROR: cron value '${ONE_SHOT_CRON}' is reserved; use 'at' for one-shot jobs`;
+
+    const nextRunAt = !args.enabled
+      ? null
+      : hasAt
+        ? Math.max(oneShotAtMs ?? nowMs, nowMs)
+        : computeNextRunAt({ cron, timezone: args.timezone, afterMs: nowMs });
 
     let spec: any = {};
     if (args.mode === "agent_task") {
@@ -66,6 +132,11 @@ export const jobCreate = defineTool({
       if (!args.tool) return "ERROR: 'tool' is required for tool_call mode";
       spec = { mode: "tool_call", tool: args.tool, args: args.args ?? {} };
     }
+    if (hasAt) {
+      spec.oneShotAtMs = oneShotAtMs;
+      spec.scheduleKind = "one_shot";
+      spec.autoDeleteAfterRun = true;
+    }
 
     try {
       db.db
@@ -76,7 +147,7 @@ export const jobCreate = defineTool({
           id,
           schedulerAgent,
           args.name,
-          args.cron,
+          cron,
           validateTimeZone(args.timezone),
           args.enabled ? 1 : 0,
           JSON.stringify(spec),
@@ -127,11 +198,15 @@ export const jobGet = defineTool({
 
 export const jobUpdate = defineTool({
   name: "job_update",
-  description: "Update a scheduled job (cron/task/enabled), or manually set the next run time to stagger execution.",
+  description: "Update a scheduled job (cron/one-shot/task/enabled), or manually set the next run time to stagger execution.",
   parameters: z.object({
     id: z.string().min(1).max(32),
     name: z.string().min(1).max(120).optional(),
     cron: z.string().min(1).max(120).optional(),
+    at: z
+      .union([z.number().int().min(0), z.string().min(1)])
+      .optional()
+      .describe("Convert to/update a one-shot run timestamp (epoch ms or ISO-8601)."),
     timezone: z.string().max(64).optional(),
     enabled: z.boolean().optional(),
     task: z.string().max(4000).optional(),
@@ -150,7 +225,13 @@ export const jobUpdate = defineTool({
     if (!existing) return "ERROR: not found";
 
     const name = args.name ?? String(existing.name);
-    const cron = args.cron ?? String(existing.cron);
+    if (args.at !== undefined && args.cron !== undefined) return "ERROR: provide only one of `at` or `cron`";
+
+    const existingCron = String(existing.cron);
+    let cron = args.cron ?? existingCron;
+    if (args.cron !== undefined && isOneShotCron(args.cron)) {
+      return `ERROR: cron value '${ONE_SHOT_CRON}' is reserved; use 'at' for one-shot jobs`;
+    }
     const timezone = validateTimeZone(args.timezone ?? String(existing.timezone));
 
     const enabled = args.enabled === undefined ? Number(existing.enabled) === 1 : args.enabled;
@@ -172,6 +253,27 @@ export const jobUpdate = defineTool({
     // Ensure mode defaults if missing
     if (!spec.mode) spec.mode = "agent_task";
 
+    if (args.at !== undefined) {
+      let atMs = 0;
+      try {
+        atMs = parseAtTimestamp(args.at);
+      } catch (e) {
+        return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      cron = ONE_SHOT_CRON;
+      spec.oneShotAtMs = atMs;
+      spec.scheduleKind = "one_shot";
+      spec.autoDeleteAfterRun = true;
+    } else if (args.cron !== undefined && !isOneShotCron(args.cron)) {
+      delete spec.oneShotAtMs;
+      delete spec.scheduleKind;
+      delete spec.autoDeleteAfterRun;
+    } else if (isOneShotCron(cron) && getOneShotAtMs(spec) === null && typeof existing.next_run_at === "number") {
+      spec.oneShotAtMs = Math.max(0, Math.floor(existing.next_run_at));
+      spec.scheduleKind = "one_shot";
+      spec.autoDeleteAfterRun = true;
+    }
+
     // Validate
     if (spec.mode === "agent_task" && !spec.task) return "ERROR: 'task' is required for agent_task mode";
     if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
@@ -179,12 +281,16 @@ export const jobUpdate = defineTool({
 
     const specJson = JSON.stringify(spec ?? {});
 
-    const scheduleChanged = args.cron !== undefined || args.timezone !== undefined || args.enabled !== undefined;
+    const scheduleChanged =
+      args.cron !== undefined || args.at !== undefined || args.timezone !== undefined || args.enabled !== undefined;
     let nextRunAt = existing.next_run_at as number | null;
     if (!enabled) {
       nextRunAt = null;
     } else if (args.nextRunAtMs !== undefined) {
       nextRunAt = args.nextRunAtMs;
+    } else if (isOneShotCron(cron)) {
+      const oneShotAtMs = getOneShotAtMs(spec);
+      if (scheduleChanged || nextRunAt === null) nextRunAt = Math.max(oneShotAtMs ?? nowMs, nowMs);
     } else if (scheduleChanged || nextRunAt === null) {
       // Recompute only when schedule semantics changed or there was no next run.
       nextRunAt = computeNextRunAt({ cron, timezone, afterMs: nowMs });
@@ -230,7 +336,19 @@ export const jobResume = defineTool({
     const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    const nextRunAt = computeNextRunAt({ cron: String(row.cron), timezone: String(row.timezone), afterMs: nowMs });
+    let nextRunAt = nowMs;
+    const cron = String(row.cron);
+    if (isOneShotCron(cron)) {
+      let spec: any = {};
+      try {
+        spec = JSON.parse(String(row.spec_json ?? "{}"));
+      } catch {
+        spec = {};
+      }
+      nextRunAt = Math.max(getOneShotAtMs(spec) ?? nowMs, nowMs);
+    } else {
+      nextRunAt = computeNextRunAt({ cron, timezone: String(row.timezone), afterMs: nowMs });
+    }
     db.db.prepare("UPDATE jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?").run(nextRunAt, nowMs, args.id);
     return "OK";
   },

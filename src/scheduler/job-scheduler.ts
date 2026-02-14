@@ -11,6 +11,7 @@ import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
 
 const execAsync = promisify(exec);
+const ONE_SHOT_CRON = "@once";
 
 const AgentTaskSpec = z.object({
   mode: z.literal("agent_task"),
@@ -77,6 +78,17 @@ function parseJobStatusMarker(output: string): "ok" | "error" | null {
 function computeFailureBackoffMs(consecutiveFailures: number): number {
   const minutes = Math.min(60, Math.max(1, 2 ** Math.max(0, consecutiveFailures - 1)));
   return minutes * 60_000;
+}
+
+function isOneShotJob(job: JobRow): boolean {
+  return job.cron.trim() === ONE_SHOT_CRON;
+}
+
+function getOneShotAtMs(specJson: string): number | null {
+  const raw = safeJsonParse(specJson) as { oneShotAtMs?: unknown } | null;
+  const value = raw?.oneShotAtMs;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
 }
 
 export type JobSchedulerDeps = {
@@ -169,6 +181,11 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
   const ensureNextRunAt = (job: JobRow, nowMs: number): number | null => {
     if (!job.enabled) return null;
+    if (isOneShotJob(job)) {
+      const atMs = getOneShotAtMs(job.spec_json);
+      if (atMs === null) return null;
+      return Math.max(atMs, nowMs);
+    }
     try {
       const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
       return nextCronTimeMs({ schedule, afterMs: nowMs, timeZone });
@@ -177,6 +194,13 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       return null;
     }
   };
+
+  const deleteJobWithHistory = deps.db.db.transaction((jobId: string) => {
+    deps.db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(jobId);
+    deps.db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(jobId);
+    deps.db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(jobId);
+    deps.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(jobId);
+  });
 
   const insertEvent = (params: { jobId: string; runId?: string | null; agentId: string; kind: string; payload: unknown; nowMs: number }) => {
     const id = randomId("JE");
@@ -341,6 +365,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     const runId = randomId("JR");
     const scheduledFor = job.next_run_at ?? nowMs;
     const startedAt = Date.now();
+    const oneShot = isOneShotJob(job);
 
     deps.db.db
       .prepare(
@@ -371,27 +396,43 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         .run(endedAt, res.status, errText, res.output, res.toolCalls, res.iterations, runId);
 
       if (ok) {
-        const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
-        const nextRunAt = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
-        deps.db.db
-          .prepare(
-            "UPDATE jobs SET last_run_at = ?, next_run_at = ?, consecutive_failures = 0, last_failure_at = NULL, updated_at = ? WHERE id = ?",
-          )
-          .run(endedAt, nextRunAt, endedAt, job.id);
+        if (oneShot) {
+          deleteJobWithHistory(job.id);
+          deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=success`);
+        } else {
+          const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
+          const nextRunAt = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
+          deps.db.db
+            .prepare(
+              "UPDATE jobs SET last_run_at = ?, next_run_at = ?, consecutive_failures = 0, last_failure_at = NULL, updated_at = ? WHERE id = ?",
+            )
+            .run(endedAt, nextRunAt, endedAt, job.id);
 
-        insertEvent({
-          jobId: job.id,
-          runId,
-          agentId: schedulerAgentId,
-          kind: "run_succeeded",
-          payload: { endedAt, nextRunAt },
-          nowMs: endedAt,
-        });
+          insertEvent({
+            jobId: job.id,
+            runId,
+            agentId: schedulerAgentId,
+            kind: "run_succeeded",
+            payload: { endedAt, nextRunAt },
+            nowMs: endedAt,
+          });
+        }
         return;
       }
 
       // Handle application-level failure (e.g. LLM said "JOB_STATUS: error")
       const consecutiveFailures = (job.consecutive_failures ?? 0) + 1;
+      if (oneShot) {
+        await notifyAgent(
+          { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
+          runId,
+          { status: res.status, output: res.output, paused: false },
+          endedAt,
+        );
+        deleteJobWithHistory(job.id);
+        deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=${res.status}`);
+        return;
+      }
       const backoffMs = computeFailureBackoffMs(consecutiveFailures);
       const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
       const nextScheduled = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
@@ -436,6 +477,17 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         .run(endedAt, "failed", truncate(output, 800), output, runId);
 
       const consecutiveFailures = (job.consecutive_failures ?? 0) + 1;
+      if (oneShot) {
+        await notifyAgent(
+          { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
+          runId,
+          { status: "exception", output, paused: false },
+          endedAt,
+        );
+        deleteJobWithHistory(job.id);
+        deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=exception`);
+        return;
+      }
       const shouldPause = consecutiveFailures >= maxConsecutiveFailures;
       let nextRunAt: number | null = null;
       let nextScheduled: number | null = null;

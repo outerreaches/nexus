@@ -160,6 +160,7 @@ For code changes:
 
 ## Scheduling
 - Delegate scheduling operations to a \`job-manager\` worker (\`job_create\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_delete\`).
+- For recurring jobs, use \`job_create\` with \`cron\`; for one-shot jobs, use \`job_create\` with \`at\` (one-shot jobs auto-delete after execution).
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.
 - Heartbeat and scheduled orchestrator runs execute on a background lane; interactive chats should remain responsive while background work runs.
@@ -379,6 +380,7 @@ Rules:
 ## Scheduling & Maintenance
 
 - Use the scheduler (jobs) for periodic work. Prefer \`mode: "tool_call"\` for zero-token automation.
+- For one-time execution, create one-shot jobs with \`job_create\` + \`at\` (epoch ms or ISO timestamp); they auto-delete after completion.
 - System jobs are seeded in \`src/maintenance/system-jobs.ts\` (e.g., \`SYS_DB_BACKUP\`).
 - Backups are written under \`{stateDir}/backups/YYYY-MM-DD/\`.
 
