@@ -34,6 +34,19 @@ export function listAgents(tracker: AgentTracker | undefined, nowMs: number, win
   };
 }
 
+function isVisibleRun(params: { status: string; endedAt: number | null | undefined; nowMs: number; visibleWindowMs: number }): boolean {
+  const endedAt = params.endedAt ?? null;
+  return params.status === "running" || endedAt === null || params.nowMs - endedAt < params.visibleWindowMs;
+}
+
+export function filterVisibleAgentRuns(rows: AgentRunInfo[], nowMs: number, visibleWindowMs: number): AgentRunInfo[] {
+  return rows.filter((row) => isVisibleRun({ status: row.status, endedAt: row.endedAt ?? null, nowMs, visibleWindowMs }));
+}
+
+export function filterVisibleAgentGraph(rows: AgentRunRow[], nowMs: number, visibleWindowMs: number): AgentRunRow[] {
+  return rows.filter((row) => isVisibleRun({ status: row.status, endedAt: row.ended_at, nowMs, visibleWindowMs }));
+}
+
 export function listAgentGraph(db: NexusDatabase | undefined, allowedRunIds: Set<string>): AgentRunRow[] {
   if (!db) return [];
   if (allowedRunIds.size === 0) return [];

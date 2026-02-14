@@ -7,6 +7,8 @@ import {
   clampInt,
   listAgents,
   listAgentGraph,
+  filterVisibleAgentRuns,
+  filterVisibleAgentGraph,
   listJobRuns,
   listLlmSessions,
   listLlmMessages,
@@ -19,11 +21,17 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/api/agents", async (c) => {
     const nowMs = Date.now();
     const agentWindowMinutes = clampInt(c.req.query("agentWindowMinutes"), 10, 24 * 60) ?? 360;
+    const visibleNodeWindowSeconds = clampInt(c.req.query("visibleNodeWindowSeconds"), 10, 3600) ?? 60;
+    const visibleNodeWindowMs = visibleNodeWindowSeconds * 1000;
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
     const agentGraph = listAgentGraph(deps.db, allowedRunIds);
+    const visibleGraph = filterVisibleAgentGraph(agentGraph, nowMs, visibleNodeWindowMs);
+    const mergedAgentRows = [...agents.active, ...agents.recent];
+    const visibleAgentRunsById = new Map(filterVisibleAgentRuns(mergedAgentRows, nowMs, visibleNodeWindowMs).map((r) => [r.runId, r]));
+    const visibleAgentRuns = [...visibleAgentRunsById.values()];
 
-    const nodes = agentGraph.map(({ run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task }) => ({
+    const nodes = visibleGraph.map(({ run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task }) => ({
       run_id,
       parent_run_id,
       agent_id,
@@ -35,10 +43,10 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     }));
 
     const stats = {
-      running: agentGraph.filter((a) => a.status === "running").length,
-      complete: agentGraph.filter((a) => a.status === "complete").length,
-      failed: agentGraph.filter((a) => a.status === "failed" || a.status === "stopped").length,
-      total: agentGraph.length,
+      running: visibleGraph.filter((a) => a.status === "running").length,
+      complete: visibleGraph.filter((a) => a.status === "complete").length,
+      failed: visibleGraph.filter((a) => a.status === "failed" || a.status === "stopped").length,
+      total: visibleGraph.length,
     };
 
     // Include table data for live updates
@@ -56,10 +64,10 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
 
     const tables = {
       active: agents.active.map(formatAgentRow),
-      recent: agents.recent.map(formatAgentRow),
+      recent: visibleAgentRuns.map(formatAgentRow),
     };
 
-    return c.json({ nodes, stats, tables, timestamp: nowMs });
+    return c.json({ nodes, stats, tables, timestamp: nowMs, visibleNodeWindowSeconds });
   });
 
   app.get("/api/logs", async (c) => {

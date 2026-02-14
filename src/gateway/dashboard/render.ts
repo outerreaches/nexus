@@ -32,6 +32,7 @@ export function renderDashboard(params: {
   nowMs: number;
   processWindowMinutes: number;
   agentWindowMinutes: number;
+  visibleNodeWindowSeconds: number;
   jobLimit: number;
   runLimit: number;
   blackboardLimit: number;
@@ -73,6 +74,7 @@ export function renderDashboard(params: {
   const dashboardQueryInputs = [
     ["processWindowMinutes", params.processWindowMinutes],
     ["agentWindowMinutes", params.agentWindowMinutes],
+    ["visibleNodeWindowSeconds", params.visibleNodeWindowSeconds],
     ["jobLimit", params.jobLimit],
     ["runLimit", params.runLimit],
     ["blackboardLimit", params.blackboardLimit],
@@ -144,7 +146,7 @@ export function renderDashboard(params: {
     <main>
       <section>
         <div class="section-header">
-          <h2>Agents (${params.agentWindowMinutes}m window)</h2>
+          <h2>Agents (activity ${params.agentWindowMinutes}m, visible ${params.visibleNodeWindowSeconds}s)</h2>
           <div class="tab-bar">
             <button class="tab-btn active" data-tab="agents-view">Agents</button>
             <button class="tab-btn" data-tab="docker-logs">Logs</button>
@@ -210,7 +212,7 @@ export function renderDashboard(params: {
             <div id="table-active">${renderAgentTable(params.agents.active)}</div>
           </div>
           <div>
-            <h3>Recent (${params.agentWindowMinutes}m)</h3>
+            <h3>Visible (${params.visibleNodeWindowSeconds}s)</h3>
             <div id="table-recent" class="scroll-5">${renderAgentTable(params.agents.recent)}</div>
           </div>
         </div>
@@ -328,6 +330,8 @@ export function renderDashboard(params: {
       let graphData = ${agentGraphJson};
       let agentStats = ${agentStatsJson};
       const agentWindowMinutes = ${params.agentWindowMinutes};
+      const visibleNodeWindowSeconds = ${params.visibleNodeWindowSeconds};
+      const visibleNodeWindowMs = visibleNodeWindowSeconds * 1000;
       const container = document.getElementById("agent-graph");
       const tooltip = document.getElementById("agent-tooltip");
       const pauseBtn = document.getElementById("btn-pause");
@@ -786,11 +790,10 @@ export function renderDashboard(params: {
       };
       updateRefreshIndicator();
 
-      // Filter out completed/failed nodes older than 60s from the 3D visualization
-      const VISUAL_DECAY_MS = 60_000;
+      // Keep graph/table visibility consistent with backend node visibility window.
       const filterVisibleNodes = (nodes) => {
         const now = Date.now();
-        return nodes.filter((n) => n.status === 'running' || !n.ended_at || (now - n.ended_at) < VISUAL_DECAY_MS);
+        return nodes.filter((n) => n.status === 'running' || !n.ended_at || (now - n.ended_at) < visibleNodeWindowMs);
       };
 
       // Scene state - will be populated when scene is created
@@ -799,7 +802,7 @@ export function renderDashboard(params: {
       // Fetch new data and update scene
       const fetchAndUpdate = async () => {
         try {
-          const res = await fetch(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}\`);
+          const res = await fetch(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`);
           if (!res.ok) return;
           const data = await res.json();
           graphData = data.nodes;

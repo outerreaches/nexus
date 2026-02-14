@@ -8,6 +8,8 @@ import {
   listProcesses,
   listAgents,
   listAgentGraph,
+  filterVisibleAgentRuns,
+  filterVisibleAgentGraph,
   listJobs,
   listRunningJobRuns,
   listDataIntake,
@@ -33,6 +35,8 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
 
     const processWindowMinutes = clampInt(c.req.query("processWindowMinutes"), 5, 24 * 60) ?? 120;
     const agentWindowMinutes = clampInt(c.req.query("agentWindowMinutes"), 10, 24 * 60) ?? 360;
+    const visibleNodeWindowSeconds = clampInt(c.req.query("visibleNodeWindowSeconds"), 10, 3600) ?? 60;
+    const visibleNodeWindowMs = visibleNodeWindowSeconds * 1000;
     const jobLimit = clampInt(c.req.query("jobLimit"), 1, 200) ?? 50;
     const runLimit = clampInt(c.req.query("runLimit"), 1, 200) ?? 50;
     const blackboardLimit = clampInt(c.req.query("blackboardLimit"), 1, 200) ?? 50;
@@ -44,7 +48,11 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const processes = listProcesses(deps.processManager, nowMs, processWindowMinutes * 60_000);
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
-    const agentGraph = listAgentGraph(deps.db, allowedRunIds);
+    const agentGraph = filterVisibleAgentGraph(listAgentGraph(deps.db, allowedRunIds), nowMs, visibleNodeWindowMs);
+    const visibleAgentsById = new Map(
+      filterVisibleAgentRuns([...agents.active, ...agents.recent], nowMs, visibleNodeWindowMs).map((row) => [row.runId, row]),
+    );
+    const visibleAgents = [...visibleAgentsById.values()];
     const jobs = listJobs(deps.db, jobLimit);
     const runningJobRuns = listRunningJobRuns(deps.db);
     const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);
@@ -57,8 +65,9 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         nowMs,
         processWindowMinutes,
         agentWindowMinutes,
+        visibleNodeWindowSeconds,
         processes,
-        agents,
+        agents: { active: agents.active, recent: visibleAgents },
         agentGraph,
         jobs,
         runningJobRuns,

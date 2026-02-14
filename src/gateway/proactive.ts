@@ -110,6 +110,7 @@ export function startProactiveHeartbeat(
   const tick = async () => {
     if (stopped) return;
     if (paused) {
+      deps.log(`proactive: tick_skip reason=paused next=${Math.round(nextDelayMs / 1000)}s`);
       scheduleNext(nextDelayMs);
       return;
     }
@@ -122,14 +123,21 @@ export function startProactiveHeartbeat(
     running = true;
 
     const startMs = Date.now();
+    const tickId = startMs.toString(36);
+    deps.log(`proactive: tick_start id=${tickId} agent=${agentId} lane=background`);
     try {
       const hb = await readPersonalizationFile(deps.stateDir, HEARTBEAT_FILENAME, agentId);
       const hasHeartbeat = Boolean(hb && hb.trim().length > 50);
+      deps.log(
+        `proactive: heartbeat_load id=${tickId} file=${deps.stateDir}/${HEARTBEAT_FILENAME} chars=${hb?.length ?? 0} hasContent=${hasHeartbeat}`,
+      );
 
       if (!hasHeartbeat) {
         // No heartbeat content; back off quietly to avoid burning tokens.
         nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.5 + 1_000));
-        deps.log(`proactive: no HEARTBEAT.md content; backing off next=${Math.round(nextDelayMs / 1000)}s`);
+        deps.log(
+          `proactive: tick_result id=${tickId} status=no_heartbeat next=${Math.round(nextDelayMs / 1000)}s`,
+        );
         lastTickAt = startMs;
         lastStatus = "no_heartbeat";
         return;
@@ -150,6 +158,7 @@ export function startProactiveHeartbeat(
         `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: \"${deps.stateDir}/NOTES.md\", limit: 200 })\`.`,
       ].join("\n");
 
+      deps.log(`proactive: dispatch id=${tickId} channel=heartbeat key=gateway agent=${agentId}`);
       const res = await deps.agent.handleUserMessage({
         channel: "heartbeat",
         channelKey: "gateway",
@@ -164,29 +173,32 @@ export function startProactiveHeartbeat(
 
       if (idle) {
         nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.4 + 1_000));
-        deps.log(`proactive: idle tookMs=${tookMs} next=${Math.round(nextDelayMs / 1000)}s`);
+        deps.log(
+          `proactive: tick_result id=${tickId} status=idle tookMs=${tookMs} outputChars=${res.output.length} next=${Math.round(nextDelayMs / 1000)}s`,
+        );
         lastTickAt = startMs;
         lastStatus = "idle";
         return;
       }
 
       nextDelayMs = intervalMs;
-      deps.log(`proactive: ran tookMs=${tookMs} outputChars=${res.output.length}`);
+      deps.log(`proactive: tick_result id=${tickId} status=ran tookMs=${tookMs} outputChars=${res.output.length}`);
       lastTickAt = startMs;
       lastStatus = "ran";
 
       if (notifyTelegram && deps.telegram && deps.config.channels.telegram.enabled) {
         const recipients = await listTelegramRecipients(deps.db, deps.config);
         if (recipients.length === 0) {
-          deps.log("proactive: no telegram recipients (allowFrom/allowlist empty)");
+          deps.log(`proactive: notify id=${tickId} recipients=0 (allowFrom/allowlist empty)`);
         } else {
+          deps.log(`proactive: notify id=${tickId} recipients=${recipients.length}`);
           for (const chatId of recipients) {
             await deps.telegram.sendOutput(chatId, res.output);
           }
         }
       }
     } catch (e) {
-      deps.log(`proactive: error ${e instanceof Error ? e.message : String(e)}`);
+      deps.log(`proactive: tick_result id=${tickId} status=error err=${e instanceof Error ? e.message : String(e)}`);
       nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.6 + 2_000));
       lastTickAt = startMs;
       lastStatus = "error";
