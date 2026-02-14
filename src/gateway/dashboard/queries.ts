@@ -63,7 +63,7 @@ export function listJobs(db: NexusDatabase | undefined, limit: number): JobRow[]
   if (!db) return [];
   return db.db
     .prepare(
-      "SELECT id, owner_agent_id, name, cron, timezone, enabled, next_run_at, last_run_at, consecutive_failures, last_failure_at, spec_json FROM jobs ORDER BY created_at DESC LIMIT ?",
+      "SELECT id, name, cron, timezone, enabled, next_run_at, last_run_at, consecutive_failures, last_failure_at, spec_json FROM jobs ORDER BY created_at DESC LIMIT ?",
     )
     .all(limit) as JobRow[];
 }
@@ -72,7 +72,7 @@ export function listJobRuns(db: NexusDatabase | undefined, limit: number): JobRu
   if (!db) return [];
   return db.db
     .prepare(
-      "SELECT id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, tool_calls_used, iterations_used FROM job_runs ORDER BY started_at DESC LIMIT ?",
+      "SELECT id, job_id, owner_agent_id AS agent_id, scheduled_for, started_at, ended_at, status, error, tool_calls_used, iterations_used FROM job_runs ORDER BY started_at DESC LIMIT ?",
     )
     .all(limit) as JobRunRow[];
 }
@@ -81,7 +81,7 @@ export function listRunningJobRuns(db: NexusDatabase | undefined): JobRunRow[] {
   if (!db) return [];
   return db.db
     .prepare(
-      "SELECT id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, tool_calls_used, iterations_used FROM job_runs WHERE status = 'running' ORDER BY started_at DESC",
+      "SELECT id, job_id, owner_agent_id AS agent_id, scheduled_for, started_at, ended_at, status, error, tool_calls_used, iterations_used FROM job_runs WHERE status = 'running' ORDER BY started_at DESC",
     )
     .all() as JobRunRow[];
 }

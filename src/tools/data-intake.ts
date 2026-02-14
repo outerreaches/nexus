@@ -19,6 +19,11 @@ function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
 }
 
+function schedulerAgentId(): string {
+  const value = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim();
+  return value || "main";
+}
+
 export const dataIntakeListSources = defineTool({
   name: "data_intake_list_sources",
   description:
@@ -241,7 +246,7 @@ export const dataIntakeScheduleRefresh = defineTool({
       )
       .run(
         id,
-        ctx.request?.agentId ?? "main",
+        schedulerAgentId(),
         name,
         args.cron,
         validateTimeZone(args.timezone),
@@ -298,7 +303,7 @@ export const dataIntakeScheduleAll = defineTool({
       )
       .run(
         id,
-        ctx.request?.agentId ?? "main",
+        schedulerAgentId(),
         name,
         args.cron,
         validateTimeZone(args.timezone),

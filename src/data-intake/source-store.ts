@@ -50,6 +50,11 @@ function sourceJobName(sourceId: string, label: string | null): string {
   return `data-intake: ${label || sourceId}`;
 }
 
+function schedulerAgentId(): string {
+  const value = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim();
+  return value || "main";
+}
+
 /** Create a cron job for this data intake source */
 function createJobForSource(params: {
   db: NexusDatabase;
@@ -72,7 +77,7 @@ function createJobForSource(params: {
     .prepare(
       "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .run(jobId, "main", jobName, cron, "UTC", 1, JSON.stringify(spec), params.nowMs, params.nowMs, params.nowMs);
+    .run(jobId, schedulerAgentId(), jobName, cron, "UTC", 1, JSON.stringify(spec), params.nowMs, params.nowMs, params.nowMs);
 
   return jobId;
 }

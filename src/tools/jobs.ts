@@ -19,9 +19,9 @@ function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   return db ?? null;
 }
 
-function currentAgentId(ctx: { request?: { agentId: string } }): string | null {
-  const id = ctx.request?.agentId;
-  return id ? String(id) : null;
+function schedulerAgentId(): string {
+  const value = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim();
+  return value || "main";
 }
 
 function computeNextRunAt(params: { cron: string; timezone: string; afterMs: number }): number {
@@ -33,7 +33,8 @@ function computeNextRunAt(params: { cron: string; timezone: string; afterMs: num
 export const jobCreate = defineTool({
   name: "job_create",
   description:
-    "Create a scheduled job (cron) owned by the current agent. PREFERRED for all periodic tasks (price checks, monitoring, reports). No external scripts needed — specify a task description and cron schedule.",
+    "Create a scheduled job (cron). PREFERRED for all periodic tasks (price checks, monitoring, reports). " +
+    "Jobs are executed by the orchestrator agent in background lane. No external scripts needed — specify a task description and cron schedule.",
   parameters: z.object({
     name: z.string().min(1).max(120),
     cron: z.string().min(1).max(120).describe("5-field cron: min hour dom mon dow"),
@@ -48,7 +49,7 @@ export const jobCreate = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
-    const ownerAgentId = currentAgentId(ctx) ?? "main";
+    const schedulerAgent = schedulerAgentId();
 
     const nowMs = ctx.nowMs();
     const id = randomId("J");
@@ -73,7 +74,7 @@ export const jobCreate = defineTool({
         )
         .run(
           id,
-          ownerAgentId,
+          schedulerAgent,
           args.name,
           args.cron,
           validateTimeZone(args.timezone),

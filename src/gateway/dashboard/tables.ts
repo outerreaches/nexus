@@ -91,7 +91,6 @@ export function renderJobsTable(rows: JobRow[]): string {
         <th>Name</th>
         <th>Cron</th>
         <th>Timezone</th>
-        <th>Owner</th>
         <th>Next Run</th>
         <th>Last Run</th>
         <th>Failures</th>
@@ -124,7 +123,6 @@ export function renderJobsTable(rows: JobRow[]): string {
             <td>${escapeHtml(j.name)}</td>
             <td>${escapeHtml(j.cron)}</td>
             <td>${escapeHtml(j.timezone)}</td>
-            <td>${escapeHtml(j.owner_agent_id)}</td>
             <td>${escapeHtml(j.next_run_at ? formatTime(j.next_run_at) : "-")}</td>
             <td>${escapeHtml(j.last_run_at ? formatTime(j.last_run_at) : "-")}</td>
             <td>${escapeHtml(String(j.consecutive_failures ?? 0))}</td>
@@ -156,7 +154,7 @@ export function renderJobRunsTable(rows: JobRunRow[]): string {
         <th>Status</th>
         <th>Run ID</th>
         <th>Job ID</th>
-        <th>Owner</th>
+        <th>Agent</th>
         <th>Scheduled</th>
         <th>Started</th>
         <th>Ended</th>
@@ -171,7 +169,7 @@ export function renderJobRunsTable(rows: JobRunRow[]): string {
             <td><span class="badge ${statusClass}">${escapeHtml(r.status)}</span></td>
             <td>${escapeHtml(r.id)}</td>
             <td>${escapeHtml(r.job_id)}</td>
-            <td>${escapeHtml(r.owner_agent_id)}</td>
+            <td>${escapeHtml(r.agent_id)}</td>
             <td>${escapeHtml(formatTime(r.scheduled_for))}</td>
             <td>${escapeHtml(formatTime(r.started_at))}</td>
             <td>${escapeHtml(r.ended_at ? formatTime(r.ended_at) : "-")}</td>

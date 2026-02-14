@@ -6,7 +6,6 @@ type SystemJobSpec = {
   name: string;
   cron: string;
   timezone: string;
-  ownerAgentId?: string;
   spec:
     | {
         mode: "tool_call";
@@ -18,6 +17,11 @@ type SystemJobSpec = {
         task: string;
       };
 };
+
+function schedulerAgentId(): string {
+  const value = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim();
+  return value || "main";
+}
 
 function buildDailyReflectionTask(stateDir: string): string {
   const statePath = stateDir.replace(/\\/g, "/");
@@ -79,7 +83,6 @@ function systemJobs(stateDir: string): SystemJobSpec[] {
       name: "System: Daily Reflection",
       cron: "0 3 * * *", // Daily at 3am America/New_York
       timezone: "America/New_York",
-      ownerAgentId: "main",
       spec: {
         mode: "agent_task",
         task: buildDailyReflectionTask(stateDir),
@@ -112,7 +115,7 @@ export function ensureSystemJobs(params: { db: NexusDatabase; nowMs: number; sta
       )
       .run(
         job.id,
-        job.ownerAgentId ?? "system",
+        schedulerAgentId(),
         job.name,
         job.cron,
         job.timezone,

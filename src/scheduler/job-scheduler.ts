@@ -91,7 +91,6 @@ export type JobSchedulerDeps = {
 
 type JobRow = {
   id: string;
-  owner_agent_id: string;
   name: string;
   cron: string;
   timezone: string;
@@ -120,6 +119,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   );
   const notifyAgentOnFailure = envBool("NEXUS_SCHEDULER_NOTIFY_AGENT_ON_FAILURE") ?? deps.config.scheduler.notifyAgentOnFailure;
   const notifyCooldownMs = Math.max(0, envInt("NEXUS_SCHEDULER_NOTIFY_COOLDOWN_MS") ?? deps.config.scheduler.notifyCooldownMs);
+  const schedulerAgentId = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim() || "main";
 
   const leaseId = `${process.pid}:${randomId("L")}`;
   const scheduleCache = new Map<string, { schedule: ReturnType<typeof parseCron>; timeZone: string }>();
@@ -178,13 +178,13 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     }
   };
 
-  const insertEvent = (params: { jobId: string; runId?: string | null; ownerAgentId: string; kind: string; payload: unknown; nowMs: number }) => {
+  const insertEvent = (params: { jobId: string; runId?: string | null; agentId: string; kind: string; payload: unknown; nowMs: number }) => {
     const id = randomId("JE");
     deps.db.db
       .prepare(
         "INSERT INTO job_events (id, job_id, run_id, owner_agent_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(id, params.jobId, params.runId ?? null, params.ownerAgentId, params.kind, JSON.stringify(params.payload ?? {}), params.nowMs);
+      .run(id, params.jobId, params.runId ?? null, params.agentId, params.kind, JSON.stringify(params.payload ?? {}), params.nowMs);
   };
 
   const notifyAgent = async (
@@ -213,7 +213,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       truncate(failure.output, 6000),
       "",
       "Instructions:",
-      "- Diagnose root cause and fix the job (use job_get/job_update/job_pause/job_runs).",
+      "- Diagnose root cause and fix the job.",
+      "- If scheduling tools are needed, spawn the job-manager preset.",
       "- Prefer small, reversible changes.",
       "- If you are blocked on OTP/MFA/CAPTCHA/etc, use human_request.",
       "- If the job is unsafe to retry automatically, pause it.",
@@ -222,8 +223,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     const res = await deps.agent.handleUserMessage({
       channel: "job",
       channelKey: job.id,
-      agentId: job.owner_agent_id,
-      preset: "job-manager",
+      agentId: schedulerAgentId,
+      preset: "orchestrator",
       text,
       executionLane: "background",
     });
@@ -231,7 +232,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     insertEvent({
       jobId: job.id,
       runId,
-      ownerAgentId: job.owner_agent_id,
+      agentId: schedulerAgentId,
       kind: "agent_notified",
       payload: { output: res.output, status: (res as any).status ?? null },
       nowMs,
@@ -271,7 +272,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       const res = await deps.agent.handleUserMessage({
         channel: "job",
         channelKey: job.id,
-        agentId: job.owner_agent_id,
+        agentId: schedulerAgentId,
         preset: "orchestrator",
         text: userText,
         executionLane: "background",
@@ -316,7 +317,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         request: {
           channel: "job",
           channelKey: job.id,
-          agentId: job.owner_agent_id,
+          agentId: schedulerAgentId,
           sessionId: runId,
           runId,
         },
@@ -345,12 +346,12 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       .prepare(
         "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, status) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(runId, job.id, job.owner_agent_id, scheduledFor, startedAt, "running");
+      .run(runId, job.id, schedulerAgentId, scheduledFor, startedAt, "running");
 
     insertEvent({
       jobId: job.id,
       runId,
-      ownerAgentId: job.owner_agent_id,
+      agentId: schedulerAgentId,
       kind: "run_started",
       payload: { scheduledFor, startedAt },
       nowMs: startedAt,
@@ -381,7 +382,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         insertEvent({
           jobId: job.id,
           runId,
-          ownerAgentId: job.owner_agent_id,
+          agentId: schedulerAgentId,
           kind: "run_succeeded",
           payload: { endedAt, nextRunAt },
           nowMs: endedAt,
@@ -407,7 +408,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       insertEvent({
         jobId: job.id,
         runId,
-        ownerAgentId: job.owner_agent_id,
+        agentId: schedulerAgentId,
         kind: shouldPause ? "run_failed_paused" : "run_failed",
         payload: {
           endedAt,
@@ -456,7 +457,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       insertEvent({
         jobId: job.id,
         runId,
-        ownerAgentId: job.owner_agent_id,
+        agentId: schedulerAgentId,
         kind: shouldPause ? "run_exception_paused" : "run_exception",
         payload: { endedAt, nextScheduled, nextRunAt, error: output },
         nowMs: endedAt,
@@ -486,7 +487,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
       // Backfill next_run_at for enabled jobs if missing.
       const missing = deps.db.db
-        .prepare("SELECT id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, consecutive_failures, last_failure_at, last_notified_at FROM jobs WHERE enabled = 1 AND next_run_at IS NULL LIMIT 50")
+        .prepare("SELECT id, name, cron, timezone, enabled, spec_json, next_run_at, consecutive_failures, last_failure_at, last_notified_at FROM jobs WHERE enabled = 1 AND next_run_at IS NULL LIMIT 50")
         .all() as JobRow[];
       for (const job of missing) {
         const nextRunAt = ensureNextRunAt(job, nowMs);
@@ -497,7 +498,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           deps.db.db.prepare("UPDATE jobs SET enabled = 0, updated_at = ? WHERE id = ?").run(nowMs, job.id);
           insertEvent({
             jobId: job.id,
-            ownerAgentId: job.owner_agent_id,
+            agentId: schedulerAgentId,
             kind: "disabled_invalid_cron",
             payload: { cron: job.cron, timezone: job.timezone },
             nowMs,
@@ -507,7 +508,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
       const due = deps.db.db
         .prepare(
-          "SELECT id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, consecutive_failures, last_failure_at, last_notified_at FROM jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT ?",
+          "SELECT id, name, cron, timezone, enabled, spec_json, next_run_at, consecutive_failures, last_failure_at, last_notified_at FROM jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT ?",
         )
         .all(nowMs, maxRunsPerTick) as JobRow[];
 
@@ -542,7 +543,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} schedulerAgentId=${schedulerAgentId}`,
   );
 
   // Start shortly after boot.

@@ -5,7 +5,6 @@ export type { AgentRunInfo, ManagedProcessInfo };
 
 export type JobRow = {
   id: string;
-  owner_agent_id: string;
   name: string;
   cron: string;
   timezone: string;
@@ -20,7 +19,7 @@ export type JobRow = {
 export type JobRunRow = {
   id: string;
   job_id: string;
-  owner_agent_id: string;
+  agent_id: string;
   scheduled_for: number;
   started_at: number;
   ended_at: number | null;

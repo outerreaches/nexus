@@ -125,7 +125,7 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     const limit = clampInt(c.req.query("limit"), 1, 10000) ?? 1000;
     const rows = listJobRuns(deps.db, limit);
 
-    const csvHeader = "id,job_id,owner_agent_id,scheduled_for,started_at,ended_at,status,error,tool_calls_used,iterations_used";
+    const csvHeader = "id,job_id,agent_id,scheduled_for,started_at,ended_at,status,error,tool_calls_used,iterations_used";
     const csvRows = rows.map((r) => {
       const escapeCsv = (s: string | null | undefined) => {
         if (s == null) return "";
@@ -138,7 +138,7 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       return [
         escapeCsv(r.id),
         escapeCsv(r.job_id),
-        escapeCsv(r.owner_agent_id),
+        escapeCsv(r.agent_id),
         r.scheduled_for ?? "",
         r.started_at ?? "",
         r.ended_at ?? "",
