@@ -25,7 +25,16 @@ export type MaintenanceResult = {
   errors: string[];
 };
 
-const ARCHIVE_TABLES = ["messages", "paper_trades", "data_items", "data_item_events", "agent_runs"] as const;
+const ARCHIVE_TABLES = [
+  "messages",
+  "paper_trades",
+  "data_items",
+  "data_item_events",
+  "agent_runs",
+  "jobs_archive",
+  "job_runs_archive",
+  "job_events_archive",
+] as const;
 const CLEANUP_TABLES = ["job_runs", "job_events"] as const;
 const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes"] as const;
 
@@ -36,6 +45,9 @@ const DATE_COLUMNS: Record<string, string> = {
   data_items: "created_at",
   data_item_events: "created_at",
   agent_runs: "started_at",
+  jobs_archive: "archived_at",
+  job_runs_archive: "archived_at",
+  job_events_archive: "archived_at",
   job_runs: "started_at",
   job_events: "created_at",
 };
@@ -47,6 +59,9 @@ const ID_COLUMNS: Record<string, string> = {
   data_items: "id",
   data_item_events: "id",
   agent_runs: "run_id",
+  jobs_archive: "archive_id",
+  job_runs_archive: "archive_id",
+  job_events_archive: "archive_id",
   job_runs: "id",
   job_events: "id",
 };

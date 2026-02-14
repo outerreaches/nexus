@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { archiveAndDeleteJob } from "../storage/job-archive.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "../scheduler/cron.js";
 
 const ONE_SHOT_CRON = "@once";
@@ -66,7 +67,7 @@ function getOneShotAtMs(spec: unknown): number | null {
 export const jobCreate = defineTool({
   name: "job_create",
   description:
-    "Create a scheduled job. Use `cron` for recurring jobs, or `at` for a one-shot run (auto-deletes after completion). " +
+    "Create a scheduled job. Use `cron` for recurring jobs, or `at` for a one-shot run (archived then removed after completion). " +
     "Jobs are executed by the orchestrator agent in background lane.",
   parameters: z
     .object({
@@ -190,6 +191,7 @@ export const jobGet = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
+    const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
     return JSON.stringify(row, null, 2);
@@ -356,13 +358,14 @@ export const jobResume = defineTool({
 
 export const jobDelete = defineTool({
   name: "job_delete",
-  description: "Delete a job and its run history.",
+  description: "Delete a job. Job definition, runs, and events are archived before removal.",
   parameters: z.object({
     id: z.string().min(1).max(32),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
+    const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
     const linked = db.db
@@ -372,13 +375,19 @@ export const jobDelete = defineTool({
       const label = linked.label ?? linked.source_id;
       return `ERROR: job is linked to data intake source '${label}' (instance ${linked.id}). Delete the source instead.`;
     }
-    const tx = db.db.transaction(() => {
-      db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(args.id);
-      db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(args.id);
-      db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(args.id);
-      db.db.prepare("DELETE FROM jobs WHERE id = ?").run(args.id);
+    const archived = archiveAndDeleteJob({
+      db,
+      jobId: args.id,
+      archivedAtMs: nowMs,
+      archiveReason: "manual_delete",
+      archivedBy: `tool:job_delete:${ctx.request?.agentId ?? "unknown"}`,
+      metadata: {
+        channel: ctx.request?.channel ?? null,
+        channelKey: ctx.request?.channelKey ?? null,
+        sessionId: ctx.request?.sessionId ?? null,
+      },
     });
-    tx();
+    if (!archived.found) return "ERROR: not found";
     return "OK";
   },
 });

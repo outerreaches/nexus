@@ -1,4 +1,5 @@
 import type { NexusDatabase } from "../storage/database.js";
+import { archiveAndDeleteJobInTx } from "../storage/job-archive.js";
 import { randomId } from "./utils.js";
 
 export type DataIntakeSourceRow = {
@@ -214,11 +215,14 @@ export function deleteIntakeSource(params: { db: NexusDatabase; id: string }): b
 
     // Delete the linked job if it exists
     if (jobId) {
-      // Delete events first to be compatible with schemas where job_events.run_id may reference job_runs(id).
-      params.db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(jobId);
-      params.db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(jobId);
-      params.db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(jobId);
-      params.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(jobId);
+      archiveAndDeleteJobInTx({
+        db: params.db,
+        jobId,
+        archivedAtMs: Date.now(),
+        archiveReason: "source_delete",
+        archivedBy: "data-intake",
+        metadata: { sourceId: existing.source_id, instanceId: params.id },
+      });
     }
   });
 

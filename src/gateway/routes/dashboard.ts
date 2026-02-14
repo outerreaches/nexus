@@ -18,6 +18,7 @@ import {
 } from "../dashboard/queries.js";
 import { renderDashboard } from "../dashboard/render.js";
 import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
+import { archiveAndDeleteJob } from "../../storage/job-archive.js";
 
 export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/dashboard", async (c) => {
@@ -230,13 +231,15 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         );
       }
 
-      const tx = deps.db.db.transaction(() => {
-        deps.db!.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(id);
-        deps.db!.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(id);
-        deps.db!.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(id);
-        deps.db!.db.prepare("DELETE FROM jobs WHERE id = ?").run(id);
+      const archived = archiveAndDeleteJob({
+        db: deps.db,
+        jobId: id,
+        archivedAtMs: Date.now(),
+        archiveReason: "dashboard_delete",
+        archivedBy: "dashboard",
+        metadata: { route: "/dashboard/jobs/delete" },
       });
-      tx();
+      if (!archived.found) return c.text("Delete failed: job not found", 404);
     } catch (err) {
       return c.text(`Delete failed: ${err instanceof Error ? err.message : String(err)}`, 500);
     }

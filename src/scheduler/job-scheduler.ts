@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { archiveAndDeleteJob } from "../storage/job-archive.js";
 import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
 
@@ -195,13 +196,6 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     }
   };
 
-  const deleteJobWithHistory = deps.db.db.transaction((jobId: string) => {
-    deps.db.db.prepare("DELETE FROM job_events WHERE job_id = ?").run(jobId);
-    deps.db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(jobId);
-    deps.db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(jobId);
-    deps.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(jobId);
-  });
-
   const insertEvent = (params: { jobId: string; runId?: string | null; agentId: string; kind: string; payload: unknown; nowMs: number }) => {
     const id = randomId("JE");
     deps.db.db
@@ -366,6 +360,39 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     const scheduledFor = job.next_run_at ?? nowMs;
     const startedAt = Date.now();
     const oneShot = isOneShotJob(job);
+    const archiveOneShot = (params: {
+      endedAt: number;
+      runId: string;
+      outcome: "success" | "failed" | "exception";
+      output: string | null;
+    }): boolean => {
+      try {
+        const archived = archiveAndDeleteJob({
+          db: deps.db,
+          jobId: job.id,
+          archivedAtMs: params.endedAt,
+          archiveReason: `one_shot_${params.outcome}`,
+          archivedBy: "scheduler",
+          metadata: {
+            runId: params.runId,
+            outcome: params.outcome,
+            output: params.output ? truncate(params.output, 4000) : null,
+          },
+        });
+        if (!archived.found) return true;
+        deps.log(
+          `scheduler: one-shot archived+deleted job=${job.id} run=${params.runId} status=${params.outcome} archiveId=${archived.jobArchiveId ?? "n/a"} runs=${archived.archivedRuns} events=${archived.archivedEvents}`,
+        );
+        return true;
+      } catch (e) {
+        deps.log(
+          `scheduler: one-shot archive failed job=${job.id} run=${params.runId} err=${e instanceof Error ? e.message : String(e)}`,
+        );
+        // Prevent repeated execution if archival path is broken.
+        deps.db.db.prepare("UPDATE jobs SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?").run(params.endedAt, job.id);
+        return false;
+      }
+    };
 
     deps.db.db
       .prepare(
@@ -397,8 +424,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
       if (ok) {
         if (oneShot) {
-          deleteJobWithHistory(job.id);
-          deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=success`);
+          archiveOneShot({ endedAt, runId, outcome: "success", output: res.output });
         } else {
           const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
           const nextRunAt = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
@@ -429,8 +455,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           { status: res.status, output: res.output, paused: false },
           endedAt,
         );
-        deleteJobWithHistory(job.id);
-        deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=${res.status}`);
+        archiveOneShot({ endedAt, runId, outcome: "failed", output: res.output });
         return;
       }
       const backoffMs = computeFailureBackoffMs(consecutiveFailures);
@@ -484,8 +509,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           { status: "exception", output, paused: false },
           endedAt,
         );
-        deleteJobWithHistory(job.id);
-        deps.log(`scheduler: one-shot auto-deleted job=${job.id} run=${runId} status=exception`);
+        archiveOneShot({ endedAt, runId, outcome: "exception", output });
         return;
       }
       const shouldPause = consecutiveFailures >= maxConsecutiveFailures;

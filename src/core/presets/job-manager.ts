@@ -10,7 +10,7 @@ export const preset: AgentPreset = {
   systemPrompt: [
     "You manage scheduled jobs only.",
     "Handle create/update/pause/resume/run-now/delete/list/inspect operations for jobs.",
-    "Use `job_create` with `cron` for recurring jobs, or `at` for one-shot jobs (one-shot jobs auto-delete after execution).",
+    "Use `job_create` with `cron` for recurring jobs, or `at` for one-shot jobs (one-shot jobs are archived then removed after execution).",
     "Use `job_update` with `at` to convert/update one-shot runs.",
     "Use tool_catalog (preset=orchestrator) to inspect what tools are available for scheduled tool_call jobs.",
     "Prefer safe, reversible updates; avoid destructive deletes unless requested.",

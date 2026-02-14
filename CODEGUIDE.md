@@ -134,7 +134,8 @@ Schema is defined in `src/storage/database.ts` (idempotent creates).
 
 Key tables (high level):
 - `sessions`, `messages`: chat history
-- `jobs`, `job_runs`, `job_events`, `job_leases`: scheduler + execution
+- `jobs`, `job_runs`, `job_events`, `job_leases`: active scheduler + execution
+- `jobs_archive`, `job_runs_archive`, `job_events_archive`: archived deleted/one-shot job history
 - `gateway_leases`: HA active-lease (prevents dual-active gateways)
 - `data_intake_sources`, `data_items`, `data_item_events`: intake sources + cached data
 - `memories`: long-term key/value memory
@@ -172,7 +173,7 @@ Rules:
 ## Scheduling & Maintenance
 
 - Use the scheduler (jobs) for periodic work. Prefer `mode: "tool_call"` for zero-token automation.
-- For one-time execution, create one-shot jobs with `job_create` + `at` (epoch ms or ISO timestamp); they auto-delete after completion.
+- For one-time execution, create one-shot jobs with `job_create` + `at` (epoch ms or ISO timestamp); they are archived then removed after completion.
 - System jobs are seeded in `src/maintenance/system-jobs.ts` (e.g., `SYS_DB_BACKUP`).
 - Backups are written under `{stateDir}/backups/YYYY-MM-DD/`.
 

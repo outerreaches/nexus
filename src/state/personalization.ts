@@ -160,7 +160,7 @@ For code changes:
 
 ## Scheduling
 - Delegate scheduling operations to a \`job-manager\` worker (\`job_create\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_delete\`).
-- For recurring jobs, use \`job_create\` with \`cron\`; for one-shot jobs, use \`job_create\` with \`at\` (one-shot jobs auto-delete after execution).
+- For recurring jobs, use \`job_create\` with \`cron\`; for one-shot jobs, use \`job_create\` with \`at\` (one-shot jobs are archived then removed after execution).
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.
 - Heartbeat and scheduled orchestrator runs execute on a background lane; interactive chats should remain responsive while background work runs.
@@ -342,7 +342,8 @@ Schema is defined in \`src/storage/database.ts\` (idempotent creates).
 
 Key tables (high level):
 - \`sessions\`, \`messages\`: chat history
-- \`jobs\`, \`job_runs\`, \`job_events\`, \`job_leases\`: scheduler + execution
+- \`jobs\`, \`job_runs\`, \`job_events\`, \`job_leases\`: active scheduler + execution
+- \`jobs_archive\`, \`job_runs_archive\`, \`job_events_archive\`: archived deleted/one-shot job history
 - \`gateway_leases\`: HA active-lease (prevents dual-active gateways)
 - \`data_intake_sources\`, \`data_items\`, \`data_item_events\`: intake sources + cached data
 - \`memories\`: long-term key/value memory
@@ -380,7 +381,7 @@ Rules:
 ## Scheduling & Maintenance
 
 - Use the scheduler (jobs) for periodic work. Prefer \`mode: "tool_call"\` for zero-token automation.
-- For one-time execution, create one-shot jobs with \`job_create\` + \`at\` (epoch ms or ISO timestamp); they auto-delete after completion.
+- For one-time execution, create one-shot jobs with \`job_create\` + \`at\` (epoch ms or ISO timestamp); they are archived then removed after completion.
 - System jobs are seeded in \`src/maintenance/system-jobs.ts\` (e.g., \`SYS_DB_BACKUP\`).
 - Backups are written under \`{stateDir}/backups/YYYY-MM-DD/\`.
 

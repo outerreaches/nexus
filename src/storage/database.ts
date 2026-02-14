@@ -161,6 +161,74 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS jobs_archive (
+      archive_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      owner_agent_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      cron TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      enabled INTEGER NOT NULL,
+      spec_json TEXT NOT NULL DEFAULT '{}',
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at INTEGER,
+      last_notified_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      archived_at INTEGER NOT NULL,
+      archive_reason TEXT NOT NULL,
+      archived_by TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_jobs_archive_job ON jobs_archive(job_id, archived_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_archive_reason ON jobs_archive(archive_reason, archived_at DESC);
+
+    CREATE TABLE IF NOT EXISTS job_runs_archive (
+      archive_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      owner_agent_id TEXT NOT NULL,
+      scheduled_for INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      status TEXT NOT NULL,
+      error TEXT,
+      output TEXT,
+      tool_calls_used INTEGER,
+      iterations_used INTEGER,
+      archived_at INTEGER NOT NULL,
+      archive_reason TEXT NOT NULL,
+      archived_by TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_job_runs_archive_job ON job_runs_archive(job_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_job_runs_archive_run ON job_runs_archive(run_id);
+    CREATE INDEX IF NOT EXISTS idx_job_runs_archive_archived ON job_runs_archive(archived_at DESC);
+
+    CREATE TABLE IF NOT EXISTS job_events_archive (
+      archive_id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      run_id TEXT,
+      owner_agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      handled_at INTEGER,
+      archived_at INTEGER NOT NULL,
+      archive_reason TEXT NOT NULL,
+      archived_by TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_job_events_archive_job ON job_events_archive(job_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_job_events_archive_run ON job_events_archive(run_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_job_events_archive_archived ON job_events_archive(archived_at DESC);
+
     -- ───────────────────────────────────────────────────────────────────────
     -- Gateway active lease (HA mode)
     -- ───────────────────────────────────────────────────────────────────────
