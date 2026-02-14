@@ -201,7 +201,7 @@ Convenience actions:
 
 - `web_search`: Brave Search API (`BRAVE_API_KEY`) or Perplexity Sonar via OpenRouter/direct (`OPENROUTER_API_KEY` or `PERPLEXITY_API_KEY`)
 - `web_fetch`: keyless HTTP fetch + text extraction (timeouts, redirect limits, small cache). Non-text binaries (images, PDFs, etc.) are saved to the workspace and return a local file path instead of inlining payloads.
-- `langextract_extract`: structured entity/field extraction via Python LangExtract. Supports text/path/url/blackboard input (including local/remote PDF extraction), writes a JSON artifact to disk, and can write a blackboard artifact reference for downstream agents. Uses OpenRouter by default (existing Nexus model route), with optional per-call model override. Supports compact auto-generated few-shot examples and internal chunk/merge for long text sources. Python runtime deps: `pip install 'langextract[openai]' pypdf`.
+- `langextract_extract`: experimental structured entity/field extraction via Python LangExtract. Supports text/path/url/blackboard input (including local/remote PDF extraction), writes a JSON artifact to disk, and can write a blackboard artifact reference for downstream agents. Uses OpenRouter by default (existing Nexus model route), with optional per-call model override. Supports compact auto-generated few-shot examples and internal chunk/merge for long text sources. Python runtime deps: `pip install 'langextract[openai]' pypdf`. Note: currently disabled in default agent presets due reliability issues.
 
 Safety knob:
 - `NEXUS_ALLOW_PRIVATE_WEB_FETCH=1` allows fetching private/loopback hostnames and IPs (disabled by default).
@@ -270,8 +270,8 @@ Agent tools:
 ## Safety knobs
 
 - `permissions.allowShellExec` (config) or `NEXUS_ALLOW_SHELL_EXEC=1` enables the `shell_exec` tool (disabled otherwise).
-- `permissions.allowCodeEdit` (config) controls whether `file_*` tools may target the running codebase via `root:"code"`.
-- `permissions.allowCodeWrite` (config) or `NEXUS_ALLOW_CODE_WRITE=1` enables code-root writes (`file_write`/`file_edit`/`file_edit_lines`).
+- `permissions.allowCodeEdit` (config) controls whether `file_*` tools may target the running codebase (absolute paths under `codeDir`).
+- `permissions.allowCodeWrite` (config) or `NEXUS_ALLOW_CODE_WRITE=1` enables writes under `codeDir` (`file_write`/`file_edit`/`file_edit_lines`).
 - `NEXUS_TELEGRAM_ALLOW_ALL=1` allows any Telegram user if `channels.telegram.allowFrom` is empty (not recommended).
 
 ## CLI tool command
@@ -370,6 +370,6 @@ For multi-agent setups, you can create agent-specific overrides in `stateDir/age
 ## Full self-modification
 
 - Prompts: edit personalization files in `stateDir` (default `~/.nexus/`) such as `SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`.
-- Code edits: `file_*` tools can target `root:"code"` (or absolute paths under the code dir). This is controlled by `permissions.allowCodeEdit` and `codeDir` in config.
+- Code edits: `file_*` tools must use absolute paths under the code dir. Access is controlled by `permissions.allowCodeEdit` and `codeDir` in config.
 - Deploy code changes with `ha_deploy` (`action:"apply"`) in HA workflows.
 - `gateway_restart` is for non-HA restarts or emergency operations, not normal code rollout.

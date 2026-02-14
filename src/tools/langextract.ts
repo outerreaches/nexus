@@ -848,9 +848,10 @@ async function writeBlackboardArtifact(params: {
 export const langextractExtract = defineTool({
   name: "langextract_extract",
   description:
-    "Run LangExtract structured extraction on text/documents and persist results as JSON. " +
+    "EXPERIMENTAL/UNSTABLE: Run LangExtract structured extraction on text/documents and persist results as JSON. " +
     "Input can come from text, a file path, a URL, or a blackboard entry. " +
-    "By default, writes output JSON to disk and creates a blackboard artifact entry.",
+    "By default, writes output JSON to disk and creates a blackboard artifact entry. " +
+    "This tool is currently disabled in default agent presets pending reliability improvements.",
   parameters: z.object({
     text: z.string().max(1_000_000).optional().describe("Inline source text to extract from."),
     path: z.string().optional().describe("File path source (relative to root or absolute inside allowed roots)."),

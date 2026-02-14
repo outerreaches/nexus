@@ -27,7 +27,7 @@ export const preset: AgentPreset = {
     "Researcher/analyst workers should not spawn further agents; keep subtasking at the orchestrator.",
   ].join("\n"),
   tools: [
-    // State files (HEARTBEAT.md, NOTES.md, etc.) - use root: "state"
+    // State files (HEARTBEAT.md, NOTES.md, etc.) - use absolute stateDir paths
     "file_read",
     "file_write",
     "file_edit",

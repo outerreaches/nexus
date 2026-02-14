@@ -24,6 +24,17 @@ export const UserProfileSchema = z.object({
 export type Identity = z.infer<typeof IdentitySchema>;
 export type UserProfile = z.infer<typeof UserProfileSchema>;
 
+export type PersonalizationTemplatePaths = {
+  stateDir: string;
+  workspaceDir: string;
+  codeDir: string;
+};
+
+function promptPath(p: string): string {
+  // Keep prompt examples stable across platforms.
+  return p.replace(/\\/g, "/");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // File names
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,9 +114,9 @@ Use \`spawn_agent\` to delegate to these specialists:
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
 | **coder** | Codebase analysis, direct code edits, debugging, rollout | file_ops, shell_exec, ha_deploy, web_fetch, image_analyze |
-| **researcher** | Web research, browsing, document analysis | web_search, data_intake_query, image_analyze, langextract_extract |
+| **researcher** | Web research, browsing, document analysis | web_search, data_intake_query, image_analyze |
 | **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
-| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze, langextract_extract |
+| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze |
 | **graphic-designer** | Visual concepting and image asset generation | image_generate, image_edit, read_from_blackboard, write_to_blackboard |
 | **intake-manager** | Data intake source operations | data_intake_source_add, data_intake_source_update, data_intake_source_delete, data_intake_run |
 | **job-manager** | Scheduling and job execution management | job_create, job_update, job_pause, job_resume, job_run_now, job_delete |
@@ -135,12 +146,10 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 ## Code Change → Deploy Workflow
 
 For code changes:
-1. Spawn a coder to inspect patterns and apply direct edits under \`root="code"\`.
+1. Spawn a coder to inspect patterns and apply direct edits using absolute paths under \`codeDir\`.
 2. Coder validates with \`npm run typecheck\` and \`npm run build\`.
 3. Coder executes \`ha_deploy\` with \`action="apply"\` (commit message + remote/branch as needed).
 4. Report rollout status (canary health, active slot, commit SHA) to the user.
-
-**Important**: Do NOT use \`gateway_restart\` as a deploy mechanism for code rollout.
 
 ## Memory Strategy
 - Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
@@ -193,26 +202,29 @@ ${user.context ?? "Add notes about yourself here — preferences, projects, cont
 `;
 }
 
-export function getDefaultCodeguideTemplate(): string {
+export function getDefaultCodeguideTemplate(paths: PersonalizationTemplatePaths): string {
+  const stateDirPath = promptPath(paths.stateDir);
+  const workspaceDirPath = promptPath(paths.workspaceDir);
+  const codeDirPath = promptPath(paths.codeDir);
   return `# CODEGUIDE
 
 This file is loaded into the **coder** agent's prompt. Keep it accurate and concise.
 
 ## TL;DR — Safe Self-Modification Workflow
 
-1. **Locate the correct repo root** in \`root="code"\` (must contain \`package.json\` + \`src/\`).
+1. **Locate the correct repo root** via absolute path under \`codeDir\` (must contain \`package.json\` + \`src/\`).
 2. **Read before editing** (\`file_read\` with line ranges).
-3. **Apply minimal direct edits** to \`root="code"\` (\`file_edit\`, \`file_edit_lines\`, \`file_write\`).
+3. **Apply minimal direct edits** using absolute paths under \`codeDir\` (\`file_edit\`, \`file_edit_lines\`, \`file_write\`).
 4. **Validate locally** (\`npm run typecheck\`, \`npm run build\`).
 5. **Deploy in the same coder run** (\`ha_deploy\` with \`action="apply"\`).
 
 ### IMPORTANT: Write + Deploy Boundaries
 
-- **Coder may write to \`root="code"\` directly.**
+- **Coder may write directly to absolute paths under \`codeDir\`.**
 - **Do NOT run raw \`git add\`, \`git commit\`, or \`git push\` from coder runs.**
 - **Do NOT call \`gateway_restart\` for code deploys.**
 - **Use \`ha_deploy\` for deployment.**
-- **Use \`root="workspace"\` for scratch files.**
+- **Use absolute paths under \`workspaceDir\` for scratch files.**
 
 If changes "disappear" after a restart, you probably edited the image filesystem (\`/app\`) instead of a persistent mounted code directory.
 
@@ -223,13 +235,10 @@ If changes "disappear" after a restart, you probably edited the image filesystem
 Nexus resolves three key directories at runtime:
 
 - **stateDir**: persistent state (SQLite DB, config, personalization files)
-- **codeDir**: the source code tree used by \`root="code"\`
-- **workspaceDir**: agent scratch/work area used by \`root="workspace"\`
+- **codeDir**: the source code tree for absolute-path code edits
+- **workspaceDir**: agent scratch/work area for absolute-path workspace files
 
-File tools map roots like this:
-- \`root="state"\` → \`stateDir\`
-- \`root="code"\` → \`codeDir\`
-- \`root="workspace"\` → \`workspaceDir\`
+File tools require absolute paths under \`stateDir\`, \`codeDir\`, or \`workspaceDir\`.
 
 ### How codeDir/workspaceDir are chosen
 
@@ -256,7 +265,7 @@ In your \`{stateDir}/nexus.json\`, explicitly set:
 ### Sanity check (always do this first)
 
 \`\`\`
-file_list root="code" path="."
+file_list path="${codeDirPath}"
 \`\`\`
 
 You should see \`package.json\`, \`src/\`, \`tsconfig.json\`, etc.
@@ -395,7 +404,7 @@ State markdown files live at \`{stateDir}\`:
 
 Edit them with:
 \`\`\`
-file_edit root="state" path="CODEGUIDE.md"
+file_edit path="${stateDirPath}/CODEGUIDE.md"
 \`\`\`
 
 Prefer \`file_write mode="append"\` when adding standing instructions to avoid clobbering content.
@@ -405,29 +414,30 @@ Prefer \`file_write mode="append"\` when adding standing instructions to avoid c
 ## Troubleshooting Self-Mod
 
 - **Edits fail with read-only errors**: ensure writable \`/data/code\` mount and \`NEXUS_ALLOW_CODE_WRITE=1\`.
-- **Can’t find files**: verify \`file_list root="code" path="."\` includes \`package.json\`.
+- **Can’t find files**: verify \`file_list path="${codeDirPath}"\` includes \`package.json\`.
 - **Behavior unchanged after deploy**: verify \`ha_deploy\` (\`action="apply"\`) completed and check rollout logs/state.
 - **HA oddities**: confirm only one instance is active (dashboard HA section + \`/status.activeLease\`).
 `;
 }
 
-export function getDefaultHeartbeatTemplate(): string {
+export function getDefaultHeartbeatTemplate(stateDir: string): string {
+  const stateDirPath = promptPath(stateDir);
   return `# HEARTBEAT
 
 Proactive task checklist reviewed on each heartbeat tick.
 
   > **Note:** When the operator gives you new standing instructions about heartbeat behavior,
   > monitoring thresholds, or recurring checks, append them using \`file_write\` with \`mode: "append"\`
-  > and \`root: "state"\`. Only edit or replace existing items if explicitly requested.
+  > and an absolute \`${stateDirPath}/HEARTBEAT.md\` path. Only edit or replace existing items if explicitly requested.
   > This ensures instructions persist across restarts.
   > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`),
-  > always set \`root: "state"\` on every file tool call. Example:
-  > \`file_read({ root: "state", path: "NOTES.md", limit: 50 })\`
+  > always use absolute paths under \`stateDir\`. Example:
+  > \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 50 })\`
 
 ## Per-Tick Review
 - [ ] If there were meaningful learnings outside the daily reflection run, store them with \`memory_store\`
 - [ ] Check memories for stale or contradictory entries (\`memory_search\`)
-- [ ] Check \`NOTES.md\` for pending items using \`file_read({ root: "state", path: "NOTES.md", limit: 50 })\`
+- [ ] Check \`NOTES.md\` for pending items using \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 50 })\`
 
 ## Daily Tasks
 - [ ] Review recent session history for unfinished work

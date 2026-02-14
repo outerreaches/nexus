@@ -396,7 +396,7 @@ export async function runCli(argv: string[]): Promise<void> {
         };
       }
 
-      await writeOnboardingFiles(paths.stateDir, onboardingValues.identity, onboardingValues.userProfile, {
+      await writeOnboardingFiles(paths, onboardingValues.identity, onboardingValues.userProfile, {
         overwriteExisting: Boolean(opts.force),
       });
       await applyInitTelegramConfig(options.config, onboardingValues.telegram);

@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import {
   type Identity,
+  type PersonalizationTemplatePaths,
   type UserProfile,
   IdentitySchema,
   UserProfileSchema,
@@ -268,11 +269,12 @@ export async function runOnboarding(
 }
 
 export async function writeOnboardingFiles(
-  stateDir: string,
+  paths: PersonalizationTemplatePaths,
   identity: Identity,
   userProfile: UserProfile,
   options: { overwriteExisting?: boolean } = {},
 ): Promise<void> {
+  const stateDir = paths.stateDir;
   const overwriteExisting = options.overwriteExisting ?? true;
   let written = 0;
   let kept = 0;
@@ -297,8 +299,8 @@ export async function writeOnboardingFiles(
   await writeOrKeep(SOUL_FILENAME, getDefaultSoulTemplate(identity));
   await writeOrKeep(AGENTS_FILENAME, getDefaultAgentsTemplate());
   await writeOrKeep(USER_FILENAME, getDefaultUserTemplate(userProfile));
-  await writeOrKeep(CODEGUIDE_FILENAME, getDefaultCodeguideTemplate());
-  await writeOrKeep(HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate());
+  await writeOrKeep(CODEGUIDE_FILENAME, getDefaultCodeguideTemplate(paths));
+  await writeOrKeep(HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate(paths.stateDir));
   await writeOrKeep(NOTES_FILENAME, getDefaultNotesTemplate());
 
   console.log();

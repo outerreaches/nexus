@@ -146,8 +146,8 @@ export function startProactiveHeartbeat(
         "- Only ask the operator for action if you are blocked on a specific step (OTP/MFA/CAPTCHA/etc).",
         "- If you do ask, use `human_request` with a short, specific prompt and then stop.",
         "- Do NOT write to the blackboard during heartbeat ticks unless you discovered a new issue, made a change, or created a durable artifact that must persist. Never write \"reviewed\" or confirmation-only notes; if nothing substantive, respond with IDLE.",
-        "- When given new standing instructions about heartbeat behavior, append them to HEARTBEAT.md using `file_write` with `mode: \"append\"` and `root: \"state\"`. Only edit or replace existing items if the user explicitly requests a change.",
-        "- For `HEARTBEAT.md`, `NOTES.md`, `AGENTS.md`, `SOUL.md`, `USER.md`, and `CODEGUIDE.md`, always call file tools with `root: \"state\"` (never rely on default root). Example: `file_read({ root: \"state\", path: \"NOTES.md\", limit: 50 })`.",
+        `- When given new standing instructions about heartbeat behavior, append them to \`${deps.stateDir}/HEARTBEAT.md\` using absolute paths.`,
+        `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: \"${deps.stateDir}/NOTES.md\", limit: 50 })\`.`,
       ].join("\n");
 
       const res = await deps.agent.handleUserMessage({

@@ -84,7 +84,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const db = await openDatabase(paths.dbPath);
   initDataIntake();
-  ensureSystemJobs({ db, nowMs: Date.now(), log });
+  ensureSystemJobs({ db, nowMs: Date.now(), stateDir: paths.stateDir, log });
 
   const effectivePort = params.port ?? config.port;
   const cdpPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? effectivePort + 2);
