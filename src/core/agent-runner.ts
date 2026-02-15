@@ -615,15 +615,15 @@ export class AgentRunner {
             `Wrap up or summarize progress soon.]`;
         }
 
-        // Hard workflow guard: once deploy is applied, stop this run immediately.
-        // Any further runtime/schema checks in this same process can observe stale state.
+        // Hard workflow guard: once deploy is applied, stop this run immediately
+        // (including worker runs). Any further runtime/schema checks in the same
+        // process can observe stale state.
         const deployApplied = toolResultIndicatesDeployApplied(call, args, result);
-        const isWorkerRun = Boolean(this.deps.toolContext.request?.parentRunId);
         const shouldHandoff =
           call.name === "spawn_agent"
             ? deployApplied
             : call.name === "ha_deploy"
-              ? deployApplied && !isWorkerRun
+              ? deployApplied
               : false;
 
         if (shouldHandoff) {

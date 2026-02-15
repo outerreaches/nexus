@@ -38,6 +38,6 @@ export const preset: AgentPreset = {
     "data_intake_query",
   ],
   spawnAllowlist: ["coder", "researcher", "analyst", "graphic-designer"],
-  budget: { maxIterations: 20, maxToolCalls: 50 },
+  budget: { maxIterations: 40, maxToolCalls: 120 },
   isolated: true,
 };
