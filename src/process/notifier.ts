@@ -59,6 +59,19 @@ function isSuccess(row: any): boolean {
   return status === "exited" && exitCode === 0 && !signal;
 }
 
+function buildAckMessage(row: any): string {
+  const id = String(row.id ?? "");
+  const status = String(row.status ?? "");
+  const exitCode = row.exit_code === null || row.exit_code === undefined ? null : Number(row.exit_code);
+  const signal = row.signal ? String(row.signal) : null;
+  const outcome = status === "stopped"
+    ? "stopped"
+    : isSuccess(row)
+      ? "completed successfully"
+      : `completed (status=${status || "unknown"}, code=${exitCode ?? "null"}, signal=${signal ?? "null"})`;
+  return `Process ${id} ${outcome}. Generating summary...`;
+}
+
 function buildCallbackTask(row: any): string {
   const lines = [
     "PROCESS RUN COMPLETED",
@@ -96,6 +109,7 @@ export function startProcessNotifier(deps: {
   const tickIntervalMs = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_TICK_MS") ?? 15_000, 2_000, 120_000);
   const maxPerTick = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_MAX_PER_TICK") ?? 3, 1, 25);
   const lockMs = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_LOCK_MS") ?? 60_000, 5_000, 10 * 60_000);
+  const sendAck = envBool("NEXUS_PROCESS_NOTIFIER_ACK") ?? true;
 
   let stopped = false;
   let running = false;
@@ -232,6 +246,15 @@ export function startProcessNotifier(deps: {
         claimed = false;
       }
       if (!claimed) continue;
+
+      // Immediate acknowledgment so the user knows we detected completion; summary follows.
+      if (sendAck && (row.notify_attempts ?? 0) <= 0) {
+        try {
+          await deps.telegram.sendOutput(chatId, buildAckMessage(row));
+        } catch (err) {
+          deps.log(`process_notifier: ack failed id=${row.id} err=${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       const preset = (row.notify_preset && String(row.notify_preset).trim()) || "process-manager";
       const agentId = (row.request_agent_id && String(row.request_agent_id).trim()) || "main";
