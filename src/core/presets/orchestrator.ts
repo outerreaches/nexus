@@ -21,6 +21,7 @@ export const preset: AgentPreset = {
     "Use the job-manager preset for all job and scheduling operations (create/update/pause/resume/run/list/delete).",
     "Use the credential-manager preset for all credential vault operations (set/generate/list/delete).",
     "Use the mcp-manager preset for MCP server/profile setup and all MCP-backed delegation runs.",
+    "Use the security-researcher preset for security audits, vulnerability assessments, and threat-modeling tasks.",
     "Use mcp_overview to inspect MCP topology (servers/profiles/health) before delegating.",
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",

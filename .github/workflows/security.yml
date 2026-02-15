@@ -55,6 +55,9 @@ jobs:
       - run: npm ci
       - name: Run npm audit
         run: npm audit --audit-level=high
+      - name: Capture audit report
+        if: failure()
+        run: npm audit --json > npm-audit.json || true
       - name: Audit summary
         if: success()
         run: |
@@ -74,9 +77,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: semgrep/action@latest
         with:
-          config: auto
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+          config: ./semgrep.yml
 
   # 5. Gitleaks Secret Detection
   gitleaks:
@@ -89,9 +90,7 @@ jobs:
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITLEAKS_LICENSE_URL: ${{ secrets.GITLEAKS_LICENSE_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPCOMING: 'true'
 
   # 6. Snyk Dependency Scan (optional - requires account)
   snyk:
@@ -125,7 +124,7 @@ jobs:
   # Summary
   security-summary:
     name: Security Scan Summary
-    needs: [lint, audit, semgrep, gitleaks, build]
+    needs: [typecheck, lint, audit, semgrep, gitleaks, build]
     runs-on: ubuntu-latest
     if: always()
     steps:

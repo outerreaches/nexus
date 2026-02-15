@@ -9,7 +9,7 @@ rules:
       - pattern: |
           $REQ = require('child_process').exec($CMD)
       - pattern: |
-        new Function($CODE)
+          new Function($CODE)
     message: Potential code injection vulnerability detected
     severity: ERROR
     languages:

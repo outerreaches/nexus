@@ -66,11 +66,11 @@ npm run security:audit:fix
 Advanced static analysis with community-curated security rules.
 
 ```bash
-# Run semgrep with auto-config
+# Run semgrep with repository rules (semgrep.yml)
 npm run security:semgrep
 
-# Or use custom rules
-semgrep --config=semgrep.yml
+# Docker fallback (if semgrep is not installed locally)
+npm run security:semgrep:docker
 ```
 
 **What's detected:**
@@ -88,6 +88,9 @@ Scans for secrets accidentally committed to the repository.
 ```bash
 # Run gitleaks
 npm run security:gitleaks
+
+# Docker fallback (if gitleaks is not installed locally)
+npm run security:gitleaks:docker
 ```
 
 **What's detected:**
@@ -109,9 +112,7 @@ For full CI/CD functionality, add these secrets to your GitHub repository:
 
 | Secret | Purpose |
 |--------|---------|
-| `SEMGREP_APP_TOKEN` | Semgrep cloud scanning (optional) |
 | `SNYK_TOKEN` | Snyk dependency monitoring (optional) |
-| `GITLEAKS_LICENSE_URL` | Gitleaks license (optional) |
 
 ### Running Locally Without Secrets
 

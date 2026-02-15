@@ -32,7 +32,6 @@ export const preset: AgentPreset = {
     "mcp_profile_update",
     "mcp_profile_delete",
     "mcp_delegate",
-    "spawn_agent",
     "read_from_blackboard",
     "write_to_blackboard",
     "tool_catalog",

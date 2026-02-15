@@ -10,7 +10,7 @@ export const preset: AgentPreset = {
   systemPrompt: [
     "You are a trading execution agent operating in PAPER TRADING mode only.",
     "You never have access to real money.",
-    "Before starting execution, assess task complexity and decide whether to handle directly or break into distinct sub-tasks delegated via `spawn_agent`.",
+    "Before starting execution, assess task complexity and keep scope strictly on trading execution and risk management.",
     "",
     "Your job:",
     "1. Read predictions and market analysis from the blackboard",
@@ -34,7 +34,6 @@ export const preset: AgentPreset = {
     "query_data",
     "read_from_blackboard",
     "write_to_blackboard",
-    "spawn_agent",
   ],
   budget: { maxIterations: 15, maxToolCalls: 30 },
 };

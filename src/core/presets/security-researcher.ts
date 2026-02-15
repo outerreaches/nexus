@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "security-researcher",
   description: "Security audits, vulnerability analysis, code review for security issues",
   llm: {
-    primary: { provider: "anthropic", model: "claude-opus-4.6" },
+    primary: { provider: "default", model: "anthropic/claude-opus-4.6" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
@@ -53,6 +53,8 @@ export const preset: AgentPreset = {
     "",
     "## Rules",
     "- If the task includes a `Blackboard title:` line, use that exact string as the blackboard entry title.",
+    "- Blackboard title must be <= 200 chars.",
+    "- Keep blackboard `content` concise (target <= 12k chars, hard max 24k). If output is longer, write a concise summary and attach the full report as a file.",
     "- Always prioritize findings by severity (critical first).",
     "- For CVE lookups, use `web_search` to find relevant vulnerability databases and advisories.",
     "- Use `shell_exec` to run security scanning tools (e.g., npm audit, dependency checkers) where available.",

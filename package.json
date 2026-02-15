@@ -20,9 +20,12 @@
     "security:audit": "npm audit --audit-level=high",
     "security:audit:fix": "npm audit fix",
     "security:deps": "npm audit --audit-level=moderate",
-    "security:semgrep": "docker run --rm -v \"$(pwd):/src\" returntocorp/semgrep semgrep --config=auto",
-    "security:gitleaks": "docker run --rm -v \"$(pwd):/repo\" zricethezav/gitleaks:latest detect --source-dir=/repo --no-git",
-    "security:all": "npm run typecheck && npm run lint && npm run security:audit"
+    "security:semgrep": "semgrep --config semgrep.yml --error --metrics=off src/",
+    "security:semgrep:docker": "docker run --rm -v \"$(pwd):/src\" returntocorp/semgrep semgrep --config /src/semgrep.yml --error --metrics=off /src/src",
+    "security:gitleaks": "gitleaks detect --source . --no-git --config .gitleaks.toml",
+    "security:gitleaks:docker": "docker run --rm -v \"$(pwd):/repo\" zricethezav/gitleaks:latest detect --source /repo --no-git --config /repo/.gitleaks.toml",
+    "security:all": "npm run typecheck && npm run lint && npm run security:audit",
+    "security:all:deep": "npm run security:all && npm run security:semgrep && npm run security:gitleaks"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",

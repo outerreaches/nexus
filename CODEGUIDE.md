@@ -119,6 +119,7 @@ infra/
 - **orchestrator**: main brain; plans; spawns workers; owns jobs/memory.
 - **coder** (you): reads/edits code, runs builds, and executes `ha_deploy` rollout.
 - **researcher/analyst/trader**: task specialists (generally should not mutate code).
+- **security-researcher**: specialized security audit worker; spawn from orchestrator only.
 - **intake-manager**: manages data intake sources (when enabled).
 - **job-manager**: manages scheduled jobs and execution policies.
 - **credential-manager**: manages credential vault operations.
@@ -167,6 +168,12 @@ Rules:
 2. Register in `src/tools/index.ts`
 3. `shell_exec`: run `npm run typecheck` + `npm run build`
 4. Document rollout/verification steps for coder execution (`ha_deploy` when code changes are involved)
+
+### Adding/updating a preset
+1. Add/update `src/core/presets/<name>.ts` and register it in `src/core/presets.ts`.
+2. LLM routing rule: `llm.primary.provider` must reference a configured provider key (typically `default` or `local`).
+3. For OpenRouter models, keep `provider: "default"` and set `model` explicitly (example: `anthropic/claude-opus-4.6`).
+4. Do not invent new provider names in presets unless that provider is configured in runtime model routing.
 
 ---
 
