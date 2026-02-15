@@ -1,0 +1,8 @@
+[Unit]
+Description=Nexus VM disk garbage collection
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nexus-disk-gc

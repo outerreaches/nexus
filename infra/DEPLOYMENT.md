@@ -768,12 +768,67 @@ virsh console nexus-vm
 ### Docker build fails
 
 ```bash
-# On VM - check disk space
-df -h /data
+# On VM - check disk space (root partition)
+df -h
 
-# Clear Docker cache
-docker system prune -a
+# Inspect Docker disk usage
+docker system df
+
+# Typical root cause: stale layers/images (overlay2)
+sudo du -xhd1 /var/lib/docker | sort -h
+
+# Safe cleanup (keeps volumes)
+docker container prune -f
+docker image prune -f
+docker builder prune -f
+
+# Aggressive cleanup (removes unused images + volumes)
+# docker system prune -a -f --volumes
 ```
+
+For recurring cleanup automation (without touching `/data/nexus/backups`), see:
+- `infra/scripts/nexus-disk-gc.sh`
+- `infra/systemd/nexus-disk-gc.service`
+- `infra/systemd/nexus-disk-gc.timer`
+
+Install on the VM:
+```bash
+sudo install -m 0755 /data/code/infra/scripts/nexus-disk-gc.sh /usr/local/sbin/nexus-disk-gc
+sudo cp /data/code/infra/systemd/nexus-disk-gc.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexus-disk-gc.timer
+systemctl list-timers nexus-disk-gc.timer --all
+```
+
+### npm install/ci fails on VM (EBADENGINE / EACCES)
+
+Symptoms:
+- `npm WARN EBADENGINE` (Node too old; repo requires Node 22+)
+- `EACCES: permission denied` under `/data/code/node_modules` (root-owned files from prior runs)
+
+Fix:
+```bash
+# Upgrade Node to 22+ (example with NodeSource)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v
+
+# Fix repo ownership and reinstall deps
+sudo chown -R "$(id -u)":"$(id -g)" /data/code
+rm -rf /data/code/node_modules /data/code/package-lock.json
+cd /data/code
+npm install
+```
+
+### VM disk fills up over time (Docker images/logs)
+
+If `/` trends toward 100% usage, the most common drivers are stale Docker images/layers and unbounded container JSON logs.
+
+Recommended:
+- Enable the disk GC timer (see files listed above).
+- Set Docker log rotation via `/etc/docker/daemon.json`:
+  - `{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}`
+  - Restart Docker after changes: `sudo systemctl restart docker`
 
 ### Port forward not working
 

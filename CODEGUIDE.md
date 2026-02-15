@@ -41,7 +41,18 @@ file_list path="/data/code"
 ## Preset Routing Rule
 When adding/updating presets:
 - `llm.primary.provider` must match a configured provider key (usually `default` or `local`).
-- For OpenRouter models, keep `provider: "default"` and set `model` explicitly (example: `anthropic/claude-opus-4.6`).
+- For OpenRouter models, keep `provider: "default"` and set `model` explicitly (examples: `anthropic/claude-opus-4.6`, `openai/gpt-5.2-codex`).
+
+## Retry Policy (Enforced)
+Tool errors may include normalized tags like `[ERROR_CLASS=... retry=...]`. This policy is now **enforced** by the runner:
+- `retry=no`: do not repeat the same tool call with identical args; it will be blocked for the rest of the run.
+- `retry=yes`: at most one identical retry is allowed; further identical calls are blocked.
+- `retry=after_backoff`: same as `retry=yes`, but wait/back off first.
+
+## Shell Probes (Avoid False Failures)
+For exploratory `shell_exec` probes (grep/head/curl checks), treat “no match” as an expected outcome:
+- Make probes non-fatal: append `|| true`, or emit explicit `YES/NO` output.
+- Prefer small single-purpose commands over long pipelines so failures are easier to interpret.
 
 ## State File Edits
 Use absolute paths under `stateDir`, for example:

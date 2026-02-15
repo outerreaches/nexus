@@ -15,6 +15,9 @@ Nexus uses a multi-layered security approach:
 
 ## Quick Start
 
+Requirements:
+- Node.js 22+ (repo and some dependencies enforce `engines`)
+
 ### Install Dependencies
 ```bash
 npm install
@@ -168,7 +171,18 @@ snyk test
    - Review PR security checks
    - Monitor dependency updates
 
+## Agent-Assisted Audits (Optional)
+
+For external platform audits (HTTP headers/TLS/artifact exposure), use the `security-researcher` preset.
+
+Operational guardrails to avoid noisy loops:
+- Retry policy is enforced by the runner; don’t repeat identical tool calls after `retry=no`.
+- For exploratory `shell_exec` probes, make commands non-fatal (`|| true`) and emit explicit YES/NO output so expected misses don’t derail the run.
+
 ## Troubleshooting
+
+### Node engine warnings / install failures on VM
+If you see `npm WARN EBADENGINE` (e.g. Node 18 on the VM), upgrade Node to 22+ before running scans.
 
 ### "command not found: semgrep"
 ```bash
@@ -207,4 +221,4 @@ If you find a security vulnerability, please:
 
 ---
 
-*Last updated: February 2025*
+*Last updated: February 2026*

@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "security-researcher",
   description: "Security audits, vulnerability analysis, code review for security issues",
   llm: {
-    primary: { provider: "default", model: "anthropic/claude-opus-4.6" },
+    primary: { provider: "default", model: "openai/gpt-5.2-codex" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
