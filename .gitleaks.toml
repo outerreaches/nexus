@@ -1,0 +1,36 @@
+# Gitleaks configuration for detecting secrets
+# Version: 8.18.2
+
+[prerun]
+# commands to run before gitleaks scan
+# semgrep install-hook
+
+[postrun]
+# commands to run after gitleaks scan
+
+[allowlist]
+  # Global allowlist patterns (files that won't be scanned)
+  files = [
+    "(?i)(node_modules|dist|coverage|\\.git)",
+    "(?i)\\.gitleaks\\.toml",
+    "(?i)\\.env\\.example",
+    "(?i)package-lock\\.json"
+  ]
+
+  # Global allowlist regex patterns (lines that won't trigger alerts)
+  regexes = [
+    "(?i)https?://[\\w\\d\\-._~:/?#\\[\\]@!$&'()*+,;=%]+",  # URLs
+    "(?i)-----BEGIN (RSA |EC )?PRIVATE KEY-----"  # Already in rules
+  ]
+
+# Note: Gitleaks uses predefined rules for common secret types:
+# - AWS Access Keys
+# - GitHub Tokens
+# - Slack Tokens
+# - Stripe API Keys
+# - Private Keys
+# - JWT Tokens
+# - Database Connection Strings
+# - And many more...
+
+# Additional custom rules can be added here if needed

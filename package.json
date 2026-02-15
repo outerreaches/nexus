@@ -14,7 +14,15 @@
     "dev": "tsx src/index.ts",
     "build": "tsup",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "security:audit": "npm audit --audit-level=high",
+    "security:audit:fix": "npm audit fix",
+    "security:deps": "npm audit --audit-level=moderate",
+    "security:semgrep": "docker run --rm -v \"$(pwd):/src\" returntocorp/semgrep semgrep --config=auto",
+    "security:gitleaks": "docker run --rm -v \"$(pwd):/repo\" zricethezav/gitleaks:latest detect --source-dir=/repo --no-git",
+    "security:all": "npm run typecheck && npm run lint && npm run security:audit"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -33,6 +41,10 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.7",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-security": "^1.7.1",
     "tsup": "^8.3.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"

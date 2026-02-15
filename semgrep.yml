@@ -1,0 +1,87 @@
+rules:
+  # TypeScript/JavaScript rules
+  - id: typescript.security
+    pattern-either:
+      - pattern: |
+          exec($CMD)
+      - pattern: |
+          eval($CODE)
+      - pattern: |
+          $REQ = require('child_process').exec($CMD)
+      - pattern: |
+        new Function($CODE)
+    message: Potential code injection vulnerability detected
+    severity: ERROR
+    languages:
+      - typescript
+      - javascript
+    metadata:
+      cwe: "CWE-94: Code Injection"
+      owasp: "A1: Injection"
+
+  # Hardcoded secrets detection
+  - id: typescript.hardcoded-secrets
+    pattern-either:
+      - pattern: |
+          $VAR = 'sk_live_...'
+      - pattern: |
+          $VAR = 'ghp_...'
+      - pattern: |
+          password = '...'
+      - pattern: |
+          api_key = '...'
+    message: Potential hardcoded secret detected
+    severity: WARNING
+    languages:
+      - typescript
+      - javascript
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  # SQL injection prevention
+  - id: typescript.sql-injection
+    pattern-either:
+      - pattern: |
+          db.exec(`SELECT * FROM $TABLE WHERE ...`)
+      - pattern: |
+          $DB.query('SELECT * FROM ' + $INPUT)
+    message: Potential SQL injection vulnerability
+    severity: ERROR
+    languages:
+      - typescript
+      - javascript
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A1: Injection"
+
+  # Path traversal
+  - id: typescript.path-traversal
+    pattern-either:
+      - pattern: |
+          fs.readFileSync(req.params.$FILE)
+      - pattern: |
+          $PATH.join($ROOT, $USER_INPUT)
+    message: Potential path traversal vulnerability
+    severity: WARNING
+    languages:
+      - typescript
+      - javascript
+    metadata:
+      cwe: "CWE-22: Improper Limitation of a Pathname"
+      owasp: "A1: Injection"
+
+  # XXE prevention
+  - id: typescript.xxe
+    pattern-either:
+      - pattern: |
+          $PARSER.dtd = '...'
+      - pattern: |
+          $PARSER.feature('externalDTD', true)
+    message: Potential XML External Entity (XXE) vulnerability
+    severity: ERROR
+    languages:
+      - typescript
+      - javascript
+    metadata:
+      cwe: "CWE-611: XML External Entity Reference"
+      owasp: "A4: XML External Entities (XXE)"

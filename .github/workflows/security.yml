@@ -1,0 +1,141 @@
+# GitHub Actions Security Scanning Workflow
+# Location: .github/workflows/security.yml
+
+name: Security Scans
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly on Sunday at 2 AM
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+jobs:
+  # 1. TypeScript Type Check
+  typecheck:
+    name: TypeScript Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+
+  # 2. ESLint Security Scan
+  lint:
+    name: ESLint Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+        env:
+          ESLINT_CACHE_STRATEGY: content
+
+  # 3. npm Audit Dependency Scan
+  audit:
+    name: npm Audit Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+      - name: Audit summary
+        if: success()
+        run: |
+          echo "✅ No high/critical vulnerabilities found"
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+
+  # 4. Semgrep SAST Scan
+  semgrep:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: semgrep/action@latest
+        with:
+          config: auto
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+  # 5. Gitleaks Secret Detection
+  gitleaks:
+    name: Gitleaks Secret Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE_URL: ${{ secrets.GITLEAKS_LICENSE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPCOMING: 'true'
+
+  # 6. Snyk Dependency Scan (optional - requires account)
+  snyk:
+    name: Snyk Dependency Scan
+    needs: typecheck
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # 7. Build Test
+  build:
+    name: Build Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+
+  # Summary
+  security-summary:
+    name: Security Scan Summary
+    needs: [lint, audit, semgrep, gitleaks, build]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Type Check: ${{ needs.typecheck.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ ESLint: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ npm Audit: ${{ needs.audit.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Semgrep: ${{ needs.semgrep.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Gitleaks: ${{ needs.gitleaks.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
