@@ -56,7 +56,7 @@ process.on("message", async (msg: ParentMessage) => {
     await mcp.init();
     const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir, mcp });
     await registry.init();
-    const processManager = new ProcessManager({ stateDir: cfg.stateDir });
+    const processManager = new ProcessManager({ stateDir: cfg.stateDir, db });
     const agentTracker = new AgentTracker({ db });
 
     // Resolve preset and filter tools

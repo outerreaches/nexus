@@ -230,6 +230,58 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_job_events_archive_archived ON job_events_archive(archived_at DESC);
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Ad-hoc process runs (one-off executions)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    -- A "process run" is an on-demand execution started by an agent/tool call
+    -- (and later, by remote node async execution). It is intentionally
+    -- separate from the scheduler's "jobs" concept.
+    CREATE TABLE IF NOT EXISTS process_runs (
+      id TEXT PRIMARY KEY,
+      backend TEXT NOT NULL DEFAULT 'local_child', -- local_child | node_async | ...
+      status TEXT NOT NULL,                       -- running | exited | stopped
+      command TEXT NOT NULL,
+      cwd TEXT NOT NULL,
+      pid INTEGER,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      exit_code INTEGER,
+      signal TEXT,
+      log_path TEXT NOT NULL,
+
+      -- Optional linkage / provenance
+      node_id TEXT,
+      node_execution_id TEXT,
+      created_by_job_id TEXT,
+      created_by_job_run_id TEXT,
+      request_channel TEXT,
+      request_channel_key TEXT,
+      request_agent_id TEXT,
+      request_preset TEXT,
+      request_session_id TEXT,
+      request_run_id TEXT,
+      request_parent_run_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+
+      -- Optional notification settings (best-effort)
+      notify_mode TEXT NOT NULL DEFAULT 'never', -- never | on_failure | on_exit
+      notify_chat_id INTEGER,                   -- telegram private-chat id (positive integer)
+      notify_preset TEXT,                       -- preset to use when notifying (e.g., "process-manager")
+      notify_attempts INTEGER NOT NULL DEFAULT 0,
+      notify_last_error TEXT,
+      notify_next_attempt_at INTEGER,
+      notified_at INTEGER,
+
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_process_runs_status_started ON process_runs(status, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_process_runs_started ON process_runs(started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_process_runs_job ON process_runs(created_by_job_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_process_runs_node ON process_runs(node_id, started_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Gateway active lease (HA mode)
     -- ───────────────────────────────────────────────────────────────────────
 
@@ -614,6 +666,54 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("ALTER TABLE data_intake_sources ADD COLUMN job_id TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_mode TEXT NOT NULL DEFAULT 'never';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_chat_id INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_preset TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_last_error TEXT;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notify_next_attempt_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE process_runs ADD COLUMN notified_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_process_runs_notify_pending ON process_runs(status, notified_at, notify_next_attempt_at);");
   } catch {
     // already exists
   }

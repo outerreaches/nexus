@@ -6,6 +6,7 @@ import { preset as intakeManager } from "./presets/intake-manager.js";
 import { preset as jobManager } from "./presets/job-manager.js";
 import { preset as mcpManager } from "./presets/mcp-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
+import { preset as processManager } from "./presets/process-manager.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as securityResearcher } from "./presets/security-researcher.js";
 import { preset as trader } from "./presets/trader.js";
@@ -63,6 +64,7 @@ export interface AgentPreset {
 
 const PRESETS: Record<string, AgentPreset> = {
   orchestrator,
+  "process-manager": processManager,
   coder,
   researcher,
   "security-researcher": securityResearcher,

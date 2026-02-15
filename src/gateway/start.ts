@@ -20,6 +20,7 @@ import { resolveRuntimePaths } from "../state/paths.js";
 import { getInitializationStatus, getInitializationErrorMessage } from "../state/onboarding.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { ProcessManager } from "../process/manager.js";
+import { startProcessNotifier } from "../process/notifier.js";
 import { startJobScheduler } from "../scheduler/job-scheduler.js";
 import { startHttpServer } from "./http.js";
 import { startTelegramBot } from "./telegram.js";
@@ -141,7 +142,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
   await registry.init();
 
-  const processManager = new ProcessManager({ stateDir: paths.stateDir });
+  const processManager = new ProcessManager({ stateDir: paths.stateDir, db });
 
   const agentTracker = new AgentTracker({ db });
 
@@ -402,6 +403,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
   // Track services (tg and scheduler may be started later if in standby mode)
   let tg: Awaited<ReturnType<typeof startTelegramBot>> = null;
   let scheduler: ReturnType<typeof startJobScheduler> = null;
+  let processNotifier: ReturnType<typeof startProcessNotifier> = null;
 
   const startServices = async () => {
     tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
@@ -414,6 +416,15 @@ export async function startGateway(params: { configPath: string; port?: number; 
         allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
       };
     }
+
+    // Process lifecycle callbacks (best-effort). Requires db + agent + telegram.
+    processNotifier = startProcessNotifier({
+      db,
+      agent,
+      processManager,
+      telegram: toolContext.telegram as any,
+      log,
+    });
 
     proactive = startProactiveHeartbeat({
       config,
@@ -444,6 +455,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
       leaseTimer = null;
     }
     releaseActiveLease();
+    processNotifier?.stop();
+    processNotifier = null;
     scheduler?.stop();
     scheduler = null;
     proactive?.stop();

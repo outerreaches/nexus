@@ -120,7 +120,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
       await registry.init();
 
-      const processManager = new ProcessManager({ stateDir: paths.stateDir });
+      const processManager = new ProcessManager({ stateDir: paths.stateDir, db });
       const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
 
       const toolContext = {
