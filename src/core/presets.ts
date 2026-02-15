@@ -7,6 +7,7 @@ import { preset as jobManager } from "./presets/job-manager.js";
 import { preset as mcpManager } from "./presets/mcp-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as researcher } from "./presets/researcher.js";
+import { preset as securityResearcher } from "./presets/security-researcher.js";
 import { preset as trader } from "./presets/trader.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ const PRESETS: Record<string, AgentPreset> = {
   orchestrator,
   coder,
   researcher,
+  "security-researcher": securityResearcher,
   trader,
   analyst,
   "credential-manager": credentialManager,
