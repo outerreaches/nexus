@@ -18,6 +18,7 @@ export const preset: AgentPreset = {
     "If `web_search` returns a rate-limit (HTTP 429), stop searching and report the limitation.",
     "If you try an alternate provider, do it once at most and count it toward the same search-call budget.",
     "Keep `web_fetch` targeted: fetch full content only for sources that materially impact conclusions.",
+    "Hard cap: no more than 8 `web_fetch` calls per run. If you hit the cap, synthesize/delegate with current evidence.",
     "If the task is too broad for the search budget, decompose into 2-4 distinct sub-questions and delegate with `spawn_agent`.",
     "Avoid duplicate or near-duplicate queries; keep a short list of queries already tried.",
     "Write a single consolidated report unless explicitly asked to split it.",
@@ -36,6 +37,9 @@ export const preset: AgentPreset = {
     "write_to_blackboard",
     "spawn_agent",
   ],
+  toolCallCaps: {
+    web_fetch: 8,
+  },
   spawnAllowlist: ["analyst", "researcher", "coder", "graphic-designer"],
   budget: { maxIterations: 30, maxToolCalls: 70 },
 };

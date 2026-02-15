@@ -109,6 +109,7 @@ process.on("message", async (msg: ParentMessage) => {
     const runner = new AgentRunner({
       llm,
       tools: workerTools,
+      toolCallCaps: preset.toolCallCaps,
       budget: cfg.budget,
       toolContext,
       onLog: log,

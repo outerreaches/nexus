@@ -275,6 +275,7 @@ export class AgentService {
       const runner = new AgentRunner({
         llm,
         tools,
+        toolCallCaps: preset?.toolCallCaps,
         budget,
         toolContext,
         onLog: onRunnerLog,

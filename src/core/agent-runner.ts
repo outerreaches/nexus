@@ -233,6 +233,8 @@ function classifyToolError(summary: string): {
       "disabled by policy",
       "not configured",
       "not available",
+      "tool call cap reached",
+      "blocked_by_cap",
       "allowlisted",
       "unsupported",
       "outside current session scope",
@@ -325,6 +327,7 @@ export class AgentRunner {
     private readonly deps: {
       llm: LLMClient;
       tools: Tool[];
+      toolCallCaps?: Record<string, number>;
       budget: AgentBudget;
       toolContext: ToolContext;
       onLog?: (line: string) => void;
@@ -337,6 +340,7 @@ export class AgentRunner {
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];
 
     let toolCallsUsed = 0;
+    const toolCallsPerName = new Map<string, number>();
     const repeatedFailures = new Map<string, number>();
     const maxSameToolFailures = 4;
 
@@ -702,6 +706,19 @@ export class AgentRunner {
               }
 
               const args = parsedArgs.args;
+              const cap = resolveToolCallCap(this.deps.toolCallCaps, batchCall.name);
+              const usedForTool = toolCallsPerName.get(batchCall.name) ?? 0;
+              if (cap !== null && usedForTool >= cap) {
+                const capResult =
+                  `ERROR: tool call cap reached for '${batchCall.name}' (${cap} per run). ` +
+                  "Stop calling this tool in this run; synthesize/delegate with current evidence.";
+                this.deps.onLog?.(
+                  `tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))} blocked_by_cap=${cap}`,
+                );
+                executions.push({ call: batchCall, args, promise: Promise.resolve(capResult) });
+                continue;
+              }
+              toolCallsPerName.set(batchCall.name, usedForTool + 1);
               this.deps.onLog?.(`tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))}`);
               const promise = tool
                 .execute(args, this.deps.toolContext)
@@ -771,6 +788,22 @@ export class AgentRunner {
         }
 
         const args = parsedArgs.args;
+        const cap = resolveToolCallCap(this.deps.toolCallCaps, call.name);
+        const usedForTool = toolCallsPerName.get(call.name) ?? 0;
+        if (cap !== null && usedForTool >= cap) {
+          const capResult =
+            `ERROR: tool call cap reached for '${call.name}' (${cap} per run). ` +
+            "Stop calling this tool in this run; synthesize/delegate with current evidence.";
+          this.deps.onLog?.(
+            `tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))} blocked_by_cap=${cap}`,
+          );
+          const abort = handleToolResult(call, args, capResult, i);
+          if (abort) {
+            return abort;
+          }
+          continue;
+        }
+        toolCallsPerName.set(call.name, usedForTool + 1);
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         let result: string;
         try {
@@ -795,4 +828,13 @@ export class AgentRunner {
       iterationsUsed: this.deps.budget.maxIterations,
     };
   }
+}
+
+function resolveToolCallCap(toolCallCaps: Record<string, number> | undefined, toolName: string): number | null {
+  if (!toolCallCaps) return null;
+  const raw = toolCallCaps[toolName];
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  const cap = Math.floor(raw);
+  if (cap < 1) return null;
+  return cap;
 }

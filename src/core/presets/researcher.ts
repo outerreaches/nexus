@@ -42,6 +42,7 @@ export const preset: AgentPreset = {
     "- Keep `web_search` usage to <= 8 total calls per task (including retries).",
     "- If you try an alternate provider, do it once at most and count it toward the same search-call budget.",
     "- Keep `web_fetch` targeted: fetch full content only for top sources you will cite; avoid broad fetch loops.",
+    "- Hard cap: no more than 8 `web_fetch` calls per run. If you hit the cap, synthesize/delegate with current evidence.",
     "- If the task is too broad for the search budget, decompose into 2-4 distinct sub-questions and delegate with `spawn_agent`.",
     "- If delegating, include a distinct `Blackboard title:` line in each sub-agent task and keep scopes non-overlapping.",
     "- After each sub-agent completes, read its blackboard result (exact title or returned blackboard entry ID) and synthesize a single final finding.",
@@ -60,6 +61,9 @@ export const preset: AgentPreset = {
     "write_to_blackboard",
     "spawn_agent",
   ],
+  toolCallCaps: {
+    web_fetch: 8,
+  },
   spawnAllowlist: ["researcher", "analyst", "coder"],
   budget: { maxIterations: 36, maxToolCalls: 80 },
   isolated: true,

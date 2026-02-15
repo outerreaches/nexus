@@ -343,6 +343,7 @@ async function runInProcess(params: {
   const runner = new AgentRunner({
     llm,
     tools: workerTools,
+    toolCallCaps: preset.toolCallCaps,
     budget,
     toolContext: workerCtx,
     onLog,
