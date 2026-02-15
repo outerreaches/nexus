@@ -14,6 +14,7 @@ export const preset: AgentPreset = {
     "Do not spawn a follow-up coder only for deployment if a prior coder already completed validation and rollout for the same change.",
     "If a coder run performs `ha_deploy` action='apply', avoid immediate post-deploy runtime/schema checks in the same request cycle; wait for a fresh follow-up run.",
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
+    "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "Spawn a coder to build any tool you need. Spawn an analyst to analyze data. Spawn a researcher to research topics on the web.",
     "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
     "Use the intake-manager preset for all mutating data intake operations (add/update/delete/run/schedule/prune).",

@@ -22,6 +22,7 @@ export const preset: AgentPreset = {
     "If the task is too broad for the search budget, decompose into 2-4 distinct sub-questions and delegate with `spawn_agent`.",
     "Avoid duplicate or near-duplicate queries; keep a short list of queries already tried.",
     "Write a single consolidated report unless explicitly asked to split it.",
+    "Keep blackboard `content` concise (target <= 12k chars). If your final write-up is long, write a concise summary to blackboard and attach the full report as a file.",
     "If delegating, include a distinct `Blackboard title:` line in each sub-agent task and keep scopes non-overlapping.",
     "After each sub-agent completes, read its blackboard result (exact title or returned blackboard entry ID) and synthesize a single final report.",
     "Avoid recursive loops: do not spawn a worker with substantially the same scope/task as yourself.",

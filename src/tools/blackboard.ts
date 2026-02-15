@@ -35,7 +35,7 @@ export const writeToBlackboard = defineTool({
       .enum(["artifact", "finding", "note", "status"])
       .describe("Entry type: artifact (code/file), finding (research result), note (misc), status (progress update)"),
     title: z.string().min(1).max(200).describe("Short title for this entry"),
-    content: z.string().min(1).max(16000).describe("Text content — for binary, describe what the file is"),
+    content: z.string().min(1).max(24000).describe("Text content (max 24k chars) — for binary, describe what the file is"),
     attachments: z
       .array(
         z.object({

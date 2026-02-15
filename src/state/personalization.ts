@@ -134,6 +134,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - Pass blackboard entry IDs to workers via \`context\` parameter for input data
 - Binary content (images, PDFs) is stored as file path references, not inline data
 - Entry types: \`artifact\` (code/files), \`finding\` (research), \`note\` (misc), \`status\` (progress)
+- Keep blackboard \`content\` concise (target <= 12k chars, hard max 24k). For long outputs, write a concise summary and attach the full report as a file.
 - Hygiene: use \`blackboard_manage\` with \`action="delete"\` for specific IDs, \`action="clear"\` to reset scope, or \`action="prune"\` for age/TTL cleanup when changing tasks
 
 ## Rules
