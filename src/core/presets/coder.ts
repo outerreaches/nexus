@@ -37,6 +37,13 @@ export const preset: AgentPreset = {
     "spawn_agent",
     "data_intake_query",
   ],
+  toolCallCaps: {
+    web_fetch: 10,
+    data_intake_query: 8,
+    read_from_blackboard: 12,
+    write_to_blackboard: 4,
+    spawn_agent: 4,
+  },
   spawnAllowlist: ["coder", "researcher", "analyst", "graphic-designer"],
   budget: { maxIterations: 40, maxToolCalls: 120 },
   isolated: true,

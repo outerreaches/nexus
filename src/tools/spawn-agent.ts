@@ -191,7 +191,6 @@ export const spawnAgent = defineTool({
     const { title: blackboardTitle, cleanedTask } = parseBlackboardTitle(args.task, preset.name);
 
     // Build worker system prompt
-    const now = new Date();
     const basePrompt = await buildPresetSystemPrompt({
       stateDir: ctx.stateDir,
       promptFiles: preset.promptFiles,
@@ -203,7 +202,7 @@ export const spawnAgent = defineTool({
       contextText,
       "",
       "## Instructions",
-      `Current date and time: ${now.toISOString()} (${now.getFullYear()}). For current events or time-sensitive queries, include the year in searches. For historical topics, use the appropriate time period.`,
+      "For time-sensitive queries, include explicit years/dates in searches. For historical topics, use the relevant time period.",
       "",
       "**File system roots:**",
       `- workspace: ${ctx.workspaceDir} (use absolute paths for file tools)`,
