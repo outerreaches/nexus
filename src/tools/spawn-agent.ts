@@ -214,6 +214,9 @@ export const spawnAgent = defineTool({
       "When writing your primary result to the blackboard, use the exact Blackboard title above.",
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
+      "Before first tool use, infer what has already been checked from task/context and avoid repeating the same URLs/queries/commands.",
+      "If a repeat check is necessary for verification, do it once and state why it is needed.",
+      "When spawning sub-agents, assign disjoint scopes and include explicit `Scope:` and `Do NOT repeat:` sections in each child task.",
       isMaxDepth
         ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
         : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
