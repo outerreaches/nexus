@@ -203,7 +203,7 @@ Edit them with:
 file_edit path="/data/nexus/CODEGUIDE.md"
 ```
 
-Prefer `file_write mode="append"` when adding standing instructions to avoid clobbering content.
+For existing files, prefer `file_edit`/`file_edit_lines`; use `file_write mode="append"` for additions and `file_write mode="overwrite"` only when explicitly replacing the entire file.
 
 ---
 

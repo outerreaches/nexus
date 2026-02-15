@@ -412,7 +412,7 @@ Edit them with:
 file_edit path="${stateDirPath}/CODEGUIDE.md"
 \`\`\`
 
-Prefer \`file_write mode="append"\` when adding standing instructions to avoid clobbering content.
+For existing files, prefer \`file_edit\`/\`file_edit_lines\`; use \`file_write mode="append"\` for additions and \`file_write mode="overwrite"\` only when explicitly replacing the entire file.
 
 ---
 
@@ -433,7 +433,8 @@ Proactive task checklist reviewed on each heartbeat tick.
 
   > **Note:** When the operator gives you new standing instructions about heartbeat behavior,
   > monitoring thresholds, or recurring checks, append them using \`file_write\` with \`mode: "append"\`
-  > and an absolute \`${stateDirPath}/HEARTBEAT.md\` path. Only edit or replace existing items if explicitly requested.
+  > and an absolute \`${stateDirPath}/HEARTBEAT.md\` path. Only replace the entire file when explicitly requested,
+  > using \`file_write\` with \`mode: "overwrite"\`.
   > This ensures instructions persist across restarts.
   > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`),
   > always use absolute paths under \`stateDir\`. Example:

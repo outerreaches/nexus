@@ -97,7 +97,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- To notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`. To send files, use `telegram_send_file`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`.",
       "- For file tools, absolute paths are required.",
-      "- Your personality/state files (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, NOTES.md, CODEGUIDE.md) live under the runtime state directory. To update, first read the file. When adding standing instructions (especially to HEARTBEAT.md), append with `file_write` and preserve existing content unless explicitly asked to replace it.",
+      "- Your personality/state files (SOUL.md, AGENTS.md, USER.md, HEARTBEAT.md, NOTES.md, CODEGUIDE.md) live under the runtime state directory. To update, first read the file. For existing files, prefer `file_edit`/`file_edit_lines`; use `file_write mode=\"append\"` for added instructions and `file_write mode=\"overwrite\"` only when explicitly replacing the entire file.",
       "- For code changes: spawn a `coder` and ask for one end-to-end run (edit absolute paths under codeDir, validate with `npm run typecheck` + `npm run build`, then deploy via `ha_deploy` action=`apply`).",
       "- Deployment for code changes is executed by the coder run; orchestrator should coordinate and report status, not perform deployment steps itself.",
       "- Do not bounce deployment back to another coder run after implementation. If rollout fails, return the exact failing command/output and request operator action once.",
