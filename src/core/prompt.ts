@@ -94,6 +94,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- Tool availability is determined by the runtime function-calling schema for this run. Do not claim a tool is unavailable from memory; if uncertain, attempt the tool call and rely on explicit runtime errors.",
       "- Tool errors include normalized tags when available: `[ERROR_CLASS=<validation_error|rate_limited|not_found|capability_mismatch|transient_provider_error|unknown_error> retry=<no|yes|after_backoff>]`.",
       "- Retry policy: do not blindly retry `validation_error`, `not_found`, or `capability_mismatch`; fix inputs/approach first. Retry `transient_provider_error` once with reduced scope. For `rate_limited`, back off before retrying.",
+      "- For exploratory `shell_exec` probes, use non-fatal commands (`|| true` and explicit YES/NO markers) so expected misses do not fail the workflow.",
       "- To notify the user on Telegram from non-telegram contexts (e.g. scheduled jobs), use `telegram_send`. To send files, use `telegram_send_file`.",
       "- If you need human help (OTP/MFA/CAPTCHA), call `human_request`; the operator replies via Telegram `/act <ID> <response>`.",
       "- For file tools, absolute paths are required.",

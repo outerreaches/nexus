@@ -235,6 +235,7 @@ function classifyToolError(summary: string): {
       "not available",
       "tool call cap reached",
       "blocked_by_cap",
+      "blocked by retry policy",
       "allowlisted",
       "unsupported",
       "outside current session scope",
@@ -292,6 +293,11 @@ export function classifyToolResultStatus(call: ToolCall, result: string): ToolRe
   };
 }
 
+function allowedIdenticalRetries(retryPolicy?: ToolRetryPolicy): number {
+  if (retryPolicy === "yes" || retryPolicy === "after_backoff") return 1;
+  return 0;
+}
+
 export function toolResultIndicatesDeployApplied(call: ToolCall, args: unknown, result: string): boolean {
   if (result.trimStart().startsWith("ERROR:")) return false;
 
@@ -342,6 +348,7 @@ export class AgentRunner {
     let toolCallsUsed = 0;
     const toolCallsPerName = new Map<string, number>();
     const repeatedFailures = new Map<string, number>();
+    const blockedToolCalls = new Map<string, string>();
     const maxSameToolFailures = 4;
 
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
@@ -551,6 +558,37 @@ export class AgentRunner {
         if (status === "error") {
           const next = (repeatedFailures.get(sig) ?? 0) + 1;
           repeatedFailures.set(sig, next);
+
+          const retryBudget = allowedIdenticalRetries(retryPolicy);
+          const maxFailuresBeforeBlock = retryBudget + 1;
+          const retriesUsed = Math.max(0, next - 1);
+          const retriesRemaining = Math.max(0, retryBudget - retriesUsed);
+
+          if (next === 1) {
+            if (retryBudget === 0) {
+              toolResultMsg.content +=
+                "\n\n[RETRY GUARD] This failure is non-retriable with identical arguments. " +
+                "Do not repeat this exact call; inspect output and change approach.";
+            } else {
+              const backoff = retryPolicy === "after_backoff" ? " after backoff" : "";
+              toolResultMsg.content +=
+                `\n\n[RETRY GUARD] One identical retry is allowed${backoff}. ` +
+                "If it fails again, this exact call will be blocked for the rest of this run.";
+            }
+          }
+
+          if (next >= maxFailuresBeforeBlock) {
+            const reason =
+              retryBudget === 0
+                ? `retry=no for ${errorClass ?? "unknown_error"}`
+                : `retry budget exhausted for ${retryPolicy ?? "unknown"} (${errorClass ?? "unknown_error"})`;
+            blockedToolCalls.set(sig, reason);
+            toolResultMsg.content +=
+              `\n\n[RETRY GUARD] Identical call is now blocked for this run (${reason}). ` +
+              "Use different arguments or a different tool.";
+          } else if (retriesRemaining === 1) {
+            toolResultMsg.content += "\n\n[RETRY GUARD] You have one identical retry remaining for this call.";
+          }
 
           // Escalating warnings before hard abort so the agent can self-correct.
           if (next >= 2 && next < maxSameToolFailures) {
@@ -788,6 +826,21 @@ export class AgentRunner {
         }
 
         const args = parsedArgs.args;
+        const callSig = toolCallSignature(call);
+        const blockedReason = blockedToolCalls.get(callSig);
+        if (blockedReason) {
+          const blockedResult =
+            `ERROR: blocked by retry policy for identical tool call. ${blockedReason} ` +
+            "Change arguments/approach before retrying.";
+          this.deps.onLog?.(
+            `tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))} blocked_by_retry_policy=true`,
+          );
+          const abort = handleToolResult(call, args, blockedResult, i);
+          if (abort) {
+            return abort;
+          }
+          continue;
+        }
         const cap = resolveToolCallCap(this.deps.toolCallCaps, call.name);
         const usedForTool = toolCallsPerName.get(call.name) ?? 0;
         if (cap !== null && usedForTool >= cap) {

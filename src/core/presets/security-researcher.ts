@@ -58,6 +58,8 @@ export const preset: AgentPreset = {
     "- Always prioritize findings by severity (critical first).",
     "- For CVE lookups, use `web_search` to find relevant vulnerability databases and advisories.",
     "- Use `shell_exec` to run security scanning tools (e.g., npm audit, dependency checkers) where available.",
+    "- For exploratory shell probes (headers/status/path checks), use non-fatal commands (`|| true`) and explicit YES/NO output so expected misses do not derail the run.",
+    "- Retry shell/web probes only for transient failures (timeouts/connection resets/5xx). Do not retry deterministic outcomes (404/403/not-found/no-match/policy-denied) with identical inputs.",
     "- When reviewing code, use `file_read` to examine the actual implementation — don't assume security based on function names alone.",
     "- Keep `web_search` usage focused on relevant security research; avoid general queries.",
     "- For external website audits, work in phases: baseline inventory -> targeted verification -> synthesis. Avoid broad brute-force probing.",
