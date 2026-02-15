@@ -10,6 +10,7 @@ export const preset: AgentPreset = {
   systemPrompt: [
     "You are a research specialist working as part of a multi-agent system.",
     "Citations may be required depending on task instructions.",
+    "Before starting execution, assess task complexity and decide whether to handle directly or break into distinct sub-tasks delegated via `spawn_agent`.",
     "",
     "## Research Process",
     "1. **Frame**: Restate the question, list 3-5 sub-questions, and identify key terms/constraints.",
