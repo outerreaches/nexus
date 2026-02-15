@@ -138,6 +138,32 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
   return `${call.name}:${hash}`;
 }
 
+const DEPLOY_HANDOFF_LINE_1 =
+  "Deploy applied. Stopping this run to avoid post-deploy tool calls on a stale process image.";
+const DEPLOY_HANDOFF_LINE_2 =
+  "Start a fresh follow-up request for runtime/schema validation or post-deploy actions.";
+
+function stripLeadingDeployHandoff(text: string): string {
+  const lines = text.split(/\r?\n/);
+  while (lines.length > 0) {
+    const line = lines[0]?.trimEnd() ?? "";
+    if (line === DEPLOY_HANDOFF_LINE_1 || line === DEPLOY_HANDOFF_LINE_2) {
+      lines.shift();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n").trimStart();
+}
+
+function summarizeItemsInline(items: string[], maxItems: number = 12): string {
+  if (items.length === 0) return "(none)";
+  const shown = items.slice(0, maxItems);
+  const suffix = items.length > maxItems ? `, … (+${items.length - maxItems} more)` : "";
+  // Keep on one line and avoid massive outputs.
+  return truncate(shown.join(", ") + suffix, 500);
+}
+
 type ToolExecutionStatus = "ok" | "error";
 type ToolErrorClass =
   | "validation_error"
@@ -350,6 +376,9 @@ export class AgentRunner {
     const repeatedFailures = new Map<string, number>();
     const blockedToolCalls = new Map<string, string>();
     const maxSameToolFailures = 4;
+    const touchedFilePaths = new Set<string>();
+    let typecheckOk = false;
+    let buildOk = false;
 
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
     const runStartedAtMs = this.deps.toolContext.nowMs();
@@ -554,6 +583,18 @@ export class AgentRunner {
         messages.push(toolResultMsg);
         newMessages.push(toolResultMsg);
 
+        if (!result.trimStart().startsWith("ERROR:") && isPlainObject(args)) {
+          if (call.name === "file_edit" || call.name === "file_edit_lines" || call.name === "file_write") {
+            const rawPath = typeof args.path === "string" ? args.path.trim() : "";
+            if (rawPath) touchedFilePaths.add(rawPath);
+          }
+          if (call.name === "shell_exec") {
+            const command = typeof args.command === "string" ? args.command.trim() : "";
+            if (/\bnpm\s+run\s+typecheck\b/.test(command)) typecheckOk = true;
+            if (/\bnpm\s+run\s+build\b/.test(command)) buildOk = true;
+          }
+        }
+
         const sig = toolCallSignature(call);
         if (status === "error") {
           const next = (repeatedFailures.get(sig) ?? 0) + 1;
@@ -665,16 +706,42 @@ export class AgentRunner {
               : false;
 
         if (shouldHandoff) {
-          const parsedSpawn = call.name === "spawn_agent" ? parseSpawnAgentResult(result) : null;
-          const workerLine = parsedSpawn?.output?.trim()?.split(/\r?\n/)[0] ?? "";
-          const outputLines = [
-            "Deploy applied. Stopping this run to avoid post-deploy tool calls on a stale process image.",
-            "Start a fresh follow-up request for runtime/schema validation or post-deploy actions.",
-          ];
-          if (workerLine) {
-            outputLines.push(`Latest worker output: ${truncate(workerLine, 220)}`);
+          const outputLines: string[] = [];
+
+          if (call.name === "spawn_agent") {
+            const parsedSpawn = parseSpawnAgentResult(result);
+            const workerOutputRaw = parsedSpawn?.output?.trim() ?? "";
+            const workerOutput = stripLeadingDeployHandoff(workerOutputRaw);
+            outputLines.push("Deploy applied by worker. Stopping this run to avoid post-deploy tool calls on a stale process image.");
+            if (workerOutput) {
+              outputLines.push("");
+              outputLines.push("Worker summary:");
+              outputLines.push(truncate(workerOutput, 4000));
+            }
+            outputLines.push("");
+            outputLines.push(DEPLOY_HANDOFF_LINE_2);
+          } else {
+            // ha_deploy applied in this run.
+            const paths = Array.from(touchedFilePaths).sort();
+            const commitMessage =
+              isPlainObject(args) && typeof args.commitMessage === "string" ? args.commitMessage.trim() : "";
+            outputLines.push(DEPLOY_HANDOFF_LINE_1);
+            outputLines.push("");
+            outputLines.push("Summary (pre-deploy):");
+            outputLines.push(`- Files modified (${paths.length}): ${summarizeItemsInline(paths)}`);
+            outputLines.push(
+              `- Validation: typecheck=${typecheckOk ? "OK" : "not run"}, build=${buildOk ? "OK" : "not run"}`,
+            );
+            outputLines.push(
+              commitMessage
+                ? `- Deploy: ha_deploy action=apply commitMessage="${truncate(commitMessage, 200)}"`
+                : "- Deploy: ha_deploy action=apply",
+            );
+            outputLines.push("");
+            outputLines.push(DEPLOY_HANDOFF_LINE_2);
           }
-          const handoffText = outputLines.join("\n");
+
+          const handoffText = outputLines.join("\n").trim();
 
           for (let j = callIndex + 1; j < toolCalls.length; j++) {
             const pending = toolCalls[j];
