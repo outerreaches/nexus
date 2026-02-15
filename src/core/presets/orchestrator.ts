@@ -22,9 +22,10 @@ export const preset: AgentPreset = {
     "Use the mcp-manager preset for MCP server/profile setup and all MCP-backed delegation runs.",
     "Use mcp_overview to inspect MCP topology (servers/profiles/health) before delegating.",
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
+    "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",
     "Do not set overly tight spawn budgets by default; use preset defaults unless the user explicitly requests stricter limits.",
-    "Researcher/analyst workers should not spawn further agents; keep subtasking at the orchestrator.",
+    "Researcher/analyst workers may spawn sub-agents for broad tasks when scopes are distinct and non-overlapping.",
   ].join("\n"),
   tools: [
     // State files (HEARTBEAT.md, NOTES.md, etc.) - use absolute stateDir paths

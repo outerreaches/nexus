@@ -69,6 +69,8 @@ export const spawnAgent = defineTool({
       .describe("Optional model routing mode for this worker (`local_only` forces local provider routing)"),
   }),
   execute: async (args, ctx) => {
+    const spawnStartedAtMs = ctx.nowMs();
+
     // Resolve preset
     const preset = getPreset(args.preset);
     if (!preset) {
@@ -78,6 +80,14 @@ export const spawnAgent = defineTool({
     if (args.preset === "orchestrator") {
       return "ERROR: cannot spawn another orchestrator";
     }
+
+    const parentPresetName = ctx.request?.preset;
+    const parentPreset = parentPresetName ? getPreset(parentPresetName) : undefined;
+    const spawnAllowlist = parentPreset?.spawnAllowlist;
+    if (Array.isArray(spawnAllowlist) && spawnAllowlist.length > 0 && !spawnAllowlist.includes(args.preset)) {
+      return `ERROR: preset "${parentPresetName}" cannot spawn "${args.preset}". Allowed: ${spawnAllowlist.join(", ")}`;
+    }
+
     const workerModelMode: ModelRoutingMode = args.modelMode ?? ctx.request?.modelMode ?? ctx.modelMode ?? "default";
 
     // Get dependencies from context
@@ -258,7 +268,7 @@ export const spawnAgent = defineTool({
       });
     }
 
-    return workerResult;
+    return attachBlackboardReference(ctx, workerResult, blackboardTitle, spawnStartedAtMs);
   },
 });
 
@@ -643,7 +653,9 @@ function clampRatio(value: number, fallback: number): number {
 }
 
 function resolveMinOverrideBudgetRatio(): number {
-  const fallback = 0.75;
+  // Keep a floor so workers are not starved by tiny overrides, but allow
+  // tighter scoped runs than the previous 75% default.
+  const fallback = 0.5;
   const configured = envFloat("NEXUS_SPAWN_BUDGET_MIN_RATIO");
   if (configured === null) return fallback;
   return clampRatio(configured, fallback);
@@ -772,4 +784,54 @@ function attachBlackboardTitle(resultJson: string, blackboardTitle: string): str
     // ignore parse errors
   }
   return resultJson;
+}
+
+function attachBlackboardReference(
+  ctx: ToolContext,
+  resultJson: string,
+  blackboardTitle: string,
+  startedAtMs: number,
+): string {
+  let parsed: Record<string, unknown>;
+  try {
+    const candidate = JSON.parse(resultJson) as unknown;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return resultJson;
+    }
+    parsed = candidate as Record<string, unknown>;
+  } catch {
+    return resultJson;
+  }
+
+  if (typeof parsed.blackboardTitle !== "string" || parsed.blackboardTitle.trim().length === 0) {
+    parsed.blackboardTitle = blackboardTitle;
+  }
+
+  const db = ctx.db as NexusDatabase | undefined;
+  if (!db) return JSON.stringify(parsed, null, 2);
+
+  const scope = ctx.request?.sessionId ?? "global";
+  const nowMs = ctx.nowMs();
+  const row = db.db
+    .prepare(
+      `SELECT id, type, created_at
+       FROM blackboard
+       WHERE session_scope = ?
+         AND title = ?
+         AND created_at >= ?
+         AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(scope, blackboardTitle, startedAtMs, nowMs) as
+    | { id: string; type: string; created_at: number }
+    | undefined;
+
+  if (row?.id) {
+    parsed.blackboardEntryId = row.id;
+    parsed.blackboardEntryType = row.type;
+    parsed.blackboardEntryCreatedAt = Number(row.created_at);
+  }
+
+  return JSON.stringify(parsed, null, 2);
 }

@@ -17,6 +17,7 @@ export const preset: AgentPreset = {
     "Mutating git commands (add, commit, push, reset, etc.) on the code repo are blocked in shell_exec. The host daemon handles git + Docker operations. You may use git freely on other repos in the workspace.",
     "Never use `gateway_restart` as deployment for code changes.",
     "If custom tools are added/updated under state/tools, you may run `tools_reload` to refresh the live registry.",
+    "If delegating via `spawn_agent`, only use coder/researcher/analyst/graphic-designer with explicit `Blackboard title:` lines, then synthesize child outputs into your final response.",
   ].join("\n"),
   promptFiles: ["CODEGUIDE.md"],
   tools: [
@@ -35,6 +36,7 @@ export const preset: AgentPreset = {
     "spawn_agent",
     "data_intake_query",
   ],
+  spawnAllowlist: ["coder", "researcher", "analyst", "graphic-designer"],
   budget: { maxIterations: 20, maxToolCalls: 50 },
   isolated: true,
 };

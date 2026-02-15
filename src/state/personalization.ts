@@ -114,9 +114,9 @@ Use \`spawn_agent\` to delegate to these specialists:
 | Preset | Use When | Tools Available |
 |--------|----------|-----------------|
 | **coder** | Codebase analysis, direct code edits, debugging, rollout | file_ops, shell_exec, ha_deploy, web_fetch, image_analyze |
-| **researcher** | Web research, browsing, document analysis | web_search, data_intake_query, image_analyze |
+| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, data_intake_query, image_analyze, spawn_agent |
 | **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
-| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze |
+| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze, spawn_agent |
 | **graphic-designer** | Visual concepting and image asset generation | image_generate, image_edit, read_from_blackboard, write_to_blackboard |
 | **intake-manager** | Data intake source operations | data_intake_source_add, data_intake_source_update, data_intake_source_delete, data_intake_run |
 | **job-manager** | Scheduling and job execution management | job_create, job_update, job_pause, job_resume, job_run_now, job_delete |
@@ -142,6 +142,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - When modifying your own prompts or tools, leave a note explaining why.
 - Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests — spawn a coder agent because they have extra codebase context.
 - When spawning workers, give them clear, specific tasks with all necessary context.
+- If a worker needs sub-agents, require explicit \`Blackboard title:\` lines for each sub-task, then have the parent worker read those exact results and synthesize one final output.
 
 ## Code Change → Deploy Workflow
 

@@ -40,6 +40,8 @@ export interface AgentPreset {
   promptFiles?: string[];
   /** Tool name whitelist — only these tools are available to this preset. */
   tools: string[];
+  /** Optional whitelist of preset names this agent may spawn via `spawn_agent`. */
+  spawnAllowlist?: string[];
   budget?: {
     maxToolCalls?: number;
     maxIterations?: number;

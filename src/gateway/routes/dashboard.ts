@@ -68,7 +68,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         agentWindowMinutes,
         visibleNodeWindowSeconds,
         processes,
-        agents: { active: agents.active, recent: visibleAgents },
+        agents: { active: agents.active, recent: agents.recent },
         agentGraph,
         jobs,
         runningJobRuns,

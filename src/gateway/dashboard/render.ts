@@ -146,7 +146,7 @@ export function renderDashboard(params: {
     <main>
       <section>
         <div class="section-header">
-          <h2>Agents (activity ${params.agentWindowMinutes}m, visible ${params.visibleNodeWindowSeconds}s)</h2>
+          <h2>Agents (activity ${params.agentWindowMinutes}m)</h2>
           <div class="tab-bar">
             <button class="tab-btn active" data-tab="agents-view">Agents</button>
             <button class="tab-btn" data-tab="docker-logs">Logs</button>
@@ -212,7 +212,7 @@ export function renderDashboard(params: {
             <div id="table-active">${renderAgentTable(params.agents.active)}</div>
           </div>
           <div>
-            <h3>Visible (${params.visibleNodeWindowSeconds}s)</h3>
+            <h3>Recent Activity (${params.agentWindowMinutes}m)</h3>
             <div id="table-recent" class="scroll-5">${renderAgentTable(params.agents.recent)}</div>
           </div>
         </div>
