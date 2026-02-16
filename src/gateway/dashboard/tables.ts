@@ -200,6 +200,72 @@ function parseStringArray(raw: string): string[] {
   }
 }
 
+function renderNodeStatusAction(params: {
+  nodeId: string;
+  nextStatus: "pending" | "approved" | "blocked";
+  label: string;
+  danger?: boolean;
+  confirmMessage?: string;
+}): string {
+  const confirmAttr = params.confirmMessage
+    ? ` onsubmit="return confirm('${escapeHtml(params.confirmMessage)}')"`
+    : "";
+  return `<form method="post" action="/dashboard/nodes/status"${confirmAttr}>
+    <input type="hidden" name="id" value="${escapeHtml(params.nodeId)}" />
+    <input type="hidden" name="status" value="${params.nextStatus}" />
+    <button type="submit" class="graph-btn${params.danger ? " btn-danger" : ""}">${escapeHtml(params.label)}</button>
+  </form>`;
+}
+
+function renderNodeActions(row: NodeRow): string {
+  const nodeId = row.id;
+  const blockAction = renderNodeStatusAction({
+    nodeId,
+    nextStatus: "blocked",
+    label: "Block",
+    danger: true,
+    confirmMessage: `Block node ${nodeId}?`,
+  });
+  switch (row.status) {
+    case "pending":
+      return `${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "approved",
+        label: "Approve",
+      })}${blockAction}`;
+    case "approved":
+      return `<button type="button" class="graph-btn" disabled>Approved</button>${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "pending",
+        label: "Set Pending",
+      })}`;
+    case "blocked":
+      return `${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "approved",
+        label: "Approve",
+      })}${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "pending",
+        label: "Set Pending",
+      })}`;
+    case "online":
+      return `<button type="button" class="graph-btn" disabled>Online</button>${blockAction}`;
+    case "offline":
+      return `<button type="button" class="graph-btn" disabled>Offline</button>${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "pending",
+        label: "Set Pending",
+      })}`;
+    default:
+      return `${renderNodeStatusAction({
+        nodeId,
+        nextStatus: "approved",
+        label: "Approve",
+      })}${blockAction}`;
+  }
+}
+
 export function renderNodesTable(rows: NodeRow[]): string {
   if (rows.length === 0) return `<div class="no-data">No nodes registered.</div>`;
   return `<table>
@@ -225,8 +291,6 @@ export function renderNodesTable(rows: NodeRow[]): string {
         const capabilities = parseStringArray(row.capabilities_json);
         const tags = parseStringArray(row.tags_json);
         const statusClass = escapeClass(row.status);
-        const approveDisabled = row.status === "approved" || row.status === "online";
-        const blockDisabled = row.status === "blocked";
         return `<tr>
             <td><span class="badge status-${statusClass}">${escapeHtml(row.status)}</span></td>
             <td>${escapeHtml(row.id)}</td>
@@ -241,16 +305,7 @@ export function renderNodesTable(rows: NodeRow[]): string {
             <td>${escapeHtml(tags.length > 0 ? truncate(tags.join(", "), 64) : "-")}</td>
             <td>
               <div class="inline-actions">
-                <form method="post" action="/dashboard/nodes/status">
-                  <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
-                  <input type="hidden" name="status" value="approved" />
-                  <button type="submit" class="graph-btn" ${approveDisabled ? "disabled" : ""}>Approve</button>
-                </form>
-                <form method="post" action="/dashboard/nodes/status" onsubmit="return confirm('Block node ${escapeHtml(row.id)}?')">
-                  <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
-                  <input type="hidden" name="status" value="blocked" />
-                  <button type="submit" class="graph-btn btn-danger" ${blockDisabled ? "disabled" : ""}>Block</button>
-                </form>
+                ${renderNodeActions(row)}
               </div>
             </td>
           </tr>`;

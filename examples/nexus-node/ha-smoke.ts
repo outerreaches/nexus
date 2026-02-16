@@ -380,7 +380,8 @@ async function waitForNodeOnline(params: {
   timeoutMs: number;
   autoApprove: boolean;
 }): Promise<void> {
-  let approvalAttempted = false;
+  let lastApprovalAttemptAt = 0;
+  let approvalAttempts = 0;
   await waitForCondition({
     timeoutMs: params.timeoutMs,
     intervalMs: 700,
@@ -407,14 +408,28 @@ async function waitForNodeOnline(params: {
       }
 
       const pendingDetected = nodeApi?.status === "pending" || nodeDb?.status === "pending";
-      if (params.autoApprove && pendingDetected && !approvalAttempted) {
-        approvalAttempted = true;
+      if (params.autoApprove && pendingDetected) {
+        const now = Date.now();
+        // Retry approvals periodically; HAProxy/API routes and sqlite writes can be transiently flaky.
+        if (now - lastApprovalAttemptAt < 1_500) return false;
+        lastApprovalAttemptAt = now;
+        approvalAttempts += 1;
+        let approved = false;
         try {
           await approveNode(params.apiBaseUrl, params.nodeId);
+          approved = true;
         } catch {
           // HAProxy topology can make /api/nodes status updates flaky;
           // fall back to direct DB update in shared state.
-          approveNodeInDb(params.gatewayDbPath, params.nodeId);
+          approved = approveNodeInDb(params.gatewayDbPath, params.nodeId);
+        }
+        if (!approved) {
+          const afterApi = await getNodeSnapshot(params.apiBaseUrl, params.nodeId);
+          const afterDb = readNodeSnapshotFromDb(params.gatewayDbPath, params.nodeId);
+          approved = afterApi?.status === "approved" || afterApi?.status === "online" || afterDb?.status === "approved" || afterDb?.status === "online";
+        }
+        if (!approved && approvalAttempts % 5 === 0) {
+          console.log(`[ha-smoke] node still pending after ${approvalAttempts} approval attempts id=${params.nodeId}`);
         }
         return false;
       }

@@ -242,6 +242,7 @@ export function renderDashboard(params: {
 
       <section>
         <h2>Execution Nodes</h2>
+        <div class="meta">Pending nodes need approval. Approved nodes wait for reconnect; use "Set Pending" to re-run pairing.</div>
         <div class="scroll-12">${renderNodesTable(params.nodes)}</div>
       </section>
 

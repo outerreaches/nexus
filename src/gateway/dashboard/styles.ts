@@ -554,6 +554,16 @@ export function dashboardStyles(): string {
         background: rgba(0, 255, 65, 0.1);
         border-color: var(--text);
       }
+      .graph-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        border-color: var(--line);
+        box-shadow: none;
+      }
+      .graph-btn:disabled:hover {
+        border-color: var(--line);
+        box-shadow: none;
+      }
       .refresh-indicator {
         position: absolute;
         bottom: 12px;
