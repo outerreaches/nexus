@@ -74,7 +74,7 @@ What it validates:
 - durable outbox replay: unacked terminal `process.update` is re-delivered after reconnect and acked via `process.ack`
 - gateway delivery persistence: `process.update`/`log.append` persisted into gateway state + `process_runs`
 - notifier duplicate suppression: two notifier loops share one DB and emit a single summary callback
-- HA active/standby smoke: mode transitions, readiness gating, and `/nx/nodes` standby rejection behavior
+- HA active/standby smoke: mode transitions, readiness gating, `/nx/nodes` standby rejection behavior, and replay dedupe across failover
 
 ## Pairing flow
 
@@ -107,6 +107,8 @@ docker run --rm \
   -v nexus_node_state:/data/nexus-node \
   nexus-reference-node
 ```
+
+The container reads the gateway endpoint from `NEXUS_NODE_GATEWAY_URL`.
 
 For a compose template, see `examples/nexus-node/compose.example.yml`.
 

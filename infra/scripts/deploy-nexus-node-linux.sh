@@ -115,6 +115,7 @@ services:
       context: $CODE_DIR
       dockerfile: examples/nexus-node/Dockerfile
     container_name: nexus-reference-node
+    command: ["sh", "-lc", "npm run node:reference -- --gateway \"\$NEXUS_NODE_GATEWAY_URL\""]
     environment:
       NEXUS_NODE_GATEWAY_URL: \${NEXUS_NODE_GATEWAY_URL}
       NEXUS_NODE_ID: \${NEXUS_NODE_ID:-$DEFAULT_NODE_ID}

@@ -12,5 +12,5 @@ COPY examples/nexus-node ./examples/nexus-node
 ENV NEXUS_NODE_STATE_DIR=/data/nexus-node
 VOLUME ["/data/nexus-node"]
 
-# Default points to a gateway service name on a Docker network.
-CMD ["npm", "run", "node:reference", "--", "--gateway", "ws://gateway:18789/nx/nodes"]
+# Gateway URL is configured via NEXUS_NODE_GATEWAY_URL (or reference-node default).
+CMD ["npm", "run", "node:reference"]
