@@ -574,7 +574,7 @@ export function renderDashboard(params: {
           "",
         ];
         if (!nodeAuditState.events.length) {
-          nodeAuditViewer.innerHTML = escapeLogHtml(header.concat(["No audit events found for current query."]).join("\n"));
+          nodeAuditViewer.innerHTML = escapeLogHtml(header.concat(["No audit events found for current query."]).join("\\n"));
           updateNodeAuditOlderButton();
           return;
         }
@@ -592,10 +592,10 @@ export function renderDashboard(params: {
               "actor=" + String(row.actor ?? "-"),
               "tool_name=" + String(row.toolName ?? "-"),
               "details=" + detailsJson,
-            ].join("\n");
+            ].join("\\n");
           })
-          .join("\n\n----------------------------------------\n\n");
-        nodeAuditViewer.innerHTML = escapeLogHtml(header.join("\n") + body);
+          .join("\\n\\n----------------------------------------\\n\\n");
+        nodeAuditViewer.innerHTML = escapeLogHtml(header.join("\\n") + body);
         updateNodeAuditOlderButton();
       };
 
@@ -634,7 +634,7 @@ export function renderDashboard(params: {
           if (!res.ok) {
             const code = payload?.code ? " code=" + String(payload.code) : "";
             nodeAuditViewer.innerHTML = escapeLogHtml(
-              "ERROR: " + String(payload?.error ?? res.status) + code + "\nnode=" + nodeId,
+              "ERROR: " + String(payload?.error ?? res.status) + code + "\\nnode=" + nodeId,
             );
             return;
           }

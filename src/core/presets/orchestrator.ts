@@ -56,6 +56,12 @@ export const preset: AgentPreset = {
     "node_set_policy",
     "node_symbols_list",
     "node_audit_query",
+    "node_system_run",
+    "node_system_which",
+    "node_process_start",
+    "node_process_status",
+    "node_process_logs",
+    "node_process_stop",
     // Memory
     "memory_store",
     "memory_recall",

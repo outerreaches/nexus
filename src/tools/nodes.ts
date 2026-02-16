@@ -35,6 +35,55 @@ const nodeAuditQueryRoutingTool: Tool = {
   execute: async () => "ERROR: node_audit_query should be routed via node transport.",
 };
 
+const nodeSystemRunRoutingTool: Tool = {
+  name: "shell_exec",
+  description: "Internal routing shim for system.run dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_system_run should be routed via node transport.",
+};
+
+const nodeSystemWhichRoutingTool: Tool = {
+  name: "system.which",
+  description: "Internal routing shim for system.which dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_system_which should be routed via node transport.",
+};
+
+const nodeProcessStartRoutingTool: Tool = {
+  name: "process_start",
+  description: "Internal routing shim for process.start dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_process_start should be routed via node transport.",
+};
+
+const nodeProcessStatusRoutingTool: Tool = {
+  name: "process_status",
+  description: "Internal routing shim for process.status dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_process_status should be routed via node transport.",
+};
+
+const nodeProcessLogsRoutingTool: Tool = {
+  name: "process_logs",
+  description: "Internal routing shim for process.logs dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_process_logs should be routed via node transport.",
+};
+
+const nodeProcessStopRoutingTool: Tool = {
+  name: "process_stop",
+  description: "Internal routing shim for process.cancel dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_process_stop should be routed via node transport.",
+};
+
+const remoteSecuritySchema = z
+  .object({
+    requireNexusBackend: z.boolean().optional(),
+    requireHermesMode: z.boolean().optional(),
+  })
+  .optional();
+
 export const nodeList = defineTool({
   name: "node_list",
   description: "List registered execution nodes with backend, status, capabilities, and firewall mode.",
@@ -225,6 +274,9 @@ export const nodeSymbolsList = defineTool({
           2,
         );
       }
+      if (message.includes("does not advertise tool capability symbols.list")) {
+        return `ERROR: ${message} (hint: restart the node with symbols.list in NEXUS_NODE_CAPS, or use preferCache=true if catalog metadata was previously cached)`;
+      }
       return `ERROR: ${message}`;
     }
   },
@@ -262,6 +314,228 @@ export const nodeAuditQuery = defineTool({
           ...(args.processId ? { processId: args.processId } : {}),
           ...(args.firewallSession ? { firewallSession: args.firewallSession } : {}),
           ...(args.actor ? { actor: args.actor } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeSystemRun = defineTool({
+  name: "node_system_run",
+  description:
+    "Run an allowlisted command on a specific Nexus node via protocol method system.run (tool.execute).",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    command: z.string().min(1).max(4000),
+    timeoutMs: z.number().int().positive().max(300_000).default(60_000),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support system.run`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeSystemRunRoutingTool,
+        {
+          command: args.command,
+          timeoutMs: args.timeoutMs,
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeSystemWhich = defineTool({
+  name: "node_system_which",
+  description: "Check whether a command exists on a specific Nexus node via system.which.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    command: z.string().min(1).max(256),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support system.which`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeSystemWhichRoutingTool,
+        { command: args.command },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeProcessStart = defineTool({
+  name: "node_process_start",
+  description:
+    "Start a process on a specific Nexus node via process.start and return its remote process id.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    command: z.string().min(1).max(4000),
+    cwd: z.string().max(2000).optional(),
+    timeoutMs: z.number().int().positive().max(300_000).optional(),
+    security: remoteSecuritySchema,
+    notify: z
+      .object({
+        mode: z.enum(["never", "on_failure", "on_exit"]).optional(),
+        chatId: z.number().int().positive().optional(),
+        preset: z.string().min(1).max(64).optional(),
+      })
+      .optional(),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support process.start`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeProcessStartRoutingTool,
+        {
+          command: args.command,
+          ...(args.cwd ? { cwd: args.cwd } : {}),
+          ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}),
+          ...(args.notify ? { notify: args.notify } : {}),
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeProcessStatus = defineTool({
+  name: "node_process_status",
+  description: "Get remote process status from a specific Nexus node via process.status.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    processId: z.string().min(1).max(128),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support process.status`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeProcessStatusRoutingTool,
+        { id: args.processId },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeProcessLogs = defineTool({
+  name: "node_process_logs",
+  description: "Fetch remote process logs from a specific Nexus node via process.logs.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    processId: z.string().min(1).max(128),
+    maxChars: z.number().int().min(200).max(50_000).default(8_000),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support process.logs`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeProcessLogsRoutingTool,
+        {
+          id: args.processId,
+          maxChars: args.maxChars,
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeProcessStop = defineTool({
+  name: "node_process_stop",
+  description: "Stop a remote process on a specific Nexus node via process.cancel.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    processId: z.string().min(1).max(128),
+    signal: z.enum(["SIGTERM", "SIGINT", "SIGKILL"]).default("SIGTERM"),
+    killAfterMs: z.number().int().min(0).max(60_000).default(5_000),
+    reason: z.string().min(1).max(200).optional(),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support process.cancel`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeProcessStopRoutingTool,
+        {
+          id: args.processId,
+          signal: args.signal,
+          killAfterMs: args.killAfterMs,
+          ...(args.reason ? { reason: args.reason } : {}),
         },
         {
           ...ctx,

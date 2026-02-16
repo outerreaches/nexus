@@ -6,7 +6,21 @@ import { queryData } from "./query-data.js";
 import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
 import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
-import { nodeAuditQuery, nodeDelete, nodeGet, nodeList, nodeSetPolicy, nodeSetStatus, nodeSymbolsList } from "./nodes.js";
+import {
+  nodeAuditQuery,
+  nodeDelete,
+  nodeGet,
+  nodeList,
+  nodeProcessLogs,
+  nodeProcessStart,
+  nodeProcessStatus,
+  nodeProcessStop,
+  nodeSetPolicy,
+  nodeSetStatus,
+  nodeSymbolsList,
+  nodeSystemRun,
+  nodeSystemWhich,
+} from "./nodes.js";
 import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
 import { imageAnalyze } from "./image-analyze.js";
@@ -84,6 +98,12 @@ export function getBuiltInTools(): Tool[] {
     nodeSetPolicy,
     nodeSymbolsList,
     nodeAuditQuery,
+    nodeSystemRun,
+    nodeSystemWhich,
+    nodeProcessStart,
+    nodeProcessStatus,
+    nodeProcessLogs,
+    nodeProcessStop,
     browserTool,
     queryData,
     toolsReload,
