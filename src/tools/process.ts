@@ -15,6 +15,18 @@ export const processStart = defineTool({
   parameters: z.object({
     command: z.string().min(1).max(4000),
     cwd: z.string().max(2000).optional().describe("Working directory (defaults to stateDir)"),
+    security: z
+      .object({
+        requireNexusBackend: z
+          .boolean()
+          .optional()
+          .describe("Require routing to a Nexus backend node; fail if unmet."),
+        requireHermesMode: z
+          .boolean()
+          .optional()
+          .describe("Require routing to a Nexus node advertising hermes.mode.hermes; fail if unmet."),
+      })
+      .optional(),
     notify: z
       .object({
         mode: z.enum(["never", "on_failure", "on_exit"]).default("on_failure"),

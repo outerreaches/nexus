@@ -29,6 +29,11 @@ function asNumber(value: unknown): number | null {
   return value;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value !== "boolean") return null;
+  return value;
+}
+
 function safeFileName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]+/g, "_");
 }
@@ -69,6 +74,42 @@ function normalizeRouting(payload: Record<string, unknown>): Record<string, unkn
     channel: asString(payload.channel) ?? null,
     channelKey: asString(payload.channelKey) ?? null,
     firewallSession: asString(payload.firewallSession) ?? null,
+  };
+}
+
+function sanitizeRoutingForMetadata(routing: Record<string, unknown>): Record<string, unknown> {
+  return {
+    runId: asString(routing.runId),
+    parentRunId: asString(routing.parentRunId),
+    sessionId: asString(routing.sessionId),
+    channel: asString(routing.channel),
+    channelKey: asString(routing.channelKey),
+    firewallSession: asString(routing.firewallSession),
+    firewallMode: asString(routing.firewallMode),
+  };
+}
+
+function sanitizeHermesMetadata(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const hermes = asObject(payload.hermes);
+  if (Object.keys(hermes).length === 0) return null;
+  const referencesRaw = Array.isArray(hermes.references) ? hermes.references : [];
+  const references = referencesRaw
+    .map((item) => {
+      const row = asObject(item);
+      const refId = asString(row.refId);
+      const sourceType = asString(row.sourceType);
+      if (!refId || !sourceType) return null;
+      return {
+        refId,
+        sourceType,
+        title: asString(row.title),
+      };
+    })
+    .filter((item): item is { refId: string; sourceType: string; title: string | null } => item !== null);
+  return {
+    mode: asString(hermes.mode),
+    sanitized: asBoolean(hermes.sanitized) === true,
+    references,
   };
 }
 
@@ -233,9 +274,10 @@ export function createNodeProcessDeliveryHandler(deps: {
         deliveryId,
         ts: asNumber(ctx.payload.ts) ?? ctx.receivedAt,
       },
-      routing,
-      payload: ctx.payload,
+      routing: sanitizeRoutingForMetadata(routing),
     };
+    const hermesMetadata = sanitizeHermesMetadata(ctx.payload);
+    if (hermesMetadata) metadata.hermes = hermesMetadata;
     const notify = extractNotifyConfig(ctx.payload, routing);
     const logPath = resolveLogPath(ctx.nodeId, processId);
 

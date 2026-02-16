@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
 
@@ -39,6 +40,29 @@ export type PersistedFirewallSessionRecord = {
   metadata: Record<string, unknown> | null;
 };
 
+export type PersistedAuditEventRecord = {
+  eventId: string;
+  createdAt: number;
+  type: string;
+  processId: string | null;
+  firewallSession: string | null;
+  actor: string | null;
+  toolName: string | null;
+  details: Record<string, unknown> | null;
+};
+
+export type PersistedReferenceRecord = {
+  refId: string;
+  sourceType: string;
+  processId: string | null;
+  toolName: string | null;
+  title: string | null;
+  safeSummary: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 type PersistedProcessRow = {
   process_id: string;
   status: string;
@@ -70,6 +94,29 @@ type PersistedFirewallSessionRow = {
   last_used_at: number;
   expires_at: number;
   metadata_json: string | null;
+};
+
+type PersistedAuditEventRow = {
+  event_id: string;
+  created_at: number;
+  type: string;
+  process_id: string | null;
+  firewall_session: string | null;
+  actor: string | null;
+  tool_name: string | null;
+  details_json: string | null;
+};
+
+type PersistedReferenceRow = {
+  ref_id: string;
+  source_type: string;
+  process_id: string | null;
+  tool_name: string | null;
+  title: string | null;
+  safe_summary: string;
+  metadata_json: string | null;
+  created_at: number;
+  updated_at: number;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -159,6 +206,39 @@ export class ReferenceNodeStateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_node_firewall_sessions_expires
         ON node_firewall_sessions(expires_at ASC);
+
+      CREATE TABLE IF NOT EXISTS node_audit_events (
+        event_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        process_id TEXT,
+        firewall_session TEXT,
+        actor TEXT,
+        tool_name TEXT,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_audit_events_created
+        ON node_audit_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_node_audit_events_type_created
+        ON node_audit_events(type, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_node_audit_events_process_created
+        ON node_audit_events(process_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS node_references (
+        ref_id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        process_id TEXT,
+        tool_name TEXT,
+        title TEXT,
+        safe_summary TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_references_process_created
+        ON node_references(process_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_node_references_tool_created
+        ON node_references(tool_name, created_at DESC);
     `);
     return new ReferenceNodeStateStore(db, dbPath);
   }
@@ -418,6 +498,181 @@ export class ReferenceNodeStateStore {
       .prepare("DELETE FROM node_firewall_sessions WHERE expires_at <= ?")
       .run(nowMs);
     return Number(result.changes ?? 0);
+  }
+
+  appendAuditEvent(params: {
+    eventId?: string;
+    createdAt: number;
+    type: string;
+    processId?: string | null;
+    firewallSession?: string | null;
+    actor?: string | null;
+    toolName?: string | null;
+    details?: Record<string, unknown> | null;
+  }): PersistedAuditEventRecord {
+    const eventId = params.eventId?.trim() || `aud_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const type = params.type.trim();
+    this.db
+      .prepare(
+        `
+        INSERT INTO node_audit_events (
+          event_id, created_at, type, process_id, firewall_session, actor, tool_name, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      )
+      .run(
+        eventId,
+        params.createdAt,
+        type,
+        params.processId ?? null,
+        params.firewallSession ?? null,
+        params.actor ?? null,
+        params.toolName ?? null,
+        params.details ? JSON.stringify(params.details) : null,
+      );
+    return {
+      eventId,
+      createdAt: params.createdAt,
+      type,
+      processId: params.processId ?? null,
+      firewallSession: params.firewallSession ?? null,
+      actor: params.actor ?? null,
+      toolName: params.toolName ?? null,
+      details: params.details ?? null,
+    };
+  }
+
+  queryAuditEvents(params: {
+    limit: number;
+    cursorCreatedAt?: number | null;
+    type?: string | null;
+    processId?: string | null;
+    firewallSession?: string | null;
+    actor?: string | null;
+  }): { events: PersistedAuditEventRecord[]; nextCursorCreatedAt: number | null } {
+    const limit = Math.max(1, Math.min(500, Math.floor(params.limit)));
+    const where: string[] = [];
+    const bind: unknown[] = [];
+
+    const cursorCreatedAt =
+      typeof params.cursorCreatedAt === "number" && Number.isFinite(params.cursorCreatedAt)
+        ? Math.floor(params.cursorCreatedAt)
+        : null;
+    if (cursorCreatedAt !== null) {
+      where.push("created_at < ?");
+      bind.push(cursorCreatedAt);
+    }
+    if (params.type && params.type.trim()) {
+      where.push("type = ?");
+      bind.push(params.type.trim());
+    }
+    if (params.processId && params.processId.trim()) {
+      where.push("process_id = ?");
+      bind.push(params.processId.trim());
+    }
+    if (params.firewallSession && params.firewallSession.trim()) {
+      where.push("firewall_session = ?");
+      bind.push(params.firewallSession.trim());
+    }
+    if (params.actor && params.actor.trim()) {
+      where.push("actor = ?");
+      bind.push(params.actor.trim());
+    }
+
+    const sql = `
+      SELECT event_id, created_at, type, process_id, firewall_session, actor, tool_name, details_json
+      FROM node_audit_events
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY created_at DESC, event_id DESC
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(sql).all(...bind, limit + 1) as PersistedAuditEventRow[];
+    const hasMore = rows.length > limit;
+    const trimmed = hasMore ? rows.slice(0, limit) : rows;
+    const events = trimmed.map((row) => ({
+      eventId: row.event_id,
+      createdAt: row.created_at,
+      type: row.type,
+      processId: row.process_id ?? null,
+      firewallSession: row.firewall_session ?? null,
+      actor: row.actor ?? null,
+      toolName: row.tool_name ?? null,
+      details: parseJsonObject(row.details_json),
+    }));
+    return {
+      events,
+      nextCursorCreatedAt: hasMore ? events[events.length - 1]?.createdAt ?? null : null,
+    };
+  }
+
+  createReference(params: {
+    refId?: string;
+    sourceType: string;
+    processId?: string | null;
+    toolName?: string | null;
+    title?: string | null;
+    safeSummary: string;
+    metadata?: Record<string, unknown> | null;
+    nowMs: number;
+  }): PersistedReferenceRecord {
+    const sourceType = params.sourceType.trim();
+    const refId = params.refId?.trim() || `ref_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const safeSummary = params.safeSummary;
+    this.db
+      .prepare(
+        `
+        INSERT INTO node_references (
+          ref_id, source_type, process_id, tool_name, title, safe_summary, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      )
+      .run(
+        refId,
+        sourceType,
+        params.processId ?? null,
+        params.toolName ?? null,
+        params.title ?? null,
+        safeSummary,
+        params.metadata ? JSON.stringify(params.metadata) : null,
+        params.nowMs,
+        params.nowMs,
+      );
+    return {
+      refId,
+      sourceType,
+      processId: params.processId ?? null,
+      toolName: params.toolName ?? null,
+      title: params.title ?? null,
+      safeSummary,
+      metadata: params.metadata ?? null,
+      createdAt: params.nowMs,
+      updatedAt: params.nowMs,
+    };
+  }
+
+  listReferencesByProcessId(processId: string, limit: number): PersistedReferenceRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT ref_id, source_type, process_id, tool_name, title, safe_summary, metadata_json, created_at, updated_at
+        FROM node_references
+        WHERE process_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `,
+      )
+      .all(processId, Math.max(1, Math.min(200, Math.floor(limit)))) as PersistedReferenceRow[];
+    return rows.map((row) => ({
+      refId: row.ref_id,
+      sourceType: row.source_type,
+      processId: row.process_id ?? null,
+      toolName: row.tool_name ?? null,
+      title: row.title ?? null,
+      safeSummary: row.safe_summary,
+      metadata: parseJsonObject(row.metadata_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
   }
 
   markOutboxDelivered(deliveryId: string, nowMs: number): boolean {

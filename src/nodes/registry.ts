@@ -5,6 +5,7 @@ import {
   endNodeSession,
   getNodeById,
   listNodes,
+  setNodeMetadata,
   setNodeStatus,
   touchNodeLastSeen,
   upsertNode,
@@ -103,6 +104,28 @@ export class NodeRegistry {
       ...existing,
       status: params.status,
       connectedAt: params.connectedAt === undefined ? existing.connectedAt : params.connectedAt,
+      updatedAt: nowMs,
+    };
+    this.inMemory.set(params.id, next);
+    return next;
+  }
+
+  setMetadata(params: { id: string; metadata: Record<string, unknown>; nowMs?: number }): NodeRecord | null {
+    const nowMs = params.nowMs ?? Date.now();
+    if (this.deps.db) {
+      setNodeMetadata(this.deps.db, {
+        id: params.id,
+        metadata: params.metadata,
+        nowMs,
+      });
+      return getNodeById(this.deps.db, params.id);
+    }
+
+    const existing = this.inMemory.get(params.id);
+    if (!existing) return null;
+    const next: NodeRecord = {
+      ...existing,
+      metadata: params.metadata,
       updatedAt: nowMs,
     };
     this.inMemory.set(params.id, next);

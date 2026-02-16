@@ -432,6 +432,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     db,
     processManager,
     agentTracker,
+    nodeGateway: nodeWsGateway,
   });
 
   registerNodeRoutes(http.app, { isStandby: () => isStandby });

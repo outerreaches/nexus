@@ -387,6 +387,22 @@ export function setNodeStatus(
     .run(params.status, params.connectedAt ?? null, nowMs, params.id);
 }
 
+export function setNodeMetadata(
+  db: NexusDatabase,
+  params: { id: string; metadata: Record<string, unknown>; nowMs?: number },
+): void {
+  const nowMs = params.nowMs ?? Date.now();
+  db.db
+    .prepare(
+      `UPDATE nodes
+       SET
+         metadata_json = ?,
+         updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(JSON.stringify(params.metadata ?? {}), nowMs, params.id);
+}
+
 export function createNodeSession(
   db: NexusDatabase,
   params: {

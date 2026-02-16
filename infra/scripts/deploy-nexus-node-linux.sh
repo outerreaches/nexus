@@ -122,7 +122,7 @@ services:
       NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS: \${NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS:-0}
       NEXUS_NODE_ID: \${NEXUS_NODE_ID:-$DEFAULT_NODE_ID}
       NEXUS_NODE_NAME: \${NEXUS_NODE_NAME:-$DEFAULT_NODE_NAME}
-      NEXUS_NODE_CAPS: \${NEXUS_NODE_CAPS:-system.run,system.which,process.start,process.status,process.logs,process.cancel}
+      NEXUS_NODE_CAPS: \${NEXUS_NODE_CAPS:-system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query}
       NEXUS_NODE_ALLOW_COMMANDS: \${NEXUS_NODE_ALLOW_COMMANDS:-echo,uname,whoami,pwd,date,ls}
       NEXUS_NODE_RECONNECT_MIN_MS: \${NEXUS_NODE_RECONNECT_MIN_MS:-2000}
       NEXUS_NODE_RECONNECT_MAX_MS: \${NEXUS_NODE_RECONNECT_MAX_MS:-30000}
@@ -148,7 +148,7 @@ NEXUS_NODE_GATEWAY_URL=$DEFAULT_GATEWAY_URL
 # Optional overrides:
 # NEXUS_NODE_ID=$DEFAULT_NODE_ID
 # NEXUS_NODE_NAME=$DEFAULT_NODE_NAME
-# NEXUS_NODE_CAPS=system.run,system.which,process.start,process.status,process.logs,process.cancel
+# NEXUS_NODE_CAPS=system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query
 # NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls
 # NEXUS_NODE_RECONNECT_MIN_MS=2000
 # NEXUS_NODE_RECONNECT_MAX_MS=30000

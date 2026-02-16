@@ -117,6 +117,64 @@ async function waitForCondition(params: {
 
 async function main(): Promise<void> {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-node-smoke-"));
+  const symbolsStoreDir = path.join(stateDir, "hermes-stores");
+  await fs.mkdir(symbolsStoreDir, { recursive: true });
+  await fs.writeFile(
+    path.join(symbolsStoreDir, "contacts.json"),
+    JSON.stringify(
+      [
+        {
+          key: "sarah",
+          email: "sarah-smoke@example.com",
+          phone: "+1-555-0001",
+          firstName: "Sarah",
+        },
+      ],
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(symbolsStoreDir, "accounts.json"),
+    JSON.stringify(
+      {
+        "aws-prod": {
+          accessKeyId: "AKIA-SMOKE-KEY",
+          region: "us-east-1",
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(symbolsStoreDir, "secrets.json"),
+    JSON.stringify(
+      {
+        "slack-bot": {
+          token: "xoxb-smoke-secret-token",
+        },
+        "db-password": "supersecret-smoke-password",
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(symbolsStoreDir, "user.json"),
+    JSON.stringify(
+      {
+        timezone: "UTC",
+        displayName: "Smoke User",
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   const nodeId = `smoke-node-${randomUUID().slice(0, 8)}`;
   const gatewayKeys = generateKeyPairSync("ed25519");
   const gatewayPubRaw = publicKeyRaw(gatewayKeys.publicKey);
@@ -532,6 +590,111 @@ async function main(): Promise<void> {
     const runOutput = asString(asObject(runRes.payload).output) ?? "";
     assert.match(runOutput, /smoke-ok/);
 
+    const symbolsListRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "symbols.list",
+      params: {
+        includeFields: true,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolsListRes.ok, true, "symbols.list failed");
+    const symbolsPayload = asObject(symbolsListRes.payload);
+    const catalogObj = asObject(symbolsPayload.catalog);
+    const contactsCatalog = (catalogObj.contact as Array<Record<string, unknown>> | undefined) ?? [];
+    const accountsCatalog = (catalogObj.account as Array<Record<string, unknown>> | undefined) ?? [];
+    const secretsCatalog = (catalogObj.secret as Array<Record<string, unknown>> | undefined) ?? [];
+    const userCatalog = (catalogObj.user as Array<Record<string, unknown>> | undefined) ?? [];
+    assert.ok(contactsCatalog.some((entry) => asString(entry.key) === "sarah"), "symbols.list missing contact key");
+    assert.ok(accountsCatalog.some((entry) => asString(entry.key) === "aws-prod"), "symbols.list missing account key");
+    assert.ok(secretsCatalog.some((entry) => asString(entry.key) === "slack-bot"), "symbols.list missing secret key");
+    assert.ok(userCatalog.some((entry) => asString(entry.key) === "timezone"), "symbols.list missing user field key");
+    const symbolStrings = (symbolsPayload.symbols as string[] | undefined) ?? [];
+    assert.ok(
+      symbolStrings.includes("{{contact:sarah}}") && symbolStrings.includes("{{contact:sarah:email}}"),
+      "symbols.list missing contact symbol forms",
+    );
+    assert.ok(
+      symbolStrings.includes("{{secret:slack-bot:token}}"),
+      "symbols.list missing secret field symbol form",
+    );
+    const symbolsPayloadJson = JSON.stringify(symbolsPayload);
+    assert.ok(
+      !symbolsPayloadJson.includes("sarah-smoke@example.com") &&
+        !symbolsPayloadJson.includes("xoxb-smoke-secret-token") &&
+        !symbolsPayloadJson.includes("supersecret-smoke-password"),
+      "symbols.list must not expose raw secure store values",
+    );
+
+    const symbolsSecretOnlyRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "symbols.list",
+      params: {
+        kind: "secret",
+        includeFields: false,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolsSecretOnlyRes.ok, true, "symbols.list kind=secret failed");
+    const symbolsSecretOnlyPayload = asObject(symbolsSecretOnlyRes.payload);
+    assert.equal(asString(symbolsSecretOnlyPayload.kind), "secret");
+    const secretOnlyCatalog = asObject(symbolsSecretOnlyPayload.catalog);
+    assert.equal(
+      ((secretOnlyCatalog.secret as Array<unknown> | undefined) ?? []).length > 0,
+      true,
+      "symbols.list kind=secret should include secret entries",
+    );
+    assert.equal(
+      ((secretOnlyCatalog.contact as Array<unknown> | undefined) ?? []).length,
+      0,
+      "symbols.list kind=secret should not include contact entries",
+    );
+
+    const symbolRunRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo {{secret:slack-bot:token}}",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolRunRes.ok, true, "system.run symbol resolution failed");
+    const symbolRunOutput = asString(asObject(symbolRunRes.payload).output) ?? "";
+    assert.match(symbolRunOutput, /xoxb-smoke-secret-token/, "resolved symbol value missing from system.run output");
+
+    const symbolRunMissing = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo {{secret:missing-secret:token}}",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolRunMissing.ok, false, "missing symbol should fail resolution");
+    assert.equal(asString(asObject(symbolRunMissing.error).code), "SYMBOL_RESOLUTION_FAILED");
+
     const deniedRes = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -658,6 +821,179 @@ async function main(): Promise<void> {
     const shortLogText = asString(asObject(shortLogs.payload).logs) ?? "";
     assert.match(shortLogText, /proc-smoke/, "short process logs missing output");
 
+    const symbolProcStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo {{user:displayName}}",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolProcStart.ok, true, "process.start symbol resolution failed");
+    const symbolProcessId = asString(asObject(symbolProcStart.payload).processId);
+    assert.ok(symbolProcessId, "symbol process missing processId");
+
+    let symbolProcStatus = "";
+    for (let i = 0; i < 20; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: symbolProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status for symbol process failed");
+      symbolProcStatus = asString(asObject(statusRes.payload).status) ?? "";
+      if (symbolProcStatus === "completed" || symbolProcStatus === "failed" || symbolProcStatus === "cancelled") break;
+      await sleep(100);
+    }
+    assert.equal(symbolProcStatus, "completed", `expected symbol process to complete, got ${symbolProcStatus}`);
+    const symbolProcLogs = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.logs",
+      params: {
+        processId: symbolProcessId,
+        maxChars: 4000,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(symbolProcLogs.ok, true, "process.logs for symbol process failed");
+    assert.match(
+      asString(asObject(symbolProcLogs.payload).logs) ?? "",
+      /Smoke User/,
+      "symbol-resolved process logs missing expected value",
+    );
+
+    const auditSymbolsRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "audit.query",
+      params: {
+        type: "symbols.list",
+        limit: 20,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditSymbolsRes.ok, true, "audit.query symbols filter failed");
+    const auditSymbolsPayload = asObject(auditSymbolsRes.payload);
+    const auditSymbolsEvents = (Array.isArray(auditSymbolsPayload.events) ? auditSymbolsPayload.events : []) as Array<
+      Record<string, unknown>
+    >;
+    assert.ok(auditSymbolsEvents.length > 0, "audit.query should return symbols.list events");
+    assert.ok(
+      auditSymbolsEvents.every((event) => asString(asObject(event).type) === "symbols.list"),
+      "audit.query type filter should only return symbols.list events",
+    );
+
+    const auditProcessRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "audit.query",
+      params: {
+        processId: shortProcessId,
+        limit: 50,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditProcessRes.ok, true, "audit.query processId filter failed");
+    const auditProcessPayload = asObject(auditProcessRes.payload);
+    const auditProcessEvents = (Array.isArray(auditProcessPayload.events) ? auditProcessPayload.events : []) as Array<
+      Record<string, unknown>
+    >;
+    assert.ok(
+      auditProcessEvents.some(
+        (event) =>
+          asString(asObject(event).type) === "process.start.requested" &&
+          asString(asObject(event).processId) === shortProcessId,
+      ),
+      "audit.query should include process.start.requested for filtered process",
+    );
+
+    const auditPageOne = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "audit.query",
+      params: {
+        limit: 1,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditPageOne.ok, true, "audit.query page 1 failed");
+    const auditPageOnePayload = asObject(auditPageOne.payload);
+    const nextCursor = asNumber(auditPageOnePayload.nextCursorCreatedAt);
+    if (nextCursor !== null) {
+      const auditPageTwo = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "audit.query",
+        params: {
+          limit: 5,
+          cursorCreatedAt: nextCursor,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(auditPageTwo.ok, true, "audit.query page 2 failed");
+    }
+
+    const policySoftUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "policy.update",
+      params: {
+        policy: {
+          version: 1,
+          defaultQuarantine: "soft",
+          label: "smoke-soft",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policySoftUpdate.ok, true, "policy.update soft failed");
+    const policySoftPayload = asObject(policySoftUpdate.payload);
+    assert.equal(
+      asString(policySoftPayload.defaultQuarantine),
+      "soft",
+      "policy.update soft should return defaultQuarantine=soft",
+    );
+    const policyPath = path.join(stateDir, "hermes-policy.json");
+    const persistedPolicySoft = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
+    assert.equal(
+      asString(persistedPolicySoft.defaultQuarantine),
+      "soft",
+      "expected persisted hermes-policy.json to reflect soft quarantine",
+    );
+
     const firewallBootstrapStart = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -681,6 +1017,11 @@ async function main(): Promise<void> {
       Boolean(firewallBootstrapPayload.firewallSessionReused),
       false,
       "initial firewall session should be freshly created",
+    );
+    assert.equal(
+      asString(firewallBootstrapPayload.firewallQuarantine),
+      "soft",
+      "new firewall session should inherit soft quarantine from policy",
     );
 
     const firewallReuseStart = await sendGatewayRequest({
@@ -713,6 +1054,41 @@ async function main(): Promise<void> {
       true,
       "expected firewallSessionReused=true for known session",
     );
+    assert.equal(
+      asString(firewallReusePayload.firewallQuarantine),
+      "soft",
+      "reused firewall session should preserve soft quarantine",
+    );
+
+    const policyHardUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "policy.update",
+      params: {
+        policy: {
+          version: 2,
+          defaultQuarantine: "hard",
+          label: "smoke-hard",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyHardUpdate.ok, true, "policy.update hard failed");
+    const policyHardPayload = asObject(policyHardUpdate.payload);
+    assert.equal(
+      asString(policyHardPayload.defaultQuarantine),
+      "hard",
+      "policy.update hard should return defaultQuarantine=hard",
+    );
+    const persistedPolicyHard = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
+    assert.equal(
+      asString(persistedPolicyHard.defaultQuarantine),
+      "hard",
+      "expected persisted hermes-policy.json to reflect hard quarantine",
+    );
 
     const unknownFirewallSession = `fw-missing-${randomUUID().slice(0, 8)}`;
     const firewallMissingStart = await sendGatewayRequest({
@@ -744,6 +1120,11 @@ async function main(): Promise<void> {
       Boolean(firewallMissingPayload.firewallSessionReused),
       false,
       "expected firewallSessionReused=false when requested session is missing/expired",
+    );
+    assert.equal(
+      asString(firewallMissingPayload.firewallQuarantine),
+      "hard",
+      "replacement firewall session should inherit hard quarantine from latest policy",
     );
 
     const streamProcStart = await sendGatewayRequest({
@@ -971,6 +1352,11 @@ async function main(): Promise<void> {
       true,
       "expected firewall session to be reused after reconnect",
     );
+    assert.equal(
+      asString(firewallReconnectPayload.firewallQuarantine),
+      "soft",
+      "reused sticky firewall session should keep its original quarantine state",
+    );
     await waitForCondition({
       timeoutMs: 10_000,
       intervalMs: 100,
@@ -1015,6 +1401,162 @@ async function main(): Promise<void> {
     }
     assert.equal(finalLongStatus, "cancelled", `expected long process cancelled, got ${finalLongStatus}`);
 
+    const policyAuditOnlyUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "policy.update",
+      params: {
+        policy: {
+          firewallMode: "audit-only",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyAuditOnlyUpdate.ok, true, "policy.update audit-only failed");
+    assert.equal(
+      asString(asObject(policyAuditOnlyUpdate.payload).firewallMode),
+      "audit-only",
+      "policy.update should return firewallMode=audit-only",
+    );
+
+    const auditOnlyRunRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo audit-only-output",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditOnlyRunRes.ok, true, "system.run failed in audit-only mode");
+    const auditOnlyOutput = asString(asObject(auditOnlyRunRes.payload).output) ?? "{}";
+    const auditOnlyStructured = asObject(JSON.parse(auditOnlyOutput));
+    assert.equal(asString(auditOnlyStructured.mode), "audit-only", "audit-only run should return mode marker");
+    assert.match(
+      asString(auditOnlyStructured.safeSummary) ?? "",
+      /audit-only-output/,
+      "audit-only run should return safe summary",
+    );
+    assert.ok(
+      ((auditOnlyStructured.references as Array<unknown> | undefined) ?? []).length > 0,
+      "audit-only run should return at least one hermes reference",
+    );
+
+    const auditOnlyProcStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo audit-only-process",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditOnlyProcStart.ok, true, "process.start failed in audit-only mode");
+    const auditOnlyProcessId = asString(asObject(auditOnlyProcStart.payload).processId);
+    assert.ok(auditOnlyProcessId, "audit-only process missing processId");
+    for (let i = 0; i < 20; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: auditOnlyProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status failed for audit-only process");
+      const status = asString(asObject(statusRes.payload).status) ?? "";
+      if (status === "completed" || status === "failed" || status === "cancelled") break;
+      await sleep(100);
+    }
+    const auditOnlyProcLogs = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.logs",
+      params: {
+        processId: auditOnlyProcessId,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(auditOnlyProcLogs.ok, true, "process.logs failed in audit-only mode");
+    const auditOnlyProcLogsPayload = asObject(auditOnlyProcLogs.payload);
+    const auditOnlyHermes = asObject(auditOnlyProcLogsPayload.hermes);
+    assert.equal(
+      asBoolean(auditOnlyHermes.sanitized),
+      true,
+      "audit-only process logs should report hermes.sanitized=true",
+    );
+    assert.ok(
+      ((auditOnlyHermes.references as Array<unknown> | undefined) ?? []).length > 0,
+      "audit-only process logs should return hermes references",
+    );
+
+    const policyHermesUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "policy.update",
+      params: {
+        policy: {
+          firewallMode: "hermes",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyHermesUpdate.ok, true, "policy.update hermes failed");
+    assert.equal(
+      asString(asObject(policyHermesUpdate.payload).firewallMode),
+      "hermes",
+      "policy.update should return firewallMode=hermes",
+    );
+
+    const hermesRunRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo {{user:displayName}}",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(hermesRunRes.ok, true, "system.run failed in hermes mode");
+    const hermesOutput = asString(asObject(hermesRunRes.payload).output) ?? "{}";
+    const hermesStructured = asObject(JSON.parse(hermesOutput));
+    assert.equal(asString(hermesStructured.mode), "hermes", "hermes run should return mode marker");
+    assert.ok(
+      ((hermesStructured.references as Array<unknown> | undefined) ?? []).length > 0,
+      "hermes run should return at least one reference",
+    );
+
     const tamperedWs = wsRef;
     assert.ok(tamperedWs, "websocket missing before tampered-signature test");
     const tamperedClose = deferred<{ code: number; reason: string }>();
@@ -1046,7 +1588,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + process primitives (log stream + firewall session continuity) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policy delivery + firewall session continuity) + firewall modes (transparent/audit-only/hermes) + sanitized hermes outputs + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1233,6 +1775,11 @@ function asString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value !== "boolean") return null;
+  return value;
 }
 
 function asNumber(value: unknown): number | null {

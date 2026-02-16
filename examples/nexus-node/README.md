@@ -15,10 +15,23 @@ Current scope:
   - `process.status`
   - `process.logs`
   - `process.cancel`
+- Policy delivery:
+  - `policy.update` (persisted to `hermes-policy.json`)
+  - policy firewall mode control (`transparent` | `audit-only` | `hermes`) with live capability advertisement refresh
+- Symbol catalog:
+  - `symbols.list` (catalog of available symbol kinds/keys/fields only, no values)
+  - `system.run` / `process.start` symbol template resolution (`{{kind:key}}`, `{{kind:key:field}}`) against node-local stores
+- Audit:
+  - `audit.query` (append-only node-local audit retrieval with filters/pagination)
+- Sanitized Hermes outputs:
+  - non-transparent modes return safe summaries + node-local reference handles (no raw payload mirroring to gateway metadata)
 - Node-local durable state (`state/reference-node.db`):
   - persisted process records
   - durable outbox for terminal `process.update` payloads
   - `process.ack` handling to mark outbox deliveries complete
+  - firewall session records with reuse/expiry handling
+  - append-only audit events (`node_audit_events`)
+  - sanitized reference artifacts (`node_references`)
 
 ## Run
 
@@ -35,8 +48,20 @@ Optional flags:
 - `--state-dir <dir>`
 - `--caps <csv>`
 - `--allow <csv>` (command allowlist for `system.run`)
+- `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
 - `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
 - `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
+
+## Hermes symbol stores (node-local)
+
+Reference-node reads symbol metadata from:
+
+- `{stateDir}/hermes-stores/contacts.json`
+- `{stateDir}/hermes-stores/accounts.json`
+- `{stateDir}/hermes-stores/secrets.json`
+- `{stateDir}/hermes-stores/user.json`
+
+The `symbols.list` response includes only kinds/keys/fields (and derived `{{kind:key}}` forms), never raw values.
 
 ## Transport security policy
 
@@ -80,10 +105,17 @@ What it validates:
 - `tool.execute` allowlisted `system.run`
 - rejection of a disallowed `system.run` command
 - `process.start` / `process.status` / `process.logs` / `process.cancel`
+- `policy.update`: policy document persists to `hermes-policy.json` and affects new firewall session defaults without restart
+- `policy.update` firewall mode transitions: `transparent` -> `audit-only` -> `hermes` with capability refresh (`hermes.mode.*`)
+- `symbols.list`: symbol catalog returns kinds/keys/fields and excludes secret values
+- symbol resolution: `system.run` / `process.start` resolve `{{kind:key}}` templates on-node (no gateway-side secret access)
+- `audit.query`: filtered/cursored retrieval of node-local audit records (`symbols.list` + `process.start` audit assertions in smoke)
+- sanitized Hermes outputs: in `audit-only`/`hermes` modes, `system.run` and process log/update payloads return safe summaries + references
 - node-owned firewall session continuity: `process.start` returns `firewallSession`; known sessions are reused across reconnects, missing/expired sessions are replaced
 - reconnect continuity: forced websocket drop -> reconnect -> process status/logs still queryable
 - durable outbox replay: unacked terminal `process.update` is re-delivered after reconnect and acked via `process.ack`
 - gateway delivery persistence: `process.update`/`log.append` persisted into gateway state + `process_runs`
+- routing security constraints: gateway router can require `backend.nexus` + `hermes.mode.hermes` and hard-fails unmet constraints
 - notifier duplicate suppression: two notifier loops share one DB and emit a single summary callback
 - HA active/standby smoke: mode transitions, readiness gating, `/nx/nodes` standby rejection behavior, and replay dedupe across failover
 

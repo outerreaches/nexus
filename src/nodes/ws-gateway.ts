@@ -97,6 +97,17 @@ type NodeProcessEventContext = {
   receivedAt: number;
 };
 
+type SymbolCatalogCache = {
+  fetchedAt: number;
+  generatedAt: number | null;
+  counts: {
+    keys: number;
+    symbols: number;
+  };
+  catalog: Record<string, unknown>;
+  symbols: string[];
+};
+
 export class NodeWebSocketGateway {
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<WebSocket, NodeSocketSession>();
@@ -106,7 +117,10 @@ export class NodeWebSocketGateway {
   private readonly requestTimeoutMs: number;
   private readonly maxMessageSkewMs: number;
   private readonly challengeTtlMs: number;
+  private readonly symbolCatalogRefreshMinIntervalMs: number;
   private readonly pendingGatewayRequests = new Map<string, PendingGatewayRequest>();
+  private readonly symbolCatalogRefreshInFlight = new Set<string>();
+  private readonly symbolCatalogRefreshLastAt = new Map<string, number>();
   private readonly identity: GatewayNodeIdentity;
   private readonly requireMessageSignatures: boolean;
   private readonly gatewaySender: string;
@@ -123,6 +137,7 @@ export class NodeWebSocketGateway {
       requestTimeoutMs?: number;
       maxMessageSkewMs?: number;
       challengeTtlMs?: number;
+      symbolCatalogRefreshMinIntervalMs?: number;
       requireMessageSignatures?: boolean;
       gatewaySender?: string;
       onProcessUpdate?: (ctx: NodeProcessEventContext) => Promise<boolean>;
@@ -135,6 +150,7 @@ export class NodeWebSocketGateway {
     this.requestTimeoutMs = Math.max(2_000, deps.requestTimeoutMs ?? 60_000);
     this.maxMessageSkewMs = Math.max(5_000, deps.maxMessageSkewMs ?? 120_000);
     this.challengeTtlMs = Math.max(5_000, deps.challengeTtlMs ?? 30_000);
+    this.symbolCatalogRefreshMinIntervalMs = Math.max(5_000, deps.symbolCatalogRefreshMinIntervalMs ?? 15_000);
     this.requireMessageSignatures = deps.requireMessageSignatures ?? true;
     this.gatewaySender = deps.gatewaySender ?? "gateway:primary";
   }
@@ -210,6 +226,12 @@ export class NodeWebSocketGateway {
         return this.requestProcessLogs(params);
       case "process.cancel":
         return this.requestProcessCancel(params);
+      case "policy.update":
+        return this.requestPolicyUpdate(params);
+      case "symbols.list":
+        return this.requestSymbolsList(params);
+      case "audit.query":
+        return this.requestAuditQuery(params);
       default:
         return this.executeTool({
           nodeId: params.nodeId,
@@ -432,6 +454,92 @@ export class NodeWebSocketGateway {
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
       message: `Node ${params.nodeId} failed to cancel process.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestPolicyUpdate(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const policy = this.asObject(argsObj.policy);
+    if (Object.keys(policy).length === 0) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_set_policy requires a non-empty `policy` object.");
+    }
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "policy.update",
+      params: { policy },
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to apply policy update.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestSymbolsList(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const kind = this.asString(argsObj.kind);
+    const includeFields = this.asBoolean(argsObj.includeFields);
+    if (kind && kind !== "contact" && kind !== "account" && kind !== "secret" && kind !== "user") {
+      throw new NodeRoutingError(
+        "NODE_PROTOCOL_ERROR",
+        `node_symbols_list kind must be one of: contact, account, secret, user (got ${kind}).`,
+      );
+    }
+    const requestParams: Record<string, unknown> = {};
+    if (kind) requestParams.kind = kind;
+    if (includeFields !== null) requestParams.includeFields = includeFields;
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "symbols.list",
+      params: requestParams,
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to list symbols catalog.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestAuditQuery(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const limitRaw = this.asNumber(argsObj.limit);
+    const requestParams: Record<string, unknown> = {
+      limit: limitRaw !== null ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 100,
+    };
+    const cursorCreatedAt = this.asNumber(argsObj.cursorCreatedAt ?? argsObj.cursor);
+    const type = this.asString(argsObj.type);
+    const processId = this.asString(argsObj.processId) ?? this.asString(argsObj.process);
+    const firewallSession = this.asString(argsObj.firewallSession);
+    const actor = this.asString(argsObj.actor);
+    if (cursorCreatedAt !== null) requestParams.cursorCreatedAt = cursorCreatedAt;
+    if (type) requestParams.type = type;
+    if (processId) requestParams.processId = processId;
+    if (firewallSession) requestParams.firewallSession = firewallSession;
+    if (actor) requestParams.actor = actor;
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "audit.query",
+      params: requestParams,
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to query audit events.`,
     });
     return this.normalizeStructuredResult(response.payload);
   }
@@ -769,6 +877,10 @@ export class NodeWebSocketGateway {
         capabilities: capabilityState.capabilities,
         tags: capabilityState.tags,
       });
+      this.queueSymbolCatalogRefresh({
+        nodeId: session.nodeId,
+        reason: msg.event,
+      });
       return;
     }
 
@@ -861,6 +973,94 @@ export class NodeWebSocketGateway {
         `nodes/ws: process.ack failed node=${params.nodeId} delivery=${params.deliveryId} error=${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private queueSymbolCatalogRefresh(params: { nodeId: string; reason: string; force?: boolean }): void {
+    void this.refreshSymbolCatalogCache(params).catch((err) => {
+      this.deps.log(
+        `nodes/ws: symbols cache refresh crashed node=${params.nodeId} reason=${params.reason} error=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
+  private async refreshSymbolCatalogCache(params: {
+    nodeId: string;
+    reason: string;
+    force?: boolean;
+  }): Promise<void> {
+    const nowMs = Date.now();
+    if (!params.force) {
+      const last = this.symbolCatalogRefreshLastAt.get(params.nodeId) ?? 0;
+      if (nowMs - last < this.symbolCatalogRefreshMinIntervalMs) return;
+    }
+    if (this.symbolCatalogRefreshInFlight.has(params.nodeId)) return;
+
+    this.symbolCatalogRefreshInFlight.add(params.nodeId);
+    this.symbolCatalogRefreshLastAt.set(params.nodeId, nowMs);
+    try {
+      const row = this.deps.registry.get(params.nodeId);
+      if (!row) return;
+      const supportsSymbolsList = row.capabilities.includes("*") || row.capabilities.includes("symbols.list");
+      if (!supportsSymbolsList) return;
+      if (!this.resolveActiveNodeSocket(params.nodeId)) return;
+      const response = await this.requestNode({
+        nodeId: params.nodeId,
+        method: "symbols.list",
+        params: {
+          includeFields: true,
+        },
+        timeoutMs: Math.min(this.requestTimeoutMs, 15_000),
+      });
+      this.throwOnRemoteError(response, {
+        code: "NODE_EXECUTION_FAILED",
+        message: `Node ${params.nodeId} failed to refresh symbols catalog.`,
+      });
+      const cache = this.parseSymbolCatalogCache(response.payload, nowMs);
+      this.deps.registry.setMetadata({
+        id: params.nodeId,
+        metadata: {
+          ...row.metadata,
+          symbolCatalogCache: cache,
+        },
+        nowMs,
+      });
+      this.deps.log(
+        `nodes/ws: symbols cache refreshed node=${params.nodeId} keys=${cache.counts.keys} symbols=${cache.counts.symbols} reason=${params.reason}`,
+      );
+    } catch (err) {
+      this.deps.log(
+        `nodes/ws: symbols cache refresh failed node=${params.nodeId} reason=${params.reason} error=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      this.symbolCatalogRefreshInFlight.delete(params.nodeId);
+    }
+  }
+
+  private parseSymbolCatalogCache(payload: unknown, fetchedAt: number): SymbolCatalogCache {
+    const payloadObj = this.asObject(payload);
+    const catalog = this.asObject(payloadObj.catalog);
+    const symbols = this.parseOptionalStringArray(payloadObj.symbols) ?? [];
+    const countsObj = this.asObject(payloadObj.counts);
+    const derivedKeys = Object.values(catalog).reduce<number>((total, value) => {
+      if (!Array.isArray(value)) return total;
+      return total + value.length;
+    }, 0);
+    const keysRaw = this.asNumber(countsObj.keys);
+    const symbolsRaw = this.asNumber(countsObj.symbols);
+    return {
+      fetchedAt,
+      generatedAt: this.asNumber(payloadObj.generatedAt),
+      counts: {
+        keys: keysRaw !== null ? Math.max(0, Math.floor(keysRaw)) : derivedKeys,
+        symbols: symbolsRaw !== null ? Math.max(0, Math.floor(symbolsRaw)) : symbols.length,
+      },
+      catalog,
+      symbols,
+    };
   }
 
   private handleConnectHello(ws: WebSocket, session: NodeSocketSession, msg: ProtocolRequest): void {
@@ -1131,6 +1331,11 @@ export class NodeWebSocketGateway {
       connectedAt: session.openedAt,
     });
     this.deps.log(`nodes/ws: auth ready node=${session.nodeId} session=${session.sessionId}`);
+    this.queueSymbolCatalogRefresh({
+      nodeId: session.nodeId,
+      reason: "connect.prove",
+      force: true,
+    });
   }
 
   private handleDisconnect(ws: WebSocket, session: NodeSocketSession, reason: string): void {
@@ -1453,6 +1658,11 @@ export class NodeWebSocketGateway {
 
   private asNumber(value: unknown): number | null {
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return value;
+  }
+
+  private asBoolean(value: unknown): boolean | null {
+    if (typeof value !== "boolean") return null;
     return value;
   }
 

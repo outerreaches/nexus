@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
+import { NodeRegistry } from "../../src/nodes/registry.js";
+import { NodeToolRouter } from "../../src/nodes/router.js";
 import { createNodeProcessDeliveryHandler } from "../../src/nodes/process-delivery.js";
 import { startProcessNotifier } from "../../src/process/notifier.js";
 import { openDatabase } from "../../src/storage/database.js";
@@ -54,6 +56,89 @@ async function main(): Promise<void> {
 
   try {
     db = await openDatabase(dbPath);
+
+    const routeRegistry = new NodeRegistry({ log: () => undefined });
+    const routeNodeId = "route-constraint-node";
+    const routeNowMs = Date.now();
+    routeRegistry.registerOrUpdate({
+      id: routeNodeId,
+      label: "Routing Constraint Smoke Node",
+      publicKey: "pub_route_node",
+      fingerprint: "fp_route_node",
+      status: "online",
+      backend: "nexus",
+      trustLevel: "standard",
+      firewallMode: "transparent",
+      capabilities: ["system.run", "backend.nexus", "hermes.mode.transparent"],
+      tags: [],
+      metadata: {},
+      connectedAt: routeNowMs,
+      lastSeenAt: routeNowMs,
+      nowMs: routeNowMs,
+    });
+    const routeTool = {
+      name: "shell_exec",
+      description: "routing smoke tool",
+      jsonSchema: {},
+      execute: async () => "unused",
+    };
+    const router = new NodeToolRouter({
+      registry: routeRegistry,
+      log: () => undefined,
+      executeOnNode: async () => "ROUTED_OK",
+    });
+    await assert.rejects(
+      () =>
+        router.routeToolExecution(
+          routeTool,
+          { command: "echo route-smoke", security: { requireHermesMode: true } },
+          {
+            workspaceDir: process.cwd(),
+            stateDir,
+            codeDir: process.cwd(),
+            executionMode: "remote",
+            nowMs: () => Date.now(),
+            log: () => undefined,
+          },
+        ),
+      (err: unknown) => {
+        const code =
+          err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+        assert.equal(code, "SECURITY_CONSTRAINT_UNSATISFIED");
+        return true;
+      },
+      "routing constraint should hard-fail when hermes.mode.hermes is required but unavailable",
+    );
+    routeRegistry.registerOrUpdate({
+      id: routeNodeId,
+      label: "Routing Constraint Smoke Node",
+      publicKey: "pub_route_node",
+      fingerprint: "fp_route_node",
+      status: "online",
+      backend: "nexus",
+      trustLevel: "standard",
+      firewallMode: "hermes",
+      capabilities: ["system.run", "backend.nexus", "hermes.mode.hermes", "hermes.enabled"],
+      tags: [],
+      metadata: {},
+      connectedAt: routeNowMs,
+      lastSeenAt: routeNowMs,
+      nowMs: routeNowMs,
+    });
+    const routedResult = await router.routeToolExecution(
+      routeTool,
+      { command: "echo route-smoke", security: { requireHermesMode: true } },
+      {
+        workspaceDir: process.cwd(),
+        stateDir,
+        codeDir: process.cwd(),
+        executionMode: "remote",
+        nowMs: () => Date.now(),
+        log: () => undefined,
+      },
+    );
+    assert.equal(routedResult, "ROUTED_OK");
+
     const delivery = createNodeProcessDeliveryHandler({
       db,
       stateDir,
@@ -101,6 +186,17 @@ async function main(): Promise<void> {
       signal: null,
       summary: "terminal failure summary",
       deliveryId: "dlv_smoke_terminal_1",
+      hermes: {
+        mode: "hermes",
+        sanitized: true,
+        references: [
+          {
+            refId: "ref_smoke_1",
+            sourceType: "process.output",
+            title: "terminal summary ref",
+          },
+        ],
+      },
       routing: {
         runId: "run-smoke-1",
         parentRunId: null,
@@ -127,7 +223,7 @@ async function main(): Promise<void> {
         `SELECT
            id, backend, status, node_id, node_execution_id, request_channel, request_channel_key,
            request_session_id, request_run_id, request_parent_run_id, notify_mode, notify_chat_id, notify_preset,
-           exit_code, signal, ended_at, log_path
+          exit_code, signal, ended_at, log_path, metadata_json
          FROM process_runs
          WHERE id = ?`,
       )
@@ -150,6 +246,7 @@ async function main(): Promise<void> {
           signal: string | null;
           ended_at: number | null;
           log_path: string;
+          metadata_json: string;
         }
       | undefined;
     assert.ok(row, "terminal process row should exist");
@@ -168,6 +265,13 @@ async function main(): Promise<void> {
     assert.equal(row.exit_code, 2);
     assert.equal(row.signal, null);
     assert.ok(asNumber(row.ended_at), "ended_at should be set for terminal process");
+    assert.ok(!row.metadata_json.includes("terminal failure summary"), "raw summary must not be persisted in metadata");
+    const metadataObj = JSON.parse(row.metadata_json) as Record<string, unknown>;
+    const routingMeta = (metadataObj.routing ?? {}) as Record<string, unknown>;
+    const hermesMeta = (metadataObj.hermes ?? {}) as Record<string, unknown>;
+    assert.equal("notify" in routingMeta, false, "routing.notify should not be persisted in metadata");
+    assert.equal(hermesMeta.mode, "hermes");
+    assert.equal(hermesMeta.sanitized, true);
 
     await delivery.handleProcessUpdate({
       nodeId,
@@ -266,7 +370,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[gateway-smoke] PASS: gateway delivery persistence + notifier duplicate suppression verified\n",
+      "[gateway-smoke] PASS: gateway delivery persistence + hermes metadata sanitization + routing security constraints + notifier duplicate suppression verified\n",
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

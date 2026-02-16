@@ -64,6 +64,18 @@ export const shellExec = defineTool({
   parameters: z.object({
     command: z.string(),
     timeoutMs: z.number().int().positive().default(60_000),
+    security: z
+      .object({
+        requireNexusBackend: z
+          .boolean()
+          .optional()
+          .describe("Require routing to a Nexus backend node; fail if unmet."),
+        requireHermesMode: z
+          .boolean()
+          .optional()
+          .describe("Require routing to a Nexus node advertising hermes.mode.hermes; fail if unmet."),
+      })
+      .optional(),
   }),
   execute: async ({ command, timeoutMs }, ctx) => {
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";

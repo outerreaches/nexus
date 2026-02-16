@@ -88,6 +88,16 @@ export function renderDashboard(params: {
   ]
     .map(([key, value]) => `<input type="hidden" name="${key}" value="${escapeHtml(String(value))}" />`)
     .join("");
+  const auditCapableNodes = params.nodes.filter((row) => row.backend === "nexus");
+  const nodeAuditDefaultNodeId = auditCapableNodes.find((row) => row.status === "online")?.id ?? auditCapableNodes[0]?.id ?? "";
+  const nodeAuditNodeOptions = auditCapableNodes
+    .map(
+      (row) =>
+        `<option value="${escapeHtml(row.id)}"${row.id === nodeAuditDefaultNodeId ? ' selected="selected"' : ""}>${escapeHtml(
+          `${row.id} (${row.status})`,
+        )}</option>`,
+    )
+    .join("");
 
   // Compute stats from agent graph
   const agentStats = {
@@ -244,6 +254,45 @@ export function renderDashboard(params: {
         <h2>Execution Nodes</h2>
         <div class="meta">Pending nodes need approval. Approved nodes wait for reconnect; use "Set Pending" to re-run pairing.</div>
         <div class="scroll-12">${renderNodesTable(params.nodes)}</div>
+        <div class="section-header" style="margin-top: 14px;">
+          <h3>Node Audit Events</h3>
+          <div class="meta">Pulled on-demand via <code>audit.query</code> from node-local durable state.</div>
+        </div>
+        <div class="log-controls" id="node-audit-controls">
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Node
+            <select id="node-audit-node" class="inline-input" style="min-width: 280px;">
+              ${nodeAuditNodeOptions}
+            </select>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Limit
+            <input id="node-audit-limit" class="inline-input" type="number" min="1" max="500" step="1" value="100" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Type
+            <input id="node-audit-type" class="inline-input" type="text" placeholder="symbols.list" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Process
+            <input id="node-audit-process" class="inline-input" type="text" placeholder="proc_..." />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Firewall Session
+            <input id="node-audit-firewall" class="inline-input" type="text" placeholder="fw_..." />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+            Actor
+            <input id="node-audit-actor" class="inline-input" type="text" placeholder="node:..." />
+          </label>
+          <button class="graph-btn" id="node-audit-fetch">Fetch</button>
+          <button class="graph-btn" id="node-audit-older" disabled>Older</button>
+        </div>
+        <pre id="node-audit-viewer" class="log-viewer">${escapeHtml(
+          auditCapableNodes.length > 0
+            ? "Select a node and click Fetch to load node audit events."
+            : "No Nexus nodes are registered.",
+        )}</pre>
       </section>
 
       <section>
@@ -366,6 +415,15 @@ export function renderDashboard(params: {
       const llmSessionsLimitInput = document.getElementById("llm-sessions-limit");
       const llmMessagesLimitInput = document.getElementById("llm-messages-limit");
       const llmSessionSelect = document.getElementById("llm-session-select");
+      const nodeAuditViewer = document.getElementById("node-audit-viewer");
+      const nodeAuditNodeInput = document.getElementById("node-audit-node");
+      const nodeAuditLimitInput = document.getElementById("node-audit-limit");
+      const nodeAuditTypeInput = document.getElementById("node-audit-type");
+      const nodeAuditProcessInput = document.getElementById("node-audit-process");
+      const nodeAuditFirewallInput = document.getElementById("node-audit-firewall");
+      const nodeAuditActorInput = document.getElementById("node-audit-actor");
+      const nodeAuditFetchBtn = document.getElementById("node-audit-fetch");
+      const nodeAuditOlderBtn = document.getElementById("node-audit-older");
 
       const escapeLogHtml = (value) =>
         String(value ?? "")
@@ -465,11 +523,22 @@ export function renderDashboard(params: {
         hasMore: false,
         nextBeforeId: null,
       };
+      const nodeAuditState = {
+        events: [],
+        nextCursorCreatedAt: null,
+        nodeId: null,
+      };
 
       const readBoundedInt = (input, fallback, min, max) => {
         const n = Number(input?.value ?? fallback);
         if (!Number.isFinite(n)) return fallback;
         return Math.min(max, Math.max(min, Math.floor(n)));
+      };
+
+      const readOptionalText = (input, maxChars) => {
+        const raw = String(input?.value ?? "").trim();
+        if (!raw) return null;
+        return raw.length > maxChars ? raw.slice(0, maxChars) : raw;
       };
 
       const formatIso = (ms) => {
@@ -484,6 +553,107 @@ export function renderDashboard(params: {
       const updateLlmOlderButton = () => {
         if (!llmOlderBtn) return;
         llmOlderBtn.disabled = !llmState.hasMore || !llmState.selectedSessionId;
+      };
+
+      const updateNodeAuditOlderButton = () => {
+        if (!nodeAuditOlderBtn) return;
+        nodeAuditOlderBtn.disabled = !nodeAuditState.nodeId || !nodeAuditState.nextCursorCreatedAt;
+      };
+
+      const renderNodeAuditRows = () => {
+        if (!nodeAuditViewer) return;
+        if (!nodeAuditState.nodeId) {
+          nodeAuditViewer.innerHTML = escapeLogHtml("Select a node and click Fetch to load node audit events.");
+          updateNodeAuditOlderButton();
+          return;
+        }
+        const header = [
+          "node=" + nodeAuditState.nodeId,
+          "events=" + nodeAuditState.events.length,
+          "next_cursor_created_at=" + (nodeAuditState.nextCursorCreatedAt ?? "-"),
+          "",
+        ];
+        if (!nodeAuditState.events.length) {
+          nodeAuditViewer.innerHTML = escapeLogHtml(header.concat(["No audit events found for current query."]).join("\n"));
+          updateNodeAuditOlderButton();
+          return;
+        }
+        const body = nodeAuditState.events
+          .map((event) => {
+            const row = event && typeof event === "object" ? event : {};
+            const details =
+              row.details && typeof row.details === "object" && !Array.isArray(row.details) ? row.details : null;
+            const detailsJson = details ? JSON.stringify(details, null, 2) : "{}";
+            return [
+              "[" + formatIso(row.createdAt) + "] " + String(row.type ?? "unknown"),
+              "event_id=" + String(row.eventId ?? "-"),
+              "process_id=" + String(row.processId ?? "-"),
+              "firewall_session=" + String(row.firewallSession ?? "-"),
+              "actor=" + String(row.actor ?? "-"),
+              "tool_name=" + String(row.toolName ?? "-"),
+              "details=" + detailsJson,
+            ].join("\n");
+          })
+          .join("\n\n----------------------------------------\n\n");
+        nodeAuditViewer.innerHTML = escapeLogHtml(header.join("\n") + body);
+        updateNodeAuditOlderButton();
+      };
+
+      const fetchNodeAudit = async ({ older = false } = {}) => {
+        if (!nodeAuditViewer) return;
+        const nodeId = String(nodeAuditNodeInput?.value ?? "").trim();
+        if (!nodeId) {
+          nodeAuditState.nodeId = null;
+          nodeAuditState.events = [];
+          nodeAuditState.nextCursorCreatedAt = null;
+          renderNodeAuditRows();
+          return;
+        }
+        const limit = readBoundedInt(nodeAuditLimitInput, 100, 1, 500);
+        if (nodeAuditLimitInput) nodeAuditLimitInput.value = String(limit);
+        const params = new URLSearchParams();
+        params.set("limit", String(limit));
+        const type = readOptionalText(nodeAuditTypeInput, 128);
+        const processId = readOptionalText(nodeAuditProcessInput, 128);
+        const firewallSession = readOptionalText(nodeAuditFirewallInput, 256);
+        const actor = readOptionalText(nodeAuditActorInput, 256);
+        if (type) params.set("type", type);
+        if (processId) params.set("processId", processId);
+        if (firewallSession) params.set("firewallSession", firewallSession);
+        if (actor) params.set("actor", actor);
+
+        const sameNode = nodeAuditState.nodeId === nodeId;
+        const canAppend = older && sameNode && nodeAuditState.nextCursorCreatedAt;
+        if (canAppend) {
+          params.set("cursorCreatedAt", String(nodeAuditState.nextCursorCreatedAt));
+        }
+
+        try {
+          const res = await fetch("/api/nodes/" + encodeURIComponent(nodeId) + "/audit?" + params.toString());
+          const payload = await res.json();
+          if (!res.ok) {
+            const code = payload?.code ? " code=" + String(payload.code) : "";
+            nodeAuditViewer.innerHTML = escapeLogHtml(
+              "ERROR: " + String(payload?.error ?? res.status) + code + "\nnode=" + nodeId,
+            );
+            return;
+          }
+
+          const events = Array.isArray(payload?.events) ? payload.events : [];
+          if (canAppend) {
+            nodeAuditState.events = nodeAuditState.events.concat(events);
+          } else {
+            nodeAuditState.events = events;
+          }
+          nodeAuditState.nextCursorCreatedAt =
+            typeof payload?.nextCursorCreatedAt === "number" && Number.isFinite(payload.nextCursorCreatedAt)
+              ? Math.floor(payload.nextCursorCreatedAt)
+              : null;
+          nodeAuditState.nodeId = nodeId;
+          renderNodeAuditRows();
+        } catch (err) {
+          nodeAuditViewer.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+        }
       };
 
       const renderLlmRows = () => {
@@ -670,6 +840,41 @@ export function renderDashboard(params: {
           llmState.hasMore = false;
           fetchLlmMessages({ reset: true });
         });
+      }
+      if (nodeAuditFetchBtn) {
+        nodeAuditFetchBtn.addEventListener("click", () => {
+          fetchNodeAudit({ older: false });
+        });
+      }
+      if (nodeAuditOlderBtn) {
+        nodeAuditOlderBtn.addEventListener("click", () => {
+          fetchNodeAudit({ older: true });
+        });
+      }
+      if (nodeAuditNodeInput) {
+        nodeAuditNodeInput.addEventListener("change", () => {
+          nodeAuditState.events = [];
+          nodeAuditState.nextCursorCreatedAt = null;
+          nodeAuditState.nodeId = String(nodeAuditNodeInput.value ?? "").trim() || null;
+          fetchNodeAudit({ older: false });
+        });
+      }
+      document.querySelectorAll("[data-node-audit-id]").forEach((element) => {
+        element.addEventListener("click", () => {
+          const nodeId = String(element.getAttribute("data-node-audit-id") ?? "").trim();
+          if (!nodeId || !nodeAuditNodeInput) return;
+          nodeAuditNodeInput.value = nodeId;
+          nodeAuditState.events = [];
+          nodeAuditState.nextCursorCreatedAt = null;
+          nodeAuditState.nodeId = nodeId;
+          fetchNodeAudit({ older: false });
+          nodeAuditViewer?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+      if (nodeAuditNodeInput && String(nodeAuditNodeInput.value ?? "").trim()) {
+        fetchNodeAudit({ older: false });
+      } else {
+        renderNodeAuditRows();
       }
 
       // Update stats display

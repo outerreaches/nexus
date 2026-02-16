@@ -53,6 +53,9 @@ export const preset: AgentPreset = {
     "node_get",
     "node_delete",
     "node_set_status",
+    "node_set_policy",
+    "node_symbols_list",
+    "node_audit_query",
     // Memory
     "memory_store",
     "memory_recall",

@@ -25,6 +25,7 @@ import {
   type PersistedFirewallSessionRecord,
   type PersistedOutboxEntry,
   type PersistedProcessRecord,
+  type PersistedReferenceRecord,
 } from "./state-store.js";
 
 const ED25519_SPKI_RAW_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -39,10 +40,44 @@ const DEFAULT_CAPABILITIES = [
   "process.status",
   "process.logs",
   "process.cancel",
+  "policy.update",
+  "symbols.list",
+  "audit.query",
 ];
 const DEFAULT_ALLOW_COMMANDS = ["echo", "uname", "whoami", "pwd", "date"];
+const DEFAULT_POLICY_DOC = {
+  version: 1,
+  defaultQuarantine: "none",
+  firewallMode: "transparent",
+} as const;
+const SYMBOL_TOKEN_PATTERN = /\{\{([a-z]+):([a-zA-Z0-9._-]+)(?::([a-zA-Z0-9._-]+))?\}\}/g;
 
 type ProcessStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type SymbolKind = "contact" | "account" | "secret" | "user";
+type FirewallMode = "transparent" | "audit-only" | "hermes";
+const SYMBOL_KINDS: SymbolKind[] = ["contact", "account", "secret", "user"];
+
+type SymbolCatalogEntry = {
+  key: string;
+  fields: string[];
+};
+
+type SymbolCatalog = Record<SymbolKind, SymbolCatalogEntry[]>;
+
+type ResolvedSystemRunInvocation = {
+  command: string;
+  cwd: string | null;
+  env: Record<string, string>;
+  symbols: string[];
+};
+type SymbolStoreCache = Partial<Record<SymbolKind, unknown>>;
+type HermesReferenceSummary = {
+  refId: string;
+  sourceType: string;
+  title: string | null;
+  safeSummary: string;
+  metadata: Record<string, unknown> | null;
+};
 
 type ReferenceProcess = {
   processId: string;
@@ -59,6 +94,8 @@ type ReferenceProcess = {
   child: ChildProcess | null;
   timeoutTimer: NodeJS.Timeout | null;
   killTimer: NodeJS.Timeout | null;
+  firewallMode: FirewallMode;
+  hermesReferences: HermesReferenceSummary[];
   routing: Record<string, unknown> | null;
 };
 
@@ -123,6 +160,7 @@ type Config = {
   gatewayUrl: string;
   gatewayTlsFingerprint: string | null;
   stateDir: string;
+  policyRequired: boolean;
   nodeId: string;
   displayName: string;
   capabilities: string[];
@@ -173,7 +211,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  client.start();
+  await client.start();
 }
 
 class ReferenceNodeClient {
@@ -190,14 +228,21 @@ class ReferenceNodeClient {
   private gatewayNonce: string | null = null;
   private sessionId: string | null = null;
   private ready = false;
+  private policy: Record<string, unknown> = { ...DEFAULT_POLICY_DOC };
+  private readonly policyPath: string;
+  private readonly symbolStoreDir: string;
 
   constructor(
     private readonly config: Config,
     private readonly identity: NodeIdentity,
     private readonly stateStore: ReferenceNodeStateStore,
-  ) {}
+  ) {
+    this.policyPath = path.join(this.config.stateDir, "hermes-policy.json");
+    this.symbolStoreDir = path.join(this.config.stateDir, "hermes-stores");
+  }
 
-  start(): void {
+  async start(): Promise<void> {
+    await this.loadPolicyFromDisk();
     this.bootstrapPersistedState();
     this.connect();
   }
@@ -322,6 +367,8 @@ class ReferenceNodeClient {
         child: null,
         timeoutTimer: null,
         killTimer: null,
+        firewallMode: this.readProcessFirewallMode(record.routing),
+        hermesReferences: this.readProcessHermesReferences(record.routing),
         routing: record.routing,
       };
       this.processes.set(entry.processId, entry);
@@ -335,6 +382,28 @@ class ReferenceNodeClient {
         entry.exitCode = entry.exitCode ?? 1;
         entry.signal = entry.signal ?? "NODE_RESTART";
         entry.logs = truncateOutput(`${entry.logs}\nprocess recovered after node restart before completion\n`, MAX_PROCESS_LOG_CHARS);
+        if (entry.firewallMode !== "transparent") {
+          const recoveredReference = this.createHermesReference({
+            sourceType: "process.output",
+            processId: entry.processId,
+            toolName: "system.run",
+            title: "process recovered after restart",
+            safeSummary: this.buildSafeSummary(entry.logs),
+            metadata: {
+              mode: entry.firewallMode,
+              status: entry.status,
+              exitCode: entry.exitCode,
+              signal: entry.signal,
+            },
+          });
+          entry.hermesReferences = [recoveredReference];
+          const routing = asObject(entry.routing ?? {});
+          entry.routing = {
+            ...routing,
+            firewallMode: entry.firewallMode,
+            hermesReferences: entry.hermesReferences,
+          };
+        }
         this.persistProcess(entry);
         this.queueTerminalProcessUpdate(entry, "recovered_after_restart");
       }
@@ -345,10 +414,84 @@ class ReferenceNodeClient {
     );
   }
 
+  private async loadPolicyFromDisk(): Promise<void> {
+    const nowMs = Date.now();
+    try {
+      const raw = await fs.readFile(this.policyPath, "utf8");
+      const parsed = asObject(JSON.parse(raw));
+      this.policy = this.normalizePolicyDocument(parsed, nowMs);
+      this.log(
+        `loaded hermes policy path=${this.policyPath} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
+      );
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      const missing = code === "ENOENT";
+      if (!missing && this.config.policyRequired) {
+        throw new Error(
+          `Failed to load required Hermes policy at ${this.policyPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      if (!missing) {
+        this.log(
+          `policy load failed path=${this.policyPath} error=${
+            err instanceof Error ? err.message : String(err)
+          }; using default policy`,
+        );
+      } else if (this.config.policyRequired) {
+        throw new Error(`Required Hermes policy missing at ${this.policyPath}`);
+      } else {
+        this.log(`policy file missing path=${this.policyPath}; creating default policy`);
+      }
+    }
+
+    this.policy = this.normalizePolicyDocument({}, nowMs);
+    await this.persistPolicyToDisk(this.policy);
+  }
+
+  private normalizePolicyDocument(value: Record<string, unknown>, nowMs: number): Record<string, unknown> {
+    const defaultQuarantine = parseQuarantineState(value.defaultQuarantine, "none");
+    const firewallMode = parseFirewallMode(asString(value.firewallMode), "transparent");
+    const updatedAt = asNumber(value.updatedAt) ?? nowMs;
+    return {
+      ...value,
+      version: asNumber(value.version) ?? 1,
+      defaultQuarantine,
+      firewallMode,
+      updatedAt,
+    };
+  }
+
+  private currentPolicyDefaultQuarantine(): "none" | "soft" | "hard" {
+    return parseQuarantineState(this.policy.defaultQuarantine, "none");
+  }
+
+  private currentPolicyFirewallMode(): FirewallMode {
+    return parseFirewallMode(asString(this.policy.firewallMode), "transparent");
+  }
+
+  private advertisedCapabilities(): string[] {
+    const mode = this.currentPolicyFirewallMode();
+    const out = new Set<string>(this.config.capabilities);
+    out.add("backend.nexus");
+    out.add(`hermes.mode.${mode}`);
+    if (mode !== "transparent") out.add("hermes.enabled");
+    return [...out.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  private async persistPolicyToDisk(policyDoc: Record<string, unknown>): Promise<void> {
+    await fs.mkdir(path.dirname(this.policyPath), { recursive: true });
+    await fs.writeFile(this.policyPath, `${JSON.stringify(policyDoc, null, 2)}\n`, "utf8");
+  }
+
   private sendConnectHello(): void {
     const ws = this.requireOpenSocket();
     if (!ws) return;
     this.nodeNonce = randomBytes(32).toString("base64url");
+    const firewallMode = this.currentPolicyFirewallMode();
+    const advertisedCapabilities = this.advertisedCapabilities();
     this.sendSignedEnvelope({
       type: "req",
       id: randomUUID(),
@@ -360,10 +503,10 @@ class ReferenceNodeClient {
         nodeId: this.config.nodeId,
         backend: "nexus",
         trustLevel: "standard",
-        firewallMode: "transparent",
+        firewallMode,
         nodeNonce: this.nodeNonce,
-        caps: this.config.capabilities,
-        capabilities: this.config.capabilities,
+        caps: advertisedCapabilities,
+        capabilities: advertisedCapabilities,
         device: {
           id: this.identity.fingerprint,
           fingerprint: this.identity.fingerprint,
@@ -556,6 +699,15 @@ class ReferenceNodeClient {
       case "process.ack":
         await this.handleProcessAck(msg);
         return;
+      case "policy.update":
+        await this.handlePolicyUpdate(msg);
+        return;
+      case "symbols.list":
+        await this.handleSymbolsList(msg);
+        return;
+      case "audit.query":
+        await this.handleAuditQuery(msg);
+        return;
       default:
         this.sendRequestError(msg.id, "METHOD_NOT_IMPLEMENTED", `Method ${msg.method} is not implemented by reference node.`, false);
     }
@@ -613,12 +765,33 @@ class ReferenceNodeClient {
     const cwd = asString(runArgs.cwd) ?? null;
     const env = asStringMap(runArgs.env);
     const timeoutMs = clampInt(runArgs.timeoutMs ?? runArgs.timeout, 1_000, this.config.runTimeoutMs) ?? null;
+    const firewallMode = this.currentPolicyFirewallMode();
+    let resolvedInvocation: ResolvedSystemRunInvocation;
+    try {
+      resolvedInvocation = await this.resolveSystemRunInvocation({
+        command,
+        cwd,
+        env,
+      });
+    } catch (err) {
+      this.writeAuditEvent({
+        type: "symbol.resolve.failed",
+        toolName: "process.start",
+        details: {
+          code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+      this.sendToolExecutionError(msg.id, err);
+      return;
+    }
     const routingObj = asObject(params.routing);
     const resolvedFirewallSession = this.resolveFirewallSession(routingObj);
     const routing = {
       ...routingObj,
       firewallSession: resolvedFirewallSession.sessionId,
       firewallQuarantine: resolvedFirewallSession.quarantineState,
+      firewallMode,
     };
     const processId = `proc_${randomUUID().slice(0, 12)}`;
     const entry: ReferenceProcess = {
@@ -636,16 +809,30 @@ class ReferenceNodeClient {
       child: null,
       timeoutTimer: null,
       killTimer: null,
+      firewallMode,
+      hermesReferences: [],
       routing: Object.keys(routing).length > 0 ? routing : null,
     };
     this.processes.set(processId, entry);
     this.persistProcess(entry);
+    this.writeAuditEvent({
+      type: "process.start.requested",
+      processId,
+      firewallSession: resolvedFirewallSession.sessionId,
+      toolName: "system.run",
+      details: {
+        commandName: parseCommandName(command),
+        symbolCount: resolvedInvocation.symbols.length,
+        symbols: resolvedInvocation.symbols,
+        firewallMode,
+      },
+    });
 
     try {
-      const child = spawnChild(command, {
+      const child = spawnChild(resolvedInvocation.command, {
         shell: true,
-        cwd: cwd ?? undefined,
-        env: Object.keys(env).length > 0 ? { ...process.env, ...env } : process.env,
+        cwd: resolvedInvocation.cwd ?? undefined,
+        env: Object.keys(resolvedInvocation.env).length > 0 ? { ...process.env, ...resolvedInvocation.env } : process.env,
         stdio: ["ignore", "pipe", "pipe"],
       });
       entry.child = child;
@@ -689,9 +876,19 @@ class ReferenceNodeClient {
           status: entry.status,
           startedAt: entry.startedAt,
           command,
+          firewallMode,
           firewallSession: resolvedFirewallSession.sessionId,
           firewallSessionReused: resolvedFirewallSession.reused,
           firewallQuarantine: resolvedFirewallSession.quarantineState,
+          ...(firewallMode !== "transparent"
+            ? {
+                hermes: {
+                  mode: firewallMode,
+                  sanitized: true,
+                  references: [],
+                },
+              }
+            : {}),
         },
       });
     } catch (err) {
@@ -735,6 +932,29 @@ class ReferenceNodeClient {
     }
     const maxChars = clampInt(params.maxChars, 200, MAX_OUTPUT_CHARS) ?? 8_000;
     const logs = entry.logs.length > maxChars ? entry.logs.slice(-maxChars) : entry.logs;
+    if (entry.firewallMode !== "transparent") {
+      const references = this.resolveProcessHermesReferences(entry);
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          processId,
+          status: entry.status,
+          logs: this.buildSafeSummary(logs),
+          totalChars: entry.logs.length,
+          truncated: entry.logs.length > maxChars,
+          firewallMode: entry.firewallMode,
+          firewallSession: asString(asObject(entry.routing ?? {}).firewallSession),
+          hermes: {
+            mode: entry.firewallMode,
+            sanitized: true,
+            references,
+          },
+        },
+      });
+      return;
+    }
     this.sendSignedEnvelope({
       type: "res",
       id: msg.id,
@@ -801,6 +1021,302 @@ class ReferenceNodeClient {
     });
   }
 
+  private async handlePolicyUpdate(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const incomingPolicy = asObject(params.policy);
+    if (Object.keys(incomingPolicy).length === 0) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "policy.update requires a non-empty `policy` object.", false);
+      return;
+    }
+    const requestedQuarantine = asString(incomingPolicy.defaultQuarantine);
+    if (
+      requestedQuarantine &&
+      requestedQuarantine !== "none" &&
+      requestedQuarantine !== "soft" &&
+      requestedQuarantine !== "hard"
+    ) {
+      this.sendRequestError(
+        msg.id,
+        "INVALID_REQUEST",
+        `policy.update defaultQuarantine must be one of: none, soft, hard (got ${requestedQuarantine}).`,
+        false,
+      );
+      return;
+    }
+    const requestedFirewallMode = asString(incomingPolicy.firewallMode);
+    if (
+      requestedFirewallMode &&
+      requestedFirewallMode !== "transparent" &&
+      requestedFirewallMode !== "audit-only" &&
+      requestedFirewallMode !== "hermes"
+    ) {
+      this.sendRequestError(
+        msg.id,
+        "INVALID_REQUEST",
+        `policy.update firewallMode must be one of: transparent, audit-only, hermes (got ${requestedFirewallMode}).`,
+        false,
+      );
+      return;
+    }
+    const nowMs = Date.now();
+    const next = this.normalizePolicyDocument(
+      {
+        ...this.policy,
+        ...incomingPolicy,
+      },
+      nowMs,
+    );
+    try {
+      await this.persistPolicyToDisk(next);
+      this.policy = next;
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          updatedAt: nowMs,
+          defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+          firewallMode: this.currentPolicyFirewallMode(),
+          policyPath: this.policyPath,
+          policy: this.policy,
+        },
+      });
+      this.log(
+        `policy.update applied path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
+      );
+      this.writeAuditEvent({
+        type: "policy.update",
+        details: {
+          firewallMode: this.currentPolicyFirewallMode(),
+          defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+          policyPath: this.policyPath,
+        },
+      });
+      this.sendCapsAdvertise();
+    } catch (err) {
+      this.sendRequestError(
+        msg.id,
+        "NODE_POLICY_PERSIST_FAILED",
+        `Failed to persist policy update: ${err instanceof Error ? err.message : String(err)}`,
+        true,
+      );
+    }
+  }
+
+  private async handleSymbolsList(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const requestedKindRaw = asString(params.kind);
+    const requestedKind = parseSymbolKind(requestedKindRaw);
+    if (requestedKindRaw && !requestedKind) {
+      this.sendRequestError(
+        msg.id,
+        "INVALID_REQUEST",
+        `symbols.list kind must be one of: ${SYMBOL_KINDS.join(", ")} (got ${requestedKindRaw}).`,
+        false,
+      );
+      return;
+    }
+    const includeFields = asBoolean(params.includeFields) ?? true;
+    try {
+      const catalog = await this.readSymbolCatalog();
+      const activeKinds = requestedKind ? [requestedKind] : SYMBOL_KINDS;
+      const responseCatalog: Record<string, Array<Record<string, unknown>>> = {
+        contact: [],
+        account: [],
+        secret: [],
+        user: [],
+      };
+      const symbols: string[] = [];
+      const countsByKind: Record<SymbolKind, number> = {
+        contact: 0,
+        account: 0,
+        secret: 0,
+        user: 0,
+      };
+
+      for (const kind of activeKinds) {
+        const entries = catalog[kind];
+        countsByKind[kind] = entries.length;
+        responseCatalog[kind] = entries.map((entry) => {
+          const record: Record<string, unknown> = { key: entry.key };
+          if (includeFields && entry.fields.length > 0 && kind !== "user") {
+            record.fields = [...entry.fields];
+          }
+          return record;
+        });
+        for (const entry of entries) {
+          symbols.push(`{{${kind}:${entry.key}}}`);
+          if (includeFields && kind !== "user") {
+            for (const field of entry.fields) {
+              symbols.push(`{{${kind}:${entry.key}:${field}}}`);
+            }
+          }
+        }
+      }
+
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          kind: requestedKind ?? null,
+          includeFields,
+          generatedAt: Date.now(),
+          storeDir: this.symbolStoreDir,
+          catalog: responseCatalog,
+          counts: {
+            byKind: countsByKind,
+            keys: countsByKind.contact + countsByKind.account + countsByKind.secret + countsByKind.user,
+            symbols: symbols.length,
+          },
+          symbols,
+        },
+      });
+      this.writeAuditEvent({
+        type: "symbols.list",
+        details: {
+          kind: requestedKind ?? null,
+          includeFields,
+          keys: countsByKind.contact + countsByKind.account + countsByKind.secret + countsByKind.user,
+          symbols: symbols.length,
+        },
+      });
+    } catch (err) {
+      this.sendRequestError(
+        msg.id,
+        "NODE_SYMBOLS_LIST_FAILED",
+        `Failed to build symbols catalog: ${err instanceof Error ? err.message : String(err)}`,
+        true,
+      );
+    }
+  }
+
+  private async handleAuditQuery(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const limit = clampInt(params.limit, 1, 500) ?? 100;
+    const cursorCreatedAt = asNumber(params.cursorCreatedAt ?? params.cursor) ?? null;
+    const type = asString(params.type);
+    const processId = asString(params.processId) ?? asString(params.process);
+    const firewallSession = asString(params.firewallSession);
+    const actor = asString(params.actor);
+    const result = this.stateStore.queryAuditEvents({
+      limit,
+      cursorCreatedAt,
+      type,
+      processId,
+      firewallSession,
+      actor,
+    });
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: {
+        count: result.events.length,
+        nextCursorCreatedAt: result.nextCursorCreatedAt,
+        events: result.events,
+      },
+    });
+  }
+
+  private async readSymbolCatalog(): Promise<SymbolCatalog> {
+    const contactsRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "contacts.json"));
+    const accountsRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "accounts.json"));
+    const secretsRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "secrets.json"));
+    const userRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "user.json"));
+
+    return {
+      contact: this.parseContactsCatalog(contactsRaw),
+      account: this.parseKeyedCatalog(accountsRaw),
+      secret: this.parseKeyedCatalog(secretsRaw),
+      user: this.parseUserCatalog(userRaw),
+    };
+  }
+
+  private async readJsonUnknown(filePath: string): Promise<unknown> {
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT") return {};
+      this.log(
+        `symbols store read failed path=${filePath} error=${
+          err instanceof Error ? err.message : String(err)
+        }; treating as empty`,
+      );
+      return {};
+    }
+  }
+
+  private parseContactsCatalog(raw: unknown): SymbolCatalogEntry[] {
+    const entries = new Map<string, Set<string>>();
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        const row = asObject(item);
+        const key = asString(row.key);
+        if (!key) continue;
+        const fields = new Set<string>();
+        for (const [field, value] of Object.entries(row)) {
+          if (field === "key" || value === null || value === undefined) continue;
+          fields.add(field);
+        }
+        entries.set(key, fields);
+      }
+      return this.normalizeCatalogEntries(entries);
+    }
+    const map = asObject(raw);
+    for (const [keyRaw, value] of Object.entries(map)) {
+      const key = keyRaw.trim();
+      if (!key) continue;
+      const fields = new Set<string>();
+      const valueObj = asObject(value);
+      for (const [field, fieldValue] of Object.entries(valueObj)) {
+        if (fieldValue === null || fieldValue === undefined) continue;
+        fields.add(field);
+      }
+      entries.set(key, fields);
+    }
+    return this.normalizeCatalogEntries(entries);
+  }
+
+  private parseKeyedCatalog(raw: unknown): SymbolCatalogEntry[] {
+    const map = asObject(raw);
+    const entries = new Map<string, Set<string>>();
+    for (const [keyRaw, value] of Object.entries(map)) {
+      const key = keyRaw.trim();
+      if (!key) continue;
+      const fields = new Set<string>();
+      const valueObj = asObject(value);
+      for (const [field, fieldValue] of Object.entries(valueObj)) {
+        if (fieldValue === null || fieldValue === undefined) continue;
+        fields.add(field);
+      }
+      entries.set(key, fields);
+    }
+    return this.normalizeCatalogEntries(entries);
+  }
+
+  private parseUserCatalog(raw: unknown): SymbolCatalogEntry[] {
+    const map = asObject(raw);
+    const entries = new Map<string, Set<string>>();
+    for (const keyRaw of Object.keys(map)) {
+      const key = keyRaw.trim();
+      if (!key) continue;
+      entries.set(key, new Set<string>());
+    }
+    return this.normalizeCatalogEntries(entries);
+  }
+
+  private normalizeCatalogEntries(entries: Map<string, Set<string>>): SymbolCatalogEntry[] {
+    return [...entries.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, fields]) => ({
+        key,
+        fields: [...fields].sort((a, b) => a.localeCompare(b)),
+      }));
+  }
+
   private sendRequestError(id: string | null, code: string, message: string, retryable: boolean): void {
     this.sendSignedEnvelope({
       type: "res",
@@ -848,29 +1364,318 @@ class ReferenceNodeClient {
     const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
     if (!commandValidation.ok) throw new NodeToolError("PERMISSION_DENIED", commandValidation.message);
 
+    const firewallMode = this.currentPolicyFirewallMode();
     const timeoutMs = clampInt(args.timeoutMs ?? args.timeout, 1_000, this.config.runTimeoutMs) ?? this.config.runTimeoutMs;
     const cwd = asString(args.cwd) ?? undefined;
     const env = asStringMap(args.env);
+    let resolvedInvocation: ResolvedSystemRunInvocation;
+    try {
+      resolvedInvocation = await this.resolveSystemRunInvocation({
+        command,
+        cwd: cwd ?? null,
+        env,
+      });
+    } catch (err) {
+      this.writeAuditEvent({
+        type: "symbol.resolve.failed",
+        toolName: "system.run",
+        details: {
+          code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+      throw err;
+    }
+    this.writeAuditEvent({
+      type: "tool.execute.requested",
+      toolName: "system.run",
+      details: {
+        commandName: parseCommandName(command),
+        symbolCount: resolvedInvocation.symbols.length,
+        symbols: resolvedInvocation.symbols,
+      },
+    });
 
-    const result = await execShell(command, {
-      cwd,
+    const result = await execShell(resolvedInvocation.command, {
+      cwd: resolvedInvocation.cwd ?? undefined,
       timeoutMs,
-      env,
+      env: resolvedInvocation.env,
     });
 
     const combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
+    if (firewallMode === "transparent") {
+      if (result.timedOut) {
+        throw new NodeToolError("EXECUTION_TIMEOUT", `Command timed out after ${timeoutMs}ms.`, true);
+      }
+      if (result.exitCode !== 0) {
+        const signalPart = result.signal ? ` signal=${result.signal}` : "";
+        throw new NodeToolError(
+          "COMMAND_FAILED",
+          truncateOutput(`Command failed (exit=${result.exitCode}${signalPart}).\n${combined}`),
+        );
+      }
+      return truncateOutput(combined || "(no output)");
+    }
+
+    const safeSummary = this.buildSafeSummary(combined || "(no output)");
+    const reference = this.createHermesReference({
+      sourceType: "system.run.output",
+      toolName: "system.run",
+      title: parseCommandName(command) ? `system.run ${parseCommandName(command)}` : "system.run output",
+      safeSummary,
+      metadata: {
+        mode: firewallMode,
+        commandName: parseCommandName(command),
+        symbolCount: resolvedInvocation.symbols.length,
+        symbols: resolvedInvocation.symbols,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+      },
+    });
+
     if (result.timedOut) {
-      throw new NodeToolError("EXECUTION_TIMEOUT", `Command timed out after ${timeoutMs}ms.`, true);
+      throw new NodeToolError(
+        "EXECUTION_TIMEOUT",
+        JSON.stringify(
+          {
+            mode: firewallMode,
+            safeSummary,
+            references: [reference],
+            timedOut: true,
+            timeoutMs,
+          },
+          null,
+          2,
+        ),
+        true,
+      );
     }
     if (result.exitCode !== 0) {
-      const signalPart = result.signal ? ` signal=${result.signal}` : "";
       throw new NodeToolError(
         "COMMAND_FAILED",
-        truncateOutput(`Command failed (exit=${result.exitCode}${signalPart}).\n${combined}`),
+        JSON.stringify(
+          {
+            mode: firewallMode,
+            safeSummary,
+            references: [reference],
+            exitCode: result.exitCode,
+            signal: result.signal,
+          },
+          null,
+          2,
+        ),
       );
     }
 
-    return truncateOutput(combined || "(no output)");
+    return JSON.stringify(
+      {
+        mode: firewallMode,
+        safeSummary,
+        references: [reference],
+        exitCode: result.exitCode,
+        signal: result.signal,
+      },
+      null,
+      2,
+    );
+  }
+
+  private async resolveSystemRunInvocation(params: {
+    command: string;
+    cwd: string | null;
+    env: Record<string, string>;
+  }): Promise<ResolvedSystemRunInvocation> {
+    const storeCache: SymbolStoreCache = {};
+    const commandResolved = await this.resolveTemplateSymbols(params.command, {
+      shellEscapeValues: true,
+      storeCache,
+    });
+    const cwdResolved = params.cwd
+      ? await this.resolveTemplateSymbols(params.cwd, {
+          shellEscapeValues: false,
+          storeCache,
+        })
+      : { value: null, symbols: [] as string[] };
+
+    const envResolved: Record<string, string> = {};
+    const seenSymbols = new Set<string>([...commandResolved.symbols, ...cwdResolved.symbols]);
+    for (const [key, value] of Object.entries(params.env)) {
+      const resolved = await this.resolveTemplateSymbols(value, {
+        shellEscapeValues: false,
+        storeCache,
+      });
+      envResolved[key] = resolved.value;
+      for (const symbol of resolved.symbols) seenSymbols.add(symbol);
+    }
+
+    return {
+      command: commandResolved.value,
+      cwd: cwdResolved.value,
+      env: envResolved,
+      symbols: [...seenSymbols.values()],
+    };
+  }
+
+  private async resolveTemplateSymbols(
+    input: string,
+    opts: { shellEscapeValues: boolean; storeCache: SymbolStoreCache },
+  ): Promise<{ value: string; symbols: string[] }> {
+    const matcher = new RegExp(SYMBOL_TOKEN_PATTERN);
+    let cursor = 0;
+    let output = "";
+    const symbols: string[] = [];
+
+    while (true) {
+      const match = matcher.exec(input);
+      if (!match) break;
+      const raw = match[0] ?? "";
+      const kindRaw = match[1] ?? "";
+      const keyRaw = match[2] ?? "";
+      const fieldRaw = match[3] ?? null;
+      const kind = parseSymbolKind(kindRaw);
+      if (!kind) {
+        throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `Unsupported symbol kind in token ${raw}.`);
+      }
+      const resolved = await this.resolveSymbolToken({
+        kind,
+        key: keyRaw,
+        field: fieldRaw,
+        storeCache: opts.storeCache,
+      });
+      output += input.slice(cursor, match.index);
+      output += opts.shellEscapeValues ? shellEscape(resolved) : resolved;
+      cursor = match.index + raw.length;
+      symbols.push(raw);
+    }
+    if (symbols.length === 0) {
+      return {
+        value: input,
+        symbols: [],
+      };
+    }
+    output += input.slice(cursor);
+    return {
+      value: output,
+      symbols,
+    };
+  }
+
+  private async resolveSymbolToken(params: {
+    kind: SymbolKind;
+    key: string;
+    field: string | null;
+    storeCache: SymbolStoreCache;
+  }): Promise<string> {
+    const key = params.key.trim();
+    if (!key) throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", "Symbol key cannot be empty.");
+
+    if (params.kind === "contact") {
+      const contactsRaw = await this.loadSymbolStore("contact", params.storeCache);
+      const record = this.lookupContactRecord(contactsRaw, key);
+      if (!record) {
+        throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `contact symbol "${key}" was not found.`);
+      }
+      const value = this.pickContactValue(record, params.field);
+      if (value === null) {
+        const suffix = params.field ? `:${params.field}` : "";
+        throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `contact symbol "${key}${suffix}" has no resolvable value.`);
+      }
+      return value;
+    }
+
+    if (params.kind === "user") {
+      if (params.field) {
+        throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `user symbols do not support field selectors (${params.field}).`);
+      }
+      const userRaw = await this.loadSymbolStore("user", params.storeCache);
+      const userMap = asObject(userRaw);
+      const scalar = this.scalarToString(userMap[key]);
+      if (scalar === null) {
+        throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `user symbol "${key}" was not found.`);
+      }
+      return scalar;
+    }
+
+    const storeKind = params.kind;
+    const storeRaw = await this.loadSymbolStore(storeKind, params.storeCache);
+    const storeMap = asObject(storeRaw);
+    if (!(key in storeMap)) {
+      throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `${storeKind} symbol "${key}" was not found.`);
+    }
+    const entry = storeMap[key];
+    if (params.field) {
+      const entryObj = asObject(entry);
+      const value = this.scalarToString(entryObj[params.field]);
+      if (value === null) {
+        throw new NodeToolError(
+          "SYMBOL_RESOLUTION_FAILED",
+          `${storeKind} symbol "${key}:${params.field}" was not found.`,
+        );
+      }
+      return value;
+    }
+
+    const direct = this.scalarToString(entry);
+    if (direct !== null) return direct;
+    const entryObj = asObject(entry);
+    const preferred = this.scalarToString(entryObj.value);
+    if (preferred !== null) return preferred;
+    const scalarEntries = Object.entries(entryObj).flatMap(([field, value]) => {
+      const scalar = this.scalarToString(value);
+      return scalar === null ? [] : [{ field, value: scalar }];
+    });
+    if (scalarEntries.length === 1) return scalarEntries[0]!.value;
+    if (scalarEntries.length === 0) {
+      throw new NodeToolError("SYMBOL_RESOLUTION_FAILED", `${storeKind} symbol "${key}" has no scalar value to resolve.`);
+    }
+    throw new NodeToolError(
+      "SYMBOL_RESOLUTION_FAILED",
+      `${storeKind} symbol "${key}" is ambiguous; use an explicit field selector.`,
+    );
+  }
+
+  private async loadSymbolStore(kind: SymbolKind, cache: SymbolStoreCache): Promise<unknown> {
+    if (cache[kind] !== undefined) return cache[kind];
+    const fileName = kind === "contact" ? "contacts.json" : kind === "account" ? "accounts.json" : kind === "secret" ? "secrets.json" : "user.json";
+    const loaded = await this.readJsonUnknown(path.join(this.symbolStoreDir, fileName));
+    cache[kind] = loaded;
+    return loaded;
+  }
+
+  private lookupContactRecord(raw: unknown, key: string): Record<string, unknown> | null {
+    if (Array.isArray(raw)) {
+      const row = raw.find((item) => asString(asObject(item).key) === key);
+      const obj = asObject(row);
+      return Object.keys(obj).length > 0 ? obj : null;
+    }
+    const map = asObject(raw);
+    if (key in map) {
+      const obj = asObject(map[key]);
+      if (Object.keys(obj).length > 0) return obj;
+    }
+    return null;
+  }
+
+  private pickContactValue(record: Record<string, unknown>, field: string | null): string | null {
+    if (field) return this.scalarToString(record[field]);
+    const preferredFields = ["name", "email", "phone", "firstName", "lastName"];
+    for (const candidate of preferredFields) {
+      const value = this.scalarToString(record[candidate]);
+      if (value !== null) return value;
+    }
+    for (const [candidate, value] of Object.entries(record)) {
+      if (candidate === "key") continue;
+      const scalar = this.scalarToString(value);
+      if (scalar !== null) return scalar;
+    }
+    return null;
+  }
+
+  private scalarToString(value: unknown): string | null {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return null;
   }
 
   private appendProcessLog(entry: ReferenceProcess, chunk: string, stream: "stdout" | "stderr"): void {
@@ -912,6 +1717,30 @@ class ReferenceNodeClient {
       entry.status = "completed";
     } else {
       entry.status = "failed";
+    }
+    if (entry.firewallMode !== "transparent") {
+      const safeSummary = this.buildSafeSummary(entry.logs);
+      const commandName = parseCommandName(entry.command);
+      const reference = this.createHermesReference({
+        sourceType: "process.output",
+        processId: entry.processId,
+        toolName: "system.run",
+        title: commandName ? `process ${commandName}` : "process output",
+        safeSummary,
+        metadata: {
+          mode: entry.firewallMode,
+          status: entry.status,
+          exitCode: entry.exitCode,
+          signal: entry.signal,
+        },
+      });
+      entry.hermesReferences = [reference];
+      const routing = asObject(entry.routing ?? {});
+      entry.routing = {
+        ...routing,
+        firewallMode: entry.firewallMode,
+        hermesReferences: entry.hermesReferences,
+      };
     }
     this.persistProcess(entry);
     this.queueTerminalProcessUpdate(entry, "process_finished");
@@ -966,17 +1795,129 @@ class ReferenceNodeClient {
 
   private createFirewallSession(nowMs: number): PersistedFirewallSessionRecord {
     const sessionId = `fw_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const quarantineState = this.currentPolicyDefaultQuarantine();
+    const firewallMode = this.currentPolicyFirewallMode();
     return this.stateStore.createFirewallSession({
       sessionId,
-      quarantineState: "none",
+      quarantineState,
       nowMs,
       ttlMs: FIREWALL_SESSION_TTL_MS,
-      metadata: null,
+      metadata: {
+        source: "policy.defaultQuarantine",
+        firewallMode,
+        policyUpdatedAt: asNumber(this.policy.updatedAt) ?? nowMs,
+      },
     });
+  }
+
+  private mapReferenceSummary(record: PersistedReferenceRecord): HermesReferenceSummary {
+    return {
+      refId: record.refId,
+      sourceType: record.sourceType,
+      title: record.title ?? null,
+      safeSummary: record.safeSummary,
+      metadata: record.metadata ?? null,
+    };
+  }
+
+  private createHermesReference(params: {
+    sourceType: string;
+    processId?: string | null;
+    toolName?: string | null;
+    title?: string | null;
+    safeSummary: string;
+    metadata?: Record<string, unknown> | null;
+  }): HermesReferenceSummary {
+    const nowMs = Date.now();
+    const created = this.stateStore.createReference({
+      sourceType: params.sourceType,
+      processId: params.processId ?? null,
+      toolName: params.toolName ?? null,
+      title: params.title ?? null,
+      safeSummary: params.safeSummary,
+      metadata: params.metadata ?? null,
+      nowMs,
+    });
+    return this.mapReferenceSummary(created);
+  }
+
+  private buildSafeSummary(value: string): string {
+    const normalized = value.replace(/\r/g, "");
+    const lines = normalized
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    const tail = lines.slice(-40).join("\n");
+    const base = tail || "(no output)";
+    return truncateOutput(base, 6_000);
+  }
+
+  private readProcessFirewallMode(routing: Record<string, unknown> | null): FirewallMode {
+    return parseFirewallMode(asString(asObject(routing ?? {}).firewallMode), "transparent");
+  }
+
+  private readProcessHermesReferences(routing: Record<string, unknown> | null): HermesReferenceSummary[] {
+    const refsRaw = asObject(routing ?? {}).hermesReferences;
+    if (!Array.isArray(refsRaw)) return [];
+    const out: HermesReferenceSummary[] = [];
+    for (const item of refsRaw) {
+      const obj = asObject(item);
+      const refId = asString(obj.refId);
+      const sourceType = asString(obj.sourceType);
+      const safeSummary = asString(obj.safeSummary);
+      if (!refId || !sourceType || !safeSummary) continue;
+      const metadataObj = asObject(obj.metadata);
+      out.push({
+        refId,
+        sourceType,
+        title: asString(obj.title) ?? null,
+        safeSummary,
+        metadata: Object.keys(metadataObj).length > 0 ? metadataObj : null,
+      });
+    }
+    return out;
+  }
+
+  private resolveProcessHermesReferences(entry: ReferenceProcess): HermesReferenceSummary[] {
+    if (entry.hermesReferences.length > 0) return entry.hermesReferences;
+    const refs = this.stateStore.listReferencesByProcessId(entry.processId, 20).map((row) => this.mapReferenceSummary(row));
+    if (refs.length > 0) {
+      entry.hermesReferences = refs;
+    }
+    return entry.hermesReferences;
+  }
+
+  private writeAuditEvent(params: {
+    type: string;
+    processId?: string | null;
+    firewallSession?: string | null;
+    actor?: string | null;
+    toolName?: string | null;
+    details?: Record<string, unknown> | null;
+    createdAt?: number;
+  }): void {
+    try {
+      this.stateStore.appendAuditEvent({
+        createdAt: params.createdAt ?? Date.now(),
+        type: params.type,
+        processId: params.processId ?? null,
+        firewallSession: params.firewallSession ?? null,
+        actor: params.actor ?? this.senderId,
+        toolName: params.toolName ?? null,
+        details: params.details ?? null,
+      });
+    } catch (err) {
+      this.log(
+        `audit append failed type=${params.type} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private queueTerminalProcessUpdate(entry: ReferenceProcess, reason: string): void {
     const deliveryId = `dlv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const hermesEnabled = entry.firewallMode !== "transparent";
+    const summary = hermesEnabled ? this.buildSafeSummary(entry.logs) : truncateOutput(entry.logs, 6_000);
+    const references = hermesEnabled ? this.resolveProcessHermesReferences(entry) : [];
     const payload: Record<string, unknown> = {
       processId: entry.processId,
       status: entry.status,
@@ -984,10 +1925,20 @@ class ReferenceNodeClient {
       endedAt: entry.endedAt,
       exitCode: entry.exitCode,
       signal: entry.signal,
-      summary: truncateOutput(entry.logs, 6_000),
+      summary,
       deliveryId,
       deliveryReason: reason,
       ts: Date.now(),
+      firewallMode: entry.firewallMode,
+      ...(hermesEnabled
+        ? {
+            hermes: {
+              mode: entry.firewallMode,
+              sanitized: true,
+              references,
+            },
+          }
+        : {}),
       ...(entry.routing ? { routing: entry.routing } : {}),
     };
     this.stateStore.enqueueOutbox({
@@ -1037,12 +1988,14 @@ class ReferenceNodeClient {
         endedAt: entry.endedAt,
         exitCode: entry.exitCode,
         signal: entry.signal,
+        firewallMode: entry.firewallMode,
         ts: Date.now(),
       },
     });
   }
 
   private serializeProcess(entry: ReferenceProcess, includeLogs: boolean): Record<string, unknown> {
+    const hermesReferences = entry.firewallMode !== "transparent" ? this.resolveProcessHermesReferences(entry) : [];
     return {
       processId: entry.processId,
       command: entry.command,
@@ -1055,7 +2008,17 @@ class ReferenceNodeClient {
       cancelRequested: entry.cancelRequested,
       timeoutMs: entry.timeoutMs,
       logChars: entry.logs.length,
+      firewallMode: entry.firewallMode,
       ...(includeLogs ? { logs: entry.logs } : {}),
+      ...(entry.firewallMode !== "transparent"
+        ? {
+            hermes: {
+              mode: entry.firewallMode,
+              sanitized: true,
+              references: hermesReferences,
+            },
+          }
+        : {}),
       ...(entry.routing ? { routing: entry.routing } : {}),
     };
   }
@@ -1123,12 +2086,14 @@ class ReferenceNodeClient {
 
   private sendCapsAdvertise(): void {
     if (!this.ready) return;
+    const firewallMode = this.currentPolicyFirewallMode();
     this.sendSignedEnvelope({
       type: "event",
       event: "caps.advertise",
       payload: {
-        capabilities: this.config.capabilities,
+        capabilities: this.advertisedCapabilities(),
         tags: ["reference-node"],
+        firewallMode,
         timestamp: Date.now(),
       },
     });
@@ -1237,6 +2202,8 @@ function buildConfig(values: Record<string, string>): Config {
     values["state-dir"] ??
     process.env.NEXUS_NODE_STATE_DIR ??
     path.join(process.cwd(), ".nexus-node");
+  const policyRequired =
+    (values["policy-required"] ?? process.env.NEXUS_NODE_POLICY_REQUIRED ?? "").trim() === "1";
   const capabilities = splitCsv(values.caps ?? process.env.NEXUS_NODE_CAPS, DEFAULT_CAPABILITIES);
   const allowCommands = new Set(
     splitCsv(values.allow ?? process.env.NEXUS_NODE_ALLOW_COMMANDS, DEFAULT_ALLOW_COMMANDS),
@@ -1255,6 +2222,7 @@ function buildConfig(values: Record<string, string>): Config {
     gatewayUrl,
     gatewayTlsFingerprint,
     stateDir: path.resolve(stateDir),
+    policyRequired,
     nodeId,
     displayName,
     capabilities,
@@ -1525,6 +2493,34 @@ function normalizeSignal(value: string | null): NodeJS.Signals | null {
   }
 }
 
+function parseQuarantineState(value: unknown, fallback: "none" | "soft" | "hard"): "none" | "soft" | "hard" {
+  if (typeof value !== "string") return fallback;
+  switch (value.trim()) {
+    case "none":
+      return "none";
+    case "soft":
+      return "soft";
+    case "hard":
+      return "hard";
+    default:
+      return fallback;
+  }
+}
+
+function parseFirewallMode(value: string | null, fallback: FirewallMode): FirewallMode {
+  if (!value) return fallback;
+  switch (value.trim()) {
+    case "transparent":
+      return "transparent";
+    case "audit-only":
+      return "audit-only";
+    case "hermes":
+      return "hermes";
+    default:
+      return fallback;
+  }
+}
+
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -1551,6 +2547,11 @@ function asString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  return null;
+}
+
 function asNumber(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return value;
@@ -1568,6 +2569,19 @@ function asStringMap(value: unknown): Record<string, string> {
     if (typeof v === "string") out[key] = v;
   }
   return out;
+}
+
+function parseSymbolKind(value: string | null): SymbolKind | null {
+  if (!value) return null;
+  switch (value) {
+    case "contact":
+    case "account":
+    case "secret":
+    case "user":
+      return value;
+    default:
+      return null;
+  }
 }
 
 function truncateOutput(text: string, maxChars: number = MAX_OUTPUT_CHARS): string {
@@ -1707,8 +2721,9 @@ function printHelp(): void {
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ./.nexus-node)",
-      "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel)",
+      "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run",
+      "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
       "  --reconnect-min-ms <ms>         Minimum reconnect delay (default 2000)",
       "  --reconnect-max-ms <ms>         Maximum reconnect delay (default 30000)",

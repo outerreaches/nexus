@@ -134,6 +134,81 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     });
   });
 
+  app.get("/api/nodes/:id/audit", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    if (!deps.nodeGateway) return c.json({ error: "node gateway is not available" }, 503);
+
+    const id = String(c.req.param("id") ?? "").trim();
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const row = getNodeRowById(deps.db, id);
+    if (!row) return c.json({ error: "node not found" }, 404);
+    if (row.backend !== "nexus") {
+      return c.json({ error: `node backend ${row.backend} does not support audit.query` }, 400);
+    }
+
+    const limit = clampInt(c.req.query("limit"), 1, 500) ?? 100;
+    const timeoutMs = clampInt(c.req.query("timeoutMs"), 2_000, 120_000) ?? 15_000;
+    const cursorCreatedAt = parseOptionalInt(c.req.query("cursorCreatedAt") ?? c.req.query("cursor"));
+    const type = parseOptionalText(c.req.query("type"), 128);
+    const processId = parseOptionalText(c.req.query("processId") ?? c.req.query("process"), 128);
+    const firewallSession = parseOptionalText(c.req.query("firewallSession"), 256);
+    const actor = parseOptionalText(c.req.query("actor"), 256);
+    const requestArgs: Record<string, unknown> = {
+      id,
+      limit,
+    };
+    if (cursorCreatedAt !== null) requestArgs.cursorCreatedAt = cursorCreatedAt;
+    if (type) requestArgs.type = type;
+    if (processId) requestArgs.processId = processId;
+    if (firewallSession) requestArgs.firewallSession = firewallSession;
+    if (actor) requestArgs.actor = actor;
+
+    try {
+      const raw = await deps.nodeGateway.executeRoutedCall({
+        nodeId: id,
+        remoteName: "audit.query",
+        args: requestArgs,
+        timeoutMs,
+        ctx: {
+          workspaceDir: "",
+          stateDir: deps.stateDir,
+          codeDir: "",
+          executionNode: id,
+          executionMode: "remote",
+          nowMs: () => Date.now(),
+          log: deps.log,
+        },
+      });
+      const parsed = parseJsonObject(raw);
+      return c.json({
+        nodeId: id,
+        source: "remote",
+        timestamp: Date.now(),
+        ...(parsed ?? { payload: raw }),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const code = readErrorCode(err);
+      const status =
+        code === "NODE_SOCKET_UNAVAILABLE" || code === "NODE_OFFLINE"
+          ? 503
+          : code === "NODE_RESPONSE_TIMEOUT"
+            ? 504
+            : code === "NODE_PROTOCOL_ERROR"
+              ? 400
+              : 502;
+      return c.json(
+        {
+          error: message,
+          code,
+          nodeId: id,
+          timestamp: Date.now(),
+        },
+        status,
+      );
+    }
+  });
+
   app.post("/api/nodes/:id/status", async (c) => {
     if (!deps.db) return c.json({ error: "database is not available" }, 503);
     const id = String(c.req.param("id") ?? "").trim();
@@ -259,6 +334,36 @@ function parseStringArrayJson(value: string | null | undefined): string[] {
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function parseOptionalInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.floor(parsed);
+}
+
+function parseOptionalText(value: string | undefined, maxChars: number): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > maxChars ? trimmed.slice(0, maxChars) : trimmed;
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function readErrorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  if (typeof code === "string" && code.trim().length > 0) return code;
+  return "NODE_AUDIT_QUERY_FAILED";
 }
 
 function parseNodeStatus(value: unknown): "pending" | "approved" | "blocked" | "offline" | "online" | null {

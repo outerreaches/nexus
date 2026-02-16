@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager } from "../process/manager.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
+import type { NodeWebSocketGateway } from "../nodes/ws-gateway.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
@@ -15,6 +16,7 @@ export type GatewayHttpDeps = {
   db?: NexusDatabase;
   processManager?: ProcessManager;
   agentTracker?: AgentTracker;
+  nodeGateway?: NodeWebSocketGateway;
 };
 
 export async function startHttpServer(

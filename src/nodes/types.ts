@@ -40,6 +40,7 @@ export type NodeDescriptor = Pick<
   | "endpoint"
   | "connectedAt"
   | "lastSeenAt"
+  | "metadata"
 >;
 
 export type NodeSession = {

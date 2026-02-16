@@ -230,6 +230,7 @@ function renderNodeDeleteAction(nodeId: string, disabled = false): string {
 
 function renderNodeActions(row: NodeRow): string {
   const nodeId = row.id;
+  const auditAction = `<button type="button" class="graph-btn" data-node-audit-id="${escapeHtml(nodeId)}">Audit</button>`;
   const deleteAction = renderNodeDeleteAction(nodeId, row.status === "online");
   const blockAction = renderNodeStatusAction({
     nodeId,
@@ -240,19 +241,19 @@ function renderNodeActions(row: NodeRow): string {
   });
   switch (row.status) {
     case "pending":
-      return `${renderNodeStatusAction({
+      return `${auditAction}${renderNodeStatusAction({
         nodeId,
         nextStatus: "approved",
         label: "Approve",
       })}${blockAction}${deleteAction}`;
     case "approved":
-      return `<button type="button" class="graph-btn" disabled>Approved</button>${renderNodeStatusAction({
+      return `${auditAction}<button type="button" class="graph-btn" disabled>Approved</button>${renderNodeStatusAction({
         nodeId,
         nextStatus: "pending",
         label: "Set Pending",
       })}${deleteAction}`;
     case "blocked":
-      return `${renderNodeStatusAction({
+      return `${auditAction}${renderNodeStatusAction({
         nodeId,
         nextStatus: "approved",
         label: "Approve",
@@ -262,15 +263,15 @@ function renderNodeActions(row: NodeRow): string {
         label: "Set Pending",
       })}${deleteAction}`;
     case "online":
-      return `<button type="button" class="graph-btn" disabled>Online</button>${blockAction}${deleteAction}`;
+      return `${auditAction}<button type="button" class="graph-btn" disabled>Online</button>${blockAction}${deleteAction}`;
     case "offline":
-      return `<button type="button" class="graph-btn" disabled>Offline</button>${renderNodeStatusAction({
+      return `${auditAction}<button type="button" class="graph-btn" disabled>Offline</button>${renderNodeStatusAction({
         nodeId,
         nextStatus: "pending",
         label: "Set Pending",
       })}${deleteAction}`;
     default:
-      return `${renderNodeStatusAction({
+      return `${auditAction}${renderNodeStatusAction({
         nodeId,
         nextStatus: "approved",
         label: "Approve",
