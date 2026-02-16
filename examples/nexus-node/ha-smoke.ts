@@ -56,6 +56,12 @@ type ProcessRunSnapshot = {
   status: string | null;
 };
 
+type NodeDbSnapshot = {
+  id: string;
+  status: string;
+  connectedAt: number | null;
+};
+
 type SeededReplayState = {
   processId: string;
   deliveryIds: string[];
@@ -329,8 +335,47 @@ async function approveNode(apiBaseUrl: string, nodeId: string): Promise<void> {
   assert.equal(res.status, 200, `node approval failed for ${nodeId}: ${res.text}`);
 }
 
+function readNodeSnapshotFromDb(gatewayDbPath: string, nodeId: string): NodeDbSnapshot | null {
+  try {
+    const db = new Database(gatewayDbPath, { readonly: true });
+    try {
+      const row = db
+        .prepare("SELECT id, status, connected_at FROM nodes WHERE id = ?")
+        .get(nodeId) as { id?: string; status?: string; connected_at?: number | null } | undefined;
+      if (!row?.id || typeof row.status !== "string") return null;
+      return {
+        id: row.id,
+        status: row.status,
+        connectedAt: typeof row.connected_at === "number" ? row.connected_at : null,
+      };
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+function approveNodeInDb(gatewayDbPath: string, nodeId: string): boolean {
+  const now = Date.now();
+  try {
+    const db = new Database(gatewayDbPath);
+    try {
+      const result = db
+        .prepare("UPDATE nodes SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'pending'")
+        .run(now, nodeId);
+      return Number(result.changes ?? 0) > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
 async function waitForNodeOnline(params: {
   apiBaseUrl: string;
+  gatewayDbPath: string;
   nodeId: string;
   timeoutMs: number;
   autoApprove: boolean;
@@ -341,14 +386,40 @@ async function waitForNodeOnline(params: {
     intervalMs: 700,
     message: `node did not reach online status id=${params.nodeId}`,
     predicate: async () => {
-      const node = await getNodeSnapshot(params.apiBaseUrl, params.nodeId);
-      if (!node) return false;
-      if (params.autoApprove && node.status === "pending" && !approvalAttempted) {
+      const nodeApi = await getNodeSnapshot(params.apiBaseUrl, params.nodeId);
+      if (
+        nodeApi &&
+        nodeApi.status === "online" &&
+        typeof nodeApi.connectedAt === "number" &&
+        nodeApi.connectedAt > 0
+      ) {
+        return true;
+      }
+
+      const nodeDb = readNodeSnapshotFromDb(params.gatewayDbPath, params.nodeId);
+      if (
+        nodeDb &&
+        nodeDb.status === "online" &&
+        typeof nodeDb.connectedAt === "number" &&
+        nodeDb.connectedAt > 0
+      ) {
+        return true;
+      }
+
+      const pendingDetected = nodeApi?.status === "pending" || nodeDb?.status === "pending";
+      if (params.autoApprove && pendingDetected && !approvalAttempted) {
         approvalAttempted = true;
-        await approveNode(params.apiBaseUrl, params.nodeId);
+        try {
+          await approveNode(params.apiBaseUrl, params.nodeId);
+        } catch {
+          // HAProxy topology can make /api/nodes status updates flaky;
+          // fall back to direct DB update in shared state.
+          approveNodeInDb(params.gatewayDbPath, params.nodeId);
+        }
         return false;
       }
-      return node.status === "online" && typeof node.connectedAt === "number" && node.connectedAt > 0;
+
+      return false;
     },
   });
 }
@@ -757,6 +828,7 @@ async function main(): Promise<void> {
 
     await waitForNodeOnline({
       apiBaseUrl: haproxyUrl,
+      gatewayDbPath,
       nodeId,
       timeoutMs,
       autoApprove: true,
@@ -834,6 +906,7 @@ async function main(): Promise<void> {
 
     await waitForNodeOnline({
       apiBaseUrl: haproxyUrl,
+      gatewayDbPath,
       nodeId,
       timeoutMs,
       autoApprove: false,

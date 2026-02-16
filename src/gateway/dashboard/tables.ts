@@ -3,6 +3,7 @@ import type {
   ManagedProcessInfo,
   JobRow,
   JobRunRow,
+  NodeRow,
   BlackboardRow,
   DataIntakePanelState,
   DataIntakeCatalogEntry,
@@ -182,6 +183,76 @@ export function renderJobRunsTable(rows: JobRunRow[]): string {
             <td>${escapeHtml(formatTime(r.started_at))}</td>
             <td>${escapeHtml(r.ended_at ? formatTime(r.ended_at) : "-")}</td>
             <td>${escapeHtml(truncate(r.error ?? "", 120))}</td>
+          </tr>`;
+      })
+      .join("")}
+    </tbody>
+  </table>`;
+}
+
+function parseStringArray(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
+}
+
+export function renderNodesTable(rows: NodeRow[]): string {
+  if (rows.length === 0) return `<div class="no-data">No nodes registered.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>ID</th>
+        <th>Label</th>
+        <th>Backend</th>
+        <th>Trust</th>
+        <th>Firewall</th>
+        <th>Last Seen</th>
+        <th>Connected</th>
+        <th>Endpoint</th>
+        <th>Capabilities</th>
+        <th>Tags</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+      .map((row) => {
+        const capabilities = parseStringArray(row.capabilities_json);
+        const tags = parseStringArray(row.tags_json);
+        const statusClass = escapeClass(row.status);
+        const approveDisabled = row.status === "approved" || row.status === "online";
+        const blockDisabled = row.status === "blocked";
+        return `<tr>
+            <td><span class="badge status-${statusClass}">${escapeHtml(row.status)}</span></td>
+            <td>${escapeHtml(row.id)}</td>
+            <td>${escapeHtml(row.label)}</td>
+            <td>${escapeHtml(row.backend)}</td>
+            <td>${escapeHtml(row.trust_level)}</td>
+            <td>${escapeHtml(row.firewall_mode)}</td>
+            <td>${escapeHtml(row.last_seen_at ? formatTime(row.last_seen_at) : "-")}</td>
+            <td>${escapeHtml(row.connected_at ? formatTime(row.connected_at) : "-")}</td>
+            <td>${escapeHtml(row.endpoint ?? "-")}</td>
+            <td>${escapeHtml(capabilities.length > 0 ? truncate(capabilities.join(", "), 96) : "-")}</td>
+            <td>${escapeHtml(tags.length > 0 ? truncate(tags.join(", "), 64) : "-")}</td>
+            <td>
+              <div class="inline-actions">
+                <form method="post" action="/dashboard/nodes/status">
+                  <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                  <input type="hidden" name="status" value="approved" />
+                  <button type="submit" class="graph-btn" ${approveDisabled ? "disabled" : ""}>Approve</button>
+                </form>
+                <form method="post" action="/dashboard/nodes/status" onsubmit="return confirm('Block node ${escapeHtml(row.id)}?')">
+                  <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                  <input type="hidden" name="status" value="blocked" />
+                  <button type="submit" class="graph-btn btn-danger" ${blockDisabled ? "disabled" : ""}>Block</button>
+                </form>
+              </div>
+            </td>
           </tr>`;
       })
       .join("")}

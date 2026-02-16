@@ -3,6 +3,7 @@ import type {
   AgentRunInfo,
   ManagedProcessInfo,
   AgentRunRow,
+  NodeRow,
   JobRow,
   JobRunRow,
   BlackboardRow,
@@ -14,6 +15,7 @@ import { dashboardStyles } from "./styles.js";
 import {
   renderAgentTable,
   renderProcessTable,
+  renderNodesTable,
   renderJobsTable,
   renderJobRunsTable,
   renderDataIntakeTable,
@@ -33,6 +35,7 @@ export function renderDashboard(params: {
   processWindowMinutes: number;
   agentWindowMinutes: number;
   visibleNodeWindowSeconds: number;
+  nodeLimit: number;
   jobLimit: number;
   runLimit: number;
   blackboardLimit: number;
@@ -41,6 +44,7 @@ export function renderDashboard(params: {
   processes: ManagedProcessInfo[];
   agents: { active: AgentRunInfo[]; recent: AgentRunInfo[] };
   agentGraph: AgentRunRow[];
+  nodes: NodeRow[];
   jobs: JobRow[];
   runningJobRuns: JobRunRow[];
   dataIntake: DataIntakePanelState;
@@ -75,6 +79,7 @@ export function renderDashboard(params: {
     ["processWindowMinutes", params.processWindowMinutes],
     ["agentWindowMinutes", params.agentWindowMinutes],
     ["visibleNodeWindowSeconds", params.visibleNodeWindowSeconds],
+    ["nodeLimit", params.nodeLimit],
     ["jobLimit", params.jobLimit],
     ["runLimit", params.runLimit],
     ["blackboardLimit", params.blackboardLimit],
@@ -233,6 +238,11 @@ export function renderDashboard(params: {
       <section>
         <h2>Processes (${params.processWindowMinutes}m window)</h2>
         ${renderProcessTable(params.processes)}
+      </section>
+
+      <section>
+        <h2>Execution Nodes</h2>
+        <div class="scroll-12">${renderNodesTable(params.nodes)}</div>
       </section>
 
       <section>

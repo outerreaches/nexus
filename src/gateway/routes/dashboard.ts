@@ -8,6 +8,7 @@ import {
   listProcesses,
   listAgents,
   listAgentGraph,
+  listNodes,
   filterVisibleAgentRuns,
   filterVisibleAgentGraph,
   listJobs,
@@ -19,6 +20,7 @@ import {
 import { renderDashboard } from "../dashboard/render.js";
 import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
 import { archiveAndDeleteJob } from "../../storage/job-archive.js";
+import { getNodeById, setNodeStatus, type NodeStatus } from "../../storage/nodes.js";
 
 export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/dashboard", async (c) => {
@@ -37,6 +39,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const processWindowMinutes = clampInt(c.req.query("processWindowMinutes"), 5, 24 * 60) ?? 120;
     const agentWindowMinutes = clampInt(c.req.query("agentWindowMinutes"), 10, 24 * 60) ?? 360;
     const visibleNodeWindowSeconds = clampInt(c.req.query("visibleNodeWindowSeconds"), 10, 3600) ?? 60;
+    const nodeLimit = clampInt(c.req.query("nodeLimit"), 1, 500) ?? 200;
     const visibleNodeWindowMs = visibleNodeWindowSeconds * 1000;
     const jobLimit = clampInt(c.req.query("jobLimit"), 1, 200) ?? 50;
     const runLimit = clampInt(c.req.query("runLimit"), 1, 200) ?? 50;
@@ -48,6 +51,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
 
     const processes = listProcesses(deps.processManager, nowMs, processWindowMinutes * 60_000);
     const agents = listAgents(deps.agentTracker, nowMs, agentWindowMinutes * 60_000);
+    const nodes = listNodes(deps.db, nodeLimit);
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
     const agentGraph = filterVisibleAgentGraph(listAgentGraph(deps.db, allowedRunIds), nowMs, visibleNodeWindowMs);
     const visibleAgentsById = new Map(
@@ -70,6 +74,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         processes,
         agents: { active: agents.active, recent: agents.recent },
         agentGraph,
+        nodes,
         jobs,
         runningJobRuns,
         dataIntake,
@@ -78,6 +83,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         blackboardScope: blackboardScopeRaw || "all",
         blackboardScopes,
         blackboardLimit,
+        nodeLimit,
         jobLimit,
         runLimit,
         dataIntakeLimit,
@@ -85,6 +91,27 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         db: deps.db,
       }),
     );
+  });
+
+  app.post("/dashboard/nodes/status", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    const statusRaw = String(body.status ?? "").trim().toLowerCase();
+    if (!id) return c.text("Missing node id", 400);
+    const allowed: readonly NodeStatus[] = ["pending", "approved", "blocked"];
+    if (!allowed.includes(statusRaw as NodeStatus)) {
+      return c.text("Invalid node status (expected pending|approved|blocked)", 400);
+    }
+    const existing = getNodeById(deps.db, id);
+    if (!existing) return c.text("Node not found", 404);
+    setNodeStatus(deps.db, {
+      id,
+      status: statusRaw as NodeStatus,
+      connectedAt: null,
+      nowMs: Date.now(),
+    });
+    return c.redirect("/dashboard");
   });
 
   app.post("/dashboard/blackboard/clear", async (c) => {
