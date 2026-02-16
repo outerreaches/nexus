@@ -20,6 +20,10 @@ function asString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asRawString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 function asNumber(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return value;
@@ -278,8 +282,8 @@ export function createNodeProcessDeliveryHandler(deps: {
 
   const handleLogAppend = async (ctx: ProcessDeliveryContext): Promise<void> => {
     const processId = asString(ctx.payload.processId);
-    const chunk = asString(ctx.payload.chunk);
-    if (!processId || !chunk) return;
+    const chunk = asRawString(ctx.payload.chunk);
+    if (!processId || chunk === null) return;
     const stream = asString(ctx.payload.stream) ?? "stdout";
     const logPath = resolveLogPath(ctx.nodeId, processId);
     try {

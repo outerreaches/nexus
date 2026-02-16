@@ -567,18 +567,9 @@ class ReferenceNodeClient {
       this.sendRequestError(msg.id, "INVALID_REQUEST", "process.start requires args.command.", false);
       return;
     }
-    const commandName = parseCommandName(command);
-    if (!commandName) {
-      this.sendRequestError(msg.id, "INVALID_REQUEST", "Unable to parse command name for process.start.", false);
-      return;
-    }
-    if (!isAllowedCommand(commandName, this.config.allowCommands)) {
-      this.sendRequestError(
-        msg.id,
-        "PERMISSION_DENIED",
-        `Command "${commandName}" is not allowlisted for process.start.`,
-        false,
-      );
+    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
+    if (!commandValidation.ok) {
+      this.sendRequestError(msg.id, "PERMISSION_DENIED", commandValidation.message, false);
       return;
     }
 
@@ -808,15 +799,8 @@ class ReferenceNodeClient {
   private async execSystemRun(args: Record<string, unknown>): Promise<string> {
     const command = asString(args.command);
     if (!command) throw new NodeToolError("INVALID_REQUEST", "system.run requires `command`.");
-
-    const commandName = parseCommandName(command);
-    if (!commandName) throw new NodeToolError("INVALID_REQUEST", "Unable to parse command name.");
-    if (!isAllowedCommand(commandName, this.config.allowCommands)) {
-      throw new NodeToolError(
-        "PERMISSION_DENIED",
-        `Command "${commandName}" is not allowlisted for this node.`,
-      );
-    }
+    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
+    if (!commandValidation.ok) throw new NodeToolError("PERMISSION_DENIED", commandValidation.message);
 
     const timeoutMs = clampInt(args.timeoutMs ?? args.timeout, 1_000, this.config.runTimeoutMs) ?? this.config.runTimeoutMs;
     const cwd = asString(args.cwd) ?? undefined;
@@ -1338,6 +1322,42 @@ async function execShell(paramsCommand: string, opts: {
 function isAllowedCommand(commandName: string, allowCommands: Set<string>): boolean {
   if (allowCommands.has("*")) return true;
   return allowCommands.has(commandName);
+}
+
+function hasDisallowedShellSyntax(command: string): boolean {
+  // Keep process/system.run in strict single-command mode so allowlist checks
+  // cannot be bypassed via shell chaining, pipes, redirects, or substitutions.
+  return /(?:&&|\|\||[;&|`$><\n\r])/.test(command);
+}
+
+function validateAllowlistedCommand(
+  command: string,
+  allowCommands: Set<string>,
+): { ok: true; commandName: string } | { ok: false; message: string } {
+  if (hasDisallowedShellSyntax(command)) {
+    return {
+      ok: false,
+      message:
+        "Shell control operators are not allowed. Use a single allowlisted command without chaining, pipes, redirects, or substitutions.",
+    };
+  }
+  const commandName = parseCommandName(command);
+  if (!commandName) {
+    return {
+      ok: false,
+      message: "Unable to parse command name.",
+    };
+  }
+  if (!isAllowedCommand(commandName, allowCommands)) {
+    return {
+      ok: false,
+      message: `Command "${commandName}" is not allowlisted for this node.`,
+    };
+  }
+  return {
+    ok: true,
+    commandName,
+  };
 }
 
 function parseCommandName(command: string): string | null {

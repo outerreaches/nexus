@@ -70,7 +70,7 @@ async function main(): Promise<void> {
       payload: {
         processId: "proc_logonly_smoke",
         stream: "stdout",
-        chunk: "hello from log.append\n",
+        chunk: "  hello from log.append  \n\n",
       },
     });
 
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     assert.equal(logOnlyRow.status, "running");
     assert.equal(logOnlyRow.notify_mode, "never");
     const logOnlyText = await fs.readFile(logOnlyRow.log_path, "utf8");
-    assert.match(logOnlyText, /hello from log\.append/);
+    assert.match(logOnlyText, /  hello from log\.append  \n\n/);
 
     const terminalPayload = {
       processId,

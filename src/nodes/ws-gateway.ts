@@ -15,7 +15,7 @@ import {
 } from "./auth.js";
 import { NodeRegistry } from "./registry.js";
 import { NodeRoutingError } from "./types.js";
-import type { NodeBackend, NodeFirewallMode, NodeTrustLevel } from "../storage/nodes.js";
+import type { NodeBackend, NodeFirewallMode, NodeStatus, NodeTrustLevel } from "../storage/nodes.js";
 
 type HandshakeChallenge = {
   nodeNonce: string;
@@ -105,6 +105,7 @@ export class NodeWebSocketGateway {
   private readonly heartbeatTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly maxMessageSkewMs: number;
+  private readonly challengeTtlMs: number;
   private readonly pendingGatewayRequests = new Map<string, PendingGatewayRequest>();
   private readonly identity: GatewayNodeIdentity;
   private readonly requireMessageSignatures: boolean;
@@ -121,6 +122,7 @@ export class NodeWebSocketGateway {
       heartbeatTimeoutMs?: number;
       requestTimeoutMs?: number;
       maxMessageSkewMs?: number;
+      challengeTtlMs?: number;
       requireMessageSignatures?: boolean;
       gatewaySender?: string;
       onProcessUpdate?: (ctx: NodeProcessEventContext) => Promise<boolean>;
@@ -132,6 +134,7 @@ export class NodeWebSocketGateway {
     this.heartbeatTimeoutMs = Math.max(this.heartbeatIntervalMs * 2, deps.heartbeatTimeoutMs ?? 95_000);
     this.requestTimeoutMs = Math.max(2_000, deps.requestTimeoutMs ?? 60_000);
     this.maxMessageSkewMs = Math.max(5_000, deps.maxMessageSkewMs ?? 120_000);
+    this.challengeTtlMs = Math.max(5_000, deps.challengeTtlMs ?? 30_000);
     this.requireMessageSignatures = deps.requireMessageSignatures ?? true;
     this.gatewaySender = deps.gatewaySender ?? "gateway:primary";
   }
@@ -979,12 +982,19 @@ export class NodeWebSocketGateway {
       return;
     }
 
+    const existingActive = this.resolveActiveNodeSocket(nodeId);
+    const preAuthStatus: NodeStatus = existingActive
+      ? "online"
+      : existing.status === "offline"
+        ? "offline"
+        : "approved";
+    const preAuthConnectedAt = preAuthStatus === "online" ? existing.connectedAt : null;
     this.deps.registry.registerOrUpdate({
       id: nodeId,
       label,
       publicKey,
       fingerprint,
-      status: "online",
+      status: preAuthStatus,
       endpoint,
       backend,
       trustLevel,
@@ -992,21 +1002,8 @@ export class NodeWebSocketGateway {
       capabilities,
       tags,
       metadata: this.asObject(params.metadata),
-      connectedAt: nowMs,
+      connectedAt: preAuthConnectedAt,
       lastSeenAt: nowMs,
-      nowMs,
-    });
-    this.deps.registry.beginSession({
-      id: session.sessionId,
-      nodeId,
-      startedAt: nowMs,
-      ipAddress: endpoint,
-      capabilities,
-    });
-    this.deps.registry.setStatus({
-      id: nodeId,
-      status: "online",
-      connectedAt: nowMs,
       nowMs,
     });
 
@@ -1016,12 +1013,6 @@ export class NodeWebSocketGateway {
     session.nodePublicKeyRaw = publicKey;
     session.nodeFingerprint = fingerprint;
     session.authState = "challenged";
-    const previousSessionId = this.activeNodeSessions.get(nodeId);
-    this.activeNodeSessions.set(nodeId, session.sessionId);
-    if (previousSessionId && previousSessionId !== session.sessionId) {
-      this.rejectPendingRequestsForSession(previousSessionId, "node session replaced");
-      this.deps.log(`nodes/ws: node=${nodeId} replaced prior session=${previousSessionId}`);
-    }
 
     const gatewayNonce = randomBytes(32).toString("base64url");
     session.pendingChallenge = {
@@ -1057,6 +1048,18 @@ export class NodeWebSocketGateway {
       this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.hello must be completed before connect.prove.", false);
       return;
     }
+    const challengeAgeMs = Date.now() - session.pendingChallenge.issuedAt;
+    if (challengeAgeMs > this.challengeTtlMs) {
+      this.sendErrorResponse(
+        ws,
+        msg.id,
+        "AUTH_INVALID",
+        `connect.prove challenge expired after ${challengeAgeMs}ms.`,
+        false,
+      );
+      this.closeForAuthFailure(ws, "connect.prove challenge expired");
+      return;
+    }
 
     const params = this.asObject(msg.params);
     const nodeProofSig = this.asString(params.nodeProofSig);
@@ -1083,6 +1086,26 @@ export class NodeWebSocketGateway {
     session.pendingChallenge = null;
 
     const nowMs = Date.now();
+    const previousSessionId = this.activeNodeSessions.get(session.nodeId);
+    this.activeNodeSessions.set(session.nodeId, session.sessionId);
+    if (previousSessionId && previousSessionId !== session.sessionId) {
+      this.rejectPendingRequestsForSession(previousSessionId, "node session replaced");
+      this.deps.log(`nodes/ws: node=${session.nodeId} replaced prior session=${previousSessionId}`);
+    }
+    const nodeRow = this.deps.registry.get(session.nodeId);
+    this.deps.registry.beginSession({
+      id: session.sessionId,
+      nodeId: session.nodeId,
+      startedAt: nowMs,
+      ipAddress: this.inferEndpoint(session.request),
+      capabilities: nodeRow?.capabilities ?? [],
+    });
+    this.deps.registry.setStatus({
+      id: session.nodeId,
+      status: "online",
+      connectedAt: nowMs,
+      nowMs,
+    });
     this.deps.registry.markHeartbeat({
       id: session.nodeId,
       nowMs,
