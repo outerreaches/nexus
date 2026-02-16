@@ -1,0 +1,19 @@
+services:
+  nexus-node:
+    build:
+      context: ../..
+      dockerfile: examples/nexus-node/Dockerfile
+    container_name: nexus-reference-node
+    environment:
+      # Update this URL if gateway is exposed differently.
+      NEXUS_NODE_GATEWAY_URL: ws://gateway:18789/nx/nodes
+      NEXUS_NODE_ID: reference-node-1
+      NEXUS_NODE_NAME: Nexus Reference Node
+      NEXUS_NODE_CAPS: system.run,system.which
+      NEXUS_NODE_ALLOW_COMMANDS: echo,uname,whoami,pwd,date,ls
+    volumes:
+      - nexus_node_state:/data/nexus-node
+    restart: unless-stopped
+
+volumes:
+  nexus_node_state:

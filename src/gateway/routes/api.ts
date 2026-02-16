@@ -15,6 +15,7 @@ import {
   listLlmSessions,
   listLlmMessages,
 } from "../dashboard/queries.js";
+import { getNodeById as getNodeRecordById, setNodeStatus as setNodeRecordStatus } from "../../storage/nodes.js";
 
 export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/status", async (c) => c.json(await deps.getStatus()));
@@ -133,6 +134,46 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     });
   });
 
+  app.post("/api/nodes/:id/status", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const id = String(c.req.param("id") ?? "").trim();
+    if (!id) return c.json({ error: "id is required" }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const status = parseNodeStatus(asObject(body).status);
+    if (!status) {
+      return c.json(
+        { error: "status must be one of pending|approved|blocked|offline|online" },
+        400,
+      );
+    }
+
+    const existing = getNodeRecordById(deps.db, id);
+    if (!existing) return c.json({ error: "node not found" }, 404);
+
+    const nowMs = Date.now();
+    const connectedAt = status === "online" ? existing.connectedAt : null;
+    setNodeRecordStatus(deps.db, {
+      id,
+      status,
+      connectedAt,
+      nowMs,
+    });
+    const updated = getNodeRecordById(deps.db, id);
+    if (!updated) return c.json({ error: "node not found after update" }, 404);
+
+    return c.json({
+      ok: true,
+      node: updated,
+      timestamp: nowMs,
+    });
+  });
+
   app.get("/api/llm/sessions", async (c) => {
     const limit = clampInt(c.req.query("limit"), 1, 200) ?? 50;
     const channel = c.req.query("channel") ?? null;
@@ -212,5 +253,29 @@ function parseStringArrayJson(value: string | null | undefined): string[] {
     return parsed.filter((item): item is string => typeof item === "string");
   } catch {
     return [];
+  }
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function parseNodeStatus(value: unknown): "pending" | "approved" | "blocked" | "offline" | "online" | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  switch (normalized) {
+    case "pending":
+      return "pending";
+    case "approved":
+      return "approved";
+    case "blocked":
+      return "blocked";
+    case "offline":
+      return "offline";
+    case "online":
+      return "online";
+    default:
+      return null;
   }
 }
