@@ -357,13 +357,44 @@ curl http://localhost:18789/status | jq .
 
 ```bash
 # On host host
-VM_IP=$(virsh domifaddr nexus-vm | grep -oE '192\.168\.[0-9]+\.[0-9]+')
-
 # Install socat for port forwarding
 sudo apt install -y socat
 
-# Create systemd service for persistent port forwarding
-sudo tee /etc/systemd/system/nexus-forward.service << EOF
+# Remove legacy TLS forwarder if present (can conflict on :18790)
+sudo systemctl disable --now nexus-forward-18790.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/nexus-forward-18790.service
+
+# Helper: resolve VM IP at connection time
+sudo tee /usr/local/bin/nexus-forward-connect.sh << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VM_NAME="${NEXUS_FORWARD_VM_NAME:-nexus-vm}"
+PORT="${NEXUS_FORWARD_PORT:-}"
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+  echo "nexus-forward-connect: invalid NEXUS_FORWARD_PORT='${PORT}'" >&2
+  exit 64
+fi
+
+lookup_vm_ip() {
+  virsh domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -n1
+}
+
+for _ in {1..20}; do
+  VM_IP="$(lookup_vm_ip || true)"
+  if [ -n "$VM_IP" ]; then
+    exec /usr/bin/socat STDIO "TCP:${VM_IP}:${PORT}"
+  fi
+  sleep 1
+done
+
+echo "nexus-forward-connect: unable to resolve IPv4 for VM '${VM_NAME}'" >&2
+exit 1
+EOF
+sudo chmod 0755 /usr/local/bin/nexus-forward-connect.sh
+
+# Create systemd services for persistent port forwarding
+sudo tee /etc/systemd/system/nexus-forward.service << 'EOF'
 [Unit]
 Description=Nexus port forward to VM
 After=libvirtd.service network-online.target
@@ -371,7 +402,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr TCP:${VM_IP}:18789
+Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
+Environment=NEXUS_FORWARD_PORT=18789
+ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
 Restart=always
 RestartSec=2
 
@@ -379,7 +412,7 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
-sudo tee /etc/systemd/system/nexus-forward-tls.service << EOF
+sudo tee /etc/systemd/system/nexus-forward-tls.service << 'EOF'
 [Unit]
 Description=Nexus TLS port forward to VM
 After=libvirtd.service network-online.target
@@ -387,7 +420,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr TCP:${VM_IP}:18790
+Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
+Environment=NEXUS_FORWARD_PORT=18790
+ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
 Restart=always
 RestartSec=2
 
@@ -403,6 +438,8 @@ sudo systemctl enable --now nexus-forward-tls
 curl http://localhost:18789/health/live
 curl -k https://localhost:18790/health/live
 ```
+
+This forwarding model resolves the VM IP on each incoming connection, so VM restarts / DHCP lease changes do not require manual systemd edits or forwarder restarts.
 
 ### 5.2 Access from laptop
 
@@ -444,10 +481,16 @@ curl http://host-tailscale-hostname:18789/health/live
 cd ~/Workspace/Nexus
 git push host main
 
-# On VM — pull and rebuild both containers
-cd /data/code && git pull
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
+# On VM — preferred helper (keeps TLS overlay + preflight checks)
+ssh nexus@<vm-ip> "/home/nexus/pull-deploy.sh"
+
+# Equivalent manual form (if helper is unavailable)
+cd /data/code
+git pull
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 ```
+
+`/home/nexus/pull-deploy.sh` also prints the active gateway TLS fingerprint after deploy to simplify node pin verification updates.
 
 **From agent (automated):** The coder agent deploys via `ha_deploy` tool. See Section 7.3.2 for the full automated flow. No manual intervention needed.
 
@@ -484,7 +527,7 @@ git log --oneline -10  # Find the good commit
 git push --force host main
 # Then on VM:
 cd /data/code && git fetch && git reset --hard host/main
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 ```
 
 ### 6.4 VM Snapshots
@@ -587,13 +630,14 @@ ln -sf ~/nexus-deploy/.env /data/code/.env
 ```bash
 # On VM - use a fixed compose project name to avoid parallel stacks
 cd /data/code
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 
 # Verify services and HA proxy endpoints
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml ps
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml ps
 curl -s http://localhost:18789/api/mode
 curl -s http://localhost:18789/health/live
 curl -s http://localhost:18789/health/ready
+curl -sk https://localhost:18790/health/live
 
 # Check HAProxy stats
 curl -s http://localhost:9999/stats | head
@@ -601,9 +645,12 @@ curl -s http://localhost:9999/stats | head
 
 Notes:
 - Always use `-p infra` with the HA compose file. Omitting it can leave an old stack running and cause port conflicts.
+- Always include both compose files (`ha.yml` + `ha.tls.yml`) for HA gateway lifecycle operations so :18790 remains exposed for node `wss://` reconnects.
 - The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
-- Deploys should still be performed from the VM host using `ha-rollout.sh apply-local`.
+- Deploys should still be performed from the VM host using `ha-rollout.sh apply-local` (now defaults to both compose files and warns/fails on TLS preflight issues).
+- `ha-rollout.sh` enforces TLS overlay by default (`REQUIRE_TLS_OVERLAY=1`). Set `REQUIRE_TLS_OVERLAY=0` only for explicit non-TLS lab runs.
+- For legacy environments still exporting only `COMPOSE_FILE=...ha.yml`, `ha-rollout.sh` auto-appends `infra/docker-compose.ha.tls.yml` when present.
 
 ### 7.3.0 Secure Node Transport (`wss://`)
 
@@ -615,8 +662,8 @@ cd /data/code
 # 1) Generate or inspect the HAProxy TLS certificate bundle and fingerprint
 bash infra/scripts/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
 
-# 2) Enable TLS-aware HAProxy config
-echo 'NEXUS_HAPROXY_CONFIG=haproxy.tls.cfg' >> /data/code/.env
+# 2) Ensure TLS overlay is available
+test -f /data/code/infra/docker-compose.ha.tls.yml
 
 # 3) Recreate HAProxy with TLS listener exposed on :18790
 docker compose -p infra \
@@ -628,6 +675,8 @@ docker compose -p infra \
 curl -sk https://localhost:18790/health/live
 ```
 
+If you intentionally run without the TLS overlay file, set `NEXUS_HAPROXY_CONFIG=haproxy.tls.cfg` in the runtime environment instead.
+
 Node `.env` settings (example):
 
 ```bash
@@ -636,6 +685,12 @@ NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=<sha256 fingerprint from ha-generate-tls-cert
 NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=0
 NEXUS_NODE_TZ=America/New_York
 ```
+
+Pairing note:
+
+- Node approval is one-time per `nodeId` + node fingerprint.
+- Gateway restarts/redeploys should not require re-approval when `/data/nexus` and node identity keys persist.
+- Re-approval is expected if node auth keys are regenerated/replaced, node ID changes, or node records are deleted/reset.
 
 ### 7.3.1 Rolling Deploy (Manual)
 

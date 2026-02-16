@@ -46,7 +46,7 @@ Optional flags:
 
 - `--node-id <id>`
 - `--name <display-name>`
-- `--state-dir <dir>`
+- `--state-dir <dir>` (default `~/.nexus-node`)
 - `--caps <csv>`
 - `--allow <csv>` (command allowlist for `system.run`; include `nexus-policyctl` to allow runtime policy changes)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
@@ -151,6 +151,8 @@ export NEXUS_NODE_MCP_BRIDGE=1
 export NEXUS_NODE_MCP_BRIDGE_CONFIG="$HOME/.nexus-node/mcp-bridge.json"
 ```
 
+If running via Docker Compose, ensure these variables are actually mapped into the container environment (adding them only to `.env` is not sufficient unless compose references them).
+
 Config file shape (`mcp-bridge.json`):
 
 ```json
@@ -186,6 +188,32 @@ node_mcp_call { "id": "<node-id>", "serverId": "smoke", "tool": "echo", "argumen
 node_mcp_resources { "id": "<node-id>", "serverId": "smoke", "action": "list" }
 node_mcp_resources { "id": "<node-id>", "serverId": "smoke", "action": "read", "uri": "mem://public/info" }
 ```
+
+### MCP live validation (operator flow)
+
+Run after the node is online and approved:
+
+1. `node_mcp_list` confirms visible server/tool/resource inventory.
+2. `node_mcp_call` succeeds for an allowlisted tool.
+3. `node_mcp_call` returns `PERMISSION_DENIED` for a blocked tool.
+4. `node_mcp_resources action=list` returns allowlisted URIs.
+5. `node_mcp_resources action=read` succeeds for allowlisted URI and returns `PERMISSION_DENIED` for blocked URI.
+
+Expected success signal:
+
+- `node_mcp_list`, `node_mcp_call`, and `node_mcp_resources` all return `status=ok` in gateway tool logs.
+
+Common MCP troubleshooting:
+
+- Symptom: `ERROR: Node <id> does not advertise tool capability mcp.list`.
+- Cause: `NEXUS_NODE_MCP_BRIDGE=1` was added only to `.env`, but the compose file did not map `NEXUS_NODE_MCP_BRIDGE*` variables into container `environment:`.
+- Fix:
+  1. Ensure compose maps:
+     - `NEXUS_NODE_MCP_BRIDGE`
+     - `NEXUS_NODE_MCP_BRIDGE_CONFIG`
+     - `NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS`
+  2. Recreate the node container (`docker compose up -d --build --force-recreate`).
+  3. Re-run `node_mcp_list`.
 
 ## Transport security policy
 
@@ -261,6 +289,14 @@ node_set_status { "id": "<node-id>", "status": "approved" }
 ```
 
 Then restart/reconnect the reference node.
+
+Pairing persistence expectations:
+
+- Approval is tied to `nodeId` + node fingerprint (node Ed25519 public key).
+- Normal gateway restart/redeploy should **not** require re-approval if:
+  - gateway state persists under `/data/nexus`, and
+  - node identity keys persist under `~/.nexus-node/auth`.
+- Re-approval is expected only after identity drift (new/missing node auth keys, different node ID, or node record deletion/reset).
 
 ## Docker
 

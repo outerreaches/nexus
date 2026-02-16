@@ -312,6 +312,11 @@ class ReferenceNodeClient {
     this.nodeNonce = null;
     this.gatewayNonce = null;
     this.sessionId = null;
+    // Re-learn gateway signing identity for each new websocket session.
+    // This prevents stale in-memory gateway keys from rejecting valid
+    // connect.challenge envelopes after gateway key rotation/redeploy.
+    this.gatewayPublicKey = null;
+    this.gatewayFingerprint = null;
 
     ws.on("upgrade", (response: IncomingMessage) => {
       if (!this.config.gatewayTlsFingerprint) return;
@@ -818,23 +823,49 @@ class ReferenceNodeClient {
       return false;
     }
 
-    // Learn gateway public key from connect.challenge payload, then require
-    // verification for all signed envelopes afterwards.
+    const challengeTrusted = this.trustGatewayIdentityFromChallenge(msg, envelope);
     if (!this.gatewayPublicKey) {
-      if (msg.type !== "event" || msg.event !== "connect.challenge") return false;
-      const payload = asObject(msg.payload);
-      const gatewayKeyRaw = asString(payload.gatewayPublicKey);
-      if (!gatewayKeyRaw) return false;
-      const parsed = parsePublicKey(gatewayKeyRaw);
-      if (!parsed) return false;
-      const envelopeOk = verifyEnvelopeSignature(envelope, parsed.key);
-      if (!envelopeOk) return false;
-      this.gatewayPublicKey = parsed.key;
-      this.gatewayFingerprint = parsed.fingerprint;
+      return challengeTrusted;
+    }
+
+    if (verifyEnvelopeSignature(envelope, this.gatewayPublicKey)) {
       return true;
     }
 
-    return verifyEnvelopeSignature(envelope, this.gatewayPublicKey);
+    // If this is a fresh connect.challenge, allow signed key rotation under
+    // TLS pinning rather than requiring a manual node restart.
+    if (challengeTrusted) {
+      this.log(`gateway signing key rotated to fingerprint=${this.gatewayFingerprint ?? "unknown"}`);
+      return true;
+    }
+    return false;
+  }
+
+  private trustGatewayIdentityFromChallenge(msg: AnyEnvelope, envelope: Record<string, unknown>): boolean {
+    if (msg.type !== "event" || msg.event !== "connect.challenge") return false;
+    const payload = asObject(msg.payload);
+    const gatewayKeyRaw = asString(payload.gatewayPublicKey);
+    if (!gatewayKeyRaw) return false;
+    const parsed = parsePublicKey(gatewayKeyRaw);
+    if (!parsed) return false;
+    const claimedFingerprintRaw = asString(payload.gatewayFingerprint);
+    const claimedFingerprint = claimedFingerprintRaw ? normalizeFingerprint256(claimedFingerprintRaw) : null;
+    if (claimedFingerprintRaw && !claimedFingerprint) {
+      this.log("connect.challenge carries invalid gatewayFingerprint format");
+      return false;
+    }
+    const parsedFingerprint = normalizeFingerprint256(parsed.fingerprint);
+    if (claimedFingerprint && parsedFingerprint && claimedFingerprint !== parsedFingerprint) {
+      this.log(
+        `connect.challenge gateway fingerprint mismatch claimed=${claimedFingerprint} parsed=${parsedFingerprint}`,
+      );
+      return false;
+    }
+    const envelopeOk = verifyEnvelopeSignature(envelope, parsed.key);
+    if (!envelopeOk) return false;
+    this.gatewayPublicKey = parsed.key;
+    this.gatewayFingerprint = parsed.fingerprint;
+    return true;
   }
 
   private async handleEvent(msg: EventEnvelope): Promise<void> {
@@ -3061,7 +3092,7 @@ function buildConfig(values: Record<string, string>): Config {
   const stateDir =
     values["state-dir"] ??
     process.env.NEXUS_NODE_STATE_DIR ??
-    path.join(process.cwd(), ".nexus-node");
+    path.join(os.homedir(), ".nexus-node");
   const policyRequired =
     (values["policy-required"] ?? process.env.NEXUS_NODE_POLICY_REQUIRED ?? "").trim() === "1";
   const capabilities = splitCsv(values.caps ?? process.env.NEXUS_NODE_CAPS, DEFAULT_CAPABILITIES);
@@ -3756,7 +3787,7 @@ function printHelp(): void {
       "  --gateway-tls-fingerprint <fp>  Pin SHA-256 cert fingerprint for wss:// gateways (self-signed friendly)",
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
-      "  --state-dir <dir>               Local state dir for keys (default ./.nexus-node)",
+      "  --state-dir <dir>               Local state dir for keys (default ~/.nexus-node)",
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",

@@ -8,6 +8,9 @@ services:
     environment:
       # Update this URL if gateway is exposed differently.
       NEXUS_NODE_GATEWAY_URL: ws://gateway:18789/nx/nodes
+      NEXUS_NODE_MCP_BRIDGE: ${NEXUS_NODE_MCP_BRIDGE:-0}
+      NEXUS_NODE_MCP_BRIDGE_CONFIG: ${NEXUS_NODE_MCP_BRIDGE_CONFIG:-/data/nexus-node/mcp-bridge.json}
+      NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS: ${NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS:-30000}
       NEXUS_NODE_ID: reference-node-1
       NEXUS_NODE_NAME: Nexus Reference Node
       NEXUS_NODE_CAPS: system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query

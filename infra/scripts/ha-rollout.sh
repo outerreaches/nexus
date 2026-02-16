@@ -16,7 +16,8 @@
 #
 # Environment overrides:
 #   CODE_DIR=/data/code
-#   COMPOSE_FILE=/data/code/infra/docker-compose.ha.yml
+#   COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.tls.yml
+#   COMPOSE_FILE=/data/code/infra/docker-compose.ha.yml   # legacy single-file override (still supported)
 #   COMPOSE_PROJECT=infra
 #   STATE_DIR=/data/nexus
 #   STATE_FILE=/data/nexus/deploy-state.env
@@ -24,6 +25,8 @@
 #   LIVE_TIMEOUT=90
 #   READY_TIMEOUT=120
 #   SMOKE_TIMEOUT=60
+#   REQUIRE_TLS_OVERLAY=1
+#   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
 
 set -euo pipefail
 
@@ -31,7 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 CODE_DIR="${CODE_DIR:-${DEFAULT_CODE_DIR}}"
-COMPOSE_FILE="${COMPOSE_FILE:-${CODE_DIR}/infra/docker-compose.ha.yml}"
+DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
+COMPOSE_FILES_RAW="${COMPOSE_FILES:-${COMPOSE_FILE:-${DEFAULT_COMPOSE_FILES}}}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/deploy-state.env}"
@@ -41,6 +45,12 @@ LIVE_TIMEOUT="${LIVE_TIMEOUT:-90}"
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
+TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
+REQUIRE_TLS_OVERLAY="${REQUIRE_TLS_OVERLAY:-1}"
+
+declare -a COMPOSE_FILES_LIST=()
+declare -a COMPOSE_BASE_CMD=()
+COMPOSE_HAS_TLS_OVERLAY=0
 
 LAST_GOOD_SHA=""
 LAST_DEPLOY_SHA=""
@@ -88,8 +98,56 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+init_compose_files() {
+  local raw="${COMPOSE_FILES_RAW}"
+  local file
+  local -a _raw_files=()
+  local tls_overlay_file="${CODE_DIR}/infra/docker-compose.ha.tls.yml"
+  COMPOSE_FILES_LIST=()
+  COMPOSE_BASE_CMD=(docker compose -p "$COMPOSE_PROJECT")
+  COMPOSE_HAS_TLS_OVERLAY=0
+
+  IFS=':' read -r -a _raw_files <<< "$raw"
+  for file in "${_raw_files[@]}"; do
+    [ -n "$file" ] || continue
+    [ -f "$file" ] || fail "missing compose file: $file"
+    COMPOSE_FILES_LIST+=("$file")
+    COMPOSE_BASE_CMD+=(-f "$file")
+    case "$file" in
+      *docker-compose.ha.tls.yml) COMPOSE_HAS_TLS_OVERLAY=1 ;;
+    esac
+  done
+
+  if [ "${#COMPOSE_FILES_LIST[@]}" -eq 0 ]; then
+    fail "no compose files configured (COMPOSE_FILES='${COMPOSE_FILES_RAW}')"
+  fi
+
+  # Compatibility automation: if legacy config selected only the base file,
+  # auto-append TLS overlay when required and available.
+  if [ "$REQUIRE_TLS_OVERLAY" = "1" ] && [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ] && [ -f "$tls_overlay_file" ]; then
+    COMPOSE_FILES_LIST+=("$tls_overlay_file")
+    COMPOSE_BASE_CMD+=(-f "$tls_overlay_file")
+    COMPOSE_HAS_TLS_OVERLAY=1
+    warn "auto-appended TLS overlay compose file: $tls_overlay_file"
+  fi
+}
+
 compose() {
-  docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" "$@"
+  "${COMPOSE_BASE_CMD[@]}" "$@"
+}
+
+ensure_tls_preflight() {
+  if [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ]; then
+    if [ "$REQUIRE_TLS_OVERLAY" = "1" ]; then
+      fail "TLS overlay not selected in COMPOSE_FILES (set REQUIRE_TLS_OVERLAY=0 to override for non-TLS labs)."
+    fi
+    warn "TLS overlay not selected in COMPOSE_FILES; external wss:// node connectivity on :18790 may fail."
+    warn "recommended: export COMPOSE_FILES='${DEFAULT_COMPOSE_FILES}' or keep REQUIRE_TLS_OVERLAY=1"
+    return 0
+  fi
+  if [ ! -f "$TLS_CERT_PEM" ]; then
+    fail "TLS overlay selected but cert bundle missing: $TLS_CERT_PEM (run infra/scripts/ha-generate-tls-cert.sh)"
+  fi
 }
 
 load_state() {
@@ -319,13 +377,13 @@ detect_slots() {
 build_slot() {
   local service="$1"
   log "building ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" build "$service"
+  timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" build "$service"
 }
 
 recreate_slot() {
   local service="$1"
   log "recreating ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$service"
+  timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" up -d --no-deps --force-recreate "$service"
 }
 
 switch_to_slot() {
@@ -769,7 +827,7 @@ main() {
       require_cmd docker
       require_cmd curl
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
-      [ -f "$COMPOSE_FILE" ] || fail "missing compose file: $COMPOSE_FILE"
+      init_compose_files
       cmd_status
       ;;
     deploy|apply-local|rollback|finalize)
@@ -777,7 +835,8 @@ main() {
       require_cmd docker
       require_cmd curl
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
-      [ -f "$COMPOSE_FILE" ] || fail "missing compose file: $COMPOSE_FILE"
+      init_compose_files
+      ensure_tls_preflight
       acquire_lock
       trap release_lock EXIT
       case "$cmd" in

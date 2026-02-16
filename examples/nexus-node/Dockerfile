@@ -8,6 +8,8 @@ RUN npm ci
 
 # Copy reference-node implementation.
 COPY examples/nexus-node ./examples/nexus-node
+# Reference node MCP bridge imports src/mcp/stdio-client.ts at runtime.
+COPY src/mcp/stdio-client.ts ./src/mcp/stdio-client.ts
 
 ENV NEXUS_NODE_STATE_DIR=/data/nexus-node
 VOLUME ["/data/nexus-node"]

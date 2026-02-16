@@ -176,6 +176,53 @@ else
     sudo mkdir -p /data/code /data/nexus /data/workspace
     sudo chown -R nexus:nexus /data
 
+    # Install a robust pull+deploy helper that always includes TLS overlay.
+    cat > /home/nexus/pull-deploy.sh << 'PULLDEPLOY'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CODE_DIR="${CODE_DIR:-/data/code}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
+BASE_COMPOSE="${BASE_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.yml}"
+TLS_COMPOSE="${TLS_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.tls.yml}"
+TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
+
+if [ ! -d "$CODE_DIR" ]; then
+  echo "[pull-deploy] missing code dir: $CODE_DIR" >&2
+  exit 1
+fi
+
+cd "$CODE_DIR"
+git fetch origin main
+git merge --ff-only origin/main
+
+if [ ! -f "$BASE_COMPOSE" ]; then
+  echo "[pull-deploy] missing compose file: $BASE_COMPOSE" >&2
+  exit 1
+fi
+if [ ! -f "$TLS_COMPOSE" ]; then
+  echo "[pull-deploy] missing TLS compose overlay: $TLS_COMPOSE" >&2
+  exit 1
+fi
+if [ ! -f "$TLS_CERT_PEM" ]; then
+  echo "[pull-deploy] missing TLS cert bundle: $TLS_CERT_PEM" >&2
+  echo "[pull-deploy] run: bash infra/scripts/ha-generate-tls-cert.sh --san <gateway-host-or-ip>" >&2
+  exit 1
+fi
+
+docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" up -d --build --force-recreate
+docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" ps
+
+if command -v openssl >/dev/null 2>&1; then
+  FP="$(openssl x509 -in "$TLS_CERT_PEM" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' || true)"
+  if [ -n "$FP" ]; then
+    echo "[pull-deploy] gateway TLS fingerprint: $FP"
+    echo "[pull-deploy] node setting: NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=$FP"
+  fi
+fi
+PULLDEPLOY
+    chmod +x /home/nexus/pull-deploy.sh
+
     # Verify
     echo "Mounted directories:"
     ls -la /data/
@@ -183,7 +230,47 @@ VMSCRIPT
 
   # Step 15: Setup port forwarding
   log "Setting up port forwarding (18789 + 18790)..."
-  sudo tee /etc/systemd/system/nexus-forward.service > /dev/null << EOF
+
+  # Some older installs created a separate legacy TLS unit that can conflict with
+  # nexus-forward-tls.service by binding :18790 first.
+  if [ -f /etc/systemd/system/nexus-forward-18790.service ]; then
+    warn "Found legacy unit nexus-forward-18790.service; disabling to avoid :18790 bind conflicts."
+    sudo systemctl disable --now nexus-forward-18790.service || true
+    sudo rm -f /etc/systemd/system/nexus-forward-18790.service
+  fi
+
+  # Resolve VM IP per accepted connection. This keeps forwarding working if the
+  # VM gets a new DHCP lease after restart.
+  sudo tee /usr/local/bin/nexus-forward-connect.sh > /dev/null << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+VM_NAME="${NEXUS_FORWARD_VM_NAME:-nexus-vm}"
+PORT="${NEXUS_FORWARD_PORT:-}"
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+  echo "nexus-forward-connect: invalid NEXUS_FORWARD_PORT='${PORT}'" >&2
+  exit 64
+fi
+
+lookup_vm_ip() {
+  virsh domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -n1
+}
+
+for _ in {1..20}; do
+  VM_IP="$(lookup_vm_ip || true)"
+  if [ -n "$VM_IP" ]; then
+    exec /usr/bin/socat STDIO "TCP:${VM_IP}:${PORT}"
+  fi
+  sleep 1
+done
+
+echo "nexus-forward-connect: unable to resolve IPv4 for VM '${VM_NAME}'" >&2
+exit 1
+EOF
+  sudo chmod 0755 /usr/local/bin/nexus-forward-connect.sh
+
+  sudo tee /etc/systemd/system/nexus-forward.service > /dev/null << 'EOF'
 [Unit]
 Description=Nexus port forward to VM
 After=libvirtd.service network-online.target
@@ -191,7 +278,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr TCP:$VM_IP:18789
+Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
+Environment=NEXUS_FORWARD_PORT=18789
+ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
 Restart=always
 RestartSec=2
 
@@ -199,7 +288,7 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
-  sudo tee /etc/systemd/system/nexus-forward-tls.service > /dev/null << EOF
+  sudo tee /etc/systemd/system/nexus-forward-tls.service > /dev/null << 'EOF'
 [Unit]
 Description=Nexus TLS port forward to VM
 After=libvirtd.service network-online.target
@@ -207,7 +296,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr TCP:$VM_IP:18790
+Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
+Environment=NEXUS_FORWARD_PORT=18790
+ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
 Restart=always
 RestartSec=2
 
@@ -219,7 +310,7 @@ EOF
   sudo systemctl enable --now nexus-forward
   sudo systemctl enable --now nexus-forward-tls
 
-  log "Port forwarding configured and started for ports 18789 (HTTP) and 18790 (HTTPS/WSS)"
+  log "Port forwarding configured with dynamic VM IP resolution for 18789 (HTTP) and 18790 (HTTPS/WSS)"
 fi
 
 echo ""
@@ -235,7 +326,7 @@ echo ""
 echo "2. After code is pushed, SSH into VM and clone the repo:"
 echo "   ssh nexus@$VM_IP"
 echo "   git clone ssh://user@host/~/git/nexus.git /data/code"
-echo "   # Then follow deployment guide"
+echo "   /home/nexus/pull-deploy.sh   # Pull + rebuild using TLS-safe compose files"
 echo ""
 echo "3. VM management commands:"
 echo "   virsh list --all      # List VMs"
