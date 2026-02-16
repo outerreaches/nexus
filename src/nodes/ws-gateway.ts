@@ -312,13 +312,15 @@ export class NodeWebSocketGateway {
     const notifyChatId = this.asNumber(notifyObj.chatId);
     const notifyPreset = this.asString(notifyObj.preset);
     const routing: Record<string, unknown> = {};
+    if (params.ctx.firewallSession) {
+      routing.firewallSession = params.ctx.firewallSession;
+    }
     if (params.ctx.request) {
       routing.runId = params.ctx.request.runId ?? randomUUID();
       routing.parentRunId = params.ctx.request.parentRunId ?? null;
       routing.sessionId = params.ctx.request.sessionId;
       routing.channel = params.ctx.request.channel;
       routing.channelKey = params.ctx.request.channelKey;
-      routing.firewallSession = params.ctx.firewallSession ?? null;
     }
     if (notifyMode || notifyChatId || notifyPreset) {
       routing.notify = {

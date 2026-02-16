@@ -658,6 +658,94 @@ async function main(): Promise<void> {
     const shortLogText = asString(asObject(shortLogs.payload).logs) ?? "";
     assert.match(shortLogText, /proc-smoke/, "short process logs missing output");
 
+    const firewallBootstrapStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo firewall-session-bootstrap",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(firewallBootstrapStart.ok, true, "process.start for firewall bootstrap failed");
+    const firewallBootstrapPayload = asObject(firewallBootstrapStart.payload);
+    const stickyFirewallSession = asString(firewallBootstrapPayload.firewallSession);
+    assert.ok(stickyFirewallSession, "expected process.start to return firewallSession");
+    assert.equal(
+      Boolean(firewallBootstrapPayload.firewallSessionReused),
+      false,
+      "initial firewall session should be freshly created",
+    );
+
+    const firewallReuseStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo firewall-session-reuse",
+        },
+        routing: {
+          firewallSession: stickyFirewallSession,
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(firewallReuseStart.ok, true, "process.start with existing firewall session failed");
+    const firewallReusePayload = asObject(firewallReuseStart.payload);
+    assert.equal(
+      asString(firewallReusePayload.firewallSession),
+      stickyFirewallSession,
+      "expected firewall session id to be reused",
+    );
+    assert.equal(
+      Boolean(firewallReusePayload.firewallSessionReused),
+      true,
+      "expected firewallSessionReused=true for known session",
+    );
+
+    const unknownFirewallSession = `fw-missing-${randomUUID().slice(0, 8)}`;
+    const firewallMissingStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo firewall-session-replaced",
+        },
+        routing: {
+          firewallSession: unknownFirewallSession,
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(firewallMissingStart.ok, true, "process.start with missing firewall session failed");
+    const firewallMissingPayload = asObject(firewallMissingStart.payload);
+    const replacementFirewallSession = asString(firewallMissingPayload.firewallSession);
+    assert.ok(
+      replacementFirewallSession && replacementFirewallSession !== unknownFirewallSession,
+      "expected missing firewall session to be replaced with a new session id",
+    );
+    assert.equal(
+      Boolean(firewallMissingPayload.firewallSessionReused),
+      false,
+      "expected firewallSessionReused=false when requested session is missing/expired",
+    );
+
     const streamProcStart = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -849,6 +937,40 @@ async function main(): Promise<void> {
     assert.equal(reconnectLogs.ok, true, "process.logs failed after reconnect");
     const reconnectLogsPayload = asObject(reconnectLogs.payload);
     assert.equal(typeof reconnectLogsPayload.logs, "string", "expected logs payload to include logs text");
+    const firewallReconnectStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo firewall-session-reconnect",
+        },
+        routing: {
+          firewallSession: stickyFirewallSession,
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(
+      firewallReconnectStart.ok,
+      true,
+      "process.start with persisted firewall session after reconnect failed",
+    );
+    const firewallReconnectPayload = asObject(firewallReconnectStart.payload);
+    assert.equal(
+      asString(firewallReconnectPayload.firewallSession),
+      stickyFirewallSession,
+      "expected firewall session continuity across reconnect/failover",
+    );
+    assert.equal(
+      Boolean(firewallReconnectPayload.firewallSessionReused),
+      true,
+      "expected firewall session to be reused after reconnect",
+    );
     await waitForCondition({
       timeoutMs: 10_000,
       intervalMs: 100,
@@ -924,7 +1046,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + process primitives (including log stream) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + process primitives (log stream + firewall session continuity) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

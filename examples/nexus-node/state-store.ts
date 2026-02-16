@@ -4,6 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export type PersistedProcessStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type PersistedFirewallQuarantineState = "none" | "soft" | "hard";
 
 export type PersistedProcessRecord = {
   processId: string;
@@ -29,6 +30,15 @@ export type PersistedOutboxEntry = {
   deliveredAt: number | null;
 };
 
+export type PersistedFirewallSessionRecord = {
+  sessionId: string;
+  quarantineState: PersistedFirewallQuarantineState;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  metadata: Record<string, unknown> | null;
+};
+
 type PersistedProcessRow = {
   process_id: string;
   status: string;
@@ -51,6 +61,15 @@ type PersistedOutboxRow = {
   created_at: number;
   delivered: number;
   delivered_at: number | null;
+};
+
+type PersistedFirewallSessionRow = {
+  session_id: string;
+  quarantine_state: string;
+  created_at: number;
+  last_used_at: number;
+  expires_at: number;
+  metadata_json: string | null;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -128,6 +147,18 @@ export class ReferenceNodeStateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_node_outbox_delivered_created
         ON node_outbox(delivered, created_at ASC);
+
+      CREATE TABLE IF NOT EXISTS node_firewall_sessions (
+        session_id TEXT PRIMARY KEY,
+        quarantine_state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        metadata_json TEXT,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_firewall_sessions_expires
+        ON node_firewall_sessions(expires_at ASC);
     `);
     return new ReferenceNodeStateStore(db, dbPath);
   }
@@ -308,6 +339,87 @@ export class ReferenceNodeStateStore {
     return typeof count === "number" && Number.isFinite(count) ? count : 0;
   }
 
+  createFirewallSession(params: {
+    sessionId: string;
+    quarantineState: PersistedFirewallQuarantineState;
+    metadata?: Record<string, unknown> | null;
+    nowMs: number;
+    ttlMs: number;
+  }): PersistedFirewallSessionRecord {
+    const expiresAt = params.nowMs + Math.max(1_000, params.ttlMs);
+    this.db
+      .prepare(
+        `
+        INSERT INTO node_firewall_sessions (
+          session_id, quarantine_state, created_at, last_used_at, expires_at, metadata_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      )
+      .run(
+        params.sessionId,
+        params.quarantineState,
+        params.nowMs,
+        params.nowMs,
+        expiresAt,
+        params.metadata ? JSON.stringify(params.metadata) : null,
+        params.nowMs,
+      );
+    return {
+      sessionId: params.sessionId,
+      quarantineState: params.quarantineState,
+      createdAt: params.nowMs,
+      lastUsedAt: params.nowMs,
+      expiresAt,
+      metadata: params.metadata ?? null,
+    };
+  }
+
+  getFirewallSession(sessionId: string, nowMs: number): PersistedFirewallSessionRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT session_id, quarantine_state, created_at, last_used_at, expires_at, metadata_json
+        FROM node_firewall_sessions
+        WHERE session_id = ?
+      `,
+      )
+      .get(sessionId) as PersistedFirewallSessionRow | undefined;
+    if (!row?.session_id) return null;
+    if (row.expires_at <= nowMs) {
+      this.db.prepare("DELETE FROM node_firewall_sessions WHERE session_id = ?").run(sessionId);
+      return null;
+    }
+    return {
+      sessionId: row.session_id,
+      quarantineState: this.parseQuarantineState(row.quarantine_state),
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      expiresAt: row.expires_at,
+      metadata: parseJsonObject(row.metadata_json),
+    };
+  }
+
+  touchFirewallSession(sessionId: string, nowMs: number, ttlMs: number): PersistedFirewallSessionRecord | null {
+    const expiresAt = nowMs + Math.max(1_000, ttlMs);
+    this.db
+      .prepare(
+        `
+        UPDATE node_firewall_sessions
+        SET last_used_at = ?, expires_at = ?, updated_at = ?
+        WHERE session_id = ?
+      `,
+      )
+      .run(nowMs, expiresAt, nowMs, sessionId);
+    return this.getFirewallSession(sessionId, nowMs);
+  }
+
+  pruneExpiredFirewallSessions(nowMs: number): number {
+    const result = this.db
+      .prepare("DELETE FROM node_firewall_sessions WHERE expires_at <= ?")
+      .run(nowMs);
+    return Number(result.changes ?? 0);
+  }
+
   markOutboxDelivered(deliveryId: string, nowMs: number): boolean {
     const result = this.db
       .prepare(
@@ -342,6 +454,17 @@ export class ReferenceNodeStateStore {
         return value;
       default:
         return "failed";
+    }
+  }
+
+  private parseQuarantineState(value: string): PersistedFirewallQuarantineState {
+    switch (value) {
+      case "none":
+      case "soft":
+      case "hard":
+        return value;
+      default:
+        return "none";
     }
   }
 }

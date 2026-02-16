@@ -22,6 +22,7 @@ import { WebSocket } from "ws";
 
 import {
   ReferenceNodeStateStore,
+  type PersistedFirewallSessionRecord,
   type PersistedOutboxEntry,
   type PersistedProcessRecord,
 } from "./state-store.js";
@@ -30,6 +31,7 @@ const ED25519_SPKI_RAW_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_OUTPUT_CHARS = 60_000;
 const MAX_PROCESS_LOG_CHARS = 120_000;
 const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const FIREWALL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAPABILITIES = [
   "system.run",
   "system.which",
@@ -58,6 +60,12 @@ type ReferenceProcess = {
   timeoutTimer: NodeJS.Timeout | null;
   killTimer: NodeJS.Timeout | null;
   routing: Record<string, unknown> | null;
+};
+
+type ResolvedFirewallSession = {
+  sessionId: string;
+  quarantineState: "none" | "soft" | "hard";
+  reused: boolean;
 };
 
 type RequestEnvelope = {
@@ -295,6 +303,7 @@ class ReferenceNodeClient {
 
   private bootstrapPersistedState(): void {
     this.stateStore.pruneDeliveredOlderThan(Date.now() - DELIVERED_OUTBOX_TTL_MS);
+    const prunedFirewallSessions = this.stateStore.pruneExpiredFirewallSessions(Date.now());
     const persisted = this.stateStore.loadProcesses(1_000);
     const nowMs = Date.now();
     for (const record of persisted) {
@@ -331,7 +340,9 @@ class ReferenceNodeClient {
       }
     }
     const pendingOutbox = this.stateStore.countUndelivered();
-    this.log(`restored processes=${persisted.length} outbox_pending=${pendingOutbox}`);
+    this.log(
+      `restored processes=${persisted.length} outbox_pending=${pendingOutbox} firewall_sessions_pruned=${prunedFirewallSessions}`,
+    );
   }
 
   private sendConnectHello(): void {
@@ -603,6 +614,12 @@ class ReferenceNodeClient {
     const env = asStringMap(runArgs.env);
     const timeoutMs = clampInt(runArgs.timeoutMs ?? runArgs.timeout, 1_000, this.config.runTimeoutMs) ?? null;
     const routingObj = asObject(params.routing);
+    const resolvedFirewallSession = this.resolveFirewallSession(routingObj);
+    const routing = {
+      ...routingObj,
+      firewallSession: resolvedFirewallSession.sessionId,
+      firewallQuarantine: resolvedFirewallSession.quarantineState,
+    };
     const processId = `proc_${randomUUID().slice(0, 12)}`;
     const entry: ReferenceProcess = {
       processId,
@@ -619,7 +636,7 @@ class ReferenceNodeClient {
       child: null,
       timeoutTimer: null,
       killTimer: null,
-      routing: Object.keys(routingObj).length > 0 ? routingObj : null,
+      routing: Object.keys(routing).length > 0 ? routing : null,
     };
     this.processes.set(processId, entry);
     this.persistProcess(entry);
@@ -672,6 +689,9 @@ class ReferenceNodeClient {
           status: entry.status,
           startedAt: entry.startedAt,
           command,
+          firewallSession: resolvedFirewallSession.sessionId,
+          firewallSessionReused: resolvedFirewallSession.reused,
+          firewallQuarantine: resolvedFirewallSession.quarantineState,
         },
       });
     } catch (err) {
@@ -913,6 +933,46 @@ class ReferenceNodeClient {
       routing: entry.routing,
     };
     this.stateStore.upsertProcess(record, Date.now());
+  }
+
+  private resolveFirewallSession(routing: Record<string, unknown>): ResolvedFirewallSession {
+    const nowMs = Date.now();
+    const requestedSessionId = asString(routing.firewallSession);
+    if (requestedSessionId) {
+      const existing = this.stateStore.getFirewallSession(requestedSessionId, nowMs);
+      if (existing) {
+        const touched = this.stateStore.touchFirewallSession(
+          requestedSessionId,
+          nowMs,
+          FIREWALL_SESSION_TTL_MS,
+        );
+        const current = touched ?? existing;
+        return {
+          sessionId: current.sessionId,
+          quarantineState: current.quarantineState,
+          reused: true,
+        };
+      }
+      this.log(`firewall session missing_or_expired id=${requestedSessionId}; creating replacement`);
+    }
+
+    const created = this.createFirewallSession(nowMs);
+    return {
+      sessionId: created.sessionId,
+      quarantineState: created.quarantineState,
+      reused: false,
+    };
+  }
+
+  private createFirewallSession(nowMs: number): PersistedFirewallSessionRecord {
+    const sessionId = `fw_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    return this.stateStore.createFirewallSession({
+      sessionId,
+      quarantineState: "none",
+      nowMs,
+      ttlMs: FIREWALL_SESSION_TTL_MS,
+      metadata: null,
+    });
   }
 
   private queueTerminalProcessUpdate(entry: ReferenceProcess, reason: string): void {

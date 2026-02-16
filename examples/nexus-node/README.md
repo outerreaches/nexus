@@ -80,6 +80,7 @@ What it validates:
 - `tool.execute` allowlisted `system.run`
 - rejection of a disallowed `system.run` command
 - `process.start` / `process.status` / `process.logs` / `process.cancel`
+- node-owned firewall session continuity: `process.start` returns `firewallSession`; known sessions are reused across reconnects, missing/expired sessions are replaced
 - reconnect continuity: forced websocket drop -> reconnect -> process status/logs still queryable
 - durable outbox replay: unacked terminal `process.update` is re-delivered after reconnect and acked via `process.ack`
 - gateway delivery persistence: `process.update`/`log.append` persisted into gateway state + `process_runs`
