@@ -366,12 +366,30 @@ sudo apt install -y socat
 sudo tee /etc/systemd/system/nexus-forward.service << EOF
 [Unit]
 Description=Nexus port forward to VM
-After=libvirtd.service
+After=libvirtd.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr TCP:${VM_IP}:18789
 Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo tee /etc/systemd/system/nexus-forward-tls.service << EOF
+[Unit]
+Description=Nexus TLS port forward to VM
+After=libvirtd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr TCP:${VM_IP}:18790
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
@@ -379,9 +397,11 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now nexus-forward
+sudo systemctl enable --now nexus-forward-tls
 
 # Verify
 curl http://localhost:18789/health/live
+curl -k https://localhost:18790/health/live
 ```
 
 ### 5.2 Access from laptop
@@ -389,6 +409,9 @@ curl http://localhost:18789/health/live
 ```bash
 # On laptop
 curl http://host:18789/health/live
+
+# Secure endpoint used by node wss transport
+curl -k https://host:18790/health/live
 
 # Or open dashboard in browser
 open http://host:18789/dashboard
@@ -869,9 +892,15 @@ Recommended:
 # On host - check socat service
 sudo systemctl status nexus-forward
 sudo journalctl -u nexus-forward -f
+sudo systemctl status nexus-forward-tls
+sudo journalctl -u nexus-forward-tls -f
 
 # Check VM is running and has correct IP
 virsh domifaddr nexus-vm
+
+# Verify both forwarded ports locally on host
+curl http://localhost:18789/health/live
+curl -k https://localhost:18790/health/live
 ```
 
 ### HA: Port 18789 already allocated

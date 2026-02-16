@@ -182,25 +182,44 @@ else
 VMSCRIPT
 
   # Step 15: Setup port forwarding
-  log "Setting up port forwarding..."
+  log "Setting up port forwarding (18789 + 18790)..."
   sudo tee /etc/systemd/system/nexus-forward.service > /dev/null << EOF
 [Unit]
 Description=Nexus port forward to VM
-After=libvirtd.service
+After=libvirtd.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr TCP:$VM_IP:18789
 Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo tee /etc/systemd/system/nexus-forward-tls.service > /dev/null << EOF
+[Unit]
+Description=Nexus TLS port forward to VM
+After=libvirtd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr TCP:$VM_IP:18790
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
   sudo systemctl daemon-reload
-  sudo systemctl enable nexus-forward
+  sudo systemctl enable --now nexus-forward
+  sudo systemctl enable --now nexus-forward-tls
 
-  log "Port forwarding configured (will start after Nexus is deployed)"
+  log "Port forwarding configured and started for ports 18789 (HTTP) and 18790 (HTTPS/WSS)"
 fi
 
 echo ""
