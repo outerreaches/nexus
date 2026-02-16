@@ -262,7 +262,9 @@ class ReferenceNodeClient {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
-    this.reconnectTimer.unref?.();
+    // Keep the process alive while waiting to reconnect. When a node is pending
+    // approval, the first socket is intentionally closed by the gateway; if this
+    // timer is unref'ed, the process can exit before retrying.
   }
 
   private bootstrapPersistedState(): void {
