@@ -664,14 +664,17 @@ async function stopReferenceNode(runtime: NodeRuntime | null): Promise<void> {
   if (child.exitCode !== null || child.signalCode) return;
 
   child.kill("SIGTERM");
-  const exited = Promise.race([
-    once(child, "exit"),
-    sleep(8_000).then(async () => {
-      if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
-      return once(child, "exit");
-    }),
-  ]);
-  await exited.catch(() => undefined);
+  const timeout = setTimeout(() => {
+    if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
+  }, 8_000);
+  timeout.unref?.();
+  try {
+    await once(child, "exit");
+  } catch {
+    // Best-effort shutdown in smoke cleanup.
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function renderNodeLogs(logs: string[]): string {
