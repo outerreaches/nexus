@@ -30,6 +30,8 @@ import { ensureSystemJobs } from "../maintenance/system-jobs.js";
 import { runBackup } from "../maintenance/db-backup.js";
 import { sendHANotification } from "./ha-notifications.js";
 import { randomId } from "../data-intake/utils.js";
+import { NodeRegistry, NodeToolRouter, NodeWebSocketGateway } from "../nodes/index.js";
+import { registerNodeRoutes } from "./routes/nodes.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
   let logStream: fs.WriteStream | null = null;
@@ -84,6 +86,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
   }
 
   const db = await openDatabase(paths.dbPath);
+  const nodeRegistry = new NodeRegistry({ db, log });
+  const nodeRouter = new NodeToolRouter({ registry: nodeRegistry, log });
   initDataIntake();
   ensureSystemJobs({ db, nowMs: Date.now(), stateDir: paths.stateDir, log });
 
@@ -196,6 +200,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     requestRestart: (reason: string, delayMs: number = 2500) => {
       requestRestartImpl(reason, delayMs);
     },
+    nodeRouter,
     runtimeLimits: {
       maxToolCalls: config.limits.maxToolCallsPerRun,
       maxIterations: config.limits.maxIterationsPerRun,
@@ -264,6 +269,12 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   // Standby mode tracking (declared early so getStatus can reference it)
   let isStandby = params.standby ?? false;
+  const nodeWsGateway = new NodeWebSocketGateway({
+    registry: nodeRegistry,
+    isStandby: () => isStandby,
+    log,
+    gatewaySender: `gateway:${hostId}`,
+  });
   const getMode = () => (isStandby ? "standby" : "active");
   logMode = getMode;
 
@@ -400,6 +411,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
     agentTracker,
   });
 
+  registerNodeRoutes(http.app, { isStandby: () => isStandby });
+
   // Track services (tg and scheduler may be started later if in standby mode)
   let tg: Awaited<ReturnType<typeof startTelegramBot>> = null;
   let scheduler: ReturnType<typeof startJobScheduler> = null;
@@ -455,6 +468,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
       leaseTimer = null;
     }
     releaseActiveLease();
+    isStandby = true;
+    nodeWsGateway.closeNodeConnections("gateway entering standby");
     processNotifier?.stop();
     processNotifier = null;
     scheduler?.stop();
@@ -464,7 +479,6 @@ export async function startGateway(params: { configPath: string; port?: number; 
     await tg?.stop();
     tg = null;
     toolContext.telegram = undefined as unknown;
-    isStandby = true;
   };
 
   const activateServices = async (): Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> => {
@@ -782,6 +796,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     isolatedWorkers.clear();
 
     await deactivateServices("shutdown");
+    nodeWsGateway.close();
     await http.stop();
     await mcp.close();
     db.close();
@@ -801,7 +816,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
   // Start accepting HTTP requests only after all routes are registered.
   // Hono's SmartRouter finalises on first request, so no routes can be
   // added after the first health-check arrives.
-  http.listen();
+  const rawServer = http.listen();
+  nodeWsGateway.attach(rawServer as unknown as Parameters<NodeWebSocketGateway["attach"]>[0]);
 
   log("gateway: started");
 }

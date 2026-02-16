@@ -927,10 +927,29 @@ export class AgentRunner {
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         let result: string;
         try {
-          result = await tool.execute(args, this.deps.toolContext);
+          const wantsNodeRouting =
+            this.deps.toolContext.executionNode !== undefined ||
+            this.deps.toolContext.executionMode === "remote" ||
+            this.deps.toolContext.executionMode === "auto";
+          if (wantsNodeRouting && this.deps.toolContext.nodeRouter) {
+            result = await this.deps.toolContext.nodeRouter.routeToolExecution(
+              tool,
+              args,
+              this.deps.toolContext,
+            );
+          } else {
+            result = await tool.execute(args, this.deps.toolContext);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          result = `ERROR: ${msg}`;
+          const code =
+            err &&
+            typeof err === "object" &&
+            "code" in err &&
+            typeof (err as { code?: unknown }).code === "string"
+              ? (err as { code: string }).code
+              : null;
+          result = code ? `ERROR: [${code}] ${msg}` : `ERROR: ${msg}`;
         }
 
         const abort = handleToolResult(call, args, result, i);

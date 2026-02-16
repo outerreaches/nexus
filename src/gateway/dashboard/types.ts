@@ -40,6 +40,22 @@ export type AgentRunRow = {
   task: string | null;
 };
 
+export type NodeRow = {
+  id: string;
+  label: string;
+  backend: string;
+  status: string;
+  trust_level: string;
+  firewall_mode: string;
+  endpoint: string | null;
+  capabilities_json: string;
+  tags_json: string;
+  last_seen_at: number | null;
+  connected_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
 export type BlackboardRow = {
   id: string;
   session_scope: string;

@@ -7,6 +7,7 @@ import type {
   AgentRunInfo,
   ManagedProcessInfo,
   AgentRunRow,
+  NodeRow,
   JobRow,
   JobRunRow,
   BlackboardRow,
@@ -66,6 +67,64 @@ export function listJobs(db: NexusDatabase | undefined, limit: number): JobRow[]
       "SELECT id, name, cron, timezone, enabled, next_run_at, last_run_at, consecutive_failures, last_failure_at, spec_json FROM jobs ORDER BY created_at DESC LIMIT ?",
     )
     .all(limit) as JobRow[];
+}
+
+export function listNodes(db: NexusDatabase | undefined, limit: number): NodeRow[] {
+  if (!db) return [];
+  return db.db
+    .prepare(
+      `SELECT
+         id,
+         label,
+         backend,
+         status,
+         trust_level,
+         firewall_mode,
+         endpoint,
+         capabilities_json,
+         tags_json,
+         last_seen_at,
+         connected_at,
+         created_at,
+         updated_at
+       FROM nodes
+       ORDER BY
+         CASE status
+           WHEN 'online' THEN 0
+           WHEN 'offline' THEN 1
+           WHEN 'pending' THEN 2
+           ELSE 3
+         END,
+         COALESCE(last_seen_at, 0) DESC,
+         created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as NodeRow[];
+}
+
+export function getNodeById(db: NexusDatabase | undefined, id: string): NodeRow | null {
+  if (!db) return null;
+  const row = db.db
+    .prepare(
+      `SELECT
+         id,
+         label,
+         backend,
+         status,
+         trust_level,
+         firewall_mode,
+         endpoint,
+         capabilities_json,
+         tags_json,
+         last_seen_at,
+         connected_at,
+         created_at,
+         updated_at
+       FROM nodes
+       WHERE id = ?`,
+    )
+    .get(id) as NodeRow | undefined;
+  return row ?? null;
 }
 
 export function listJobRuns(db: NexusDatabase | undefined, limit: number): JobRunRow[] {

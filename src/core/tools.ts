@@ -40,6 +40,16 @@ export type ToolContext = {
     parentRunId?: string;
     modelMode?: ModelRoutingMode;
   };
+  /** Optional explicit node target for remote execution. */
+  executionNode?: string;
+  /** Optional execution preference. Undefined keeps existing local behavior. */
+  executionMode?: "local" | "remote" | "auto";
+  /** Opaque Hermes firewall session identifier (node-owned state). */
+  firewallSession?: string;
+  /** Optional node-aware execution router for remote tool dispatch. */
+  nodeRouter?: {
+    routeToolExecution: (tool: Tool, args: unknown, ctx: ToolContext) => Promise<string>;
+  };
   /** Global runtime caps for agent budgets; worker budgets should not exceed these. */
   runtimeLimits?: {
     maxToolCalls: number;

@@ -9,6 +9,8 @@ import {
   listAgentGraph,
   filterVisibleAgentRuns,
   filterVisibleAgentGraph,
+  listNodes as listNodeRows,
+  getNodeById as getNodeRowById,
   listJobRuns,
   listLlmSessions,
   listLlmMessages,
@@ -85,6 +87,52 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     }
   });
 
+  app.get("/api/nodes", async (c) => {
+    const limit = clampInt(c.req.query("limit"), 1, 500) ?? 200;
+    const rows = listNodeRows(deps.db, limit);
+    const nodes = rows.map((row) => ({
+      id: row.id,
+      label: row.label,
+      backend: row.backend,
+      status: row.status,
+      trustLevel: row.trust_level,
+      firewallMode: row.firewall_mode,
+      endpoint: row.endpoint,
+      capabilities: parseStringArrayJson(row.capabilities_json),
+      tags: parseStringArrayJson(row.tags_json),
+      lastSeenAt: row.last_seen_at,
+      connectedAt: row.connected_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+    return c.json({ nodes, timestamp: Date.now() });
+  });
+
+  app.get("/api/nodes/:id", async (c) => {
+    const id = String(c.req.param("id") ?? "").trim();
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const row = getNodeRowById(deps.db, id);
+    if (!row) return c.json({ error: "node not found" }, 404);
+    return c.json({
+      node: {
+        id: row.id,
+        label: row.label,
+        backend: row.backend,
+        status: row.status,
+        trustLevel: row.trust_level,
+        firewallMode: row.firewall_mode,
+        endpoint: row.endpoint,
+        capabilities: parseStringArrayJson(row.capabilities_json),
+        tags: parseStringArrayJson(row.tags_json),
+        lastSeenAt: row.last_seen_at,
+        connectedAt: row.connected_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      },
+      timestamp: Date.now(),
+    });
+  });
+
   app.get("/api/llm/sessions", async (c) => {
     const limit = clampInt(c.req.query("limit"), 1, 200) ?? 50;
     const channel = c.req.query("channel") ?? null;
@@ -154,4 +202,15 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     c.header("Content-Disposition", `attachment; filename="job-runs-${new Date().toISOString().slice(0, 10)}.csv"`);
     return c.body(csv);
   });
+}
+
+function parseStringArrayJson(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
 }

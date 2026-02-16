@@ -17,9 +17,13 @@ export type GatewayHttpDeps = {
   agentTracker?: AgentTracker;
 };
 
-export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: () => Promise<void>; listen: () => void; app: Hono }> {
+export async function startHttpServer(
+  deps: GatewayHttpDeps,
+): Promise<{ stop: () => Promise<void>; listen: () => ReturnType<typeof serve>; app: Hono }> {
   const app = new Hono();
 
+  // Keep this module as pure HTTP bootstrap. Node WebSocket transport is wired
+  // separately in gateway startup to keep boundaries explicit.
   registerHealthRoutes(app, deps);
   registerApiRoutes(app, deps);
   registerDashboardRoutes(app, deps);
@@ -28,17 +32,20 @@ export async function startHttpServer(deps: GatewayHttpDeps): Promise<{ stop: ()
 
   return {
     listen: () => {
+      if (server) return server;
       server = serve({
         fetch: app.fetch,
         port: deps.port,
       });
       deps.log(`http: listening on :${deps.port}`);
+      return server;
     },
     stop: async () => {
       if (!server) return;
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
       });
+      server = null;
     },
     app,
   };

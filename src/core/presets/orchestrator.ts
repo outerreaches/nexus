@@ -48,6 +48,10 @@ export const preset: AgentPreset = {
     "data_intake_list_sources",
     "data_intake_query",
     "data_intake_source_list",
+    // Node management
+    "node_list",
+    "node_get",
+    "node_delete",
     // Memory
     "memory_store",
     "memory_recall",

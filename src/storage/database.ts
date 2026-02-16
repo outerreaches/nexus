@@ -282,6 +282,74 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_process_runs_node ON process_runs(node_id, started_at DESC);
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Node registry (gateway-side)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS nodes (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      public_key TEXT UNIQUE NOT NULL,
+      fingerprint TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',      -- pending | approved | blocked | offline | online
+      endpoint TEXT,
+      backend TEXT NOT NULL DEFAULT 'nexus',       -- nexus | openclaw
+      trust_level TEXT NOT NULL DEFAULT 'standard',
+      firewall_mode TEXT NOT NULL DEFAULT 'transparent',
+      capabilities_json TEXT NOT NULL DEFAULT '[]',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      permissions_json TEXT NOT NULL DEFAULT '{}',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      last_seen_at INTEGER,
+      connected_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+    CREATE INDEX IF NOT EXISTS idx_nodes_fingerprint ON nodes(fingerprint);
+    CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen_at);
+    CREATE INDEX IF NOT EXISTS idx_nodes_backend_status ON nodes(backend, status);
+    CREATE INDEX IF NOT EXISTS idx_nodes_trust_status ON nodes(trust_level, status);
+
+    CREATE TABLE IF NOT EXISTS node_sessions (
+      id TEXT PRIMARY KEY,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      ip_address TEXT,
+      capabilities_json TEXT NOT NULL DEFAULT '[]'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_node_sessions_node_started ON node_sessions(node_id, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS node_executions (
+      id TEXT PRIMARY KEY,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+      tool_name TEXT NOT NULL,
+      args_json TEXT,
+      result_status TEXT, -- success | error | timeout
+      error_code TEXT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_node_executions_node_started ON node_executions(node_id, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS node_pairing_requests (
+      id TEXT PRIMARY KEY,
+      fingerprint TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      display_name TEXT,
+      requested_at INTEGER NOT NULL,
+      approved_at INTEGER,
+      approved_by TEXT,
+      rejected_at INTEGER,
+      rejected_reason TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_node_pairing_fingerprint ON node_pairing_requests(fingerprint);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Gateway active lease (HA mode)
     -- ───────────────────────────────────────────────────────────────────────
 
@@ -744,6 +812,96 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_events_server ON mcp_events(server_id, created_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN backend TEXT NOT NULL DEFAULT 'nexus';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN trust_level TEXT NOT NULL DEFAULT 'standard';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN firewall_mode TEXT NOT NULL DEFAULT 'transparent';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN permissions_json TEXT NOT NULL DEFAULT '{}';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN last_seen_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN connected_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE nodes ADD COLUMN updated_at INTEGER;");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("UPDATE nodes SET updated_at = COALESCE(updated_at, created_at, CAST(strftime('%s','now') AS INTEGER) * 1000);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_fingerprint ON nodes(fingerprint);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_backend_status ON nodes(backend, status);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_trust_status ON nodes(trust_level, status);");
   } catch {
     // already exists
   }
