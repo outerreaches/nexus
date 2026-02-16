@@ -2,7 +2,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { once } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -638,6 +637,7 @@ function startReferenceNode(params: {
         NEXUS_NODE_RECONNECT_MIN_MS: "500",
         NEXUS_NODE_RECONNECT_MAX_MS: "2000",
       },
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -658,22 +658,62 @@ function startReferenceNode(params: {
   return { child, logs };
 }
 
+function processTreeAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ESRCH") return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return code !== "ESRCH";
+  }
+}
+
+function signalProcessTree(pid: number, signal: NodeJS.Signals): void {
+  if (!Number.isFinite(pid) || pid <= 0) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ESRCH") return;
+    }
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // ignore best-effort teardown failures
+  }
+}
+
 async function stopReferenceNode(runtime: NodeRuntime | null): Promise<void> {
   if (!runtime) return;
   const child = runtime.child;
-  if (child.exitCode !== null || child.signalCode) return;
+  const pid = child.pid;
+  if (!pid || !processTreeAlive(pid)) return;
 
-  child.kill("SIGTERM");
-  const timeout = setTimeout(() => {
-    if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
-  }, 8_000);
-  timeout.unref?.();
-  try {
-    await once(child, "exit");
-  } catch {
-    // Best-effort shutdown in smoke cleanup.
-  } finally {
-    clearTimeout(timeout);
+  signalProcessTree(pid, "SIGTERM");
+  const gracefulDeadline = Date.now() + 8_000;
+  while (Date.now() < gracefulDeadline) {
+    if (!processTreeAlive(pid)) return;
+    await sleep(100);
+  }
+
+  signalProcessTree(pid, "SIGKILL");
+  const killDeadline = Date.now() + 2_000;
+  while (Date.now() < killDeadline) {
+    if (!processTreeAlive(pid)) return;
+    await sleep(100);
   }
 }
 
