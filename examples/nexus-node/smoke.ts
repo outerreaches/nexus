@@ -97,11 +97,27 @@ function timeoutPromise<T>(promise: Promise<T>, timeoutMs: number, message: stri
   });
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForCondition(params: {
+  timeoutMs: number;
+  intervalMs: number;
+  message: string;
+  predicate: () => boolean;
+}): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < params.timeoutMs) {
+    if (params.predicate()) return;
+    await sleep(params.intervalMs);
+  }
+  throw new Error(params.message);
+}
+
 async function main(): Promise<void> {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-node-smoke-"));
   const nodeId = `smoke-node-${randomUUID().slice(0, 8)}`;
-  const sessionId = `sess-${randomUUID().slice(0, 12)}`;
-  const gatewayNonce = randomBytes(32).toString("base64url");
   const gatewayKeys = generateKeyPairSync("ed25519");
   const gatewayPubRaw = publicKeyRaw(gatewayKeys.publicKey);
   assert.ok(gatewayPubRaw, "failed to derive gateway public key");
@@ -112,14 +128,29 @@ async function main(): Promise<void> {
   const childStdout: string[] = [];
   const childStderr: string[] = [];
   const pendingResponses = new Map<string, Deferred<ResponseEnvelope>>();
-  const ready = deferred<void>();
-  const handshakeComplete = deferred<void>();
+  const initialReady = deferred<void>();
+  const initialHandshakeComplete = deferred<void>();
+  const reconnectReady = deferred<void>();
+  const reconnectHandshakeComplete = deferred<void>();
   const nodePublicKeyDeferred = deferred<ParsedPublicKey>();
 
   let wsRef: WebSocket | null = null;
-  let nodeNonce: string | null = null;
   let nodePublic: ParsedPublicKey | null = null;
   let nodeSender: string | null = null;
+  let handshakeCount = 0;
+  let capsAdvertiseCount = 0;
+  let suppressNextTerminalAck = false;
+  let withheldDeliveryId: string | null = null;
+  let replayedWithheldDelivery = false;
+  const sessionStateBySocket = new WeakMap<
+    WebSocket,
+    {
+      sessionId: string;
+      nodeNonce: string;
+      gatewayNonce: string;
+      nodeId: string;
+    }
+  >();
 
   const wss = new WebSocketServer({ port: 0 });
   try {
@@ -148,7 +179,11 @@ async function main(): Promise<void> {
         "--state-dir",
         stateDir,
         "--allow",
-        "echo,uname,whoami,pwd,date,ls",
+        "echo,uname,whoami,pwd,date,ls,sleep",
+        "--reconnect-min-ms",
+        "500",
+        "--reconnect-max-ms",
+        "1500",
       ],
       {
         cwd: process.cwd(),
@@ -166,6 +201,9 @@ async function main(): Promise<void> {
 
     wss.on("connection", (ws) => {
       wsRef = ws;
+      ws.on("close", () => {
+        if (wsRef === ws) wsRef = null;
+      });
       ws.on("message", (data, isBinary) => {
         if (isBinary) return;
         const raw = typeof data === "string" ? data : data.toString("utf8");
@@ -186,11 +224,27 @@ async function main(): Promise<void> {
             assert.equal(asString(device.fingerprint), parsedPublic.fingerprint);
             assert.ok(verifyEnvelopeSignature(envelopeObj, parsedPublic.key), "connect.hello signature invalid");
 
-            nodePublic = parsedPublic;
-            nodeSender = msg.sender;
-            nodeNonce = asString(params.nodeNonce);
+            if (!nodePublic) {
+              nodePublic = parsedPublic;
+              nodePublicKeyDeferred.resolve(parsedPublic);
+            } else {
+              assert.equal(parsedPublic.fingerprint, nodePublic.fingerprint, "node fingerprint changed after reconnect");
+            }
+            if (!nodeSender) {
+              nodeSender = msg.sender;
+            } else {
+              assert.equal(msg.sender, nodeSender, "node sender changed after reconnect");
+            }
+            const nodeNonce = asString(params.nodeNonce);
             assert.ok(nodeNonce, "connect.hello missing nodeNonce");
-            nodePublicKeyDeferred.resolve(parsedPublic);
+            const sessionId = `sess-${randomUUID().slice(0, 12)}`;
+            const gatewayNonce = randomBytes(32).toString("base64url");
+            sessionStateBySocket.set(ws, {
+              sessionId,
+              nodeNonce: nodeNonce!,
+              gatewayNonce,
+              nodeId: helloNodeId ?? nodeId,
+            });
 
             const transcript = buildHandshakeTranscript({
               nodeId: helloNodeId ?? nodeId,
@@ -233,12 +287,14 @@ async function main(): Promise<void> {
             const params = asObject(msg.params);
             const nodeProofSig = asString(params.nodeProofSig);
             assert.ok(nodeProofSig, "connect.prove missing nodeProofSig");
+            const state = sessionStateBySocket.get(ws);
+            assert.ok(state, "missing handshake state for websocket session");
 
             const transcript = buildHandshakeTranscript({
-              nodeId,
-              sessionId,
-              nodeNonce: nodeNonce!,
-              gatewayNonce,
+              nodeId: state!.nodeId,
+              sessionId: state!.sessionId,
+              nodeNonce: state!.nodeNonce,
+              gatewayNonce: state!.gatewayNonce,
             });
             assert.ok(
               verifyDetachedPayload(transcript, nodeProofSig!, nodePublic!.key),
@@ -249,7 +305,7 @@ async function main(): Promise<void> {
               type: "event",
               event: "connect.accept",
               payload: {
-                sessionId,
+                sessionId: state!.sessionId,
                 connectedAt: Date.now(),
                 gatewayFingerprint,
                 gatewayAcceptSig: signDetachedPayload(transcript, gatewayKeys.privateKey),
@@ -260,11 +316,13 @@ async function main(): Promise<void> {
               id: msg.id,
               ok: true,
               payload: {
-                sessionId,
+                sessionId: state!.sessionId,
                 status: "ready",
               },
             });
-            handshakeComplete.resolve();
+            handshakeCount += 1;
+            if (handshakeCount === 1) initialHandshakeComplete.resolve();
+            if (handshakeCount === 2) reconnectHandshakeComplete.resolve();
             return;
           }
 
@@ -272,9 +330,39 @@ async function main(): Promise<void> {
           assert.equal(msg.sender, nodeSender);
           assert.ok(verifyEnvelopeSignature(envelopeObj, nodePublic.key), `invalid signed envelope for ${msg.type}`);
 
-          if (msg.type === "event" && msg.event === "caps.advertise") {
-            ready.resolve();
-            return;
+          if (msg.type === "event") {
+            if (msg.event === "caps.advertise") {
+              capsAdvertiseCount += 1;
+              if (capsAdvertiseCount === 1) initialReady.resolve();
+              if (capsAdvertiseCount === 2) reconnectReady.resolve();
+              return;
+            }
+            if (msg.event === "process.update") {
+              const payload = asObject(msg.payload);
+              const deliveryId = asString(payload.deliveryId);
+              const processId = asString(payload.processId);
+              if (deliveryId) {
+                const shouldSuppress = suppressNextTerminalAck && handshakeCount === 1 && !withheldDeliveryId;
+                if (shouldSuppress) {
+                  suppressNextTerminalAck = false;
+                  withheldDeliveryId = deliveryId;
+                } else {
+                  if (withheldDeliveryId && deliveryId === withheldDeliveryId && handshakeCount >= 2) {
+                    replayedWithheldDelivery = true;
+                  }
+                  sendSignedEnvelope(ws, gatewayKeys.privateKey, "gateway:smoke", {
+                    type: "req",
+                    id: randomUUID(),
+                    method: "process.ack",
+                    params: {
+                      deliveryId,
+                      processId,
+                    },
+                  });
+                }
+              }
+              return;
+            }
           }
 
           if (msg.type === "res" && msg.id) {
@@ -287,15 +375,17 @@ async function main(): Promise<void> {
           const wrapped = err instanceof Error ? err : new Error(String(err));
           for (const pending of pendingResponses.values()) pending.reject(wrapped);
           pendingResponses.clear();
-          ready.reject(wrapped);
-          handshakeComplete.reject(wrapped);
+          initialReady.reject(wrapped);
+          reconnectReady.reject(wrapped);
+          initialHandshakeComplete.reject(wrapped);
+          reconnectHandshakeComplete.reject(wrapped);
           nodePublicKeyDeferred.reject(wrapped);
         }
       });
     });
 
-    await timeoutPromise(handshakeComplete.promise, 12_000, "handshake did not complete");
-    await timeoutPromise(ready.promise, 12_000, "node did not advertise capabilities");
+    await timeoutPromise(initialHandshakeComplete.promise, 12_000, "initial handshake did not complete");
+    await timeoutPromise(initialReady.promise, 12_000, "node did not advertise capabilities on initial connect");
     const parsedNodePublic = await timeoutPromise(nodePublicKeyDeferred.promise, 2_000, "node public key missing");
     assert.ok(wsRef, "websocket connection missing");
 
@@ -355,7 +445,213 @@ async function main(): Promise<void> {
     assert.equal(deniedRes.ok, false, "expected disallowed command to fail");
     assert.equal(asString(asObject(deniedRes.error).code), "PERMISSION_DENIED");
 
-    process.stdout.write("[smoke] PASS: signed handshake + system.which/system.run verified\n");
+    const shortProcStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo proc-smoke",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(shortProcStart.ok, true, "process.start short command failed");
+    const shortProcessId = asString(asObject(shortProcStart.payload).processId);
+    assert.ok(shortProcessId, "process.start did not return processId");
+
+    let shortStatus = "";
+    for (let i = 0; i < 20; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: shortProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status for short process failed");
+      shortStatus = asString(asObject(statusRes.payload).status) ?? "";
+      if (shortStatus === "completed" || shortStatus === "failed" || shortStatus === "cancelled") break;
+      await sleep(100);
+    }
+    assert.equal(shortStatus, "completed", `expected short process to complete, got ${shortStatus}`);
+
+    const shortLogs = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.logs",
+      params: {
+        processId: shortProcessId,
+        maxChars: 4000,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(shortLogs.ok, true, "process.logs for short process failed");
+    const shortLogText = asString(asObject(shortLogs.payload).logs) ?? "";
+    assert.match(shortLogText, /proc-smoke/, "short process logs missing output");
+
+    suppressNextTerminalAck = true;
+    const replayProcStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo replay-me",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(replayProcStart.ok, true, "process.start replay process failed");
+    const replayProcessId = asString(asObject(replayProcStart.payload).processId);
+    assert.ok(replayProcessId, "replay process missing processId");
+    for (let i = 0; i < 20; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: replayProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status for replay process failed");
+      const status = asString(asObject(statusRes.payload).status) ?? "";
+      if (status === "completed" || status === "failed" || status === "cancelled") break;
+      await sleep(100);
+    }
+    await waitForCondition({
+      timeoutMs: 10_000,
+      intervalMs: 100,
+      message: "did not observe terminal delivery id for replay process",
+      predicate: () => Boolean(withheldDeliveryId),
+    });
+
+    const longProcStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "sleep 20",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(longProcStart.ok, true, "process.start long command failed");
+    const longProcessId = asString(asObject(longProcStart.payload).processId);
+    assert.ok(longProcessId, "long process missing processId");
+
+    const wsBeforeFailover = wsRef;
+    assert.ok(wsBeforeFailover && wsBeforeFailover.readyState === WebSocket.OPEN, "expected open websocket before failover");
+    wsBeforeFailover!.close(1012, "simulate gateway failover");
+    await timeoutPromise(reconnectHandshakeComplete.promise, 20_000, "reconnect handshake did not complete");
+    await timeoutPromise(reconnectReady.promise, 20_000, "node did not advertise capabilities after reconnect");
+    assert.ok(wsRef, "reconnected websocket missing");
+    assert.notEqual(wsRef, wsBeforeFailover, "expected new websocket after failover");
+
+    const reconnectStatus = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.status",
+      params: {
+        processId: longProcessId,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(reconnectStatus.ok, true, "process.status failed after reconnect");
+    const reconnectProcessStatus = asString(asObject(reconnectStatus.payload).status) ?? "";
+    assert.notEqual(reconnectProcessStatus, "", "missing process status after reconnect");
+
+    const reconnectLogs = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.logs",
+      params: {
+        processId: longProcessId,
+        maxChars: 4000,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(reconnectLogs.ok, true, "process.logs failed after reconnect");
+    const reconnectLogsPayload = asObject(reconnectLogs.payload);
+    assert.equal(typeof reconnectLogsPayload.logs, "string", "expected logs payload to include logs text");
+    await waitForCondition({
+      timeoutMs: 10_000,
+      intervalMs: 100,
+      message: "withheld terminal delivery was not replayed after reconnect",
+      predicate: () => replayedWithheldDelivery,
+    });
+
+    const cancelRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.cancel",
+      params: {
+        processId: longProcessId,
+        signal: "SIGTERM",
+        killAfterMs: 1000,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(cancelRes.ok, true, "process.cancel failed");
+
+    let finalLongStatus = "";
+    for (let i = 0; i < 40; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: longProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status for long process failed");
+      finalLongStatus = asString(asObject(statusRes.payload).status) ?? "";
+      if (finalLongStatus === "cancelled" || finalLongStatus === "completed" || finalLongStatus === "failed") break;
+      await sleep(125);
+    }
+    assert.equal(finalLongStatus, "cancelled", `expected long process cancelled, got ${finalLongStatus}`);
+
+    process.stdout.write(
+      "[smoke] PASS: signed handshake + process primitives + reconnect continuity + outbox replay verified\n",
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[smoke] FAIL: ${msg}\n`);

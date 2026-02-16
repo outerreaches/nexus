@@ -104,6 +104,16 @@ export class NodeToolRouter implements NodeRouter {
   private resolveRemoteToolName(toolName: string): string {
     // Current local shell tool maps to protocol-level system.run on Nexus nodes.
     if (toolName === "shell_exec") return "system.run";
+    if (toolName === "process_start") return "process.start";
+    if (toolName === "process_status") return "process.status";
+    if (toolName === "process_logs") return "process.logs";
+    if (toolName === "process_stop") return "process.cancel";
+    if (toolName === "process_list") {
+      throw new NodeRoutingError(
+        "NODE_ROUTING_NOT_IMPLEMENTED",
+        "Remote process listing is not implemented yet; use explicit process_status/process_logs/process_stop.",
+      );
+    }
     return toolName;
   }
 }

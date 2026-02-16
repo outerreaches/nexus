@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { exec } from "node:child_process";
+import { exec, spawn as spawnChild, type ChildProcess } from "node:child_process";
 import {
   createHash,
   createPrivateKey,
@@ -18,10 +18,45 @@ import process from "node:process";
 
 import { WebSocket } from "ws";
 
+import {
+  ReferenceNodeStateStore,
+  type PersistedOutboxEntry,
+  type PersistedProcessRecord,
+} from "./state-store.js";
+
 const ED25519_SPKI_RAW_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_OUTPUT_CHARS = 60_000;
-const DEFAULT_CAPABILITIES = ["system.run", "system.which"];
+const MAX_PROCESS_LOG_CHARS = 120_000;
+const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_CAPABILITIES = [
+  "system.run",
+  "system.which",
+  "process.start",
+  "process.status",
+  "process.logs",
+  "process.cancel",
+];
 const DEFAULT_ALLOW_COMMANDS = ["echo", "uname", "whoami", "pwd", "date"];
+
+type ProcessStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+type ReferenceProcess = {
+  processId: string;
+  command: string;
+  cwd: string | null;
+  status: ProcessStatus;
+  startedAt: number;
+  endedAt: number | null;
+  exitCode: number | null;
+  signal: string | null;
+  cancelRequested: boolean;
+  timeoutMs: number | null;
+  logs: string;
+  child: ChildProcess | null;
+  timeoutTimer: NodeJS.Timeout | null;
+  killTimer: NodeJS.Timeout | null;
+  routing: Record<string, unknown> | null;
+};
 
 type RequestEnvelope = {
   type: "req";
@@ -107,7 +142,8 @@ async function main(): Promise<void> {
   }
   const config = buildConfig(args.values);
   const identity = await loadOrCreateIdentity(config.stateDir);
-  const client = new ReferenceNodeClient(config, identity);
+  const stateStore = await ReferenceNodeStateStore.open(config.stateDir);
+  const client = new ReferenceNodeClient(config, identity, stateStore);
 
   process.stdout.write(
     `[reference-node] id=${config.nodeId} fingerprint=${identity.fingerprint} gateway=${config.gatewayUrl}\n`,
@@ -117,6 +153,7 @@ async function main(): Promise<void> {
       ...config.allowCommands,
     ].join(",")}\n`,
   );
+  process.stdout.write(`[reference-node] state_db=${stateStore.dbPath}\n`);
 
   const shutdown = (): void => {
     client.stop("shutdown");
@@ -132,6 +169,8 @@ class ReferenceNodeClient {
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
+  private readonly processes = new Map<string, ReferenceProcess>();
+  private drainingOutbox = false;
 
   private gatewayPublicKey: KeyObject | null = null;
   private gatewayFingerprint: string | null = null;
@@ -143,9 +182,11 @@ class ReferenceNodeClient {
   constructor(
     private readonly config: Config,
     private readonly identity: NodeIdentity,
+    private readonly stateStore: ReferenceNodeStateStore,
   ) {}
 
   start(): void {
+    this.bootstrapPersistedState();
     this.connect();
   }
 
@@ -163,6 +204,8 @@ class ReferenceNodeClient {
         // ignore
       }
     }
+    this.terminateAllProcesses(reason);
+    this.stateStore.close();
   }
 
   private connect(): void {
@@ -220,6 +263,47 @@ class ReferenceNodeClient {
       this.connect();
     }, delay);
     this.reconnectTimer.unref?.();
+  }
+
+  private bootstrapPersistedState(): void {
+    this.stateStore.pruneDeliveredOlderThan(Date.now() - DELIVERED_OUTBOX_TTL_MS);
+    const persisted = this.stateStore.loadProcesses(1_000);
+    const nowMs = Date.now();
+    for (const record of persisted) {
+      const entry: ReferenceProcess = {
+        processId: record.processId,
+        command: record.command,
+        cwd: record.cwd,
+        status: record.status,
+        startedAt: record.startedAt,
+        endedAt: record.endedAt,
+        exitCode: record.exitCode,
+        signal: record.signal,
+        cancelRequested: record.cancelRequested,
+        timeoutMs: record.timeoutMs,
+        logs: record.logs,
+        child: null,
+        timeoutTimer: null,
+        killTimer: null,
+        routing: record.routing,
+      };
+      this.processes.set(entry.processId, entry);
+
+      // Processes that were mid-flight when the node exited cannot continue
+      // and must transition to a terminal state before replay.
+      if (entry.status === "queued" || entry.status === "running") {
+        entry.status = "failed";
+        entry.cancelRequested = true;
+        entry.endedAt = nowMs;
+        entry.exitCode = entry.exitCode ?? 1;
+        entry.signal = entry.signal ?? "NODE_RESTART";
+        entry.logs = truncateOutput(`${entry.logs}\nprocess recovered after node restart before completion\n`, MAX_PROCESS_LOG_CHARS);
+        this.persistProcess(entry);
+        this.queueTerminalProcessUpdate(entry, "recovered_after_restart");
+      }
+    }
+    const pendingOutbox = this.stateStore.countUndelivered();
+    this.log(`restored processes=${persisted.length} outbox_pending=${pendingOutbox}`);
   }
 
   private sendConnectHello(): void {
@@ -321,6 +405,7 @@ class ReferenceNodeClient {
         this.ready = true;
         this.log("received connect.accept; session ready");
         this.sendCapsAdvertise();
+        this.drainOutbox("connect.accept");
         return;
       default:
         this.log(`event=${msg.event}`);
@@ -369,6 +454,10 @@ class ReferenceNodeClient {
         permissions: {
           "system.run": true,
           "system.which": true,
+          "process.start": true,
+          "process.status": true,
+          "process.logs": true,
+          "process.cancel": true,
         },
         nodeNonce: this.nodeNonce,
         gatewayNonce,
@@ -387,6 +476,7 @@ class ReferenceNodeClient {
         this.ready = true;
         this.log("gateway response status=ready");
         this.sendCapsAdvertise();
+        this.drainOutbox("response.ready");
       }
       return;
     }
@@ -400,47 +490,46 @@ class ReferenceNodeClient {
   }
 
   private async handleRequest(msg: RequestEnvelope): Promise<void> {
-    if (msg.method === "ping") {
-      this.sendSignedEnvelope({
-        type: "res",
-        id: msg.id,
-        ok: true,
-        payload: { pong: true, ts: Date.now() },
-      });
-      return;
+    switch (msg.method) {
+      case "ping":
+        this.sendSignedEnvelope({
+          type: "res",
+          id: msg.id,
+          ok: true,
+          payload: { pong: true, ts: Date.now() },
+        });
+        return;
+      case "tool.execute":
+        await this.handleToolExecute(msg);
+        return;
+      case "process.start":
+        await this.handleProcessStart(msg);
+        return;
+      case "process.status":
+        await this.handleProcessStatus(msg);
+        return;
+      case "process.logs":
+        await this.handleProcessLogs(msg);
+        return;
+      case "process.cancel":
+        await this.handleProcessCancel(msg);
+        return;
+      case "process.ack":
+        await this.handleProcessAck(msg);
+        return;
+      default:
+        this.sendRequestError(msg.id, "METHOD_NOT_IMPLEMENTED", `Method ${msg.method} is not implemented by reference node.`, false);
     }
+  }
 
-    if (msg.method !== "tool.execute") {
-      this.sendSignedEnvelope({
-        type: "res",
-        id: msg.id,
-        ok: false,
-        error: {
-          code: "METHOD_NOT_IMPLEMENTED",
-          message: `Method ${msg.method} is not implemented by reference node.`,
-          retryable: false,
-        },
-      });
-      return;
-    }
-
+  private async handleToolExecute(msg: RequestEnvelope): Promise<void> {
     const params = asObject(msg.params);
     const tool = asString(params.tool);
     const args = asObject(params.args);
     if (!tool) {
-      this.sendSignedEnvelope({
-        type: "res",
-        id: msg.id,
-        ok: false,
-        error: {
-          code: "INVALID_REQUEST",
-          message: "tool.execute requires a tool name",
-          retryable: false,
-        },
-      });
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "tool.execute requires a tool name", false);
       return;
     }
-
     try {
       let output = "";
       if (tool === "system.which") {
@@ -450,7 +539,6 @@ class ReferenceNodeClient {
       } else {
         throw new NodeToolError("CAPABILITY_UNAVAILABLE", `Tool ${tool} is not supported by this reference node.`);
       }
-
       this.sendSignedEnvelope({
         type: "res",
         id: msg.id,
@@ -460,25 +548,243 @@ class ReferenceNodeClient {
         },
       });
     } catch (err) {
-      const code =
-        err instanceof NodeToolError
-          ? err.code
-          : err && typeof err === "object" && "code" in err && typeof (err as { code?: unknown }).code === "string"
-            ? (err as { code: string }).code
-            : "NODE_EXECUTION_FAILED";
-      const message = err instanceof Error ? err.message : String(err);
-      const retryable = err instanceof NodeToolError ? err.retryable : false;
+      this.sendToolExecutionError(msg.id, err);
+    }
+  }
+
+  private async handleProcessStart(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const tool = asString(params.tool) ?? "system.run";
+    if (tool !== "system.run") {
+      this.sendRequestError(msg.id, "CAPABILITY_UNAVAILABLE", `process.start only supports system.run (got ${tool}).`, false);
+      return;
+    }
+    const runArgs = asObject(params.args);
+    const command = asString(runArgs.command);
+    if (!command) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "process.start requires args.command.", false);
+      return;
+    }
+    const commandName = parseCommandName(command);
+    if (!commandName) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "Unable to parse command name for process.start.", false);
+      return;
+    }
+    if (!isAllowedCommand(commandName, this.config.allowCommands)) {
+      this.sendRequestError(
+        msg.id,
+        "PERMISSION_DENIED",
+        `Command "${commandName}" is not allowlisted for process.start.`,
+        false,
+      );
+      return;
+    }
+
+    const cwd = asString(runArgs.cwd) ?? null;
+    const env = asStringMap(runArgs.env);
+    const timeoutMs = clampInt(runArgs.timeoutMs ?? runArgs.timeout, 1_000, this.config.runTimeoutMs) ?? null;
+    const routingObj = asObject(params.routing);
+    const processId = `proc_${randomUUID().slice(0, 12)}`;
+    const entry: ReferenceProcess = {
+      processId,
+      command,
+      cwd,
+      status: "queued",
+      startedAt: Date.now(),
+      endedAt: null,
+      exitCode: null,
+      signal: null,
+      cancelRequested: false,
+      timeoutMs,
+      logs: "",
+      child: null,
+      timeoutTimer: null,
+      killTimer: null,
+      routing: Object.keys(routingObj).length > 0 ? routingObj : null,
+    };
+    this.processes.set(processId, entry);
+    this.persistProcess(entry);
+
+    try {
+      const child = spawnChild(command, {
+        shell: true,
+        cwd: cwd ?? undefined,
+        env: Object.keys(env).length > 0 ? { ...process.env, ...env } : process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      entry.child = child;
+      entry.status = "running";
+      entry.startedAt = Date.now();
+      this.persistProcess(entry);
+      this.emitProcessUpdate(entry, "running");
+
+      child.stdout?.on("data", (chunk) => {
+        this.appendProcessLog(entry, String(chunk), "stdout");
+      });
+      child.stderr?.on("data", (chunk) => {
+        this.appendProcessLog(entry, String(chunk), "stderr");
+      });
+      child.on("error", (err) => {
+        this.appendProcessLog(entry, `process error: ${err instanceof Error ? err.message : String(err)}\n`, "stderr");
+      });
+      child.on("close", (code, signal) => {
+        this.finishProcess(entry, code, signal);
+      });
+
+      if (timeoutMs && timeoutMs > 0) {
+        entry.timeoutTimer = setTimeout(() => {
+          if (entry.status !== "running") return;
+          this.appendProcessLog(entry, `process timeout exceeded (${timeoutMs}ms); terminating\n`, "stderr");
+          this.cancelProcess(entry, {
+            signal: "SIGTERM",
+            reason: "timeout",
+            killAfterMs: 5_000,
+          });
+        }, timeoutMs);
+        entry.timeoutTimer.unref?.();
+      }
+
       this.sendSignedEnvelope({
         type: "res",
         id: msg.id,
-        ok: false,
-        error: {
-          code,
-          message: truncateOutput(message, 2_000),
-          retryable,
+        ok: true,
+        payload: {
+          processId,
+          status: entry.status,
+          startedAt: entry.startedAt,
+          command,
         },
       });
+    } catch (err) {
+      this.processes.delete(processId);
+      this.stateStore.removeProcess(processId);
+      this.sendToolExecutionError(msg.id, err);
     }
+  }
+
+  private async handleProcessStatus(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const processId = asString(params.processId) ?? asString(params.id);
+    if (!processId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "process.status requires processId.", false);
+      return;
+    }
+    const entry = this.processes.get(processId);
+    if (!entry) {
+      this.sendRequestError(msg.id, "PROCESS_NOT_FOUND", `Process ${processId} was not found.`, false);
+      return;
+    }
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: this.serializeProcess(entry, false),
+    });
+  }
+
+  private async handleProcessLogs(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const processId = asString(params.processId) ?? asString(params.id);
+    if (!processId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "process.logs requires processId.", false);
+      return;
+    }
+    const entry = this.processes.get(processId);
+    if (!entry) {
+      this.sendRequestError(msg.id, "PROCESS_NOT_FOUND", `Process ${processId} was not found.`, false);
+      return;
+    }
+    const maxChars = clampInt(params.maxChars, 200, MAX_OUTPUT_CHARS) ?? 8_000;
+    const logs = entry.logs.length > maxChars ? entry.logs.slice(-maxChars) : entry.logs;
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: {
+        processId,
+        status: entry.status,
+        logs,
+        totalChars: entry.logs.length,
+        truncated: entry.logs.length > maxChars,
+      },
+    });
+  }
+
+  private async handleProcessCancel(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const processId = asString(params.processId) ?? asString(params.id);
+    if (!processId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "process.cancel requires processId.", false);
+      return;
+    }
+    const entry = this.processes.get(processId);
+    if (!entry) {
+      this.sendRequestError(msg.id, "PROCESS_NOT_FOUND", `Process ${processId} was not found.`, false);
+      return;
+    }
+    const signal = normalizeSignal(asString(params.signal)) ?? "SIGTERM";
+    const reason = asString(params.reason) ?? "gateway_cancel";
+    const killAfterMs = clampInt(params.killAfterMs, 0, 60_000) ?? 5_000;
+    this.cancelProcess(entry, { signal, reason, killAfterMs });
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: {
+        processId,
+        status: entry.status === "running" ? "cancelling" : entry.status,
+        signal,
+        reason,
+      },
+    });
+  }
+
+  private async handleProcessAck(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const deliveryId = asString(params.deliveryId);
+    if (!deliveryId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "process.ack requires deliveryId.", false);
+      return;
+    }
+    const processId = asString(params.processId) ?? undefined;
+    const nowMs = Date.now();
+    const acknowledged = this.stateStore.markOutboxDelivered(deliveryId, nowMs);
+    this.stateStore.pruneDeliveredOlderThan(nowMs - DELIVERED_OUTBOX_TTL_MS);
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: {
+        deliveryId,
+        processId: processId ?? null,
+        acknowledged,
+      },
+    });
+  }
+
+  private sendRequestError(id: string | null, code: string, message: string, retryable: boolean): void {
+    this.sendSignedEnvelope({
+      type: "res",
+      id,
+      ok: false,
+      error: {
+        code,
+        message: truncateOutput(message, 2_000),
+        retryable,
+      },
+    });
+  }
+
+  private sendToolExecutionError(id: string, err: unknown): void {
+    const code =
+      err instanceof NodeToolError
+        ? err.code
+        : err && typeof err === "object" && "code" in err && typeof (err as { code?: unknown }).code === "string"
+          ? (err as { code: string }).code
+          : "NODE_EXECUTION_FAILED";
+    const message = err instanceof Error ? err.message : String(err);
+    const retryable = err instanceof NodeToolError ? err.retryable : false;
+    this.sendRequestError(id, code, message, retryable);
   }
 
   private async execSystemWhich(args: Record<string, unknown>): Promise<string> {
@@ -535,6 +841,214 @@ class ReferenceNodeClient {
     return truncateOutput(combined || "(no output)");
   }
 
+  private appendProcessLog(entry: ReferenceProcess, chunk: string, stream: "stdout" | "stderr"): void {
+    if (!chunk) return;
+    const line = chunk;
+    entry.logs += line;
+    if (entry.logs.length > MAX_PROCESS_LOG_CHARS) {
+      entry.logs = entry.logs.slice(entry.logs.length - MAX_PROCESS_LOG_CHARS);
+    }
+    this.stateStore.updateProcessLogs(entry.processId, entry.logs, Date.now());
+    this.sendSignedEnvelope({
+      type: "event",
+      event: "log.append",
+      payload: {
+        processId: entry.processId,
+        stream,
+        chunk: truncateOutput(line, 8_000),
+        ts: Date.now(),
+      },
+    });
+  }
+
+  private finishProcess(entry: ReferenceProcess, exitCode: number | null, signal: NodeJS.Signals | null): void {
+    if (entry.timeoutTimer) {
+      clearTimeout(entry.timeoutTimer);
+      entry.timeoutTimer = null;
+    }
+    if (entry.killTimer) {
+      clearTimeout(entry.killTimer);
+      entry.killTimer = null;
+    }
+    entry.child = null;
+    entry.exitCode = exitCode;
+    entry.signal = signal ? String(signal) : null;
+    entry.endedAt = Date.now();
+    if (entry.cancelRequested) {
+      entry.status = "cancelled";
+    } else if ((exitCode ?? 0) === 0) {
+      entry.status = "completed";
+    } else {
+      entry.status = "failed";
+    }
+    this.persistProcess(entry);
+    this.queueTerminalProcessUpdate(entry, "process_finished");
+  }
+
+  private persistProcess(entry: ReferenceProcess): void {
+    const record: PersistedProcessRecord = {
+      processId: entry.processId,
+      status: entry.status,
+      command: entry.command,
+      cwd: entry.cwd,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      exitCode: entry.exitCode,
+      signal: entry.signal,
+      cancelRequested: entry.cancelRequested,
+      timeoutMs: entry.timeoutMs,
+      logs: entry.logs,
+      routing: entry.routing,
+    };
+    this.stateStore.upsertProcess(record, Date.now());
+  }
+
+  private queueTerminalProcessUpdate(entry: ReferenceProcess, reason: string): void {
+    const deliveryId = `dlv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const payload: Record<string, unknown> = {
+      processId: entry.processId,
+      status: entry.status,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      exitCode: entry.exitCode,
+      signal: entry.signal,
+      summary: truncateOutput(entry.logs, 6_000),
+      deliveryId,
+      deliveryReason: reason,
+      ts: Date.now(),
+      ...(entry.routing ? { routing: entry.routing } : {}),
+    };
+    this.stateStore.enqueueOutbox({
+      deliveryId,
+      processId: entry.processId,
+      payload,
+      createdAt: Date.now(),
+    });
+    if (this.ready) this.sendOutboxEntry({ deliveryId, processId: entry.processId, payload, createdAt: Date.now(), delivered: false, deliveredAt: null });
+  }
+
+  private sendOutboxEntry(entry: PersistedOutboxEntry): boolean {
+    return this.sendSignedEnvelope({
+      type: "event",
+      event: "process.update",
+      payload: entry.payload,
+    });
+  }
+
+  private drainOutbox(source: string): void {
+    if (!this.ready || this.drainingOutbox) return;
+    this.drainingOutbox = true;
+    try {
+      const pending = this.stateStore.listUndelivered(250);
+      let sent = 0;
+      for (const entry of pending) {
+        const ok = this.sendOutboxEntry(entry);
+        if (!ok) break;
+        sent += 1;
+      }
+      if (pending.length > 0) {
+        this.log(`outbox drain source=${source} pending=${pending.length} sent=${sent}`);
+      }
+    } finally {
+      this.drainingOutbox = false;
+    }
+  }
+
+  private emitProcessUpdate(entry: ReferenceProcess, status: ProcessStatus): void {
+    this.sendSignedEnvelope({
+      type: "event",
+      event: "process.update",
+      payload: {
+        processId: entry.processId,
+        status,
+        startedAt: entry.startedAt,
+        endedAt: entry.endedAt,
+        exitCode: entry.exitCode,
+        signal: entry.signal,
+        ts: Date.now(),
+      },
+    });
+  }
+
+  private serializeProcess(entry: ReferenceProcess, includeLogs: boolean): Record<string, unknown> {
+    return {
+      processId: entry.processId,
+      command: entry.command,
+      cwd: entry.cwd,
+      status: entry.status,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      exitCode: entry.exitCode,
+      signal: entry.signal,
+      cancelRequested: entry.cancelRequested,
+      timeoutMs: entry.timeoutMs,
+      logChars: entry.logs.length,
+      ...(includeLogs ? { logs: entry.logs } : {}),
+      ...(entry.routing ? { routing: entry.routing } : {}),
+    };
+  }
+
+  private cancelProcess(
+    entry: ReferenceProcess,
+    params: {
+      signal: NodeJS.Signals;
+      reason: string;
+      killAfterMs: number;
+    },
+  ): void {
+    entry.cancelRequested = true;
+    this.persistProcess(entry);
+    if (!entry.child || entry.status !== "running") return;
+    try {
+      entry.child.kill(params.signal);
+    } catch {
+      // ignore
+    }
+    this.appendProcessLog(entry, `cancel requested (${params.reason}) using ${params.signal}\n`, "stderr");
+    if (params.signal !== "SIGKILL" && params.killAfterMs > 0) {
+      if (entry.killTimer) clearTimeout(entry.killTimer);
+      entry.killTimer = setTimeout(() => {
+        if (!entry.child || entry.status !== "running") return;
+        try {
+          entry.child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, params.killAfterMs);
+      entry.killTimer.unref?.();
+    }
+  }
+
+  private terminateAllProcesses(reason: string): void {
+    for (const entry of this.processes.values()) {
+      if (entry.timeoutTimer) {
+        clearTimeout(entry.timeoutTimer);
+        entry.timeoutTimer = null;
+      }
+      if (entry.killTimer) {
+        clearTimeout(entry.killTimer);
+        entry.killTimer = null;
+      }
+      if (entry.child && entry.status === "running") {
+        this.cancelProcess(entry, {
+          signal: "SIGTERM",
+          reason: `node shutdown: ${reason}`,
+          killAfterMs: 2_000,
+        });
+        this.appendProcessLog(entry, `node shutdown requested while process was running\n`, "stderr");
+        continue;
+      }
+      if (entry.status === "queued") {
+        entry.status = "cancelled";
+        entry.cancelRequested = true;
+        entry.endedAt = Date.now();
+        this.appendProcessLog(entry, `node shutdown before process start: ${reason}\n`, "stderr");
+        this.persistProcess(entry);
+        this.queueTerminalProcessUpdate(entry, "shutdown_queued");
+      }
+    }
+  }
+
   private sendCapsAdvertise(): void {
     if (!this.ready) return;
     this.sendSignedEnvelope({
@@ -550,21 +1064,26 @@ class ReferenceNodeClient {
 
   private sendSignedEnvelope(
     envelope: Omit<RequestEnvelope, "ts" | "sender" | "sig"> | Omit<ResponseEnvelope, "ts" | "sender" | "sig"> | Omit<EventEnvelope, "ts" | "sender" | "sig">,
-  ): void {
+  ): boolean {
     const ws = this.requireOpenSocket();
-    if (!ws) return;
+    if (!ws) return false;
     const withMeta = {
       ...envelope,
       ts: Date.now(),
       sender: this.senderId,
     };
     const sig = signEnvelope(withMeta, this.identity.privateKey);
-    ws.send(
-      JSON.stringify({
-        ...withMeta,
-        sig,
-      }),
-    );
+    try {
+      ws.send(
+        JSON.stringify({
+          ...withMeta,
+          sig,
+        }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private get senderId(): string {
@@ -826,6 +1345,17 @@ function parseCommandName(command: string): string | null {
   return match?.[1] ?? null;
 }
 
+function normalizeSignal(value: string | null): NodeJS.Signals | null {
+  switch (value) {
+    case "SIGTERM":
+    case "SIGINT":
+    case "SIGKILL":
+      return value;
+    default:
+      return null;
+  }
+}
+
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -997,7 +1527,7 @@ function signEnvelope(envelopeWithoutSig: Record<string, unknown>, privateKey: K
 function printHelp(): void {
   process.stdout.write(
     [
-      "Reference Nexus node (signed protocol + system.run/system.which)",
+      "Reference Nexus node (signed protocol + system.run/system.which + process primitives)",
       "",
       "Usage:",
       "  tsx examples/nexus-node/reference-node.ts [options]",
@@ -1007,7 +1537,7 @@ function printHelp(): void {
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ./.nexus-node)",
-      "  --caps <csv>                    Capability list (default system.run,system.which)",
+      "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel)",
       "  --allow <csv>                   Allowlisted command names for system.run",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
       "  --reconnect-min-ms <ms>         Minimum reconnect delay (default 2000)",

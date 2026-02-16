@@ -121,9 +121,9 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # 8. Reference Node Smoke Test
+  # 8. Node Protocol Smoke Tests
   node-smoke:
-    name: Reference Node Smoke Test
+    name: Node Protocol Smoke Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,6 +133,7 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run node:reference:smoke
+      - run: npm run node:gateway:smoke
 
   # Summary
   security-summary:
@@ -151,4 +152,4 @@ jobs:
           echo "✅ Semgrep: ${{ needs.semgrep.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Gitleaks: ${{ needs.gitleaks.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Reference Node Smoke: ${{ needs.node-smoke.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Node Protocol Smokes: ${{ needs.node-smoke.result }}" >> $GITHUB_STEP_SUMMARY

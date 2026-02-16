@@ -32,6 +32,7 @@ import { sendHANotification } from "./ha-notifications.js";
 import { randomId } from "../data-intake/utils.js";
 import { NodeRegistry, NodeToolRouter, NodeWebSocketGateway } from "../nodes/index.js";
 import { loadOrCreateGatewayIdentity } from "../nodes/auth.js";
+import { createNodeProcessDeliveryHandler } from "../nodes/process-delivery.js";
 import { registerNodeRoutes } from "./routes/nodes.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
@@ -90,6 +91,11 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const nodeRegistry = new NodeRegistry({ db, log });
   const nodeGatewayIdentity = await loadOrCreateGatewayIdentity(paths.stateDir);
   log(`nodes/auth: loaded gateway ed25519 identity fingerprint=${nodeGatewayIdentity.fingerprint}`);
+  const nodeProcessDelivery = createNodeProcessDeliveryHandler({
+    db,
+    stateDir: paths.stateDir,
+    log,
+  });
   // Standby mode tracking is declared early so node transport, status, and HA
   // transitions all share the same source of truth.
   let isStandby = params.standby ?? false;
@@ -99,15 +105,18 @@ export async function startGateway(params: { configPath: string; port?: number; 
     isStandby: () => isStandby,
     log,
     gatewaySender: `gateway:${hostId}`,
+    onProcessUpdate: nodeProcessDelivery.handleProcessUpdate,
+    onLogAppend: nodeProcessDelivery.handleLogAppend,
   });
   const nodeRouter = new NodeToolRouter({
     registry: nodeRegistry,
     log,
-    executeOnNode: async ({ nodeId, toolName, args }) =>
-      nodeWsGateway.executeTool({
+    executeOnNode: async ({ nodeId, toolName, args, ctx }) =>
+      nodeWsGateway.executeRoutedCall({
         nodeId,
-        tool: toolName,
+        remoteName: toolName,
         args,
+        ctx,
       }),
   });
   initDataIntake();

@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
+import type { ToolContext } from "../core/tools.js";
 import {
   parseNodePublicKey,
   signDetachedPayload,
@@ -89,6 +90,13 @@ type PendingGatewayRequest = {
   reject: (error: NodeRoutingError) => void;
 };
 
+type NodeProcessEventContext = {
+  nodeId: string;
+  sessionId: string;
+  payload: Record<string, unknown>;
+  receivedAt: number;
+};
+
 export class NodeWebSocketGateway {
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<WebSocket, NodeSocketSession>();
@@ -115,6 +123,8 @@ export class NodeWebSocketGateway {
       maxMessageSkewMs?: number;
       requireMessageSignatures?: boolean;
       gatewaySender?: string;
+      onProcessUpdate?: (ctx: NodeProcessEventContext) => Promise<boolean>;
+      onLogAppend?: (ctx: NodeProcessEventContext) => Promise<void>;
     },
   ) {
     this.identity = deps.identity;
@@ -165,6 +175,54 @@ export class NodeWebSocketGateway {
   }
 
   async executeTool(params: { nodeId: string; tool: string; args: unknown; timeoutMs?: number }): Promise<string> {
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "tool.execute",
+      params: {
+        tool: params.tool,
+        args: params.args,
+      },
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to execute ${params.tool}.`,
+    });
+    return this.normalizeToolResult(response.payload);
+  }
+
+  async executeRoutedCall(params: {
+    nodeId: string;
+    remoteName: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    switch (params.remoteName) {
+      case "process.start":
+        return this.requestProcessStart(params);
+      case "process.status":
+        return this.requestProcessStatus(params);
+      case "process.logs":
+        return this.requestProcessLogs(params);
+      case "process.cancel":
+        return this.requestProcessCancel(params);
+      default:
+        return this.executeTool({
+          nodeId: params.nodeId,
+          tool: params.remoteName,
+          args: params.args,
+          timeoutMs: params.timeoutMs,
+        });
+    }
+  }
+
+  private async requestNode(params: {
+    nodeId: string;
+    method: string;
+    params?: unknown;
+    timeoutMs?: number;
+  }): Promise<ProtocolResponse> {
     const target = this.resolveActiveNodeSocket(params.nodeId);
     if (!target) {
       throw new NodeRoutingError("NODE_SOCKET_UNAVAILABLE", `Node ${params.nodeId} does not have an active websocket session.`);
@@ -172,13 +230,13 @@ export class NodeWebSocketGateway {
 
     const requestId = randomUUID();
     const timeoutMs = Math.max(2_000, params.timeoutMs ?? this.requestTimeoutMs);
-    const response = await new Promise<ProtocolResponse>((resolve, reject) => {
+    return await new Promise<ProtocolResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingGatewayRequests.delete(requestId);
         reject(
           new NodeRoutingError(
             "NODE_RESPONSE_TIMEOUT",
-            `Timed out waiting for ${params.tool} response from node ${params.nodeId} after ${timeoutMs}ms.`,
+            `Timed out waiting for ${params.method} response from node ${params.nodeId} after ${timeoutMs}ms.`,
           ),
         );
       }, timeoutMs);
@@ -188,7 +246,7 @@ export class NodeWebSocketGateway {
         id: requestId,
         nodeId: params.nodeId,
         sessionId: target.session.sessionId,
-        method: "tool.execute",
+        method: params.method,
         createdAt: Date.now(),
         timeout,
         resolve,
@@ -198,11 +256,8 @@ export class NodeWebSocketGateway {
       const sent = this.sendSignedEnvelope(target.ws, {
         type: "req",
         id: requestId,
-        method: "tool.execute",
-        params: {
-          tool: params.tool,
-          args: params.args,
-        },
+        method: params.method,
+        params: params.params,
       });
       if (!sent) {
         const pending = this.pendingGatewayRequests.get(requestId);
@@ -213,22 +268,181 @@ export class NodeWebSocketGateway {
         reject(
           new NodeRoutingError(
             "NODE_SOCKET_UNAVAILABLE",
-            `Failed to send ${params.tool} request to node ${params.nodeId}; websocket is not writable.`,
+            `Failed to send ${params.method} request to node ${params.nodeId}; websocket is not writable.`,
           ),
         );
       }
     });
+  }
 
-    if (!response.ok) {
-      const code = response.error?.code ?? "NODE_EXECUTION_FAILED";
-      const message = response.error?.message ?? `Node ${params.nodeId} failed to execute ${params.tool}.`;
-      const err = new Error(message) as Error & { code: string };
-      err.name = "NodeRemoteExecutionError";
-      err.code = code;
-      throw err;
+  private throwOnRemoteError(
+    response: ProtocolResponse,
+    fallback: {
+      code: string;
+      message: string;
+    },
+  ): void {
+    if (response.ok) return;
+    const code = response.error?.code ?? fallback.code;
+    const message = response.error?.message ?? fallback.message;
+    const err = new Error(message) as Error & { code: string };
+    err.name = "NodeRemoteExecutionError";
+    err.code = code;
+    throw err;
+  }
+
+  private async requestProcessStart(params: {
+    nodeId: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const command = this.asString(argsObj.command);
+    if (!command) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "process_start requires a non-empty `command`.");
     }
+    const cwd = this.asString(argsObj.cwd) ?? undefined;
+    const timeout = this.asNumber(argsObj.timeoutMs ?? argsObj.timeout) ?? undefined;
+    const notifyObj = this.asObject(argsObj.notify);
+    const notifyMode = this.asString(notifyObj.mode);
+    const notifyChatId = this.asNumber(notifyObj.chatId);
+    const notifyPreset = this.asString(notifyObj.preset);
+    const routing: Record<string, unknown> = {};
+    if (params.ctx.request) {
+      routing.runId = params.ctx.request.runId ?? randomUUID();
+      routing.parentRunId = params.ctx.request.parentRunId ?? null;
+      routing.sessionId = params.ctx.request.sessionId;
+      routing.channel = params.ctx.request.channel;
+      routing.channelKey = params.ctx.request.channelKey;
+      routing.firewallSession = params.ctx.firewallSession ?? null;
+    }
+    if (notifyMode || notifyChatId || notifyPreset) {
+      routing.notify = {
+        ...(notifyMode ? { mode: notifyMode } : {}),
+        ...(notifyChatId ? { chatId: notifyChatId } : {}),
+        ...(notifyPreset ? { preset: notifyPreset } : {}),
+      };
+    }
+    const requestParams: Record<string, unknown> = {
+      tool: "system.run",
+      args: {
+        command,
+        ...(cwd ? { cwd } : {}),
+        ...(timeout ? { timeoutMs: timeout } : {}),
+      },
+    };
+    if (Object.keys(routing).length > 0) {
+      requestParams.routing = routing;
+    }
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.start",
+      params: requestParams,
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to start remote process.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
 
-    return this.normalizeToolResult(response.payload);
+  private async requestProcessStatus(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const processId = this.extractProcessId(argsObj);
+    if (!processId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "process_status requires process `id`.");
+    }
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.status",
+      params: { processId },
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to fetch process status.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestProcessLogs(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const processId = this.extractProcessId(argsObj);
+    if (!processId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "process_logs requires process `id`.");
+    }
+    const maxChars = this.asNumber(argsObj.maxChars) ?? undefined;
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.logs",
+      params: {
+        processId,
+        ...(maxChars ? { maxChars } : {}),
+      },
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to fetch process logs.`,
+    });
+    const payloadObj = this.asObject(response.payload);
+    if (typeof payloadObj.logs === "string") return payloadObj.logs;
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestProcessCancel(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const processId = this.extractProcessId(argsObj);
+    if (!processId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "process_stop requires process `id`.");
+    }
+    const signal = this.asString(argsObj.signal) ?? undefined;
+    const killAfterMs = this.asNumber(argsObj.killAfterMs) ?? undefined;
+    const reason = this.asString(argsObj.reason) ?? signal ?? "gateway_cancel";
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.cancel",
+      params: {
+        processId,
+        ...(signal ? { signal } : {}),
+        ...(killAfterMs ? { killAfterMs } : {}),
+        reason,
+      },
+      timeoutMs: params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to cancel process.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private extractProcessId(value: Record<string, unknown>): string | null {
+    return this.asString(value.id) ?? this.asString(value.processId);
+  }
+
+  private normalizeStructuredResult(payload: unknown): string {
+    if (payload === null || payload === undefined) return "";
+    if (typeof payload === "string") return payload;
+    try {
+      return JSON.stringify(payload, null, 2);
+    } catch {
+      return String(payload);
+    }
   }
 
   private readonly handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
@@ -539,18 +753,110 @@ export class NodeWebSocketGateway {
 
   private handleEventMessage(session: NodeSocketSession, msg: ProtocolEvent): void {
     if (!session.nodeId) return;
-    if (msg.event !== "capability.update" && msg.event !== "caps.advertise") return;
-
+    const receivedAt = Date.now();
     const payload = this.asObject(msg.payload);
-    const capabilities = this.parseStringArray(payload.capabilities ?? payload.caps);
-    const tags = this.parseStringArray(payload.tags);
-    this.deps.registry.markHeartbeat({
-      id: session.nodeId,
-      nowMs: Date.now(),
-      endpoint: this.inferEndpoint(session.request),
-      capabilities,
-      tags,
+    if (msg.event === "capability.update" || msg.event === "caps.advertise") {
+      const capabilities = this.parseStringArray(payload.capabilities ?? payload.caps);
+      const tags = this.parseStringArray(payload.tags);
+      this.deps.registry.markHeartbeat({
+        id: session.nodeId,
+        nowMs: receivedAt,
+        endpoint: this.inferEndpoint(session.request),
+        capabilities,
+        tags,
+      });
+      return;
+    }
+
+    if (msg.event === "log.append") {
+      const processId = this.asString(payload.processId) ?? "unknown";
+      const stream = this.asString(payload.stream) ?? "stdout";
+      this.deps.log(`nodes/ws: log.append node=${session.nodeId} process=${processId} stream=${stream}`);
+      if (this.deps.onLogAppend) {
+        void this.deps.onLogAppend({
+          nodeId: session.nodeId,
+          sessionId: session.sessionId,
+          payload,
+          receivedAt,
+        }).catch((err) => {
+          this.deps.log(
+            `nodes/ws: onLogAppend failed node=${session.nodeId} process=${processId} error=${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
+      return;
+    }
+
+    if (msg.event === "process.update") {
+      const processId = this.asString(payload.processId) ?? "unknown";
+      const status = this.asString(payload.status) ?? "unknown";
+      const deliveryId = this.asString(payload.deliveryId);
+      this.deps.log(
+        `nodes/ws: process.update node=${session.nodeId} process=${processId} status=${status} delivery=${deliveryId ?? "none"}`,
+      );
+      void this.handleProcessUpdateEvent({
+        nodeId: session.nodeId,
+        sessionId: session.sessionId,
+        payload,
+        receivedAt,
+      });
+      return;
+    }
+  }
+
+  private async handleProcessUpdateEvent(ctx: NodeProcessEventContext): Promise<void> {
+    const processId = this.asString(ctx.payload.processId) ?? null;
+    const deliveryId = this.asString(ctx.payload.deliveryId);
+    let persistOk = true;
+    if (this.deps.onProcessUpdate) {
+      try {
+        persistOk = await this.deps.onProcessUpdate(ctx);
+      } catch (err) {
+        persistOk = false;
+        this.deps.log(
+          `nodes/ws: onProcessUpdate failed node=${ctx.nodeId} process=${processId ?? "unknown"} error=${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (!deliveryId) return;
+    if (!persistOk) {
+      this.deps.log(
+        `nodes/ws: skipped process.ack node=${ctx.nodeId} process=${processId ?? "unknown"} delivery=${deliveryId} reason=persist_failed`,
+      );
+      return;
+    }
+    await this.sendProcessAck({
+      nodeId: ctx.nodeId,
+      processId,
+      deliveryId,
     });
+  }
+
+  private async sendProcessAck(params: {
+    nodeId: string;
+    processId: string | null;
+    deliveryId: string;
+  }): Promise<void> {
+    const ackParams: Record<string, unknown> = { deliveryId: params.deliveryId };
+    if (params.processId) ackParams.processId = params.processId;
+    try {
+      const res = await this.requestNode({
+        nodeId: params.nodeId,
+        method: "process.ack",
+        params: ackParams,
+        timeoutMs: 10_000,
+      });
+      if (!res.ok) {
+        this.deps.log(
+          `nodes/ws: process.ack rejected node=${params.nodeId} delivery=${params.deliveryId} code=${res.error?.code ?? "unknown"} message=${res.error?.message ?? "unknown"}`,
+        );
+      }
+    } catch (err) {
+      this.deps.log(
+        `nodes/ws: process.ack failed node=${params.nodeId} delivery=${params.deliveryId} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private handleConnectHello(ws: WebSocket, session: NodeSocketSession, msg: ProtocolRequest): void {

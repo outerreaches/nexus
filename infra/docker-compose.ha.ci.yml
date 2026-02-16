@@ -1,0 +1,41 @@
+services:
+  haproxy:
+    ports:
+      - "127.0.0.1:18789:18789"
+      - "127.0.0.1:9999:9999"
+
+  nexus-primary:
+    ports:
+      - "127.0.0.1:18891:18789"
+    volumes:
+      - ../.ci-data/nexus:/data/nexus
+      - ..:/data/code
+      - ../.ci-data/workspace:/data/workspace
+    environment:
+      - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_CODE_DIR=/data/code
+      - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_ALLOW_CODE_WRITE=1
+      - NEXUS_BROWSER_HEADLESS=1
+      - NEXUS_BROWSER_NO_SANDBOX=1
+      - NEXUS_HA_PEER_URL=http://nexus-standby:18789
+
+  nexus-standby:
+    ports:
+      - "127.0.0.1:18892:18789"
+    volumes:
+      - ../.ci-data/nexus:/data/nexus
+      - ..:/data/code
+      - ../.ci-data/workspace:/data/workspace
+    environment:
+      - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_CODE_DIR=/data/code
+      - NEXUS_WORKSPACE_DIR=/data/workspace
+      - NEXUS_ALLOW_CODE_WRITE=1
+      - NEXUS_BROWSER_HEADLESS=1
+      - NEXUS_BROWSER_NO_SANDBOX=1
+      - NEXUS_HA_PEER_URL=http://nexus-primary:18789
+
+  watchdog:
+    volumes:
+      - ../.ci-data/nexus:/data/nexus:ro

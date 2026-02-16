@@ -1,0 +1,22 @@
+{
+  "identity": {
+    "name": "Nexus CI",
+    "emoji": ":robot_face:",
+    "vibe": "Deterministic CI harness"
+  },
+  "userProfile": {
+    "name": "CI User",
+    "gender": true,
+    "timezone": "UTC",
+    "context": "Automated HA smoke validation environment."
+  },
+  "telegram": {
+    "enabled": false,
+    "allowFrom": [],
+    "pairing": {
+      "enabled": false,
+      "codeTtlMs": 3600000,
+      "maxPending": 1
+    }
+  }
+}
