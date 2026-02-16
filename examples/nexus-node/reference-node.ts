@@ -49,6 +49,7 @@ const DEFAULT_POLICY_DOC = {
   version: 1,
   defaultQuarantine: "none",
   firewallMode: "transparent",
+  denyCommands: [],
 } as const;
 const SYMBOL_TOKEN_PATTERN = /\{\{([a-z]+):([a-zA-Z0-9._-]+)(?::([a-zA-Z0-9._-]+))?\}\}/g;
 
@@ -454,12 +455,14 @@ class ReferenceNodeClient {
   private normalizePolicyDocument(value: Record<string, unknown>, nowMs: number): Record<string, unknown> {
     const defaultQuarantine = parseQuarantineState(value.defaultQuarantine, "none");
     const firewallMode = parseFirewallMode(asString(value.firewallMode), "transparent");
+    const denyCommands = parsePolicyDenyCommands(value.denyCommands) ?? [];
     const updatedAt = asNumber(value.updatedAt) ?? nowMs;
     return {
       ...value,
       version: asNumber(value.version) ?? 1,
       defaultQuarantine,
       firewallMode,
+      denyCommands,
       updatedAt,
     };
   }
@@ -470,6 +473,10 @@ class ReferenceNodeClient {
 
   private currentPolicyFirewallMode(): FirewallMode {
     return parseFirewallMode(asString(this.policy.firewallMode), "transparent");
+  }
+
+  private currentPolicyDenyCommands(): string[] {
+    return parsePolicyDenyCommands(this.policy.denyCommands) ?? [];
   }
 
   private advertisedCapabilities(): string[] {
@@ -761,39 +768,68 @@ class ReferenceNodeClient {
       this.sendRequestError(msg.id, "PERMISSION_DENIED", commandValidation.message, false);
       return;
     }
+    const commandName = commandValidation.commandName;
 
     const cwd = asString(runArgs.cwd) ?? null;
     const env = asStringMap(runArgs.env);
     const timeoutMs = clampInt(runArgs.timeoutMs ?? runArgs.timeout, 1_000, this.config.runTimeoutMs) ?? null;
     const firewallMode = this.currentPolicyFirewallMode();
-    let resolvedInvocation: ResolvedSystemRunInvocation;
+    let executionCommand = command;
+    let executionCwd = cwd;
+    let executionEnv = env;
+    let resolvedSymbols: string[] = [];
+    if (firewallMode !== "transparent") {
+      let resolvedInvocation: ResolvedSystemRunInvocation;
+      try {
+        resolvedInvocation = await this.resolveSystemRunInvocation({
+          command,
+          cwd,
+          env,
+        });
+      } catch (err) {
+        this.writeAuditEvent({
+          type: "symbol.resolve.failed",
+          toolName: "process.start",
+          details: {
+            code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+        this.sendToolExecutionError(msg.id, err);
+        return;
+      }
+      executionCommand = resolvedInvocation.command;
+      executionCwd = resolvedInvocation.cwd;
+      executionEnv = resolvedInvocation.env;
+      resolvedSymbols = resolvedInvocation.symbols;
+    }
+    const routingObj = asObject(params.routing);
+    const routing: Record<string, unknown> = {
+      ...routingObj,
+      firewallMode,
+    };
+    if (firewallMode === "transparent") {
+      delete routing.firewallSession;
+      delete routing.firewallQuarantine;
+    }
+    const resolvedFirewallSession = firewallMode === "transparent" ? null : this.resolveFirewallSession(routingObj);
+    if (resolvedFirewallSession) {
+      routing.firewallSession = resolvedFirewallSession.sessionId;
+      routing.firewallQuarantine = resolvedFirewallSession.quarantineState;
+    }
+    const processId = `proc_${randomUUID().slice(0, 12)}`;
     try {
-      resolvedInvocation = await this.resolveSystemRunInvocation({
-        command,
-        cwd,
-        env,
+      this.enforceHermesCommandPolicy({
+        toolName: "process.start",
+        commandName,
+        firewallMode,
+        processId,
+        firewallSession: resolvedFirewallSession?.sessionId ?? null,
       });
     } catch (err) {
-      this.writeAuditEvent({
-        type: "symbol.resolve.failed",
-        toolName: "process.start",
-        details: {
-          code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
-          message: err instanceof Error ? err.message : String(err),
-        },
-      });
       this.sendToolExecutionError(msg.id, err);
       return;
     }
-    const routingObj = asObject(params.routing);
-    const resolvedFirewallSession = this.resolveFirewallSession(routingObj);
-    const routing = {
-      ...routingObj,
-      firewallSession: resolvedFirewallSession.sessionId,
-      firewallQuarantine: resolvedFirewallSession.quarantineState,
-      firewallMode,
-    };
-    const processId = `proc_${randomUUID().slice(0, 12)}`;
     const entry: ReferenceProcess = {
       processId,
       command,
@@ -818,21 +854,21 @@ class ReferenceNodeClient {
     this.writeAuditEvent({
       type: "process.start.requested",
       processId,
-      firewallSession: resolvedFirewallSession.sessionId,
+      firewallSession: resolvedFirewallSession?.sessionId ?? null,
       toolName: "system.run",
       details: {
-        commandName: parseCommandName(command),
-        symbolCount: resolvedInvocation.symbols.length,
-        symbols: resolvedInvocation.symbols,
+        commandName,
+        symbolCount: resolvedSymbols.length,
+        symbols: resolvedSymbols,
         firewallMode,
       },
     });
 
     try {
-      const child = spawnChild(resolvedInvocation.command, {
+      const child = spawnChild(executionCommand, {
         shell: true,
-        cwd: resolvedInvocation.cwd ?? undefined,
-        env: Object.keys(resolvedInvocation.env).length > 0 ? { ...process.env, ...resolvedInvocation.env } : process.env,
+        cwd: executionCwd ?? undefined,
+        env: Object.keys(executionEnv).length > 0 ? { ...process.env, ...executionEnv } : process.env,
         stdio: ["ignore", "pipe", "pipe"],
       });
       entry.child = child;
@@ -877,9 +913,13 @@ class ReferenceNodeClient {
           startedAt: entry.startedAt,
           command,
           firewallMode,
-          firewallSession: resolvedFirewallSession.sessionId,
-          firewallSessionReused: resolvedFirewallSession.reused,
-          firewallQuarantine: resolvedFirewallSession.quarantineState,
+          ...(resolvedFirewallSession
+            ? {
+                firewallSession: resolvedFirewallSession.sessionId,
+                firewallSessionReused: resolvedFirewallSession.reused,
+                firewallQuarantine: resolvedFirewallSession.quarantineState,
+              }
+            : {}),
           ...(firewallMode !== "transparent"
             ? {
                 hermes: {
@@ -1058,6 +1098,16 @@ class ReferenceNodeClient {
       );
       return;
     }
+    const requestedDenyCommands = parsePolicyDenyCommands(incomingPolicy.denyCommands);
+    if (incomingPolicy.denyCommands !== undefined && requestedDenyCommands === null) {
+      this.sendRequestError(
+        msg.id,
+        "INVALID_REQUEST",
+        "policy.update denyCommands must be an array of command names.",
+        false,
+      );
+      return;
+    }
     const nowMs = Date.now();
     const next = this.normalizePolicyDocument(
       {
@@ -1077,18 +1127,20 @@ class ReferenceNodeClient {
           updatedAt: nowMs,
           defaultQuarantine: this.currentPolicyDefaultQuarantine(),
           firewallMode: this.currentPolicyFirewallMode(),
+          denyCommands: this.currentPolicyDenyCommands(),
           policyPath: this.policyPath,
           policy: this.policy,
         },
       });
       this.log(
-        `policy.update applied path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
+        `policy.update applied path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()} deny_commands=${this.currentPolicyDenyCommands().join(",") || "-"}`,
       );
       this.writeAuditEvent({
         type: "policy.update",
         details: {
           firewallMode: this.currentPolicyFirewallMode(),
           defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+          denyCommands: this.currentPolicyDenyCommands(),
           policyPath: this.policyPath,
         },
       });
@@ -1363,43 +1415,60 @@ class ReferenceNodeClient {
     if (!command) throw new NodeToolError("INVALID_REQUEST", "system.run requires `command`.");
     const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
     if (!commandValidation.ok) throw new NodeToolError("PERMISSION_DENIED", commandValidation.message);
+    const commandName = commandValidation.commandName;
 
     const firewallMode = this.currentPolicyFirewallMode();
     const timeoutMs = clampInt(args.timeoutMs ?? args.timeout, 1_000, this.config.runTimeoutMs) ?? this.config.runTimeoutMs;
-    const cwd = asString(args.cwd) ?? undefined;
+    const cwd = asString(args.cwd) ?? null;
     const env = asStringMap(args.env);
-    let resolvedInvocation: ResolvedSystemRunInvocation;
-    try {
-      resolvedInvocation = await this.resolveSystemRunInvocation({
-        command,
-        cwd: cwd ?? null,
-        env,
-      });
-    } catch (err) {
-      this.writeAuditEvent({
-        type: "symbol.resolve.failed",
-        toolName: "system.run",
-        details: {
-          code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
-          message: err instanceof Error ? err.message : String(err),
-        },
-      });
-      throw err;
+    let executionCommand = command;
+    let executionCwd = cwd;
+    let executionEnv = env;
+    let resolvedSymbols: string[] = [];
+    if (firewallMode !== "transparent") {
+      let resolvedInvocation: ResolvedSystemRunInvocation;
+      try {
+        resolvedInvocation = await this.resolveSystemRunInvocation({
+          command,
+          cwd,
+          env,
+        });
+      } catch (err) {
+        this.writeAuditEvent({
+          type: "symbol.resolve.failed",
+          toolName: "system.run",
+          details: {
+            code: err instanceof NodeToolError ? err.code : "NODE_EXECUTION_FAILED",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+        throw err;
+      }
+      executionCommand = resolvedInvocation.command;
+      executionCwd = resolvedInvocation.cwd;
+      executionEnv = resolvedInvocation.env;
+      resolvedSymbols = resolvedInvocation.symbols;
     }
     this.writeAuditEvent({
       type: "tool.execute.requested",
       toolName: "system.run",
       details: {
-        commandName: parseCommandName(command),
-        symbolCount: resolvedInvocation.symbols.length,
-        symbols: resolvedInvocation.symbols,
+        commandName,
+        symbolCount: resolvedSymbols.length,
+        symbols: resolvedSymbols,
+        firewallMode,
       },
     });
+    this.enforceHermesCommandPolicy({
+      toolName: "system.run",
+      commandName,
+      firewallMode,
+    });
 
-    const result = await execShell(resolvedInvocation.command, {
-      cwd: resolvedInvocation.cwd ?? undefined,
+    const result = await execShell(executionCommand, {
+      cwd: executionCwd ?? undefined,
       timeoutMs,
-      env: resolvedInvocation.env,
+      env: executionEnv,
     });
 
     const combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
@@ -1421,13 +1490,13 @@ class ReferenceNodeClient {
     const reference = this.createHermesReference({
       sourceType: "system.run.output",
       toolName: "system.run",
-      title: parseCommandName(command) ? `system.run ${parseCommandName(command)}` : "system.run output",
+      title: commandName ? `system.run ${commandName}` : "system.run output",
       safeSummary,
       metadata: {
         mode: firewallMode,
-        commandName: parseCommandName(command),
-        symbolCount: resolvedInvocation.symbols.length,
-        symbols: resolvedInvocation.symbols,
+        commandName,
+        symbolCount: resolvedSymbols.length,
+        symbols: resolvedSymbols,
         exitCode: result.exitCode,
         signal: result.signal,
         timedOut: result.timedOut,
@@ -1843,13 +1912,52 @@ class ReferenceNodeClient {
 
   private buildSafeSummary(value: string): string {
     const normalized = value.replace(/\r/g, "");
-    const lines = normalized
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0);
-    const tail = lines.slice(-40).join("\n");
-    const base = tail || "(no output)";
-    return truncateOutput(base, 6_000);
+    const charCount = normalized.length;
+    if (charCount <= 0) {
+      return "Sanitized output withheld by firewall mode (no output).";
+    }
+    const lineCount = normalized.split("\n").length;
+    return `Sanitized output withheld by firewall mode (${lineCount} line(s), ${charCount} char(s)).`;
+  }
+
+  private enforceHermesCommandPolicy(params: {
+    toolName: "system.run" | "process.start";
+    commandName: string;
+    firewallMode: FirewallMode;
+    processId?: string | null;
+    firewallSession?: string | null;
+  }): void {
+    if (params.firewallMode !== "hermes") return;
+    const denyCommands = this.currentPolicyDenyCommands();
+    if (!denyCommands.includes(params.commandName)) return;
+    this.writeAuditEvent({
+      type: "policy.deny",
+      processId: params.processId ?? null,
+      firewallSession: params.firewallSession ?? null,
+      toolName: params.toolName,
+      details: {
+        mode: params.firewallMode,
+        reason: "command_denied",
+        commandName: params.commandName,
+        denyCommands,
+      },
+    });
+    throw new NodeToolError(
+      "HERMES_POLICY_DENIED",
+      JSON.stringify(
+        {
+          code: "HERMES_POLICY_DENIED",
+          mode: params.firewallMode,
+          decision: "deny",
+          reason: "command_denied",
+          commandName: params.commandName,
+          denyCommands,
+        },
+        null,
+        2,
+      ),
+      false,
+    );
   }
 
   private readProcessFirewallMode(routing: Record<string, unknown> | null): FirewallMode {
@@ -2519,6 +2627,21 @@ function parseFirewallMode(value: string | null, fallback: FirewallMode): Firewa
     default:
       return fallback;
   }
+}
+
+function parsePolicyDenyCommands(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const commandName = parseCommandName(trimmed) ?? trimmed;
+    if (!commandName) continue;
+    out.push(commandName);
+  }
+  return [...new Set(out.values())].sort((a, b) => a.localeCompare(b));
 }
 
 function shellEscape(value: string): string {

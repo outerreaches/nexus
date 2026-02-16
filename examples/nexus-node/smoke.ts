@@ -673,9 +673,17 @@ async function main(): Promise<void> {
       },
       timeoutMs: 10_000,
     });
-    assert.equal(symbolRunRes.ok, true, "system.run symbol resolution failed");
+    assert.equal(symbolRunRes.ok, true, "system.run should execute in transparent mode");
     const symbolRunOutput = asString(asObject(symbolRunRes.payload).output) ?? "";
-    assert.match(symbolRunOutput, /xoxb-smoke-secret-token/, "resolved symbol value missing from system.run output");
+    assert.match(
+      symbolRunOutput,
+      /\{\{secret:slack-bot:token\}\}/,
+      "transparent mode should keep symbol placeholders unresolved",
+    );
+    assert.ok(
+      !symbolRunOutput.includes("xoxb-smoke-secret-token"),
+      "transparent mode should not resolve secret symbols",
+    );
 
     const symbolRunMissing = await sendGatewayRequest({
       ws: wsRef!,
@@ -692,8 +700,12 @@ async function main(): Promise<void> {
       },
       timeoutMs: 10_000,
     });
-    assert.equal(symbolRunMissing.ok, false, "missing symbol should fail resolution");
-    assert.equal(asString(asObject(symbolRunMissing.error).code), "SYMBOL_RESOLUTION_FAILED");
+    assert.equal(symbolRunMissing.ok, true, "transparent mode should not fail on unresolved symbols");
+    assert.match(
+      asString(asObject(symbolRunMissing.payload).output) ?? "",
+      /\{\{secret:missing-secret:token\}\}/,
+      "transparent mode should pass unresolved missing symbol placeholders",
+    );
 
     const deniedRes = await sendGatewayRequest({
       ws: wsRef!,
@@ -782,6 +794,11 @@ async function main(): Promise<void> {
     assert.equal(shortProcStart.ok, true, "process.start short command failed");
     const shortProcessId = asString(asObject(shortProcStart.payload).processId);
     assert.ok(shortProcessId, "process.start did not return processId");
+    assert.equal(
+      asString(asObject(shortProcStart.payload).firewallSession),
+      null,
+      "transparent mode process.start should not create firewall sessions",
+    );
 
     let shortStatus = "";
     for (let i = 0; i < 20; i += 1) {
@@ -876,8 +893,8 @@ async function main(): Promise<void> {
     assert.equal(symbolProcLogs.ok, true, "process.logs for symbol process failed");
     assert.match(
       asString(asObject(symbolProcLogs.payload).logs) ?? "",
-      /Smoke User/,
-      "symbol-resolved process logs missing expected value",
+      /\{\{user:displayName\}\}/,
+      "transparent mode process logs should preserve unresolved symbol placeholders",
     );
 
     const auditSymbolsRes = await sendGatewayRequest({
@@ -974,6 +991,7 @@ async function main(): Promise<void> {
         policy: {
           version: 1,
           defaultQuarantine: "soft",
+          firewallMode: "audit-only",
           label: "smoke-soft",
         },
       },
@@ -986,12 +1004,22 @@ async function main(): Promise<void> {
       "soft",
       "policy.update soft should return defaultQuarantine=soft",
     );
+    assert.equal(
+      asString(policySoftPayload.firewallMode),
+      "audit-only",
+      "policy.update soft should switch firewallMode=audit-only for continuity tests",
+    );
     const policyPath = path.join(stateDir, "hermes-policy.json");
     const persistedPolicySoft = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
     assert.equal(
       asString(persistedPolicySoft.defaultQuarantine),
       "soft",
       "expected persisted hermes-policy.json to reflect soft quarantine",
+    );
+    assert.equal(
+      asString(persistedPolicySoft.firewallMode),
+      "audit-only",
+      "expected persisted hermes-policy.json to reflect audit-only mode",
     );
 
     const firewallBootstrapStart = await sendGatewayRequest({
@@ -1213,7 +1241,12 @@ async function main(): Promise<void> {
     });
     assert.equal(streamLogs.ok, true, "process.logs for streaming process failed");
     const streamLogText = asString(asObject(streamLogs.payload).logs) ?? "";
-    assert.match(streamLogText, /stream-alpha/, "streaming process logs missing alpha output");
+    assert.match(
+      streamLogText,
+      /Sanitized output withheld by firewall mode/,
+      "audit-only process logs should return sanitized summaries",
+    );
+    assert.ok(!streamLogText.includes("stream-alpha"), "sanitized process.logs must not leak raw output");
 
     suppressNextTerminalAck = true;
     const replayProcStart = await sendGatewayRequest({
@@ -1443,8 +1476,12 @@ async function main(): Promise<void> {
     assert.equal(asString(auditOnlyStructured.mode), "audit-only", "audit-only run should return mode marker");
     assert.match(
       asString(auditOnlyStructured.safeSummary) ?? "",
-      /audit-only-output/,
-      "audit-only run should return safe summary",
+      /Sanitized output withheld by firewall mode/,
+      "audit-only run should return sanitized safe summary",
+    );
+    assert.ok(
+      !(asString(auditOnlyStructured.safeSummary) ?? "").includes("audit-only-output"),
+      "audit-only safe summary must not include raw command output",
     );
     assert.ok(
       ((auditOnlyStructured.references as Array<unknown> | undefined) ?? []).length > 0,
@@ -1552,9 +1589,75 @@ async function main(): Promise<void> {
     const hermesOutput = asString(asObject(hermesRunRes.payload).output) ?? "{}";
     const hermesStructured = asObject(JSON.parse(hermesOutput));
     assert.equal(asString(hermesStructured.mode), "hermes", "hermes run should return mode marker");
+    assert.match(
+      asString(hermesStructured.safeSummary) ?? "",
+      /Sanitized output withheld by firewall mode/,
+      "hermes run should return sanitized safe summary",
+    );
+    assert.ok(
+      !(asString(hermesStructured.safeSummary) ?? "").includes("Smoke User"),
+      "hermes safe summary must not include resolved symbol plaintext",
+    );
     assert.ok(
       ((hermesStructured.references as Array<unknown> | undefined) ?? []).length > 0,
       "hermes run should return at least one reference",
+    );
+
+    const hermesMissingSymbol = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "echo {{secret:missing-secret:token}}",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(hermesMissingSymbol.ok, false, "hermes mode should hard-fail unresolved symbols");
+    assert.equal(asString(asObject(hermesMissingSymbol.error).code), "SYMBOL_RESOLUTION_FAILED");
+
+    const policyHermesDenyUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "policy.update",
+      params: {
+        policy: {
+          firewallMode: "hermes",
+          denyCommands: ["uname"],
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyHermesDenyUpdate.ok, true, "policy.update hermes denyCommands failed");
+    const hermesDenyRunRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "uname -a",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(hermesDenyRunRes.ok, false, "hermes deny policy should block system.run command");
+    assert.equal(asString(asObject(hermesDenyRunRes.error).code), "HERMES_POLICY_DENIED");
+    assert.match(
+      asString(asObject(hermesDenyRunRes.error).message) ?? "",
+      /command_denied/,
+      "hermes deny policy should return structured deny reason",
     );
 
     const tamperedWs = wsRef;
@@ -1588,7 +1691,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policy delivery + firewall session continuity) + firewall modes (transparent/audit-only/hermes) + sanitized hermes outputs + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policy delivery + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
