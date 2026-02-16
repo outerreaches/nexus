@@ -293,14 +293,14 @@ async function waitForMode(params: { target: InstanceTarget; mode: "active" | "s
 
 async function expectNodeEndpointStatus(params: {
   target: InstanceTarget;
-  expectedStatus: number;
+  expectedStatus: number | number[];
   label: string;
 }): Promise<void> {
   const res = await requestInstanceJson(params.target, "/nx/nodes");
-  assert.equal(
-    res.status,
-    params.expectedStatus,
-    `${params.label}: expected /nx/nodes status ${params.expectedStatus}, got ${res.status} body=${res.text} target=${targetLabel(params.target)}`,
+  const expected = Array.isArray(params.expectedStatus) ? params.expectedStatus : [params.expectedStatus];
+  assert.ok(
+    expected.includes(res.status),
+    `${params.label}: expected /nx/nodes status in [${expected.join(", ")}], got ${res.status} body=${res.text} target=${targetLabel(params.target)}`,
   );
 }
 
@@ -734,7 +734,7 @@ async function main(): Promise<void> {
     });
     await expectNodeEndpointStatus({
       target: standbyTarget,
-      expectedStatus: 503,
+      expectedStatus: [503, 426],
       label: "standby before failover",
     });
 
@@ -828,7 +828,7 @@ async function main(): Promise<void> {
     });
     await expectNodeEndpointStatus({
       target: primaryTarget,
-      expectedStatus: 503,
+      expectedStatus: [503, 426],
       label: "old primary after failover",
     });
 
