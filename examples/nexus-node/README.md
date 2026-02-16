@@ -33,6 +33,22 @@ See all options:
 npm run node:reference -- --help
 ```
 
+## Smoke test
+
+Run the automated signed-protocol smoke flow:
+
+```bash
+npm run node:reference:smoke
+```
+
+What it validates:
+
+- signed `connect.hello` -> `connect.challenge` -> `connect.prove` handshake
+- signed envelope verification on both sides
+- `tool.execute` for `system.which`
+- `tool.execute` allowlisted `system.run`
+- rejection of a disallowed `system.run` command
+
 ## Pairing flow
 
 On first connection, the gateway records unknown fingerprints as `pending` and rejects the session.

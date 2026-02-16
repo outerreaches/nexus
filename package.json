@@ -15,6 +15,7 @@
     "build": "tsup",
     "start": "node dist/index.js",
     "node:reference": "tsx examples/nexus-node/reference-node.ts",
+    "node:reference:smoke": "tsx examples/nexus-node/smoke.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
