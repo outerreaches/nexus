@@ -44,6 +44,15 @@ export type UpsertNodeParams = {
   nowMs?: number;
 };
 
+export type DeleteNodeCascadeResult = {
+  nodeId: string;
+  deleted: boolean;
+  nodeSessionsDeleted: number;
+  nodeExecutionsDeleted: number;
+  processRunsDeleted: number;
+  pairingRequestsDeleted: number;
+};
+
 type NodeRow = {
   id: string;
   label: string;
@@ -222,6 +231,42 @@ export function getNodeById(db: NexusDatabase, id: string): NodeRecord | null {
 export function deleteNodeById(db: NexusDatabase, id: string): boolean {
   const result = db.db.prepare("DELETE FROM nodes WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+export function deleteNodeCascadeById(db: NexusDatabase, id: string): DeleteNodeCascadeResult {
+  const row = db.db
+    .prepare("SELECT id, fingerprint, public_key FROM nodes WHERE id = ?")
+    .get(id) as { id?: string; fingerprint?: string; public_key?: string } | undefined;
+  if (!row?.id || typeof row.fingerprint !== "string" || typeof row.public_key !== "string") {
+    return {
+      nodeId: id,
+      deleted: false,
+      nodeSessionsDeleted: 0,
+      nodeExecutionsDeleted: 0,
+      processRunsDeleted: 0,
+      pairingRequestsDeleted: 0,
+    };
+  }
+
+  const run = db.db.transaction((nodeId: string, fingerprint: string, publicKey: string): DeleteNodeCascadeResult => {
+    const nodeSessionsDeleted = db.db.prepare("DELETE FROM node_sessions WHERE node_id = ?").run(nodeId).changes;
+    const nodeExecutionsDeleted = db.db.prepare("DELETE FROM node_executions WHERE node_id = ?").run(nodeId).changes;
+    const processRunsDeleted = db.db.prepare("DELETE FROM process_runs WHERE node_id = ?").run(nodeId).changes;
+    const pairingRequestsDeleted = db.db
+      .prepare("DELETE FROM node_pairing_requests WHERE fingerprint = ? OR public_key = ?")
+      .run(fingerprint, publicKey).changes;
+    const deleted = db.db.prepare("DELETE FROM nodes WHERE id = ?").run(nodeId).changes > 0;
+    return {
+      nodeId,
+      deleted,
+      nodeSessionsDeleted: Number(nodeSessionsDeleted),
+      nodeExecutionsDeleted: Number(nodeExecutionsDeleted),
+      processRunsDeleted: Number(processRunsDeleted),
+      pairingRequestsDeleted: Number(pairingRequestsDeleted),
+    };
+  });
+
+  return run(row.id, row.fingerprint, row.public_key);
 }
 
 export function upsertNode(db: NexusDatabase, params: UpsertNodeParams): void {

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { deleteNodeById, getNodeById, listNodes, setNodeStatus } from "../storage/nodes.js";
+import { deleteNodeCascadeById, getNodeById, listNodes, setNodeStatus } from "../storage/nodes.js";
 
 function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   const db = ctx.db as NexusDatabase | undefined;
@@ -58,9 +58,9 @@ export const nodeDelete = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
-    const removed = deleteNodeById(db, args.id);
-    if (!removed) return "ERROR: node not found";
-    return JSON.stringify({ ok: true, id: args.id, deleted: true }, null, 2);
+    const result = deleteNodeCascadeById(db, args.id);
+    if (!result.deleted) return "ERROR: node not found";
+    return JSON.stringify({ ok: true, ...result }, null, 2);
   },
 });
 

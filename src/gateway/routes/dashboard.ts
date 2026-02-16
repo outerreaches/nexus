@@ -20,7 +20,7 @@ import {
 import { renderDashboard } from "../dashboard/render.js";
 import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
 import { archiveAndDeleteJob } from "../../storage/job-archive.js";
-import { getNodeById, setNodeStatus, type NodeStatus } from "../../storage/nodes.js";
+import { deleteNodeCascadeById, getNodeById, setNodeStatus, type NodeStatus } from "../../storage/nodes.js";
 
 export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/dashboard", async (c) => {
@@ -111,6 +111,25 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
       connectedAt: null,
       nowMs: Date.now(),
     });
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/nodes/delete", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing node id", 400);
+    const existing = getNodeById(deps.db, id);
+    if (!existing) return c.text("Node not found", 404);
+    if (existing.status === "online") {
+      return c.text("Cannot delete an online node. Block it or wait for disconnect first.", 400);
+    }
+
+    const result = deleteNodeCascadeById(deps.db, id);
+    if (!result.deleted) return c.text("Node not found", 404);
+    deps.log(
+      `nodes: deleted node=${id} sessions=${result.nodeSessionsDeleted} executions=${result.nodeExecutionsDeleted} process_runs=${result.processRunsDeleted} pairing_requests=${result.pairingRequestsDeleted}`,
+    );
     return c.redirect("/dashboard");
   });
 
