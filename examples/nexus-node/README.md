@@ -35,6 +35,15 @@ Optional flags:
 - `--state-dir <dir>`
 - `--caps <csv>`
 - `--allow <csv>` (command allowlist for `system.run`)
+- `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
+- `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
+
+## Transport security policy
+
+- `ws://` is allowed for loopback/local-host style endpoints (`127.0.0.1`, `localhost`, `::1`, `host.docker.internal`).
+- Non-loopback endpoints require `wss://` by default.
+- Self-signed TLS is supported by pinning `NEXUS_NODE_GATEWAY_TLS_FINGERPRINT` (or `--gateway-tls-fingerprint`).
+- Debug-only override: `NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1`.
 
 See all options:
 
@@ -66,6 +75,7 @@ What it validates:
 
 - signed `connect.hello` -> `connect.challenge` -> `connect.prove` handshake
 - signed envelope verification on both sides
+- non-loopback transport policy: `ws://` endpoints are hard-rejected unless explicitly overridden
 - `tool.execute` for `system.which`
 - `tool.execute` allowlisted `system.run`
 - rejection of a disallowed `system.run` command
@@ -104,11 +114,13 @@ docker run --rm \
   -e NEXUS_NODE_GATEWAY_URL=ws://host.docker.internal:18789/nx/nodes \
   -e NEXUS_NODE_ID=reference-node-1 \
   -e NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls \
+  -e NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1 \
   -v nexus_node_state:/data/nexus-node \
   nexus-reference-node
 ```
 
 The container reads the gateway endpoint from `NEXUS_NODE_GATEWAY_URL`.
+For non-loopback production endpoints, use `wss://...` and set `NEXUS_NODE_GATEWAY_TLS_FINGERPRINT`.
 
 For a compose template, see `examples/nexus-node/compose.example.yml`.
 

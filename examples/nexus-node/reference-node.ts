@@ -12,9 +12,11 @@ import {
   type KeyObject,
 } from "node:crypto";
 import fs from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import type { TLSSocket } from "node:tls";
 
 import { WebSocket } from "ws";
 
@@ -111,6 +113,7 @@ type ParsedPublicKey = {
 
 type Config = {
   gatewayUrl: string;
+  gatewayTlsFingerprint: string | null;
   stateDir: string;
   nodeId: string;
   displayName: string;
@@ -120,6 +123,7 @@ type Config = {
   reconnectMinMs: number;
   reconnectMaxMs: number;
   maxClockSkewMs: number;
+  insecureAllowNonLoopbackWs: boolean;
   insecureSkipGatewayProof: boolean;
 };
 
@@ -211,15 +215,37 @@ class ReferenceNodeClient {
   private connect(): void {
     if (this.stopped) return;
 
-    const ws = new WebSocket(this.config.gatewayUrl);
+    const needsTlsPin = Boolean(this.config.gatewayTlsFingerprint);
+    let tlsPinVerified = !needsTlsPin;
+    const ws = needsTlsPin ? new WebSocket(this.config.gatewayUrl, { rejectUnauthorized: false }) : new WebSocket(this.config.gatewayUrl);
     this.ws = ws;
     this.ready = false;
     this.nodeNonce = null;
     this.gatewayNonce = null;
     this.sessionId = null;
 
+    ws.on("upgrade", (response: IncomingMessage) => {
+      if (!this.config.gatewayTlsFingerprint) return;
+      const socket = response.socket as TLSSocket;
+      const certificate = socket.getPeerCertificate?.(true);
+      const actual = normalizeFingerprint256(certificate?.fingerprint256 ?? certificate?.fingerprint ?? "");
+      if (!actual || actual !== this.config.gatewayTlsFingerprint) {
+        this.log(
+          `gateway TLS fingerprint mismatch expected=${this.config.gatewayTlsFingerprint} actual=${actual ?? "unknown"}`,
+        );
+        this.closeSocket(4001, "gateway tls fingerprint mismatch");
+        return;
+      }
+      tlsPinVerified = true;
+    });
+
     ws.on("open", () => {
       this.reconnectAttempt = 0;
+      if (needsTlsPin && !tlsPinVerified) {
+        this.log("gateway TLS fingerprint was not validated before websocket open");
+        this.closeSocket(4001, "gateway tls fingerprint missing");
+        return;
+      }
       this.sendConnectHello();
     });
 
@@ -1131,6 +1157,22 @@ function buildConfig(values: Record<string, string>): Config {
   const displayName = values.name ?? process.env.NEXUS_NODE_NAME ?? "Nexus Reference Node";
   const gatewayUrl =
     values.gateway ?? process.env.NEXUS_NODE_GATEWAY_URL ?? "ws://127.0.0.1:18789/nx/nodes";
+  const gatewayTlsFingerprintRaw =
+    values["gateway-tls-fingerprint"] ?? process.env.NEXUS_NODE_GATEWAY_TLS_FINGERPRINT ?? "";
+  const gatewayTlsFingerprint = normalizeFingerprint256(gatewayTlsFingerprintRaw);
+  if (gatewayTlsFingerprintRaw.trim() && !gatewayTlsFingerprint) {
+    throw new Error(
+      "Invalid gateway TLS fingerprint format. Expected SHA-256 fingerprint with 64 hex chars (with or without ':' separators).",
+    );
+  }
+  const insecureAllowNonLoopbackWs =
+    (values["insecure-allow-nonloopback-ws"] ?? process.env.NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS ?? "").trim() ===
+    "1";
+  validateGatewayTransportPolicy({
+    gatewayUrl,
+    gatewayTlsFingerprint,
+    insecureAllowNonLoopbackWs,
+  });
   const stateDir =
     values["state-dir"] ??
     process.env.NEXUS_NODE_STATE_DIR ??
@@ -1151,6 +1193,7 @@ function buildConfig(values: Record<string, string>): Config {
 
   return {
     gatewayUrl,
+    gatewayTlsFingerprint,
     stateDir: path.resolve(stateDir),
     nodeId,
     displayName,
@@ -1160,8 +1203,52 @@ function buildConfig(values: Record<string, string>): Config {
     reconnectMinMs,
     reconnectMaxMs,
     maxClockSkewMs,
+    insecureAllowNonLoopbackWs,
     insecureSkipGatewayProof,
   };
+}
+
+function validateGatewayTransportPolicy(params: {
+  gatewayUrl: string;
+  gatewayTlsFingerprint: string | null;
+  insecureAllowNonLoopbackWs: boolean;
+}): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(params.gatewayUrl);
+  } catch {
+    throw new Error(`Invalid gateway URL: ${params.gatewayUrl}`);
+  }
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error(`Gateway URL must use ws:// or wss:// (got ${parsed.protocol}).`);
+  }
+  const loopback = isLoopbackHost(parsed.hostname);
+  if (!loopback && parsed.protocol !== "wss:" && !params.insecureAllowNonLoopbackWs) {
+    throw new Error(
+      `TLS is required for non-loopback gateway endpoints. Use wss:// for ${parsed.hostname} or set ` +
+        "NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1 for debug-only development.",
+    );
+  }
+  if (parsed.protocol === "ws:" && params.gatewayTlsFingerprint) {
+    throw new Error("Gateway TLS fingerprint pinning requires a wss:// gateway URL.");
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "localhost" || normalized === "::1" || normalized === "127.0.0.1") return true;
+  if (normalized === "host.docker.internal") return true;
+  if (normalized.startsWith("127.")) return true;
+  return normalized.endsWith(".localhost");
+}
+
+function normalizeFingerprint256(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const hex = trimmed.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+  if (hex.length !== 64) return null;
+  return hex.match(/.{1,2}/g)?.join(":") ?? null;
 }
 
 async function loadOrCreateIdentity(stateDir: string): Promise<NodeIdentity> {
@@ -1556,6 +1643,7 @@ function printHelp(): void {
       "",
       "Options:",
       "  --gateway <url>                 Gateway websocket URL (default ws://127.0.0.1:18789/nx/nodes)",
+      "  --gateway-tls-fingerprint <fp>  Pin SHA-256 cert fingerprint for wss:// gateways (self-signed friendly)",
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ./.nexus-node)",
@@ -1565,6 +1653,7 @@ function printHelp(): void {
       "  --reconnect-min-ms <ms>         Minimum reconnect delay (default 2000)",
       "  --reconnect-max-ms <ms>         Maximum reconnect delay (default 30000)",
       "  --max-clock-skew-ms <ms>        Max accepted signed message skew (default 120000)",
+      "  --insecure-allow-nonloopback-ws 1 Allow ws:// to non-loopback hosts (debug only; insecure)",
       "  --insecure-skip-gateway-proof 1 Skip challenge proof verification (debug only)",
       "  --help                          Show this help",
       "",

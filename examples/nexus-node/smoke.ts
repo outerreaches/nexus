@@ -175,6 +175,55 @@ async function main(): Promise<void> {
       ".bin",
       process.platform === "win32" ? "tsx.cmd" : "tsx",
     );
+    const tlsPolicyStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-node-smoke-tls-policy-"));
+    const tlsPolicyStderr: string[] = [];
+    const tlsPolicyChild = spawn(
+      tsxBin,
+      [
+        "examples/nexus-node/reference-node.ts",
+        "--gateway",
+        "ws://203.0.113.10:18789/nx/nodes",
+        "--node-id",
+        `tls-policy-${randomUUID().slice(0, 8)}`,
+        "--state-dir",
+        tlsPolicyStateDir,
+      ],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    tlsPolicyChild.stderr.on("data", (chunk) => {
+      tlsPolicyStderr.push(String(chunk));
+    });
+    try {
+      const tlsPolicyExit = await timeoutPromise(
+        new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+          tlsPolicyChild.once("exit", (code, signal) => {
+            resolve({ code, signal });
+          });
+        }),
+        8_000,
+        "tls policy preflight child did not exit",
+      );
+      assert.notEqual(tlsPolicyExit.code, 0, "expected non-loopback ws:// gateway policy check to fail");
+      assert.match(
+        tlsPolicyStderr.join(""),
+        /TLS is required for non-loopback gateway endpoints/,
+        "expected non-loopback ws:// policy failure message",
+      );
+    } finally {
+      if (tlsPolicyChild.exitCode === null && !tlsPolicyChild.killed) {
+        try {
+          tlsPolicyChild.kill("SIGKILL");
+        } catch {
+          // ignore cleanup failures in smoke preflight.
+        }
+      }
+      await fs.rm(tlsPolicyStateDir, { recursive: true, force: true });
+    }
+
     const spawnedChild = spawn(
       tsxBin,
       [
@@ -875,7 +924,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: bidirectional handshake proof rejection + signed handshake + process primitives (including log stream) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + process primitives (including log stream) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

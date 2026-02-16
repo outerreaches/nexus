@@ -118,6 +118,8 @@ services:
     command: ["sh", "-lc", "npm run node:reference -- --gateway \"\$NEXUS_NODE_GATEWAY_URL\""]
     environment:
       NEXUS_NODE_GATEWAY_URL: \${NEXUS_NODE_GATEWAY_URL}
+      NEXUS_NODE_GATEWAY_TLS_FINGERPRINT: \${NEXUS_NODE_GATEWAY_TLS_FINGERPRINT:-}
+      NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS: \${NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS:-0}
       NEXUS_NODE_ID: \${NEXUS_NODE_ID:-$DEFAULT_NODE_ID}
       NEXUS_NODE_NAME: \${NEXUS_NODE_NAME:-$DEFAULT_NODE_NAME}
       NEXUS_NODE_CAPS: \${NEXUS_NODE_CAPS:-system.run,system.which,process.start,process.status,process.logs,process.cancel}
@@ -138,6 +140,10 @@ if [ ! -f .env ]; then
 # Example (macOS same host): NEXUS_NODE_GATEWAY_URL=ws://host.docker.internal:18789/nx/nodes
 # Example (remote host):      NEXUS_NODE_GATEWAY_URL=wss://gateway.example.com/nx/nodes
 NEXUS_NODE_GATEWAY_URL=$DEFAULT_GATEWAY_URL
+# Optional for self-signed remote TLS:
+# NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=AB:CD:...:EF
+# Optional debug-only escape hatch for non-loopback ws:// endpoints:
+# NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1
 
 # Optional overrides:
 # NEXUS_NODE_ID=$DEFAULT_NODE_ID
