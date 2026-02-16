@@ -20,6 +20,15 @@ type HttpResult = {
   text: string;
 };
 
+type InstanceTarget = {
+  name: "primary" | "standby";
+  url: string;
+  service: "nexus-primary" | "nexus-standby";
+  useComposeExec: boolean;
+  composeProject: string;
+  composeFile: string;
+};
+
 type ParsedArgs = {
   dryRun: boolean;
 };
@@ -73,6 +82,14 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { dryRun: argv.includes("--dry-run") };
 }
 
+function envBool(name: string): boolean | null {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "y" || raw === "on") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "n" || raw === "off") return false;
+  return null;
+}
+
 function toWsUrl(baseUrl: string): string {
   const u = new URL(baseUrl);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
@@ -102,6 +119,142 @@ async function requestJson(url: string, init?: RequestInit): Promise<HttpResult>
   }
 }
 
+async function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let done = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (code: number, timedOut: boolean) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code, stdout, stderr, timedOut });
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      stderr += err instanceof Error ? err.message : String(err);
+      finish(1, false);
+    });
+    child.on("close", (code) => {
+      finish(code ?? 1, false);
+    });
+
+    timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      finish(124, true);
+    }, timeoutMs);
+  });
+}
+
+function targetLabel(target: InstanceTarget): string {
+  if (!target.useComposeExec) return target.url;
+  return `docker-compose:${target.service}`;
+}
+
+async function requestComposeServiceJson(
+  target: InstanceTarget,
+  requestPath: string,
+  init?: RequestInit,
+): Promise<HttpResult> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const cmd = [
+    "compose",
+    "-p",
+    target.composeProject,
+    "-f",
+    target.composeFile,
+    "exec",
+    "-T",
+    target.service,
+    "curl",
+    "-sS",
+    "--max-time",
+    "8",
+    "-X",
+    method,
+    "-o",
+    "-",
+    "-w",
+    "\\n__HTTP_STATUS__:%{http_code}\\n",
+    `http://localhost:18789${requestPath}`,
+  ];
+  const result = await runCommand("docker", cmd, 20_000);
+  if (result.code !== 0) {
+    const errText = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    return {
+      ok: false,
+      status: 0,
+      json: null,
+      text: errText || `docker compose exec failed code=${result.code}${result.timedOut ? " timeout" : ""}`,
+    };
+  }
+
+  const marker = "\n__HTTP_STATUS__:";
+  const idx = result.stdout.lastIndexOf(marker);
+  if (idx < 0) {
+    return {
+      ok: false,
+      status: 0,
+      json: null,
+      text: `missing HTTP status marker from compose exec output: ${result.stdout.trim()}`,
+    };
+  }
+  const body = result.stdout.slice(0, idx);
+  const statusRaw = result.stdout.slice(idx + marker.length).trim();
+  const status = Number.parseInt(statusRaw, 10);
+  if (!Number.isFinite(status)) {
+    return {
+      ok: false,
+      status: 0,
+      json: null,
+      text: `invalid HTTP status from compose exec: ${statusRaw}`,
+    };
+  }
+
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = asObject(JSON.parse(body));
+  } catch {
+    json = null;
+  }
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json,
+    text: body,
+  };
+}
+
+async function requestInstanceJson(
+  target: InstanceTarget,
+  requestPath: string,
+  init?: RequestInit,
+): Promise<HttpResult> {
+  if (!target.useComposeExec) {
+    return requestJson(`${target.url}${requestPath}`, init);
+  }
+  return requestComposeServiceJson(target, requestPath, init);
+}
+
 async function waitForCondition(params: {
   timeoutMs: number;
   intervalMs: number;
@@ -116,29 +269,29 @@ async function waitForCondition(params: {
   throw new Error(params.message);
 }
 
-async function waitForMode(params: {
-  url: string;
-  mode: "active" | "standby";
-  timeoutMs: number;
-}): Promise<void> {
+async function waitForMode(params: { target: InstanceTarget; mode: "active" | "standby"; timeoutMs: number }): Promise<void> {
   await waitForCondition({
     timeoutMs: params.timeoutMs,
     intervalMs: 500,
-    message: `mode check timed out url=${params.url} expected=${params.mode}`,
+    message: `mode check timed out target=${targetLabel(params.target)} expected=${params.mode}`,
     predicate: async () => {
-      const res = await requestJson(`${params.url}/api/mode`);
+      const res = await requestInstanceJson(params.target, "/api/mode");
       if (!res.ok || !res.json) return false;
       return asString(res.json.mode) === params.mode;
     },
   });
 }
 
-async function expectNodeEndpointStatus(params: { url: string; expectedStatus: number; label: string }): Promise<void> {
-  const res = await requestJson(`${params.url}/nx/nodes`);
+async function expectNodeEndpointStatus(params: {
+  target: InstanceTarget;
+  expectedStatus: number;
+  label: string;
+}): Promise<void> {
+  const res = await requestInstanceJson(params.target, "/nx/nodes");
   assert.equal(
     res.status,
     params.expectedStatus,
-    `${params.label}: expected /nx/nodes status ${params.expectedStatus}, got ${res.status} body=${res.text}`,
+    `${params.label}: expected /nx/nodes status ${params.expectedStatus}, got ${res.status} body=${res.text} target=${targetLabel(params.target)}`,
   );
 }
 
@@ -439,6 +592,9 @@ async function main(): Promise<void> {
   const replayDeliveryCount = Math.max(6, Math.min(120, Number(process.env.NEXUS_HA_SMOKE_REPLAY_DELIVERIES ?? 24)));
   const stateDir = process.env.NEXUS_HA_SMOKE_STATE_DIR ?? path.resolve(".ci-data/nexus");
   const gatewayDbPath = process.env.NEXUS_HA_SMOKE_DB_PATH ?? path.join(stateDir, "nexus.db");
+  const composeFile = process.env.NEXUS_HA_SMOKE_COMPOSE_FILE ?? path.resolve("infra/docker-compose.ha.yml");
+  const composeProject = process.env.NEXUS_HA_SMOKE_COMPOSE_PROJECT ?? "infra";
+  const composeExecOverride = envBool("NEXUS_HA_SMOKE_USE_COMPOSE_EXEC");
   const gatewayWsUrl = toWsUrl(haproxyUrl);
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -455,6 +611,9 @@ async function main(): Promise<void> {
           timeoutMs,
           replayDeliveryCount,
           gatewayDbPath,
+          composeFile,
+          composeProject,
+          useComposeExec: composeExecOverride ?? false,
         },
         null,
         2,
@@ -468,17 +627,48 @@ async function main(): Promise<void> {
   let nodeRunB: NodeRuntime | null = null;
 
   try {
+    const primaryTargetBase: Omit<InstanceTarget, "useComposeExec"> = {
+      name: "primary",
+      url: primaryUrl,
+      service: "nexus-primary",
+      composeProject,
+      composeFile,
+    };
+    const standbyTargetBase: Omit<InstanceTarget, "useComposeExec"> = {
+      name: "standby",
+      url: standbyUrl,
+      service: "nexus-standby",
+      composeProject,
+      composeFile,
+    };
+
+    let useComposeExec = composeExecOverride === true;
+    if (composeExecOverride === null) {
+      // Auto-fallback for VM deployments that only publish HAProxy externally.
+      const directProbe = await requestJson(`${primaryUrl}/health/live`);
+      if (!directProbe.ok) {
+        const composeProbe = await requestComposeServiceJson(
+          { ...primaryTargetBase, useComposeExec: true },
+          "/health/live",
+        );
+        if (composeProbe.ok || composeProbe.status > 0) useComposeExec = true;
+      }
+    }
+
+    const primaryTarget: InstanceTarget = { ...primaryTargetBase, useComposeExec };
+    const standbyTarget: InstanceTarget = { ...standbyTargetBase, useComposeExec };
+
     await waitForCondition({
       timeoutMs,
       intervalMs: 1000,
       message: "primary /health/live not ready",
-      predicate: async () => (await requestJson(`${primaryUrl}/health/live`)).ok,
+      predicate: async () => (await requestInstanceJson(primaryTarget, "/health/live")).ok,
     });
     await waitForCondition({
       timeoutMs,
       intervalMs: 1000,
       message: "standby /health/live not ready",
-      predicate: async () => (await requestJson(`${standbyUrl}/health/live`)).ok,
+      predicate: async () => (await requestInstanceJson(standbyTarget, "/health/live")).ok,
     });
     await waitForCondition({
       timeoutMs,
@@ -488,21 +678,21 @@ async function main(): Promise<void> {
     });
     await waitForGatewayDb(gatewayDbPath, timeoutMs);
 
-    await waitForMode({ url: primaryUrl, mode: "active", timeoutMs });
-    await waitForMode({ url: standbyUrl, mode: "standby", timeoutMs });
+    await waitForMode({ target: primaryTarget, mode: "active", timeoutMs });
+    await waitForMode({ target: standbyTarget, mode: "standby", timeoutMs });
 
-    const primaryReady = await requestJson(`${primaryUrl}/health/ready`);
+    const primaryReady = await requestInstanceJson(primaryTarget, "/health/ready");
     assert.equal(primaryReady.status, 200, `primary should be ready: ${primaryReady.text}`);
-    const standbyReady = await requestJson(`${standbyUrl}/health/ready`);
+    const standbyReady = await requestInstanceJson(standbyTarget, "/health/ready");
     assert.equal(standbyReady.status, 503, `standby should not be ready: ${standbyReady.text}`);
 
     await expectNodeEndpointStatus({
-      url: primaryUrl,
+      target: primaryTarget,
       expectedStatus: 426,
       label: "primary before failover",
     });
     await expectNodeEndpointStatus({
-      url: standbyUrl,
+      target: standbyTarget,
       expectedStatus: 503,
       label: "standby before failover",
     });
@@ -566,13 +756,13 @@ async function main(): Promise<void> {
       nodeStateDir,
     });
 
-    const deactivatePrimary = await requestJson(`${primaryUrl}/api/deactivate`, { method: "POST" });
+    const deactivatePrimary = await requestInstanceJson(primaryTarget, "/api/deactivate", { method: "POST" });
     assert.equal(deactivatePrimary.status, 200, `primary deactivate failed: ${deactivatePrimary.text}`);
-    await waitForMode({ url: primaryUrl, mode: "standby", timeoutMs });
+    await waitForMode({ target: primaryTarget, mode: "standby", timeoutMs });
 
-    const activateStandby = await requestJson(`${standbyUrl}/api/activate`, { method: "POST" });
+    const activateStandby = await requestInstanceJson(standbyTarget, "/api/activate", { method: "POST" });
     assert.equal(activateStandby.status, 200, `standby activate failed: ${activateStandby.text}`);
-    await waitForMode({ url: standbyUrl, mode: "active", timeoutMs });
+    await waitForMode({ target: standbyTarget, mode: "active", timeoutMs });
 
     await waitForCondition({
       timeoutMs,
@@ -585,18 +775,18 @@ async function main(): Promise<void> {
       },
     });
 
-    const standbyNowReady = await requestJson(`${standbyUrl}/health/ready`);
+    const standbyNowReady = await requestInstanceJson(standbyTarget, "/health/ready");
     assert.equal(standbyNowReady.status, 200, `new active should be ready: ${standbyNowReady.text}`);
-    const primaryNowReady = await requestJson(`${primaryUrl}/health/ready`);
+    const primaryNowReady = await requestInstanceJson(primaryTarget, "/health/ready");
     assert.equal(primaryNowReady.status, 503, `old primary should be standby/not ready: ${primaryNowReady.text}`);
 
     await expectNodeEndpointStatus({
-      url: standbyUrl,
+      target: standbyTarget,
       expectedStatus: 426,
       label: "new active after failover",
     });
     await expectNodeEndpointStatus({
-      url: primaryUrl,
+      target: primaryTarget,
       expectedStatus: 503,
       label: "old primary after failover",
     });
