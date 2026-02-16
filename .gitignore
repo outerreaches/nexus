@@ -5,3 +5,6 @@ dist/
 .env.local
 .env.*.local
 nexus-data/
+infra/haproxy/certs/*.pem
+infra/haproxy/certs/*.crt
+infra/haproxy/certs/*.key

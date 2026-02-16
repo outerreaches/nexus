@@ -21,6 +21,7 @@
     "node:deploy": "bash infra/scripts/deploy-nexus-node-linux.sh",
     "node:deploy:linux": "bash infra/scripts/deploy-nexus-node-linux.sh",
     "node:deploy:macos": "bash infra/scripts/deploy-nexus-node-linux.sh",
+    "ha:tls:cert": "bash infra/scripts/ha-generate-tls-cert.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

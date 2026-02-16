@@ -194,6 +194,20 @@ NEXUS_NODE_TZ=America/Los_Angeles
 
 The deploy script auto-detects a host timezone when possible and uses it as the default.
 
+For secure non-loopback deployments, point the node at a TLS-enabled gateway endpoint and pin the cert fingerprint:
+
+```bash
+NEXUS_NODE_GATEWAY_URL=wss://<gateway-host-or-ip>:18790/nx/nodes
+NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=<sha256 fingerprint>
+NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=0
+```
+
+If your local timezone is Eastern, set:
+
+```bash
+NEXUS_NODE_TZ=America/New_York
+```
+
 On Linux, `.env` starts with a `CHANGE_ME` placeholder for `NEXUS_NODE_GATEWAY_URL`.
 
 If your repo is not at `/data/code`, set:

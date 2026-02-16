@@ -1,0 +1,6 @@
+services:
+  haproxy:
+    environment:
+      - NEXUS_HAPROXY_CONFIG=haproxy.tls.cfg
+    ports:
+      - "18790:18790"

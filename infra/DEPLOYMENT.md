@@ -543,6 +543,7 @@ This section covers deploying Nexus in a fault-tolerant primary/standby configur
 | `DEACTIVATE_TIMEOUT` | 5 | Seconds to wait for graceful deactivate |
 | `ENABLE_FAILBACK` | false | Auto-restore original primary when healthy |
 | `FAILBACK_THRESHOLD` | 3 | Consecutive healthy checks before failback |
+| `NEXUS_HAPROXY_CONFIG` | `haproxy.cfg` | HAProxy config file (`haproxy.tls.cfg` enables TLS listener) |
 
 ### 7.2.1 Required HA Paths and Files
 
@@ -580,6 +581,38 @@ Notes:
 - The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
 - Deploys should still be performed from the VM host using `ha-rollout.sh apply-local`.
+
+### 7.3.0 Secure Node Transport (`wss://`)
+
+To use strict node transport security for non-loopback nodes, enable TLS on HAProxy and pin the certificate fingerprint on the node.
+
+```bash
+cd /data/code
+
+# 1) Generate or inspect the HAProxy TLS certificate bundle and fingerprint
+bash infra/scripts/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
+
+# 2) Enable TLS-aware HAProxy config
+echo 'NEXUS_HAPROXY_CONFIG=haproxy.tls.cfg' >> /data/code/.env
+
+# 3) Recreate HAProxy with TLS listener exposed on :18790
+docker compose -p infra \
+  -f /data/code/infra/docker-compose.ha.yml \
+  -f /data/code/infra/docker-compose.ha.tls.yml \
+  up -d --force-recreate haproxy
+
+# 4) Validate HTTPS endpoint (self-signed cert; -k expected)
+curl -sk https://localhost:18790/health/live
+```
+
+Node `.env` settings (example):
+
+```bash
+NEXUS_NODE_GATEWAY_URL=wss://192.0.2.10:18790/nx/nodes
+NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=<sha256 fingerprint from ha-generate-tls-cert.sh>
+NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=0
+NEXUS_NODE_TZ=America/New_York
+```
 
 ### 7.3.1 Rolling Deploy (Manual)
 

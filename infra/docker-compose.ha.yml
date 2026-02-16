@@ -22,11 +22,15 @@ services:
   # Load balancer - entry point for all traffic
   haproxy:
     image: haproxy:2.9-alpine
+    command:
+      - sh
+      - -lc
+      - exec haproxy -W -db -f "/usr/local/etc/haproxy/${NEXUS_HAPROXY_CONFIG:-haproxy.cfg}"
     ports:
       - "18789:18789"   # Nexus API
       - "127.0.0.1:9999:9999"     # HAProxy stats (http://localhost:9999/stats)
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy:/usr/local/etc/haproxy:ro
     depends_on:
       - nexus-primary
       - nexus-standby
