@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "label": "live-hermes-deny-uname",
+  "defaultQuarantine": "soft",
+  "firewallMode": "hermes",
+  "denyCommands": [
+    "uname"
+  ]
+}

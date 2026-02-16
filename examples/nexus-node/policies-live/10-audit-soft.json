@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "label": "live-audit-soft",
+  "defaultQuarantine": "soft",
+  "firewallMode": "audit-only",
+  "denyCommands": []
+}

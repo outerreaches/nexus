@@ -175,6 +175,61 @@ async function main(): Promise<void> {
     ),
     "utf8",
   );
+  const policyPresetDir = path.join(stateDir, "policy-presets");
+  await fs.mkdir(policyPresetDir, { recursive: true });
+  await fs.writeFile(
+    path.join(policyPresetDir, "smoke-soft.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        defaultQuarantine: "soft",
+        firewallMode: "audit-only",
+        label: "smoke-soft",
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(policyPresetDir, "smoke-hard.json"),
+    JSON.stringify(
+      {
+        version: 2,
+        defaultQuarantine: "hard",
+        label: "smoke-hard",
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(policyPresetDir, "smoke-hermes-deny-uname.json"),
+    JSON.stringify(
+      {
+        version: 3,
+        firewallMode: "hermes",
+        denyCommands: ["uname"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(policyPresetDir, "smoke-hermes-clear-deny.json"),
+    JSON.stringify(
+      {
+        version: 4,
+        firewallMode: "hermes",
+        denyCommands: [],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   const nodeId = `smoke-node-${randomUUID().slice(0, 8)}`;
   const gatewayKeys = generateKeyPairSync("ed25519");
   const gatewayPubRaw = publicKeyRaw(gatewayKeys.publicKey);
@@ -293,7 +348,7 @@ async function main(): Promise<void> {
         "--state-dir",
         stateDir,
         "--allow",
-        "echo,uname,whoami,pwd,date,ls,sleep",
+        "echo,uname,whoami,pwd,date,ls,sleep,nexus-policyctl",
         "--reconnect-min-ms",
         "500",
         "--reconnect-max-ms",
@@ -980,7 +1035,7 @@ async function main(): Promise<void> {
       assert.equal(auditPageTwo.ok, true, "audit.query page 2 failed");
     }
 
-    const policySoftUpdate = await sendGatewayRequest({
+    const legacyPolicyUpdate = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
       gatewaySender: "gateway:smoke",
@@ -989,25 +1044,121 @@ async function main(): Promise<void> {
       method: "policy.update",
       params: {
         policy: {
-          version: 1,
-          defaultQuarantine: "soft",
           firewallMode: "audit-only",
-          label: "smoke-soft",
         },
       },
       timeoutMs: 10_000,
     });
-    assert.equal(policySoftUpdate.ok, true, "policy.update soft failed");
-    const policySoftPayload = asObject(policySoftUpdate.payload);
+    assert.equal(legacyPolicyUpdate.ok, false, "legacy policy.update should no longer be supported");
+    assert.equal(asString(asObject(legacyPolicyUpdate.error).code), "METHOD_NOT_IMPLEMENTED");
+
+    const unallowlistedPolicyCommand = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctlx show",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(unallowlistedPolicyCommand.ok, false, "non-allowlisted policy command should be denied");
+    assert.equal(asString(asObject(unallowlistedPolicyCommand.error).code), "PERMISSION_DENIED");
+
+    const policyShowProcessStart = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.start",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl show",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyShowProcessStart.ok, true, "process.start nexus-policyctl show failed");
+    const policyShowProcessId = asString(asObject(policyShowProcessStart.payload).processId);
+    assert.ok(policyShowProcessId, "policyctl process.start should return processId");
+    for (let i = 0; i < 20; i += 1) {
+      const statusRes = await sendGatewayRequest({
+        ws: wsRef!,
+        gatewayPrivateKey: gatewayKeys.privateKey,
+        gatewaySender: "gateway:smoke",
+        pendingResponses,
+        nodePublicKey: parsedNodePublic.key,
+        method: "process.status",
+        params: {
+          processId: policyShowProcessId,
+        },
+        timeoutMs: 10_000,
+      });
+      assert.equal(statusRes.ok, true, "process.status failed for policyctl process");
+      const status = asString(asObject(statusRes.payload).status) ?? "";
+      if (status === "completed" || status === "failed" || status === "cancelled") break;
+      await sleep(100);
+    }
+    const policyShowProcessLogs = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "process.logs",
+      params: {
+        processId: policyShowProcessId,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policyShowProcessLogs.ok, true, "process.logs failed for policyctl process");
+    const policyShowLogText = asString(asObject(policyShowProcessLogs.payload).logs) ?? "";
+    assert.match(policyShowLogText, /"action": "show"/, "policyctl process logs should include show output");
+
+    const policySoftUpdate = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl apply-preset smoke-soft",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(policySoftUpdate.ok, true, "nexus-policyctl apply-preset smoke-soft failed");
+    const policySoftOutput = asString(asObject(policySoftUpdate.payload).output) ?? "{}";
+    const policySoftPayload = asObject(JSON.parse(policySoftOutput));
+    assert.equal(
+      asString(policySoftPayload.action),
+      "apply-preset",
+      "policyctl should report apply-preset action",
+    );
+    assert.equal(
+      asBoolean(policySoftPayload.changed),
+      true,
+      "policyctl soft apply should report changed=true",
+    );
     assert.equal(
       asString(policySoftPayload.defaultQuarantine),
       "soft",
-      "policy.update soft should return defaultQuarantine=soft",
+      "policyctl soft apply should return defaultQuarantine=soft",
     );
     assert.equal(
       asString(policySoftPayload.firewallMode),
       "audit-only",
-      "policy.update soft should switch firewallMode=audit-only for continuity tests",
+      "policyctl soft apply should switch firewallMode=audit-only for continuity tests",
     );
     const policyPath = path.join(stateDir, "hermes-policy.json");
     const persistedPolicySoft = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
@@ -1094,23 +1245,16 @@ async function main(): Promise<void> {
       gatewaySender: "gateway:smoke",
       pendingResponses,
       nodePublicKey: parsedNodePublic.key,
-      method: "policy.update",
+      method: "tool.execute",
       params: {
-        policy: {
-          version: 2,
-          defaultQuarantine: "hard",
-          label: "smoke-hard",
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl apply-preset smoke-hard",
         },
       },
       timeoutMs: 10_000,
     });
-    assert.equal(policyHardUpdate.ok, true, "policy.update hard failed");
-    const policyHardPayload = asObject(policyHardUpdate.payload);
-    assert.equal(
-      asString(policyHardPayload.defaultQuarantine),
-      "hard",
-      "policy.update hard should return defaultQuarantine=hard",
-    );
+    assert.equal(policyHardUpdate.ok, true, "nexus-policyctl apply-preset smoke-hard failed");
     const persistedPolicyHard = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
     assert.equal(
       asString(persistedPolicyHard.defaultQuarantine),
@@ -1440,19 +1584,21 @@ async function main(): Promise<void> {
       gatewaySender: "gateway:smoke",
       pendingResponses,
       nodePublicKey: parsedNodePublic.key,
-      method: "policy.update",
+      method: "tool.execute",
       params: {
-        policy: {
-          firewallMode: "audit-only",
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl set-mode audit-only",
         },
       },
       timeoutMs: 10_000,
     });
-    assert.equal(policyAuditOnlyUpdate.ok, true, "policy.update audit-only failed");
+    assert.equal(policyAuditOnlyUpdate.ok, true, "nexus-policyctl set-mode audit-only failed");
+    const persistedPolicyAuditOnly = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
     assert.equal(
-      asString(asObject(policyAuditOnlyUpdate.payload).firewallMode),
+      asString(persistedPolicyAuditOnly.firewallMode),
       "audit-only",
-      "policy.update should return firewallMode=audit-only",
+      "policyctl set-mode should persist firewallMode=audit-only",
     );
 
     const auditOnlyRunRes = await sendGatewayRequest({
@@ -1555,19 +1701,21 @@ async function main(): Promise<void> {
       gatewaySender: "gateway:smoke",
       pendingResponses,
       nodePublicKey: parsedNodePublic.key,
-      method: "policy.update",
+      method: "tool.execute",
       params: {
-        policy: {
-          firewallMode: "hermes",
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl set-mode hermes",
         },
       },
       timeoutMs: 10_000,
     });
-    assert.equal(policyHermesUpdate.ok, true, "policy.update hermes failed");
+    assert.equal(policyHermesUpdate.ok, true, "nexus-policyctl set-mode hermes failed");
+    const persistedPolicyHermes = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
     assert.equal(
-      asString(asObject(policyHermesUpdate.payload).firewallMode),
+      asString(persistedPolicyHermes.firewallMode),
       "hermes",
-      "policy.update should return firewallMode=hermes",
+      "policyctl set-mode should persist firewallMode=hermes",
     );
 
     const hermesRunRes = await sendGatewayRequest({
@@ -1627,16 +1775,16 @@ async function main(): Promise<void> {
       gatewaySender: "gateway:smoke",
       pendingResponses,
       nodePublicKey: parsedNodePublic.key,
-      method: "policy.update",
+      method: "tool.execute",
       params: {
-        policy: {
-          firewallMode: "hermes",
-          denyCommands: ["uname"],
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl apply-preset smoke-hermes-deny-uname",
         },
       },
       timeoutMs: 10_000,
     });
-    assert.equal(policyHermesDenyUpdate.ok, true, "policy.update hermes denyCommands failed");
+    assert.equal(policyHermesDenyUpdate.ok, true, "nexus-policyctl apply-preset smoke-hermes-deny-uname failed");
     const hermesDenyRunRes = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -1659,6 +1807,78 @@ async function main(): Promise<void> {
       /command_denied/,
       "hermes deny policy should return structured deny reason",
     );
+
+    const denyClearBlocked = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl apply-preset smoke-hermes-clear-deny",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(denyClearBlocked.ok, false, "clearing denyCommands without break-glass should fail");
+    assert.equal(asString(asObject(denyClearBlocked.error).code), "POLICY_MUTATION_DENIED");
+
+    const denyClearBreakGlass = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl apply-preset smoke-hermes-clear-deny --break-glass",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(denyClearBreakGlass.ok, true, "clearing denyCommands with break-glass should succeed");
+
+    const downgradeBlocked = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl set-mode transparent",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(downgradeBlocked.ok, false, "hermes->transparent downgrade without break-glass should fail");
+    assert.equal(asString(asObject(downgradeBlocked.error).code), "POLICY_MUTATION_DENIED");
+
+    const downgradeBreakGlass = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl set-mode transparent --break-glass",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(downgradeBreakGlass.ok, true, "hermes->transparent downgrade with break-glass should succeed");
+    const persistedPolicyTransparent = asObject(JSON.parse(await fs.readFile(policyPath, "utf8")));
+    assert.equal(asString(persistedPolicyTransparent.firewallMode), "transparent");
 
     const tamperedWs = wsRef;
     assert.ok(tamperedWs, "websocket missing before tampered-signature test");
@@ -1691,7 +1911,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policy delivery + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policyctl command gating + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement + break-glass downgrade guards) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

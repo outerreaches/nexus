@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "label": "live-hermes-deny-uname-ls",
+  "defaultQuarantine": "hard",
+  "firewallMode": "hermes",
+  "denyCommands": [
+    "uname",
+    "ls"
+  ]
+}

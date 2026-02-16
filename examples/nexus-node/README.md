@@ -15,8 +15,9 @@ Current scope:
   - `process.status`
   - `process.logs`
   - `process.cancel`
-- Policy delivery:
-  - `policy.update` (persisted to `hermes-policy.json`)
+- Policy management (command-gated):
+  - `nexus-policyctl` builtin command (available via allowlisted `system.run` / `process.start`)
+  - updates persisted to `hermes-policy.json`
   - policy firewall mode control (`transparent` | `audit-only` | `hermes`) with live capability advertisement refresh
 - Symbol catalog:
   - `symbols.list` (catalog of available symbol kinds/keys/fields only, no values)
@@ -47,7 +48,7 @@ Optional flags:
 - `--name <display-name>`
 - `--state-dir <dir>`
 - `--caps <csv>`
-- `--allow <csv>` (command allowlist for `system.run`)
+- `--allow <csv>` (command allowlist for `system.run`; include `nexus-policyctl` to allow runtime policy changes)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
 - `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
 - `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
@@ -62,6 +63,23 @@ Reference-node reads symbol metadata from:
 - `{stateDir}/hermes-stores/user.json`
 
 The `symbols.list` response includes only kinds/keys/fields (and derived `{{kind:key}}` forms), never raw values.
+
+## Policy control (`nexus-policyctl`)
+
+Runtime policy mutation is command-gated. There is no gateway `policy.update` control-plane method.
+
+- To allow runtime policy changes, add `nexus-policyctl` to `NEXUS_NODE_ALLOW_COMMANDS` (or `--allow`).
+- Preset files are loaded from `{stateDir}/policy-presets/`.
+- Supported subcommands:
+  - `nexus-policyctl show`
+  - `nexus-policyctl apply-preset <name>`
+  - `nexus-policyctl set-mode <transparent|audit-only|hermes>`
+  - `nexus-policyctl deny add <command>`
+  - `nexus-policyctl deny remove <command>`
+- Guardrails:
+  - policy field validation is strict (unknown fields rejected)
+  - firewall-mode downgrade and deny-list clear require `--break-glass`
+  - writes are atomic and applied immediately for new executions
 
 ## Transport security policy
 
@@ -105,8 +123,10 @@ What it validates:
 - `tool.execute` allowlisted `system.run`
 - rejection of a disallowed `system.run` command
 - `process.start` / `process.status` / `process.logs` / `process.cancel`
-- `policy.update`: policy document persists to `hermes-policy.json` and affects new firewall session defaults without restart
-- `policy.update` firewall mode transitions: `transparent` -> `audit-only` -> `hermes` with capability refresh (`hermes.mode.*`)
+- legacy `policy.update` is rejected (`METHOD_NOT_IMPLEMENTED`)
+- `nexus-policyctl` applies policy updates via allowlisted command path and persists to `hermes-policy.json`
+- `nexus-policyctl` firewall mode transitions: `transparent` -> `audit-only` -> `hermes` with capability refresh (`hermes.mode.*`)
+- `nexus-policyctl` mutation guards: deny-list clear and firewall-mode downgrades require `--break-glass`
 - `symbols.list`: symbol catalog returns kinds/keys/fields and excludes secret values
 - symbol resolution: `system.run` / `process.start` resolve `{{kind:key}}` templates on-node (no gateway-side secret access)
 - `audit.query`: filtered/cursored retrieval of node-local audit records (`symbols.list` + `process.start` audit assertions in smoke)
@@ -118,6 +138,10 @@ What it validates:
 - routing security constraints: gateway router can require `backend.nexus` + `hermes.mode.hermes` and hard-fails unmet constraints
 - notifier duplicate suppression: two notifier loops share one DB and emit a single summary callback
 - HA active/standby smoke: mode transitions, readiness gating, `/nx/nodes` standby rejection behavior, and replay dedupe across failover
+
+Live operator validation runbook:
+
+- `examples/nexus-node/internal-doc`
 
 ## Pairing flow
 
@@ -146,7 +170,7 @@ Run container:
 docker run --rm \
   -e NEXUS_NODE_GATEWAY_URL=ws://host.docker.internal:18789/nx/nodes \
   -e NEXUS_NODE_ID=reference-node-1 \
-  -e NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls \
+  -e NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls,nexus-policyctl \
   -e TZ=America/Los_Angeles \
   -e NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1 \
   -v nexus_node_state:/data/nexus-node \

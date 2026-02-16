@@ -10,7 +10,7 @@ services:
       NEXUS_NODE_GATEWAY_URL: ws://gateway:18789/nx/nodes
       NEXUS_NODE_ID: reference-node-1
       NEXUS_NODE_NAME: Nexus Reference Node
-      NEXUS_NODE_CAPS: system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query
+      NEXUS_NODE_CAPS: system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query
       NEXUS_NODE_ALLOW_COMMANDS: echo,uname,whoami,pwd,date,ls
       TZ: ${NEXUS_NODE_TZ:-UTC}
     volumes:

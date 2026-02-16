@@ -33,6 +33,9 @@ const MAX_OUTPUT_CHARS = 60_000;
 const MAX_PROCESS_LOG_CHARS = 120_000;
 const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const FIREWALL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const POLICYCTL_COMMAND = "nexus-policyctl";
+const POLICY_PRESET_DIRNAME = "policy-presets";
+const POLICY_ALLOWED_FIELDS = new Set(["version", "label", "defaultQuarantine", "firewallMode", "denyCommands", "updatedAt"]);
 const DEFAULT_CAPABILITIES = [
   "system.run",
   "system.which",
@@ -40,7 +43,6 @@ const DEFAULT_CAPABILITIES = [
   "process.status",
   "process.logs",
   "process.cancel",
-  "policy.update",
   "symbols.list",
   "audit.query",
 ];
@@ -230,7 +232,10 @@ class ReferenceNodeClient {
   private sessionId: string | null = null;
   private ready = false;
   private policy: Record<string, unknown> = { ...DEFAULT_POLICY_DOC };
+  private policyLoadedAtMs: number | null = null;
+  private policyDigest: string | null = null;
   private readonly policyPath: string;
+  private readonly policyPresetDir: string;
   private readonly symbolStoreDir: string;
 
   constructor(
@@ -239,6 +244,7 @@ class ReferenceNodeClient {
     private readonly stateStore: ReferenceNodeStateStore,
   ) {
     this.policyPath = path.join(this.config.stateDir, "hermes-policy.json");
+    this.policyPresetDir = path.join(this.config.stateDir, POLICY_PRESET_DIRNAME);
     this.symbolStoreDir = path.join(this.config.stateDir, "hermes-stores");
   }
 
@@ -421,8 +427,11 @@ class ReferenceNodeClient {
       const raw = await fs.readFile(this.policyPath, "utf8");
       const parsed = asObject(JSON.parse(raw));
       this.policy = this.normalizePolicyDocument(parsed, nowMs);
+      const stat = await fs.stat(this.policyPath);
+      this.policyLoadedAtMs = stat.mtimeMs;
+      this.policyDigest = this.policyDocDigest(this.policy);
       this.log(
-        `loaded hermes policy path=${this.policyPath} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
+        `loaded hermes policy path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
       );
       return;
     } catch (err) {
@@ -457,14 +466,62 @@ class ReferenceNodeClient {
     const firewallMode = parseFirewallMode(asString(value.firewallMode), "transparent");
     const denyCommands = parsePolicyDenyCommands(value.denyCommands) ?? [];
     const updatedAt = asNumber(value.updatedAt) ?? nowMs;
-    return {
-      ...value,
+    const normalized: Record<string, unknown> = {
       version: asNumber(value.version) ?? 1,
       defaultQuarantine,
       firewallMode,
       denyCommands,
       updatedAt,
     };
+    const label = asString(value.label);
+    if (label) normalized.label = label;
+    return normalized;
+  }
+
+  private policyDocDigest(policyDoc: Record<string, unknown>): string {
+    return createHash("sha256")
+      .update(JSON.stringify(policyDoc))
+      .digest("hex");
+  }
+
+  private async refreshPolicyFromDiskIfChanged(source: string): Promise<void> {
+    try {
+      const stat = await fs.stat(this.policyPath);
+      if (this.policyLoadedAtMs !== null && stat.mtimeMs <= this.policyLoadedAtMs) return;
+      const raw = await fs.readFile(this.policyPath, "utf8");
+      const parsed = asObject(JSON.parse(raw));
+      const nextPolicy = this.normalizePolicyDocument(parsed, Date.now());
+      const nextDigest = this.policyDocDigest(nextPolicy);
+      if (nextDigest === this.policyDigest) {
+        this.policyLoadedAtMs = stat.mtimeMs;
+        return;
+      }
+      const previousMode = this.currentPolicyFirewallMode();
+      this.policy = nextPolicy;
+      this.policyDigest = nextDigest;
+      this.policyLoadedAtMs = stat.mtimeMs;
+      this.log(
+        `policy reload source=${source} path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()}`,
+      );
+      this.writeAuditEvent({
+        type: "policy.reload",
+        details: {
+          source,
+          firewallMode: this.currentPolicyFirewallMode(),
+          defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+          denyCommands: this.currentPolicyDenyCommands(),
+          policyPath: this.policyPath,
+        },
+      });
+      if (previousMode !== this.currentPolicyFirewallMode()) this.sendCapsAdvertise();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOENT" && !this.config.policyRequired) return;
+      throw new NodeToolError(
+        "NODE_POLICY_RELOAD_FAILED",
+        `Failed to refresh Hermes policy from disk: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private currentPolicyDefaultQuarantine(): "none" | "soft" | "hard" {
@@ -489,8 +546,36 @@ class ReferenceNodeClient {
   }
 
   private async persistPolicyToDisk(policyDoc: Record<string, unknown>): Promise<void> {
-    await fs.mkdir(path.dirname(this.policyPath), { recursive: true });
-    await fs.writeFile(this.policyPath, `${JSON.stringify(policyDoc, null, 2)}\n`, "utf8");
+    const dirPath = path.dirname(this.policyPath);
+    await fs.mkdir(dirPath, { recursive: true });
+    const tempPath = `${this.policyPath}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
+    const payload = `${JSON.stringify(policyDoc, null, 2)}\n`;
+    try {
+      const fileHandle = await fs.open(tempPath, "w", 0o600);
+      try {
+        await fileHandle.writeFile(payload, "utf8");
+        await fileHandle.sync();
+      } finally {
+        await fileHandle.close();
+      }
+      await fs.rename(tempPath, this.policyPath);
+      try {
+        const dirHandle = await fs.open(dirPath, "r");
+        try {
+          await dirHandle.sync();
+        } finally {
+          await dirHandle.close();
+        }
+      } catch {
+        // Best effort only: some filesystems do not allow directory fsync.
+      }
+      const stat = await fs.stat(this.policyPath);
+      this.policyLoadedAtMs = stat.mtimeMs;
+      this.policyDigest = this.policyDocDigest(policyDoc);
+    } catch (err) {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      throw err;
+    }
   }
 
   private sendConnectHello(): void {
@@ -706,9 +791,6 @@ class ReferenceNodeClient {
       case "process.ack":
         await this.handleProcessAck(msg);
         return;
-      case "policy.update":
-        await this.handlePolicyUpdate(msg);
-        return;
       case "symbols.list":
         await this.handleSymbolsList(msg);
         return;
@@ -724,8 +806,15 @@ class ReferenceNodeClient {
     const params = asObject(msg.params);
     const tool = asString(params.tool);
     const args = asObject(params.args);
+    const routing = asObject(params.routing);
     if (!tool) {
       this.sendRequestError(msg.id, "INVALID_REQUEST", "tool.execute requires a tool name", false);
+      return;
+    }
+    try {
+      await this.refreshPolicyFromDiskIfChanged("tool.execute");
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
       return;
     }
     try {
@@ -733,7 +822,10 @@ class ReferenceNodeClient {
       if (tool === "system.which") {
         output = await this.execSystemWhich(args);
       } else if (tool === "system.run") {
-        output = await this.execSystemRun(args);
+        output = await this.execSystemRun({
+          ...args,
+          ...(Object.keys(routing).length > 0 ? { routing } : {}),
+        });
       } else {
         throw new NodeToolError("CAPABILITY_UNAVAILABLE", `Tool ${tool} is not supported by this reference node.`);
       }
@@ -769,6 +861,12 @@ class ReferenceNodeClient {
       return;
     }
     const commandName = commandValidation.commandName;
+    try {
+      await this.refreshPolicyFromDiskIfChanged("process.start");
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+      return;
+    }
 
     const cwd = asString(runArgs.cwd) ?? null;
     const env = asStringMap(runArgs.env);
@@ -863,6 +961,58 @@ class ReferenceNodeClient {
         firewallMode,
       },
     });
+
+    if (commandName === POLICYCTL_COMMAND) {
+      try {
+        entry.status = "running";
+        entry.startedAt = Date.now();
+        this.persistProcess(entry);
+        this.emitProcessUpdate(entry, "running");
+        const output = await this.execPolicyCtlCommand({
+          command: executionCommand,
+          routing,
+          toolName: "process.start",
+          processId,
+          firewallSession: resolvedFirewallSession?.sessionId ?? null,
+          firewallMode,
+        });
+        if (output) this.appendProcessLog(entry, `${output}\n`, "stdout");
+        this.finishProcess(entry, 0, null);
+        this.sendSignedEnvelope({
+          type: "res",
+          id: msg.id,
+          ok: true,
+          payload: {
+            processId,
+            status: entry.status,
+            startedAt: entry.startedAt,
+            command,
+            firewallMode,
+            ...(resolvedFirewallSession
+              ? {
+                  firewallSession: resolvedFirewallSession.sessionId,
+                  firewallSessionReused: resolvedFirewallSession.reused,
+                  firewallQuarantine: resolvedFirewallSession.quarantineState,
+                }
+              : {}),
+            ...(firewallMode !== "transparent"
+              ? {
+                  hermes: {
+                    mode: firewallMode,
+                    sanitized: true,
+                    references: [],
+                  },
+                }
+              : {}),
+          },
+        });
+      } catch (err) {
+        this.processes.delete(processId);
+        this.stateStore.removeProcess(processId);
+        this.sendToolExecutionError(msg.id, err);
+      }
+      return;
+    }
 
     try {
       const child = spawnChild(executionCommand, {
@@ -1061,98 +1211,282 @@ class ReferenceNodeClient {
     });
   }
 
-  private async handlePolicyUpdate(msg: RequestEnvelope): Promise<void> {
-    const params = asObject(msg.params);
-    const incomingPolicy = asObject(params.policy);
-    if (Object.keys(incomingPolicy).length === 0) {
-      this.sendRequestError(msg.id, "INVALID_REQUEST", "policy.update requires a non-empty `policy` object.", false);
-      return;
-    }
-    const requestedQuarantine = asString(incomingPolicy.defaultQuarantine);
-    if (
-      requestedQuarantine &&
-      requestedQuarantine !== "none" &&
-      requestedQuarantine !== "soft" &&
-      requestedQuarantine !== "hard"
-    ) {
-      this.sendRequestError(
-        msg.id,
-        "INVALID_REQUEST",
-        `policy.update defaultQuarantine must be one of: none, soft, hard (got ${requestedQuarantine}).`,
-        false,
+  private async execPolicyCtlCommand(params: {
+    command: string;
+    routing: Record<string, unknown>;
+    toolName: string;
+    firewallMode: FirewallMode;
+    processId?: string | null;
+    firewallSession?: string | null;
+  }): Promise<string> {
+    const parsed = parsePolicyCtlCommand(params.command);
+    const provenance = {
+      runId: asString(params.routing.runId),
+      parentRunId: asString(params.routing.parentRunId),
+      sessionId: asString(params.routing.sessionId),
+      channel: asString(params.routing.channel),
+      channelKey: asString(params.routing.channelKey),
+    };
+    if (parsed.action === "show") {
+      this.writeAuditEvent({
+        type: "policy.command.show",
+        processId: params.processId ?? null,
+        firewallSession: params.firewallSession ?? null,
+        actor: this.formatPolicyMutationActor(provenance),
+        toolName: params.toolName,
+        details: {
+          command: params.command,
+          firewallMode: params.firewallMode,
+          policyPath: this.policyPath,
+          policyDigest: `sha256:${this.policyDocDigest(this.policy)}`,
+          provenance,
+        },
+      });
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "show",
+          policyPath: this.policyPath,
+          policyPresetDir: this.policyPresetDir,
+          policyDigest: `sha256:${this.policyDocDigest(this.policy)}`,
+          policy: this.policy,
+        },
+        null,
+        2,
       );
-      return;
     }
-    const requestedFirewallMode = asString(incomingPolicy.firewallMode);
-    if (
-      requestedFirewallMode &&
-      requestedFirewallMode !== "transparent" &&
-      requestedFirewallMode !== "audit-only" &&
-      requestedFirewallMode !== "hermes"
-    ) {
-      this.sendRequestError(
-        msg.id,
-        "INVALID_REQUEST",
-        `policy.update firewallMode must be one of: transparent, audit-only, hermes (got ${requestedFirewallMode}).`,
-        false,
-      );
-      return;
+
+    const mutationSource = parsed.action === "apply-preset" ? "policyctl.apply-preset" : "policyctl.patch";
+    let patch: Record<string, unknown> = {};
+    if (parsed.action === "apply-preset") {
+      const presetPath = resolvePolicyPresetPath(this.policyPresetDir, parsed.presetName);
+      let raw = "";
+      try {
+        raw = await fs.readFile(presetPath, "utf8");
+      } catch (err) {
+        throw new NodeToolError(
+          "POLICY_PRESET_NOT_FOUND",
+          `Policy preset "${parsed.presetName}" was not found at ${presetPath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        patch = asObject(JSON.parse(raw));
+      } catch (err) {
+        throw new NodeToolError(
+          "POLICY_PRESET_INVALID",
+          `Policy preset "${parsed.presetName}" is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else if (parsed.action === "set-mode") {
+      patch = { firewallMode: parsed.mode };
+    } else if (parsed.action === "deny-add") {
+      patch = {
+        denyCommands: [...new Set([...this.currentPolicyDenyCommands(), parsed.commandName])].sort((a, b) =>
+          a.localeCompare(b),
+        ),
+      };
+    } else {
+      patch = {
+        denyCommands: this.currentPolicyDenyCommands()
+          .filter((entry) => entry !== parsed.commandName)
+          .sort((a, b) => a.localeCompare(b)),
+      };
     }
-    const requestedDenyCommands = parsePolicyDenyCommands(incomingPolicy.denyCommands);
-    if (incomingPolicy.denyCommands !== undefined && requestedDenyCommands === null) {
-      this.sendRequestError(
-        msg.id,
-        "INVALID_REQUEST",
-        "policy.update denyCommands must be an array of command names.",
-        false,
-      );
-      return;
-    }
+
+    const applied = await this.applyPolicyPatch({
+      patch,
+      source: mutationSource,
+      command: params.command,
+      breakGlass: parsed.breakGlass,
+      toolName: params.toolName,
+      processId: params.processId ?? null,
+      firewallSession: params.firewallSession ?? null,
+      provenance,
+    });
+
+    return JSON.stringify(
+      {
+        ok: true,
+        action: parsed.action,
+        changed: applied.changed,
+        breakGlass: parsed.breakGlass,
+        source: mutationSource,
+        changedFields: applied.changedFields,
+        policyPath: this.policyPath,
+        policyDigestBefore: `sha256:${applied.digestBefore}`,
+        policyDigestAfter: `sha256:${applied.digestAfter}`,
+        defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+        firewallMode: this.currentPolicyFirewallMode(),
+        denyCommands: this.currentPolicyDenyCommands(),
+      },
+      null,
+      2,
+    );
+  }
+
+  private async applyPolicyPatch(params: {
+    patch: Record<string, unknown>;
+    source: string;
+    command: string;
+    breakGlass: boolean;
+    toolName: string;
+    processId: string | null;
+    firewallSession: string | null;
+    provenance: Record<string, string | null>;
+  }): Promise<{
+    changed: boolean;
+    changedFields: string[];
+    digestBefore: string;
+    digestAfter: string;
+  }> {
+    this.assertPolicyPatchShape(params.patch);
     const nowMs = Date.now();
+    const current = this.normalizePolicyDocument(this.policy, nowMs);
     const next = this.normalizePolicyDocument(
       {
-        ...this.policy,
-        ...incomingPolicy,
+        ...current,
+        ...params.patch,
       },
       nowMs,
     );
-    try {
-      await this.persistPolicyToDisk(next);
-      this.policy = next;
-      this.sendSignedEnvelope({
-        type: "res",
-        id: msg.id,
-        ok: true,
-        payload: {
-          updatedAt: nowMs,
-          defaultQuarantine: this.currentPolicyDefaultQuarantine(),
-          firewallMode: this.currentPolicyFirewallMode(),
-          denyCommands: this.currentPolicyDenyCommands(),
-          policyPath: this.policyPath,
-          policy: this.policy,
-        },
-      });
-      this.log(
-        `policy.update applied path=${this.policyPath} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()} deny_commands=${this.currentPolicyDenyCommands().join(",") || "-"}`,
-      );
-      this.writeAuditEvent({
-        type: "policy.update",
-        details: {
-          firewallMode: this.currentPolicyFirewallMode(),
-          defaultQuarantine: this.currentPolicyDefaultQuarantine(),
-          denyCommands: this.currentPolicyDenyCommands(),
-          policyPath: this.policyPath,
-        },
-      });
-      this.sendCapsAdvertise();
-    } catch (err) {
-      this.sendRequestError(
-        msg.id,
-        "NODE_POLICY_PERSIST_FAILED",
-        `Failed to persist policy update: ${err instanceof Error ? err.message : String(err)}`,
-        true,
+    const changedFields = this.policyChangedFields(current, next);
+    const digestBefore = this.policyDocDigest(current);
+    const digestAfter = this.policyDocDigest(next);
+    if (changedFields.length === 0) {
+      return {
+        changed: false,
+        changedFields: [],
+        digestBefore,
+        digestAfter,
+      };
+    }
+
+    const previousMode = parseFirewallMode(asString(current.firewallMode), "transparent");
+    const nextMode = parseFirewallMode(asString(next.firewallMode), "transparent");
+    if (firewallModeStrength(nextMode) < firewallModeStrength(previousMode) && !params.breakGlass) {
+      throw new NodeToolError(
+        "POLICY_MUTATION_DENIED",
+        `Policy downgrade ${previousMode} -> ${nextMode} requires --break-glass.`,
       );
     }
+    const currentDeny = parsePolicyDenyCommands(current.denyCommands) ?? [];
+    const nextDeny = parsePolicyDenyCommands(next.denyCommands) ?? [];
+    if (nextDeny.length > 128) {
+      throw new NodeToolError("INVALID_REQUEST", "denyCommands cannot exceed 128 entries.");
+    }
+    if (currentDeny.length > 0 && nextDeny.length === 0 && !params.breakGlass) {
+      throw new NodeToolError(
+        "POLICY_MUTATION_DENIED",
+        "Clearing denyCommands requires --break-glass when denyCommands is currently non-empty.",
+      );
+    }
+
+    await this.persistPolicyToDisk(next);
+    this.policy = next;
+    this.log(
+      `policy command applied source=${params.source} firewall_mode=${this.currentPolicyFirewallMode()} default_quarantine=${this.currentPolicyDefaultQuarantine()} deny_commands=${this.currentPolicyDenyCommands().join(",") || "-"}`,
+    );
+    this.writeAuditEvent({
+      type: "policy.command.applied",
+      processId: params.processId,
+      firewallSession: params.firewallSession,
+      actor: this.formatPolicyMutationActor(params.provenance),
+      toolName: params.toolName,
+      details: {
+        source: params.source,
+        command: params.command,
+        breakGlass: params.breakGlass,
+        changedFields,
+        previousFirewallMode: previousMode,
+        firewallMode: this.currentPolicyFirewallMode(),
+        defaultQuarantine: this.currentPolicyDefaultQuarantine(),
+        denyCommands: this.currentPolicyDenyCommands(),
+        policyPath: this.policyPath,
+        digestBefore: `sha256:${digestBefore}`,
+        digestAfter: `sha256:${this.policyDocDigest(this.policy)}`,
+        provenance: params.provenance,
+      },
+    });
+    if (previousMode !== nextMode) this.sendCapsAdvertise();
+
+    return {
+      changed: true,
+      changedFields,
+      digestBefore,
+      digestAfter: this.policyDocDigest(this.policy),
+    };
+  }
+
+  private assertPolicyPatchShape(patch: Record<string, unknown>): void {
+    const keys = Object.keys(patch);
+    if (keys.length === 0) {
+      throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} requires a non-empty policy patch.`);
+    }
+    for (const key of keys) {
+      if (!POLICY_ALLOWED_FIELDS.has(key)) {
+        throw new NodeToolError(
+          "INVALID_REQUEST",
+          `${POLICYCTL_COMMAND} does not allow policy field "${key}". Allowed fields: ${[...POLICY_ALLOWED_FIELDS.values()].join(", ")}.`,
+        );
+      }
+    }
+    if ("defaultQuarantine" in patch) {
+      const value = asString(patch.defaultQuarantine);
+      if (!value || (value !== "none" && value !== "soft" && value !== "hard")) {
+        throw new NodeToolError(
+          "INVALID_REQUEST",
+          `${POLICYCTL_COMMAND} defaultQuarantine must be one of: none, soft, hard.`,
+        );
+      }
+    }
+    if ("firewallMode" in patch) {
+      const value = asString(patch.firewallMode);
+      if (!value || (value !== "transparent" && value !== "audit-only" && value !== "hermes")) {
+        throw new NodeToolError(
+          "INVALID_REQUEST",
+          `${POLICYCTL_COMMAND} firewallMode must be one of: transparent, audit-only, hermes.`,
+        );
+      }
+    }
+    if ("denyCommands" in patch && parsePolicyDenyCommands(patch.denyCommands) === null) {
+      throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} denyCommands must be an array of command names.`);
+    }
+    if ("version" in patch) {
+      const version = asNumber(patch.version);
+      if (version === null || !Number.isInteger(version) || version <= 0) {
+        throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} version must be a positive integer.`);
+      }
+    }
+    if ("label" in patch) {
+      const label = asString(patch.label);
+      if (!label || label.length > 120) {
+        throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} label must be a non-empty string up to 120 chars.`);
+      }
+    }
+    if ("updatedAt" in patch) {
+      const updatedAt = asNumber(patch.updatedAt);
+      if (updatedAt === null || !Number.isInteger(updatedAt) || updatedAt < 0) {
+        throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} updatedAt must be a non-negative integer.`);
+      }
+    }
+  }
+
+  private policyChangedFields(current: Record<string, unknown>, next: Record<string, unknown>): string[] {
+    const fields = ["version", "label", "defaultQuarantine", "firewallMode", "denyCommands"];
+    const changed: string[] = [];
+    for (const field of fields) {
+      if (JSON.stringify(current[field] ?? null) !== JSON.stringify(next[field] ?? null)) changed.push(field);
+    }
+    return changed;
+  }
+
+  private formatPolicyMutationActor(provenance: Record<string, string | null>): string {
+    const parts = [this.senderId];
+    if (provenance.channel) parts.push(`channel=${provenance.channel}`);
+    if (provenance.channelKey) parts.push(`channelKey=${provenance.channelKey}`);
+    if (provenance.sessionId) parts.push(`session=${provenance.sessionId}`);
+    if (provenance.runId) parts.push(`run=${provenance.runId}`);
+    return parts.join(" ");
   }
 
   private async handleSymbolsList(msg: RequestEnvelope): Promise<void> {
@@ -1399,6 +1733,12 @@ class ReferenceNodeClient {
     if (!command) {
       throw new NodeToolError("INVALID_REQUEST", "system.which requires `command`.");
     }
+    if (command === POLICYCTL_COMMAND) {
+      if (!isAllowedCommand(POLICYCTL_COMMAND, this.config.allowCommands)) {
+        throw new NodeToolError("COMMAND_NOT_FOUND", `Command not found: ${command}`);
+      }
+      return `${POLICYCTL_COMMAND} (node-builtin)`;
+    }
 
     const safe = shellEscape(command);
     const result = await execShell(`command -v ${safe}`, {
@@ -1416,6 +1756,7 @@ class ReferenceNodeClient {
     const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
     if (!commandValidation.ok) throw new NodeToolError("PERMISSION_DENIED", commandValidation.message);
     const commandName = commandValidation.commandName;
+    const routing = asObject(args.routing);
 
     const firewallMode = this.currentPolicyFirewallMode();
     const timeoutMs = clampInt(args.timeoutMs ?? args.timeout, 1_000, this.config.runTimeoutMs) ?? this.config.runTimeoutMs;
@@ -1465,22 +1806,38 @@ class ReferenceNodeClient {
       firewallMode,
     });
 
-    const result = await execShell(executionCommand, {
-      cwd: executionCwd ?? undefined,
-      timeoutMs,
-      env: executionEnv,
-    });
+    let combined = "";
+    let exitCode = 0;
+    let signal: string | null = null;
+    let timedOut = false;
+    if (commandName === POLICYCTL_COMMAND) {
+      combined = await this.execPolicyCtlCommand({
+        command: executionCommand,
+        routing,
+        toolName: "system.run",
+        firewallMode,
+      });
+    } else {
+      const result = await execShell(executionCommand, {
+        cwd: executionCwd ?? undefined,
+        timeoutMs,
+        env: executionEnv,
+      });
+      combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
+      exitCode = result.exitCode;
+      signal = result.signal;
+      timedOut = result.timedOut;
+    }
 
-    const combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
     if (firewallMode === "transparent") {
-      if (result.timedOut) {
+      if (timedOut) {
         throw new NodeToolError("EXECUTION_TIMEOUT", `Command timed out after ${timeoutMs}ms.`, true);
       }
-      if (result.exitCode !== 0) {
-        const signalPart = result.signal ? ` signal=${result.signal}` : "";
+      if (exitCode !== 0) {
+        const signalPart = signal ? ` signal=${signal}` : "";
         throw new NodeToolError(
           "COMMAND_FAILED",
-          truncateOutput(`Command failed (exit=${result.exitCode}${signalPart}).\n${combined}`),
+          truncateOutput(`Command failed (exit=${exitCode}${signalPart}).\n${combined}`),
         );
       }
       return truncateOutput(combined || "(no output)");
@@ -1497,13 +1854,13 @@ class ReferenceNodeClient {
         commandName,
         symbolCount: resolvedSymbols.length,
         symbols: resolvedSymbols,
-        exitCode: result.exitCode,
-        signal: result.signal,
-        timedOut: result.timedOut,
+        exitCode,
+        signal,
+        timedOut,
       },
     });
 
-    if (result.timedOut) {
+    if (timedOut) {
       throw new NodeToolError(
         "EXECUTION_TIMEOUT",
         JSON.stringify(
@@ -1520,7 +1877,7 @@ class ReferenceNodeClient {
         true,
       );
     }
-    if (result.exitCode !== 0) {
+    if (exitCode !== 0) {
       throw new NodeToolError(
         "COMMAND_FAILED",
         JSON.stringify(
@@ -1528,8 +1885,8 @@ class ReferenceNodeClient {
             mode: firewallMode,
             safeSummary,
             references: [reference],
-            exitCode: result.exitCode,
-            signal: result.signal,
+            exitCode,
+            signal,
           },
           null,
           2,
@@ -1542,8 +1899,8 @@ class ReferenceNodeClient {
         mode: firewallMode,
         safeSummary,
         references: [reference],
-        exitCode: result.exitCode,
-        signal: result.signal,
+        exitCode,
+        signal,
       },
       null,
       2,
@@ -2644,6 +3001,129 @@ function parsePolicyDenyCommands(value: unknown): string[] | null {
   return [...new Set(out.values())].sort((a, b) => a.localeCompare(b));
 }
 
+function parsePolicyCtlCommand(command: string):
+  | { action: "show"; breakGlass: boolean }
+  | { action: "apply-preset"; presetName: string; breakGlass: boolean }
+  | { action: "set-mode"; mode: FirewallMode; breakGlass: boolean }
+  | { action: "deny-add"; commandName: string; breakGlass: boolean }
+  | { action: "deny-remove"; commandName: string; breakGlass: boolean } {
+  const tokens = parseCommandTokens(command);
+  if (!tokens || tokens.length === 0 || tokens[0] !== POLICYCTL_COMMAND) {
+    throw new NodeToolError(
+      "INVALID_REQUEST",
+      `${POLICYCTL_COMMAND} command is malformed. Expected: ${POLICYCTL_COMMAND} <show|apply-preset|set-mode|deny>.`,
+    );
+  }
+  const args: string[] = [];
+  let breakGlass = false;
+  for (const token of tokens.slice(1)) {
+    if (token === "--break-glass") {
+      breakGlass = true;
+      continue;
+    }
+    args.push(token);
+  }
+  if (args.length === 0) {
+    throw new NodeToolError(
+      "INVALID_REQUEST",
+      `${POLICYCTL_COMMAND} requires a subcommand: show | apply-preset <name> | set-mode <mode> | deny add|remove <command>.`,
+    );
+  }
+  if (args[0] === "show") {
+    if (args.length !== 1) {
+      throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} show does not accept extra arguments.`);
+    }
+    return { action: "show", breakGlass };
+  }
+  if (args[0] === "apply-preset") {
+    if (args.length !== 2) {
+      throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} apply-preset requires a preset name.`);
+    }
+    return { action: "apply-preset", presetName: args[1], breakGlass };
+  }
+  if (args[0] === "set-mode") {
+    if (args.length !== 2) {
+      throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} set-mode requires one mode argument.`);
+    }
+    const mode = asString(args[1]);
+    if (!mode || (mode !== "transparent" && mode !== "audit-only" && mode !== "hermes")) {
+      throw new NodeToolError(
+        "INVALID_REQUEST",
+        `${POLICYCTL_COMMAND} set-mode must be one of: transparent, audit-only, hermes.`,
+      );
+    }
+    return { action: "set-mode", mode, breakGlass };
+  }
+  if (args[0] === "deny") {
+    if (args.length !== 3) {
+      throw new NodeToolError(
+        "INVALID_REQUEST",
+        `${POLICYCTL_COMMAND} deny requires: deny add <command> | deny remove <command>.`,
+      );
+    }
+    const operation = args[1];
+    const candidate = asString(args[2]) ?? "";
+    const commandName = parseCommandName(candidate);
+    if (!commandName || commandName !== candidate || !/^[A-Za-z0-9._-]+$/.test(commandName)) {
+      throw new NodeToolError(
+        "INVALID_REQUEST",
+        `${POLICYCTL_COMMAND} deny command name must be a single token matching [A-Za-z0-9._-]+.`,
+      );
+    }
+    if (operation === "add") return { action: "deny-add", commandName, breakGlass };
+    if (operation === "remove") return { action: "deny-remove", commandName, breakGlass };
+    throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} deny operation must be add or remove.`);
+  }
+  throw new NodeToolError(
+    "INVALID_REQUEST",
+    `${POLICYCTL_COMMAND} subcommand ${args[0]} is not supported. Use show|apply-preset|set-mode|deny.`,
+  );
+}
+
+function parseCommandTokens(command: string): string[] | null {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  if (tokens.length === 0) return [];
+  const out: string[] = [];
+  for (const token of tokens) {
+    if (token.startsWith('"') || token.startsWith("'")) {
+      if (token.length < 2 || token[0] !== token[token.length - 1]) return null;
+      out.push(token.slice(1, -1));
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
+}
+
+function resolvePolicyPresetPath(policyPresetDir: string, presetName: string): string {
+  const trimmed = presetName.trim();
+  if (!trimmed) {
+    throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} apply-preset requires a non-empty preset name.`);
+  }
+  if (trimmed.length > 128) {
+    throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} preset names must be <= 128 characters.`);
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) || trimmed.includes("..")) {
+    throw new NodeToolError(
+      "INVALID_REQUEST",
+      `${POLICYCTL_COMMAND} preset names can only include letters, numbers, dot, underscore, and dash.`,
+    );
+  }
+  const fileName = trimmed.endsWith(".json") ? trimmed : `${trimmed}.json`;
+  const root = path.resolve(policyPresetDir);
+  const resolved = path.resolve(root, fileName);
+  if (!resolved.startsWith(`${root}${path.sep}`)) {
+    throw new NodeToolError("INVALID_REQUEST", `${POLICYCTL_COMMAND} preset path escapes the approved preset directory.`);
+  }
+  return resolved;
+}
+
+function firewallModeStrength(mode: FirewallMode): number {
+  if (mode === "transparent") return 0;
+  if (mode === "audit-only") return 1;
+  return 2;
+}
+
 function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -2844,7 +3324,7 @@ function printHelp(): void {
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ./.nexus-node)",
-      "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query)",
+      "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",

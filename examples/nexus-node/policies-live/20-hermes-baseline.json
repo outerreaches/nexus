@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "label": "live-hermes-baseline",
+  "defaultQuarantine": "soft",
+  "firewallMode": "hermes",
+  "denyCommands": []
+}

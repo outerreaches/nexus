@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "label": "live-rollback-transparent",
+  "defaultQuarantine": "none",
+  "firewallMode": "transparent",
+  "denyCommands": []
+}

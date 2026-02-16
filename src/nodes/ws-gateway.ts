@@ -193,13 +193,31 @@ export class NodeWebSocketGateway {
     }
   }
 
-  async executeTool(params: { nodeId: string; tool: string; args: unknown; timeoutMs?: number }): Promise<string> {
+  async executeTool(params: {
+    nodeId: string;
+    tool: string;
+    args: unknown;
+    ctx?: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const routing: Record<string, unknown> = {};
+    if (params.ctx?.firewallSession) {
+      routing.firewallSession = params.ctx.firewallSession;
+    }
+    if (params.ctx?.request) {
+      routing.runId = params.ctx.request.runId ?? randomUUID();
+      routing.parentRunId = params.ctx.request.parentRunId ?? null;
+      routing.sessionId = params.ctx.request.sessionId;
+      routing.channel = params.ctx.request.channel;
+      routing.channelKey = params.ctx.request.channelKey;
+    }
     const response = await this.requestNode({
       nodeId: params.nodeId,
       method: "tool.execute",
       params: {
         tool: params.tool,
         args: params.args,
+        ...(Object.keys(routing).length > 0 ? { routing } : {}),
       },
       timeoutMs: params.timeoutMs,
     });
@@ -226,8 +244,6 @@ export class NodeWebSocketGateway {
         return this.requestProcessLogs(params);
       case "process.cancel":
         return this.requestProcessCancel(params);
-      case "policy.update":
-        return this.requestPolicyUpdate(params);
       case "symbols.list":
         return this.requestSymbolsList(params);
       case "audit.query":
@@ -237,6 +253,7 @@ export class NodeWebSocketGateway {
           nodeId: params.nodeId,
           tool: params.remoteName,
           args: params.args,
+          ctx: params.ctx,
           timeoutMs: params.timeoutMs,
         });
     }
@@ -454,29 +471,6 @@ export class NodeWebSocketGateway {
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
       message: `Node ${params.nodeId} failed to cancel process.`,
-    });
-    return this.normalizeStructuredResult(response.payload);
-  }
-
-  private async requestPolicyUpdate(params: {
-    nodeId: string;
-    args: unknown;
-    timeoutMs?: number;
-  }): Promise<string> {
-    const argsObj = this.asObject(params.args);
-    const policy = this.asObject(argsObj.policy);
-    if (Object.keys(policy).length === 0) {
-      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_set_policy requires a non-empty `policy` object.");
-    }
-    const response = await this.requestNode({
-      nodeId: params.nodeId,
-      method: "policy.update",
-      params: { policy },
-      timeoutMs: params.timeoutMs,
-    });
-    this.throwOnRemoteError(response, {
-      code: "NODE_EXECUTION_FAILED",
-      message: `Node ${params.nodeId} failed to apply policy update.`,
     });
     return this.normalizeStructuredResult(response.payload);
   }

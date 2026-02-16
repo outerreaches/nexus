@@ -14,13 +14,6 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-const nodeSetPolicyRoutingTool: Tool = {
-  name: "node_set_policy",
-  description: "Internal routing shim for policy.update dispatch.",
-  jsonSchema: {},
-  execute: async () => "ERROR: node_set_policy should be routed via node transport.",
-};
-
 const nodeSymbolsListRoutingTool: Tool = {
   name: "node_symbols_list",
   description: "Internal routing shim for symbols.list dispatch.",
@@ -175,41 +168,6 @@ export const nodeSetStatus = defineTool({
       null,
       2,
     );
-  },
-});
-
-export const nodeSetPolicy = defineTool({
-  name: "node_set_policy",
-  description:
-    "Push a Hermes policy document to a Nexus node via protocol method policy.update and persist it in node-local state.",
-  parameters: z.object({
-    id: z.string().min(1).max(128),
-    policy: z
-      .record(z.string(), z.unknown())
-      .refine((value) => Object.keys(value).length > 0, "policy must include at least one field"),
-  }),
-  execute: async (args, ctx) => {
-    const db = requireDb(ctx);
-    if (!db) return "ERROR: database is not available";
-    const row = getNodeById(db, args.id);
-    if (!row) return "ERROR: node not found";
-    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support policy.update`;
-    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
-
-    try {
-      return await ctx.nodeRouter.routeToolExecution(
-        nodeSetPolicyRoutingTool,
-        { policy: args.policy },
-        {
-          ...ctx,
-          executionNode: args.id,
-          executionMode: "remote",
-        },
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return `ERROR: ${message}`;
-    }
   },
 });
 

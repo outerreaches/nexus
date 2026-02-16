@@ -133,7 +133,7 @@ export class NodeToolRouter implements NodeRouter {
   }
 
   private resolveNodeIdFromArgs(toolName: string, args: unknown): string | null {
-    if (toolName !== "policy.update" && toolName !== "symbols.list" && toolName !== "audit.query") return null;
+    if (toolName !== "symbols.list" && toolName !== "audit.query") return null;
     if (!args || typeof args !== "object" || Array.isArray(args)) return null;
     const id = (args as { id?: unknown }).id;
     if (typeof id !== "string") return null;
@@ -278,7 +278,6 @@ export class NodeToolRouter implements NodeRouter {
     if (toolName === "process_status") return "process.status";
     if (toolName === "process_logs") return "process.logs";
     if (toolName === "process_stop") return "process.cancel";
-    if (toolName === "node_set_policy") return "policy.update";
     if (toolName === "node_symbols_list") return "symbols.list";
     if (toolName === "node_audit_query") return "audit.query";
     if (toolName === "process_list") {
