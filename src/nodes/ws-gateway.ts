@@ -756,14 +756,13 @@ export class NodeWebSocketGateway {
     const receivedAt = Date.now();
     const payload = this.asObject(msg.payload);
     if (msg.event === "capability.update" || msg.event === "caps.advertise") {
-      const capabilities = this.parseStringArray(payload.capabilities ?? payload.caps);
-      const tags = this.parseStringArray(payload.tags);
+      const capabilityState = this.resolveCapabilityAdvertisement(session.nodeId, payload);
       this.deps.registry.markHeartbeat({
         id: session.nodeId,
         nowMs: receivedAt,
         endpoint: this.inferEndpoint(session.request),
-        capabilities,
-        tags,
+        capabilities: capabilityState.capabilities,
+        tags: capabilityState.tags,
       });
       return;
     }
@@ -1430,6 +1429,78 @@ export class NodeWebSocketGateway {
   private asNumber(value: unknown): number | null {
     if (typeof value !== "number" || !Number.isFinite(value)) return null;
     return value;
+  }
+
+  private resolveCapabilityAdvertisement(
+    nodeId: string,
+    payload: Record<string, unknown>,
+  ): { capabilities?: string[]; tags?: string[] } {
+    const current = this.deps.registry.get(nodeId);
+    const delta = this.asObject(payload.delta);
+
+    const fullCapabilitiesRaw = payload.capabilities ?? payload.caps;
+    const fullTagsRaw = payload.tags;
+    const hasFullCapabilities = fullCapabilitiesRaw !== undefined;
+    const hasFullTags = fullTagsRaw !== undefined;
+    const fullCapabilities = this.parseOptionalStringArray(fullCapabilitiesRaw);
+    const fullTags = this.parseOptionalStringArray(fullTagsRaw);
+
+    const addCapabilities = this.parseOptionalStringArray(payload.addCapabilities ?? delta.addCapabilities) ?? [];
+    const removeCapabilities = this.parseOptionalStringArray(payload.removeCapabilities ?? delta.removeCapabilities) ?? [];
+    const addTags = this.parseOptionalStringArray(payload.addTags ?? delta.addTags) ?? [];
+    const removeTags = this.parseOptionalStringArray(payload.removeTags ?? delta.removeTags) ?? [];
+
+    let nextCapabilities = hasFullCapabilities ? this.uniqueStrings(fullCapabilities ?? []) : [...(current?.capabilities ?? [])];
+    let nextTags = hasFullTags ? this.uniqueStrings(fullTags ?? []) : [...(current?.tags ?? [])];
+    let capabilitiesChanged = hasFullCapabilities;
+    let tagsChanged = hasFullTags;
+
+    for (const capability of addCapabilities) {
+      if (!nextCapabilities.includes(capability)) {
+        nextCapabilities.push(capability);
+        capabilitiesChanged = true;
+      }
+    }
+    if (removeCapabilities.length > 0) {
+      const removeSet = new Set(removeCapabilities);
+      const before = nextCapabilities.length;
+      nextCapabilities = nextCapabilities.filter((capability) => !removeSet.has(capability));
+      if (nextCapabilities.length !== before) capabilitiesChanged = true;
+    }
+
+    for (const tag of addTags) {
+      if (!nextTags.includes(tag)) {
+        nextTags.push(tag);
+        tagsChanged = true;
+      }
+    }
+    if (removeTags.length > 0) {
+      const removeSet = new Set(removeTags);
+      const before = nextTags.length;
+      nextTags = nextTags.filter((tag) => !removeSet.has(tag));
+      if (nextTags.length !== before) tagsChanged = true;
+    }
+
+    return {
+      capabilities: capabilitiesChanged ? nextCapabilities : undefined,
+      tags: tagsChanged ? nextTags : undefined,
+    };
+  }
+
+  private parseOptionalStringArray(value: unknown): string[] | undefined {
+    if (value === undefined) return undefined;
+    return this.parseStringArray(value);
+  }
+
+  private uniqueStrings(value: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of value) {
+      if (seen.has(item)) continue;
+      seen.add(item);
+      out.push(item);
+    }
+    return out;
   }
 
   private parseStringArray(value: unknown): string[] {

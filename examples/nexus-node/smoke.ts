@@ -168,7 +168,7 @@ async function main(): Promise<void> {
       ".bin",
       process.platform === "win32" ? "tsx.cmd" : "tsx",
     );
-    child = spawn(
+    const spawnedChild = spawn(
       tsxBin,
       [
         "examples/nexus-node/reference-node.ts",
@@ -188,14 +188,15 @@ async function main(): Promise<void> {
       {
         cwd: process.cwd(),
         env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
       },
     );
+    child = spawnedChild;
 
-    child.stdout.on("data", (chunk) => {
+    spawnedChild.stdout.on("data", (chunk) => {
       childStdout.push(String(chunk));
     });
-    child.stderr.on("data", (chunk) => {
+    spawnedChild.stderr.on("data", (chunk) => {
       childStderr.push(String(chunk));
     });
 
@@ -566,8 +567,8 @@ async function main(): Promise<void> {
     assert.ok(longProcessId, "long process missing processId");
 
     const wsBeforeFailover = wsRef;
-    assert.ok(wsBeforeFailover && wsBeforeFailover.readyState === WebSocket.OPEN, "expected open websocket before failover");
-    wsBeforeFailover!.close(1012, "simulate gateway failover");
+    assert.ok(wsBeforeFailover, "expected open websocket before failover");
+    (wsBeforeFailover as WebSocket).close(1012, "simulate gateway failover");
     await timeoutPromise(reconnectHandshakeComplete.promise, 20_000, "reconnect handshake did not complete");
     await timeoutPromise(reconnectReady.promise, 20_000, "node did not advertise capabilities after reconnect");
     assert.ok(wsRef, "reconnected websocket missing");
@@ -649,8 +650,38 @@ async function main(): Promise<void> {
     }
     assert.equal(finalLongStatus, "cancelled", `expected long process cancelled, got ${finalLongStatus}`);
 
+    const tamperedWs = wsRef;
+    assert.ok(tamperedWs, "websocket missing before tampered-signature test");
+    const tamperedClose = deferred<{ code: number; reason: string }>();
+    tamperedWs.once("close", (code, reasonRaw) => {
+      tamperedClose.resolve({ code: Number(code), reason: String(reasonRaw || "") });
+    });
+    sendTamperedEnvelope(tamperedWs, gatewayKeys.privateKey, "gateway:smoke", {
+      type: "event",
+      event: "caps.advertise",
+      payload: {
+        capabilities: ["system.run"],
+        tags: ["tampered-signature-test"],
+        timestamp: Date.now(),
+      },
+    });
+    const tamperedCloseResult = await timeoutPromise(
+      tamperedClose.promise,
+      8_000,
+      "node did not disconnect after receiving tampered gateway envelope",
+    );
+    assert.equal(
+      tamperedCloseResult.code,
+      4001,
+      `expected auth disconnect code=4001 for tampered envelope, got ${tamperedCloseResult.code}`,
+    );
+    assert.ok(
+      tamperedCloseResult.reason.includes("invalid gateway signature"),
+      `expected invalid signature close reason, got: ${tamperedCloseResult.reason || "<none>"}`,
+    );
+
     process.stdout.write(
-      "[smoke] PASS: signed handshake + process primitives + reconnect continuity + outbox replay verified\n",
+      "[smoke] PASS: signed handshake + process primitives + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -671,9 +702,10 @@ async function main(): Promise<void> {
       pending.reject(new Error("smoke shutting down"));
     }
     pendingResponses.clear();
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+    const openWs = wsRef;
+    if (openWs) {
       try {
-        wsRef.close(1000, "smoke complete");
+        (openWs as WebSocket).close(1000, "smoke complete");
       } catch {
         // ignore
       }
@@ -750,6 +782,25 @@ function sendSignedEnvelope(
   };
   const sig = signDetachedPayload(withMeta, privateKey);
   ws.send(JSON.stringify({ ...withMeta, sig }));
+}
+
+function sendTamperedEnvelope(
+  ws: WebSocket,
+  privateKey: KeyObject,
+  sender: string,
+  envelope:
+    | { type: "req"; id: string; method: string; params?: unknown }
+    | { type: "res"; id: string | null; ok: boolean; payload?: unknown; error?: unknown }
+    | { type: "event"; event: string; payload?: unknown },
+): void {
+  const withMeta = {
+    ...envelope,
+    ts: Date.now(),
+    sender,
+  };
+  const sig = signDetachedPayload(withMeta, privateKey);
+  // Deliberately mutate signed content after signature generation.
+  ws.send(JSON.stringify({ ...withMeta, ts: withMeta.ts + 1, sig }));
 }
 
 function verifyEnvelopeSignature(envelope: Record<string, unknown>, publicKey: KeyObject): boolean {

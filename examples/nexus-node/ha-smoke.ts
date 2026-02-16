@@ -379,6 +379,7 @@ async function waitForNodeOnline(params: {
   timeoutMs: number;
   autoApprove: boolean;
 }): Promise<void> {
+  let sawPending = false;
   let lastApprovalAttemptAt = 0;
   let approvalAttempts = 0;
   await waitForCondition({
@@ -407,6 +408,7 @@ async function waitForNodeOnline(params: {
       }
 
       const pendingDetected = nodeApi?.status === "pending" || nodeDb?.status === "pending";
+      if (pendingDetected) sawPending = true;
       if (params.autoApprove && pendingDetected) {
         const now = Date.now();
         // Retry approvals periodically; HAProxy/API routes and sqlite writes can be transiently flaky.
@@ -436,6 +438,9 @@ async function waitForNodeOnline(params: {
       return false;
     },
   });
+  if (params.autoApprove) {
+    assert.ok(sawPending, `expected pending pairing status before approval id=${params.nodeId}`);
+  }
 }
 
 function readOutboxProgress(nodeDbPath: string, processId: string): OutboxProgress {
