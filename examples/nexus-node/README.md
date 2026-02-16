@@ -81,6 +81,60 @@ Runtime policy mutation is command-gated. There is no gateway `policy.update` co
   - firewall-mode downgrade and deny-list clear require `--break-glass`
   - writes are atomic and applied immediately for new executions
 
+### `NEXUS_NODE_ALLOW_COMMANDS` semantics
+
+`NEXUS_NODE_ALLOW_COMMANDS` is the node execution allowlist for `system.run` / `process.start` command names.
+
+- It is **not** the full firewall policy model.
+- It gates command execution before process launch.
+- Hermes `denyCommands` is an additional restriction layer in `firewallMode=hermes`.
+
+Effective command behavior:
+
+- `transparent` / `audit-only`: allowed set = `NEXUS_NODE_ALLOW_COMMANDS`
+- `hermes`: allowed set = `NEXUS_NODE_ALLOW_COMMANDS` minus policy `denyCommands`
+
+So Hermes can deny an allowlisted command, but Hermes cannot allow a command that is missing from `NEXUS_NODE_ALLOW_COMMANDS`.
+Protocol capabilities (`symbols.list`, `audit.query`, process status/log/cancel) are separate from this command allowlist.
+
+### Node-side preset deployment + verification
+
+If you use `nexus-policyctl apply-preset <name>`, preset files must exist under `{stateDir}/policy-presets/`.
+
+Typical helper-script deployment layout:
+
+```bash
+cd ~/nexus-node-deploy
+rg "/data/nexus-node" docker-compose.yml
+```
+
+If compose uses a host bind mount like `~/.nexus-node:/data/nexus-node`:
+
+```bash
+STATE_DIR="$HOME/.nexus-node"
+mkdir -p "$STATE_DIR/policy-presets"
+cp -v /path/to/Nexus/examples/nexus-node/policies-live/*.json "$STATE_DIR/policy-presets/"
+```
+
+Then ensure allowlist + restart:
+
+```bash
+cd ~/nexus-node-deploy
+# include nexus-policyctl only if runtime policy mutation should be enabled
+sed -n '1,220p' .env | rg "NEXUS_NODE_ALLOW_COMMANDS"
+docker compose up -d --build
+docker compose logs --tail=120 nexus-node
+```
+
+Gateway/tool verification examples:
+
+```text
+node_system_which { "id": "reference-node-macos-1", "command": "nexus-policyctl" }
+node_system_run { "id": "reference-node-macos-1", "command": "nexus-policyctl show" }
+node_system_run { "id": "reference-node-macos-1", "command": "nexus-policyctl apply-preset 10-audit-soft" }
+node_audit_query { "id": "reference-node-macos-1", "type": "policy.command.applied", "limit": 20 }
+```
+
 ## Transport security policy
 
 - `ws://` is allowed for loopback/local-host style endpoints (`127.0.0.1`, `localhost`, `::1`, `host.docker.internal`).
