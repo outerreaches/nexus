@@ -121,10 +121,23 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+  # 8. Reference Node Smoke Test
+  node-smoke:
+    name: Reference Node Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run node:reference:smoke
+
   # Summary
   security-summary:
     name: Security Scan Summary
-    needs: [typecheck, lint, audit, semgrep, gitleaks, build]
+    needs: [typecheck, lint, audit, semgrep, gitleaks, build, node-smoke]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -138,3 +151,4 @@ jobs:
           echo "✅ Semgrep: ${{ needs.semgrep.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Gitleaks: ${{ needs.gitleaks.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Reference Node Smoke: ${{ needs.node-smoke.result }}" >> $GITHUB_STEP_SUMMARY
