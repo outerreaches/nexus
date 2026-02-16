@@ -119,6 +119,15 @@ async function requestJson(url: string, init?: RequestInit): Promise<HttpResult>
   }
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runCommand(
   command: string,
   args: string[],
@@ -424,7 +433,9 @@ async function waitForGatewayDb(gatewayDbPath: string, timeoutMs: number): Promi
   await waitForCondition({
     timeoutMs,
     intervalMs: 500,
-    message: `gateway DB not found at ${gatewayDbPath}`,
+    message:
+      `gateway DB not found at ${gatewayDbPath} ` +
+      `(override with NEXUS_HA_SMOKE_DB_PATH or NEXUS_HA_SMOKE_STATE_DIR if needed)`,
     predicate: async () => {
       try {
         await fs.access(gatewayDbPath);
@@ -590,8 +601,38 @@ async function main(): Promise<void> {
   const standbyUrl = process.env.NEXUS_HA_SMOKE_STANDBY_URL ?? "http://127.0.0.1:18892";
   const timeoutMs = Number(process.env.NEXUS_HA_SMOKE_TIMEOUT_MS ?? 90_000);
   const replayDeliveryCount = Math.max(6, Math.min(120, Number(process.env.NEXUS_HA_SMOKE_REPLAY_DELIVERIES ?? 24)));
-  const stateDir = process.env.NEXUS_HA_SMOKE_STATE_DIR ?? path.resolve(".ci-data/nexus");
-  const gatewayDbPath = process.env.NEXUS_HA_SMOKE_DB_PATH ?? path.join(stateDir, "nexus.db");
+  const explicitDbPath = (process.env.NEXUS_HA_SMOKE_DB_PATH ?? "").trim();
+  const explicitStateDir = (process.env.NEXUS_HA_SMOKE_STATE_DIR ?? "").trim();
+  const runtimeStateDir = (process.env.NEXUS_STATE_DIR ?? "").trim();
+  const defaultStateDir = path.resolve(".ci-data/nexus");
+  const candidateStateDirs = Array.from(
+    new Set([runtimeStateDir, "/data/nexus", defaultStateDir].filter((v): v is string => Boolean(v))),
+  );
+  let stateDir: string;
+  let gatewayDbPath: string;
+  if (explicitDbPath) {
+    gatewayDbPath = explicitDbPath;
+    stateDir = explicitStateDir || path.dirname(explicitDbPath);
+  } else if (explicitStateDir) {
+    stateDir = explicitStateDir;
+    gatewayDbPath = path.join(stateDir, "nexus.db");
+  } else {
+    let detectedDbPath: string | null = null;
+    for (const candidate of candidateStateDirs) {
+      const dbPath = path.join(candidate, "nexus.db");
+      if (await pathExists(dbPath)) {
+        detectedDbPath = dbPath;
+        break;
+      }
+    }
+    if (detectedDbPath) {
+      gatewayDbPath = detectedDbPath;
+      stateDir = path.dirname(detectedDbPath);
+    } else {
+      stateDir = runtimeStateDir || defaultStateDir;
+      gatewayDbPath = path.join(stateDir, "nexus.db");
+    }
+  }
   const composeFile = process.env.NEXUS_HA_SMOKE_COMPOSE_FILE ?? path.resolve("infra/docker-compose.ha.yml");
   const composeProject = process.env.NEXUS_HA_SMOKE_COMPOSE_PROJECT ?? "infra";
   const composeExecOverride = envBool("NEXUS_HA_SMOKE_USE_COMPOSE_EXEC");
