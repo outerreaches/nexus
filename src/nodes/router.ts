@@ -3,23 +3,50 @@ import { NodeRegistry } from "./registry.js";
 import type { NodeDescriptor, NodeRouter } from "./types.js";
 import { NodeRoutingError } from "./types.js";
 
+type ExecuteOnNodeParams = {
+  nodeId: string;
+  toolName: string;
+  args: unknown;
+  ctx: ToolContext;
+};
+
 export class NodeToolRouter implements NodeRouter {
   constructor(
     private readonly deps: {
       registry: NodeRegistry;
       log: (line: string) => void;
+      executeOnNode?: (params: ExecuteOnNodeParams) => Promise<string>;
     },
   ) {}
 
   async routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string> {
-    const node = this.selectNode(tool.name, ctx);
-    this.assertNodeCanExecute(node, tool.name, ctx);
-    this.deps.log(`nodes: route request node=${node.id} tool=${tool.name} backend=${node.backend}`);
-
-    throw new NodeRoutingError(
-      "NODE_ROUTING_NOT_IMPLEMENTED",
-      `Remote execution transport is not implemented yet (node=${node.id}, tool=${tool.name}).`,
+    const remoteToolName = this.resolveRemoteToolName(tool.name);
+    const node = this.selectNode(remoteToolName, ctx);
+    this.assertNodeCanExecute(node, remoteToolName, ctx);
+    this.deps.log(
+      `nodes: route request node=${node.id} tool=${tool.name} remote_tool=${remoteToolName} backend=${node.backend}`,
     );
+
+    if (node.backend !== "nexus") {
+      throw new NodeRoutingError(
+        "NODE_ROUTING_NOT_IMPLEMENTED",
+        `Node backend ${node.backend} is reserved but not implemented (node=${node.id}).`,
+      );
+    }
+
+    if (!this.deps.executeOnNode) {
+      throw new NodeRoutingError(
+        "NODE_ROUTING_NOT_IMPLEMENTED",
+        `Remote execution transport is not wired (node=${node.id}, tool=${remoteToolName}).`,
+      );
+    }
+
+    return this.deps.executeOnNode({
+      nodeId: node.id,
+      toolName: remoteToolName,
+      args,
+      ctx,
+    });
   }
 
   private selectNode(toolName: string, ctx: ToolContext): NodeDescriptor {
@@ -72,5 +99,11 @@ export class NodeToolRouter implements NodeRouter {
 
   private nodeHasCapability(node: NodeDescriptor, toolName: string): boolean {
     return node.capabilities.includes("*") || node.capabilities.includes(toolName);
+  }
+
+  private resolveRemoteToolName(toolName: string): string {
+    // Current local shell tool maps to protocol-level system.run on Nexus nodes.
+    if (toolName === "shell_exec") return "system.run";
+    return toolName;
   }
 }

@@ -1,15 +1,36 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, type KeyObject } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
+import {
+  parseNodePublicKey,
+  signDetachedPayload,
+  signProtocolEnvelope,
+  verifyDetachedPayload,
+  verifyProtocolEnvelope,
+  type GatewayNodeIdentity,
+} from "./auth.js";
 import { NodeRegistry } from "./registry.js";
+import { NodeRoutingError } from "./types.js";
 import type { NodeBackend, NodeFirewallMode, NodeTrustLevel } from "../storage/nodes.js";
+
+type HandshakeChallenge = {
+  nodeNonce: string;
+  gatewayNonce: string;
+  issuedAt: number;
+};
 
 type NodeSocketSession = {
   sessionId: string;
   nodeId: string | null;
+  nodeSender: string | null;
+  nodePublicKey: KeyObject | null;
+  nodePublicKeyRaw: string | null;
+  nodeFingerprint: string | null;
+  authState: "connected" | "challenged" | "authenticated";
+  pendingChallenge: HandshakeChallenge | null;
   openedAt: number;
   lastSeenAt: number;
   heartbeatTimer: NodeJS.Timeout | null;
@@ -24,17 +45,49 @@ type UpgradeCapableServer = {
 type ProtocolRequest = {
   type: "req";
   id: string;
+  ts: number;
+  sender: string;
+  sig: string;
   method: string;
   params?: unknown;
 };
 
+type ProtocolResponse = {
+  type: "res";
+  id: string | null;
+  ts: number;
+  sender: string;
+  sig: string;
+  ok: boolean;
+  payload?: unknown;
+  error?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+  };
+};
+
 type ProtocolEvent = {
   type: "event";
+  ts: number;
+  sender: string;
+  sig: string;
   event: string;
   payload?: unknown;
 };
 
-type ProtocolMessage = ProtocolRequest | ProtocolEvent;
+type ProtocolMessage = ProtocolRequest | ProtocolResponse | ProtocolEvent;
+
+type PendingGatewayRequest = {
+  id: string;
+  nodeId: string;
+  sessionId: string;
+  method: string;
+  createdAt: number;
+  timeout: NodeJS.Timeout;
+  resolve: (response: ProtocolResponse) => void;
+  reject: (error: NodeRoutingError) => void;
+};
 
 export class NodeWebSocketGateway {
   private readonly wss = new WebSocketServer({ noServer: true });
@@ -42,21 +95,34 @@ export class NodeWebSocketGateway {
   private readonly activeNodeSessions = new Map<string, string>();
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly maxMessageSkewMs: number;
+  private readonly pendingGatewayRequests = new Map<string, PendingGatewayRequest>();
+  private readonly identity: GatewayNodeIdentity;
+  private readonly requireMessageSignatures: boolean;
   private readonly gatewaySender: string;
   private server: UpgradeCapableServer | null = null;
 
   constructor(
     private readonly deps: {
+      identity: GatewayNodeIdentity;
       registry: NodeRegistry;
       isStandby: () => boolean;
       log: (line: string) => void;
       heartbeatIntervalMs?: number;
       heartbeatTimeoutMs?: number;
+      requestTimeoutMs?: number;
+      maxMessageSkewMs?: number;
+      requireMessageSignatures?: boolean;
       gatewaySender?: string;
     },
   ) {
+    this.identity = deps.identity;
     this.heartbeatIntervalMs = Math.max(5_000, deps.heartbeatIntervalMs ?? 30_000);
     this.heartbeatTimeoutMs = Math.max(this.heartbeatIntervalMs * 2, deps.heartbeatTimeoutMs ?? 95_000);
+    this.requestTimeoutMs = Math.max(2_000, deps.requestTimeoutMs ?? 60_000);
+    this.maxMessageSkewMs = Math.max(5_000, deps.maxMessageSkewMs ?? 120_000);
+    this.requireMessageSignatures = deps.requireMessageSignatures ?? true;
     this.gatewaySender = deps.gatewaySender ?? "gateway:primary";
   }
 
@@ -73,6 +139,7 @@ export class NodeWebSocketGateway {
       this.server.off("upgrade", this.handleUpgrade);
       this.server = null;
     }
+    this.rejectAllPendingRequests("gateway shutdown");
     this.closeNodeConnections("gateway shutdown");
     this.wss.removeAllListeners();
     try {
@@ -95,6 +162,73 @@ export class NodeWebSocketGateway {
         }
       }
     }
+  }
+
+  async executeTool(params: { nodeId: string; tool: string; args: unknown; timeoutMs?: number }): Promise<string> {
+    const target = this.resolveActiveNodeSocket(params.nodeId);
+    if (!target) {
+      throw new NodeRoutingError("NODE_SOCKET_UNAVAILABLE", `Node ${params.nodeId} does not have an active websocket session.`);
+    }
+
+    const requestId = randomUUID();
+    const timeoutMs = Math.max(2_000, params.timeoutMs ?? this.requestTimeoutMs);
+    const response = await new Promise<ProtocolResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingGatewayRequests.delete(requestId);
+        reject(
+          new NodeRoutingError(
+            "NODE_RESPONSE_TIMEOUT",
+            `Timed out waiting for ${params.tool} response from node ${params.nodeId} after ${timeoutMs}ms.`,
+          ),
+        );
+      }, timeoutMs);
+      timeout.unref?.();
+
+      this.pendingGatewayRequests.set(requestId, {
+        id: requestId,
+        nodeId: params.nodeId,
+        sessionId: target.session.sessionId,
+        method: "tool.execute",
+        createdAt: Date.now(),
+        timeout,
+        resolve,
+        reject,
+      });
+
+      const sent = this.sendSignedEnvelope(target.ws, {
+        type: "req",
+        id: requestId,
+        method: "tool.execute",
+        params: {
+          tool: params.tool,
+          args: params.args,
+        },
+      });
+      if (!sent) {
+        const pending = this.pendingGatewayRequests.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingGatewayRequests.delete(requestId);
+        }
+        reject(
+          new NodeRoutingError(
+            "NODE_SOCKET_UNAVAILABLE",
+            `Failed to send ${params.tool} request to node ${params.nodeId}; websocket is not writable.`,
+          ),
+        );
+      }
+    });
+
+    if (!response.ok) {
+      const code = response.error?.code ?? "NODE_EXECUTION_FAILED";
+      const message = response.error?.message ?? `Node ${params.nodeId} failed to execute ${params.tool}.`;
+      const err = new Error(message) as Error & { code: string };
+      err.name = "NodeRemoteExecutionError";
+      err.code = code;
+      throw err;
+    }
+
+    return this.normalizeToolResult(response.payload);
   }
 
   private readonly handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
@@ -138,6 +272,12 @@ export class NodeWebSocketGateway {
     const session: NodeSocketSession = {
       sessionId: randomUUID(),
       nodeId: null,
+      nodeSender: null,
+      nodePublicKey: null,
+      nodePublicKeyRaw: null,
+      nodeFingerprint: null,
+      authState: "connected",
+      pendingChallenge: null,
       openedAt: nowMs,
       lastSeenAt: nowMs,
       heartbeatTimer: null,
@@ -165,7 +305,6 @@ export class NodeWebSocketGateway {
   };
 
   private handleMessage(ws: WebSocket, session: NodeSocketSession, data: RawData, isBinary: boolean): void {
-    this.touchSession(session);
     if (isBinary) {
       this.sendErrorResponse(ws, null, "INVALID_REQUEST", "Binary websocket frames are not supported.", false);
       return;
@@ -180,17 +319,176 @@ export class NodeWebSocketGateway {
       return;
     }
 
-    const msg = this.asProtocolMessage(parsed);
+    const envelope = this.asObject(parsed);
+    const msg = this.asProtocolMessage(envelope);
     if (!msg) {
       this.sendErrorResponse(ws, null, "INVALID_REQUEST", "Invalid protocol message envelope.", false);
       return;
     }
 
+    const auth = this.verifyIncomingMessage(session, msg, envelope);
+    if (!auth.ok) {
+      const id = msg.type === "req" ? msg.id : null;
+      this.sendErrorResponse(ws, id, auth.code, auth.message, false);
+      this.closeForAuthFailure(ws, auth.message);
+      return;
+    }
+
+    this.touchSession(session);
+
     if (msg.type === "req") {
       this.handleRequestMessage(ws, session, msg);
       return;
     }
+    if (msg.type === "res") {
+      this.handleResponseMessage(session, msg);
+      return;
+    }
     this.handleEventMessage(session, msg);
+  }
+
+  private verifyIncomingMessage(
+    session: NodeSocketSession,
+    msg: ProtocolMessage,
+    envelope: Record<string, unknown>,
+  ): { ok: true } | { ok: false; code: string; message: string } {
+    const nowMs = Date.now();
+    const skewMs = Math.abs(nowMs - msg.ts);
+    if (skewMs > this.maxMessageSkewMs) {
+      return {
+        ok: false,
+        code: "AUTH_INVALID",
+        message: `Message timestamp skew is too large (${skewMs}ms).`,
+      };
+    }
+
+    if (!msg.sender.startsWith("node:")) {
+      return {
+        ok: false,
+        code: "AUTH_INVALID",
+        message: "Message sender must use node:<id> format.",
+      };
+    }
+
+    if (msg.type === "req" && (msg.method === "connect.hello" || msg.method === "connect")) {
+      const params = this.asObject(msg.params);
+      const hello = this.extractHelloIdentity(params);
+      if (!hello) {
+        return {
+          ok: false,
+          code: "AUTH_INVALID",
+          message: "connect.hello identity is missing or invalid.",
+        };
+      }
+      const expectedSender = `node:${hello.nodeId}`;
+      if (msg.sender !== expectedSender) {
+        return {
+          ok: false,
+          code: "AUTH_INVALID",
+          message: `connect.hello sender mismatch. expected=${expectedSender} actual=${msg.sender}`,
+        };
+      }
+      if (this.requireMessageSignatures && !verifyProtocolEnvelope(envelope, hello.publicKey)) {
+        return {
+          ok: false,
+          code: "AUTH_INVALID",
+          message: "connect.hello signature verification failed.",
+        };
+      }
+      return { ok: true };
+    }
+
+    if (!session.nodeId || !session.nodeSender || !session.nodePublicKey) {
+      return {
+        ok: false,
+        code: "AUTH_INVALID",
+        message: "Node identity is not established; send connect.hello first.",
+      };
+    }
+    if (msg.sender !== session.nodeSender) {
+      return {
+        ok: false,
+        code: "AUTH_INVALID",
+        message: `Message sender mismatch. expected=${session.nodeSender} actual=${msg.sender}`,
+      };
+    }
+    if (this.requireMessageSignatures && !verifyProtocolEnvelope(envelope, session.nodePublicKey)) {
+      return {
+        ok: false,
+        code: "AUTH_INVALID",
+        message: "Message signature verification failed.",
+      };
+    }
+
+    if (session.authState !== "authenticated") {
+      const isAllowedHandshakeStep = msg.type === "req" && (msg.method === "connect.prove" || msg.method === "ping");
+      if (!isAllowedHandshakeStep) {
+        return {
+          ok: false,
+          code: "AUTH_INVALID",
+          message: "Session is not authenticated yet.",
+        };
+      }
+    }
+
+    return { ok: true };
+  }
+
+  private closeForAuthFailure(ws: WebSocket, reason: string): void {
+    try {
+      ws.close(4001, truncateReason(reason));
+    } catch {
+      try {
+        ws.terminate();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private extractHelloIdentity(params: Record<string, unknown>): {
+    nodeId: string;
+    fingerprint: string;
+    publicKey: KeyObject;
+    publicKeyRaw: string;
+  } | null {
+    const device = this.asObject(params.device);
+    const nodeId = this.asString(params.nodeId) ?? this.asString(device.id) ?? this.asString(device.fingerprint);
+    const publicKeyRaw = this.asString(device.publicKey) ?? this.asString(params.publicKey);
+    if (!nodeId || !publicKeyRaw) return null;
+
+    const parsed = parseNodePublicKey(publicKeyRaw);
+    if (!parsed) return null;
+
+    const providedFingerprint = this.asString(device.fingerprint) ?? this.asString(params.fingerprint);
+    if (providedFingerprint && providedFingerprint !== parsed.fingerprint) {
+      this.deps.log(
+        `nodes/ws: fingerprint mismatch provided=${providedFingerprint} derived=${parsed.fingerprint} node=${nodeId}; using derived fingerprint`,
+      );
+    }
+
+    return {
+      nodeId,
+      fingerprint: parsed.fingerprint,
+      publicKey: parsed.key,
+      publicKeyRaw: parsed.raw,
+    };
+  }
+
+  private buildHandshakeProofPayload(params: {
+    nodeId: string;
+    sessionId: string;
+    nodeNonce: string;
+    gatewayNonce: string;
+  }): Record<string, unknown> {
+    return {
+      protocol: "nexus-node-v1",
+      kind: "connect-proof",
+      nodeId: params.nodeId,
+      sessionId: params.sessionId,
+      nodeNonce: params.nodeNonce,
+      gatewayNonce: params.gatewayNonce,
+    };
   }
 
   private handleRequestMessage(ws: WebSocket, session: NodeSocketSession, msg: ProtocolRequest): void {
@@ -216,6 +514,29 @@ export class NodeWebSocketGateway {
     }
   }
 
+  private handleResponseMessage(session: NodeSocketSession, msg: ProtocolResponse): void {
+    if (!msg.id) return;
+    const pending = this.pendingGatewayRequests.get(msg.id);
+    if (!pending) return;
+
+    if (!session.nodeId) {
+      this.deps.log(
+        `nodes/ws: dropped response id=${msg.id} reason=node_not_identified session=${session.sessionId}`,
+      );
+      return;
+    }
+    if (pending.nodeId !== session.nodeId || pending.sessionId !== session.sessionId) {
+      this.deps.log(
+        `nodes/ws: dropped response id=${msg.id} reason=session_mismatch expected=${pending.nodeId}/${pending.sessionId} actual=${session.nodeId}/${session.sessionId}`,
+      );
+      return;
+    }
+
+    this.pendingGatewayRequests.delete(msg.id);
+    clearTimeout(pending.timeout);
+    pending.resolve(msg);
+  }
+
   private handleEventMessage(session: NodeSocketSession, msg: ProtocolEvent): void {
     if (!session.nodeId) return;
     if (msg.event !== "capability.update" && msg.event !== "caps.advertise") return;
@@ -233,6 +554,11 @@ export class NodeWebSocketGateway {
   }
 
   private handleConnectHello(ws: WebSocket, session: NodeSocketSession, msg: ProtocolRequest): void {
+    if (session.authState !== "connected") {
+      this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.hello has already been processed for this session.", false);
+      return;
+    }
+
     const params = this.asObject(msg.params);
     const role = this.asString(params.role);
     if (role && role !== "node") {
@@ -240,21 +566,29 @@ export class NodeWebSocketGateway {
       return;
     }
 
-    const device = this.asObject(params.device);
-    const nodeId = this.asString(params.nodeId) ?? this.asString(device.id) ?? this.asString(device.fingerprint);
-    const fingerprint = this.asString(device.fingerprint) ?? this.asString(device.id) ?? nodeId;
-    const publicKey = this.asString(device.publicKey) ?? "";
-    const label = this.asString(params.displayName) ?? (nodeId ? `Node ${nodeId.slice(0, 8)}` : "Unknown Node");
-    if (!nodeId || !fingerprint || !publicKey) {
+    const helloIdentity = this.extractHelloIdentity(params);
+    if (!helloIdentity) {
       this.sendErrorResponse(
         ws,
         msg.id,
         "AUTH_INVALID",
-        "connect.hello requires node identifier, fingerprint, and public key.",
+        "connect.hello requires node identifier, fingerprint, and an Ed25519 public key.",
         false,
       );
       return;
     }
+
+    const nodeId = helloIdentity.nodeId;
+    const fingerprint = helloIdentity.fingerprint;
+    const publicKey = helloIdentity.publicKeyRaw;
+    const nodePublicKey = helloIdentity.publicKey;
+    const nodeNonce = this.asString(params.nodeNonce);
+    if (!nodeNonce) {
+      this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.hello requires nodeNonce for challenge-response.", false);
+      return;
+    }
+
+    const label = this.asString(params.displayName) ?? (nodeId ? `Node ${nodeId.slice(0, 8)}` : "Unknown Node");
 
     const nowMs = Date.now();
     const backend = this.parseBackend(this.asString(params.backend));
@@ -263,8 +597,83 @@ export class NodeWebSocketGateway {
     const capabilities = this.parseStringArray(params.caps ?? params.capabilities);
     const tags = this.parseStringArray(params.tags);
     const endpoint = this.inferEndpoint(session.request);
+    const existing = this.deps.registry.get(nodeId);
+    if (!existing) {
+      this.deps.registry.registerOrUpdate({
+        id: nodeId,
+        label,
+        publicKey,
+        fingerprint,
+        status: "pending",
+        endpoint,
+        backend,
+        trustLevel,
+        firewallMode,
+        capabilities,
+        tags,
+        metadata: this.asObject(params.metadata),
+        connectedAt: null,
+        lastSeenAt: nowMs,
+        nowMs,
+      });
+      this.deps.log(
+        `nodes/ws: pairing required node=${nodeId} fingerprint=${fingerprint} sender=${msg.sender}. Approve with node_set_status status=approved.`,
+      );
+      this.sendErrorResponse(
+        ws,
+        msg.id,
+        "PAIRING_REQUIRED",
+        `Node ${nodeId} is not approved. Set status=approved before reconnecting.`,
+        false,
+      );
+      this.closeForAuthFailure(ws, "pairing required");
+      return;
+    }
+    if (existing.fingerprint !== fingerprint) {
+      this.sendErrorResponse(
+        ws,
+        msg.id,
+        "AUTH_INVALID",
+        `Fingerprint mismatch for node ${nodeId}. Expected ${existing.fingerprint}, got ${fingerprint}.`,
+        false,
+      );
+      this.closeForAuthFailure(ws, "fingerprint mismatch");
+      return;
+    }
+    if (existing.status === "blocked") {
+      this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", `Node ${nodeId} is blocked and cannot connect.`, false);
+      this.closeForAuthFailure(ws, "node blocked");
+      return;
+    }
+    if (existing.status === "pending") {
+      this.deps.registry.registerOrUpdate({
+        id: nodeId,
+        label,
+        publicKey,
+        fingerprint,
+        status: "pending",
+        endpoint,
+        backend,
+        trustLevel,
+        firewallMode,
+        capabilities,
+        tags,
+        metadata: this.asObject(params.metadata),
+        connectedAt: null,
+        lastSeenAt: nowMs,
+        nowMs,
+      });
+      this.sendErrorResponse(
+        ws,
+        msg.id,
+        "PAIRING_PENDING",
+        `Node ${nodeId} is pending approval. Approve with node_set_status status=approved.`,
+        false,
+      );
+      this.closeForAuthFailure(ws, "pairing pending");
+      return;
+    }
 
-    const firstHelloInSession = session.nodeId === null;
     this.deps.registry.registerOrUpdate({
       id: nodeId,
       label,
@@ -282,15 +691,13 @@ export class NodeWebSocketGateway {
       lastSeenAt: nowMs,
       nowMs,
     });
-    if (firstHelloInSession) {
-      this.deps.registry.beginSession({
-        id: session.sessionId,
-        nodeId,
-        startedAt: nowMs,
-        ipAddress: endpoint,
-        capabilities,
-      });
-    }
+    this.deps.registry.beginSession({
+      id: session.sessionId,
+      nodeId,
+      startedAt: nowMs,
+      ipAddress: endpoint,
+      capabilities,
+    });
     this.deps.registry.setStatus({
       id: nodeId,
       status: "online",
@@ -299,15 +706,35 @@ export class NodeWebSocketGateway {
     });
 
     session.nodeId = nodeId;
+    session.nodeSender = msg.sender;
+    session.nodePublicKey = nodePublicKey;
+    session.nodePublicKeyRaw = publicKey;
+    session.nodeFingerprint = fingerprint;
+    session.authState = "challenged";
     const previousSessionId = this.activeNodeSessions.get(nodeId);
     this.activeNodeSessions.set(nodeId, session.sessionId);
     if (previousSessionId && previousSessionId !== session.sessionId) {
+      this.rejectPendingRequestsForSession(previousSessionId, "node session replaced");
       this.deps.log(`nodes/ws: node=${nodeId} replaced prior session=${previousSessionId}`);
     }
 
+    const gatewayNonce = randomBytes(32).toString("base64url");
+    session.pendingChallenge = {
+      nodeNonce,
+      gatewayNonce,
+      issuedAt: nowMs,
+    };
+    const proofPayload = this.buildHandshakeProofPayload({
+      nodeId,
+      sessionId: session.sessionId,
+      nodeNonce,
+      gatewayNonce,
+    });
     const challenge = {
-      gatewayNonce: randomBytes(32).toString("base64url"),
-      gatewayPublicKey: null,
+      gatewayNonce,
+      gatewayPublicKey: this.identity.publicKeyRaw,
+      gatewayFingerprint: this.identity.fingerprint,
+      gatewayProofSig: signDetachedPayload(proofPayload, this.identity.privateKey),
       ts: nowMs,
       sessionId: session.sessionId,
     };
@@ -321,33 +748,74 @@ export class NodeWebSocketGateway {
   }
 
   private handleConnectProve(ws: WebSocket, session: NodeSocketSession, msg: ProtocolRequest): void {
-    if (!session.nodeId) {
+    if (!session.nodeId || !session.nodePublicKey || !session.pendingChallenge || session.authState !== "challenged") {
       this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.hello must be completed before connect.prove.", false);
       return;
     }
+
+    const params = this.asObject(msg.params);
+    const nodeProofSig = this.asString(params.nodeProofSig);
+    if (!nodeProofSig) {
+      this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.prove requires nodeProofSig.", false);
+      return;
+    }
+
+    const proofPayload = this.buildHandshakeProofPayload({
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      nodeNonce: session.pendingChallenge.nodeNonce,
+      gatewayNonce: session.pendingChallenge.gatewayNonce,
+    });
+    const verified = verifyDetachedPayload(proofPayload, nodeProofSig, session.nodePublicKey);
+    if (!verified) {
+      this.sendErrorResponse(ws, msg.id, "AUTH_INVALID", "connect.prove signature verification failed.", false);
+      this.closeForAuthFailure(ws, "invalid connect.prove signature");
+      return;
+    }
+
+    const challenge = session.pendingChallenge;
+    session.authState = "authenticated";
+    session.pendingChallenge = null;
+
     const nowMs = Date.now();
     this.deps.registry.markHeartbeat({
       id: session.nodeId,
       nowMs,
       endpoint: this.inferEndpoint(session.request),
     });
+    const acceptPayload = this.buildHandshakeProofPayload({
+      nodeId: session.nodeId,
+      sessionId: session.sessionId,
+      nodeNonce: challenge.nodeNonce,
+      gatewayNonce: challenge.gatewayNonce,
+    });
+    this.sendEvent(ws, "connect.accept", {
+      sessionId: session.sessionId,
+      connectedAt: session.openedAt,
+      gatewayFingerprint: this.identity.fingerprint,
+      gatewayAcceptSig: signDetachedPayload(acceptPayload, this.identity.privateKey),
+    });
     this.sendOkResponse(ws, msg.id, {
       sessionId: session.sessionId,
       status: "ready",
       connectedAt: session.openedAt,
     });
+    this.deps.log(`nodes/ws: auth ready node=${session.nodeId} session=${session.sessionId}`);
   }
 
   private handleDisconnect(ws: WebSocket, session: NodeSocketSession, reason: string): void {
     this.clearHeartbeat(session);
     this.sessions.delete(ws);
+    this.rejectPendingRequestsForSession(session.sessionId, reason);
     if (session.nodeId) {
       const activeSession = this.activeNodeSessions.get(session.nodeId);
       if (activeSession === session.sessionId) {
         this.activeNodeSessions.delete(session.nodeId);
+        const current = this.deps.registry.get(session.nodeId);
+        const nextStatus = current?.status === "blocked" || current?.status === "pending" ? current.status : "offline";
         this.deps.registry.setStatus({
           id: session.nodeId,
-          status: "offline",
+          status: nextStatus,
           connectedAt: null,
           nowMs: Date.now(),
         });
@@ -415,24 +883,80 @@ export class NodeWebSocketGateway {
     });
   }
 
+  private resolveActiveNodeSocket(nodeId: string): { ws: WebSocket; session: NodeSocketSession } | null {
+    const activeSessionId = this.activeNodeSessions.get(nodeId);
+    if (!activeSessionId) return null;
+    for (const [ws, session] of this.sessions) {
+      if (session.nodeId !== nodeId) continue;
+      if (session.sessionId !== activeSessionId) continue;
+      if (session.authState !== "authenticated") continue;
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      return { ws, session };
+    }
+    return null;
+  }
+
+  private rejectPendingRequestsForSession(sessionId: string, reason: string): void {
+    for (const [requestId, pending] of this.pendingGatewayRequests) {
+      if (pending.sessionId !== sessionId) continue;
+      clearTimeout(pending.timeout);
+      this.pendingGatewayRequests.delete(requestId);
+      pending.reject(
+        new NodeRoutingError(
+          "NODE_SOCKET_UNAVAILABLE",
+          `Node session closed before response (node=${pending.nodeId}, method=${pending.method}, requestId=${pending.id}, reason=${reason}).`,
+        ),
+      );
+    }
+  }
+
+  private rejectAllPendingRequests(reason: string): void {
+    for (const [requestId, pending] of this.pendingGatewayRequests) {
+      clearTimeout(pending.timeout);
+      this.pendingGatewayRequests.delete(requestId);
+      pending.reject(
+        new NodeRoutingError(
+          "NODE_SOCKET_UNAVAILABLE",
+          `Gateway closed before node response (node=${pending.nodeId}, method=${pending.method}, requestId=${pending.id}, reason=${reason}).`,
+        ),
+      );
+    }
+  }
+
+  private normalizeToolResult(payload: unknown): string {
+    if (payload === null || payload === undefined) return "";
+    if (typeof payload === "string") return payload;
+    if (typeof payload === "number" || typeof payload === "boolean") return String(payload);
+
+    const payloadObj = this.asObject(payload);
+    const output = this.asString(payloadObj.output);
+    if (output) return output;
+    const result = this.asString(payloadObj.result);
+    if (result) return result;
+    const text = this.asString(payloadObj.text);
+    if (text) return text;
+
+    try {
+      return JSON.stringify(payload, null, 2);
+    } catch {
+      return String(payload);
+    }
+  }
+
   private sendEvent(ws: WebSocket, event: string, payload: Record<string, unknown>): void {
-    this.sendJson(ws, {
+    this.sendSignedEnvelope(ws, {
       type: "event",
       event,
       payload,
-      ts: Date.now(),
-      sender: this.gatewaySender,
     });
   }
 
   private sendOkResponse(ws: WebSocket, id: string | null, payload: Record<string, unknown>): void {
-    this.sendJson(ws, {
+    this.sendSignedEnvelope(ws, {
       type: "res",
       id,
       ok: true,
       payload,
-      ts: Date.now(),
-      sender: this.gatewaySender,
     });
   }
 
@@ -443,22 +967,40 @@ export class NodeWebSocketGateway {
     message: string,
     retryable: boolean,
   ): void {
-    this.sendJson(ws, {
+    this.sendSignedEnvelope(ws, {
       type: "res",
       id,
       ok: false,
       error: { code, message, retryable },
-      ts: Date.now(),
-      sender: this.gatewaySender,
     });
   }
 
-  private sendJson(ws: WebSocket, payload: Record<string, unknown>): void {
-    if (ws.readyState !== WebSocket.OPEN) return;
+  private sendSignedEnvelope(ws: WebSocket, envelope: Record<string, unknown>): boolean {
+    try {
+      const withMeta = {
+        ...envelope,
+        ts: Date.now(),
+        sender: this.gatewaySender,
+      };
+      const sig = signProtocolEnvelope(withMeta, this.identity.privateKey);
+      return this.sendJson(ws, {
+        ...withMeta,
+        sig,
+      });
+    } catch (err) {
+      this.deps.log(`nodes/ws: signing failed error=${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  private sendJson(ws: WebSocket, payload: Record<string, unknown>): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false;
     try {
       ws.send(JSON.stringify(payload));
+      return true;
     } catch (err) {
       this.deps.log(`nodes/ws: send failed error=${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 
@@ -509,6 +1051,11 @@ export class NodeWebSocketGateway {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const obj = value as Record<string, unknown>;
     const type = this.asString(obj.type);
+    const ts = this.asNumber(obj.ts);
+    const sender = this.asString(obj.sender);
+    const sig = this.asString(obj.sig);
+    if (!ts || !sender || (this.requireMessageSignatures && !sig)) return null;
+    const normalizedSig = sig ?? "";
     if (type === "req") {
       const id = this.asString(obj.id);
       const method = this.asString(obj.method);
@@ -516,8 +1063,36 @@ export class NodeWebSocketGateway {
       return {
         type: "req",
         id,
+        ts,
+        sender,
+        sig: normalizedSig,
         method,
         params: obj.params,
+      };
+    }
+    if (type === "res") {
+      const ok = obj.ok;
+      if (typeof ok !== "boolean") return null;
+      const errorObj = this.asObject(obj.error);
+      const code = this.asString(errorObj.code);
+      const message = this.asString(errorObj.message);
+      const retryable = typeof errorObj.retryable === "boolean" ? errorObj.retryable : undefined;
+      return {
+        type: "res",
+        id: this.asString(obj.id),
+        ts,
+        sender,
+        sig: normalizedSig,
+        ok,
+        payload: obj.payload,
+        error:
+          code || message || retryable !== undefined
+            ? {
+                code: code ?? "NODE_EXECUTION_FAILED",
+                message: message ?? "Node execution failed.",
+                retryable,
+              }
+            : undefined,
       };
     }
     if (type === "event") {
@@ -525,6 +1100,9 @@ export class NodeWebSocketGateway {
       if (!event) return null;
       return {
         type: "event",
+        ts,
+        sender,
+        sig: normalizedSig,
         event,
         payload: obj.payload,
       };
@@ -541,6 +1119,11 @@ export class NodeWebSocketGateway {
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  }
+
+  private asNumber(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return value;
   }
 
   private parseStringArray(value: unknown): string[] {

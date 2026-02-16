@@ -31,6 +31,7 @@ import { runBackup } from "../maintenance/db-backup.js";
 import { sendHANotification } from "./ha-notifications.js";
 import { randomId } from "../data-intake/utils.js";
 import { NodeRegistry, NodeToolRouter, NodeWebSocketGateway } from "../nodes/index.js";
+import { loadOrCreateGatewayIdentity } from "../nodes/auth.js";
 import { registerNodeRoutes } from "./routes/nodes.js";
 
 export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
@@ -87,7 +88,28 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   const db = await openDatabase(paths.dbPath);
   const nodeRegistry = new NodeRegistry({ db, log });
-  const nodeRouter = new NodeToolRouter({ registry: nodeRegistry, log });
+  const nodeGatewayIdentity = await loadOrCreateGatewayIdentity(paths.stateDir);
+  log(`nodes/auth: loaded gateway ed25519 identity fingerprint=${nodeGatewayIdentity.fingerprint}`);
+  // Standby mode tracking is declared early so node transport, status, and HA
+  // transitions all share the same source of truth.
+  let isStandby = params.standby ?? false;
+  const nodeWsGateway = new NodeWebSocketGateway({
+    identity: nodeGatewayIdentity,
+    registry: nodeRegistry,
+    isStandby: () => isStandby,
+    log,
+    gatewaySender: `gateway:${hostId}`,
+  });
+  const nodeRouter = new NodeToolRouter({
+    registry: nodeRegistry,
+    log,
+    executeOnNode: async ({ nodeId, toolName, args }) =>
+      nodeWsGateway.executeTool({
+        nodeId,
+        tool: toolName,
+        args,
+      }),
+  });
   initDataIntake();
   ensureSystemJobs({ db, nowMs: Date.now(), stateDir: paths.stateDir, log });
 
@@ -267,14 +289,6 @@ export async function startGateway(params: { configPath: string; port?: number; 
   let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;
   const getProactiveStatus = () => proactive?.getStatus() ?? { enabled: false, lastTickAt: null, nextTickAt: null };
 
-  // Standby mode tracking (declared early so getStatus can reference it)
-  let isStandby = params.standby ?? false;
-  const nodeWsGateway = new NodeWebSocketGateway({
-    registry: nodeRegistry,
-    isStandby: () => isStandby,
-    log,
-    gatewaySender: `gateway:${hostId}`,
-  });
   const getMode = () => (isStandby ? "standby" : "active");
   logMode = getMode;
 

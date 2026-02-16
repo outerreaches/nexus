@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { deleteNodeById, getNodeById, listNodes } from "../storage/nodes.js";
+import { deleteNodeById, getNodeById, listNodes, setNodeStatus } from "../storage/nodes.js";
 
 function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   const db = ctx.db as NexusDatabase | undefined;
@@ -61,5 +61,44 @@ export const nodeDelete = defineTool({
     const removed = deleteNodeById(db, args.id);
     if (!removed) return "ERROR: node not found";
     return JSON.stringify({ ok: true, id: args.id, deleted: true }, null, 2);
+  },
+});
+
+export const nodeSetStatus = defineTool({
+  name: "node_set_status",
+  description:
+    "Set node approval/lifecycle status. Use status=approved to allow pending nodes to connect, or blocked to revoke access.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    status: z.enum(["pending", "approved", "blocked", "offline", "online"]),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+
+    const nowMs = ctx.nowMs();
+    const connectedAt =
+      args.status === "blocked" || args.status === "pending"
+        ? null
+        : args.status === "offline"
+          ? null
+          : row.connectedAt;
+    setNodeStatus(db, {
+      id: args.id,
+      status: args.status,
+      connectedAt,
+      nowMs,
+    });
+    const updated = getNodeById(db, args.id);
+    return JSON.stringify(
+      {
+        ok: true,
+        node: updated,
+      },
+      null,
+      2,
+    );
   },
 });
