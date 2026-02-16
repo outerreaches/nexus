@@ -147,6 +147,7 @@ docker run --rm \
   -e NEXUS_NODE_GATEWAY_URL=ws://host.docker.internal:18789/nx/nodes \
   -e NEXUS_NODE_ID=reference-node-1 \
   -e NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls \
+  -e TZ=America/Los_Angeles \
   -e NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=1 \
   -v nexus_node_state:/data/nexus-node \
   nexus-reference-node
@@ -184,6 +185,14 @@ On macOS, the generated `.env` defaults to:
 ```bash
 NEXUS_NODE_GATEWAY_URL=ws://host.docker.internal:18789/nx/nodes
 ```
+
+Timezone note: Dockerized nodes run Linux userland. If `date` appears off by a day relative to local time, set:
+
+```bash
+NEXUS_NODE_TZ=America/Los_Angeles
+```
+
+The deploy script auto-detects a host timezone when possible and uses it as the default.
 
 On Linux, `.env` starts with a `CHANGE_ME` placeholder for `NEXUS_NODE_GATEWAY_URL`.
 

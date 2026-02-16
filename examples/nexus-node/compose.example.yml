@@ -12,6 +12,7 @@ services:
       NEXUS_NODE_NAME: Nexus Reference Node
       NEXUS_NODE_CAPS: system.run,system.which,process.start,process.status,process.logs,process.cancel,policy.update,symbols.list,audit.query
       NEXUS_NODE_ALLOW_COMMANDS: echo,uname,whoami,pwd,date,ls
+      TZ: ${NEXUS_NODE_TZ:-UTC}
     volumes:
       - nexus_node_state:/data/nexus-node
     restart: unless-stopped

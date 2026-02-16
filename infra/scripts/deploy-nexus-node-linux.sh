@@ -24,6 +24,7 @@ Environment overrides:
   NEXUS_NODE_CODE_DIR
   NEXUS_NODE_DEPLOY_DIR
   NEXUS_NODE_STATE_HOST_DIR
+  NEXUS_NODE_TZ
 EOF
 }
 
@@ -68,6 +69,47 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+detect_default_timezone() {
+  if [ -n "${NEXUS_NODE_TZ:-}" ]; then
+    printf '%s' "$NEXUS_NODE_TZ"
+    return 0
+  fi
+
+  local tz=""
+  if command -v timedatectl > /dev/null 2>&1; then
+    tz="$(timedatectl show -p Timezone --value 2> /dev/null || true)"
+    tz="$(printf '%s' "$tz" | tr -d '\r\n[:space:]')"
+    if [ -n "$tz" ] && [ "$tz" != "n/a" ]; then
+      printf '%s' "$tz"
+      return 0
+    fi
+  fi
+
+  if [ -f /etc/timezone ]; then
+    tz="$(tr -d '\r\n[:space:]' < /etc/timezone)"
+    if [ -n "$tz" ]; then
+      printf '%s' "$tz"
+      return 0
+    fi
+  fi
+
+  if [ -L /etc/localtime ]; then
+    local target=""
+    target="$(readlink /etc/localtime || true)"
+    case "$target" in
+      *zoneinfo/*)
+        tz="${target#*zoneinfo/}"
+        if [ -n "$tz" ]; then
+          printf '%s' "$tz"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+
+  printf '%s' "UTC"
+}
+
 if [ -n "${NEXUS_NODE_CODE_DIR:-}" ]; then
   CODE_DIR="$NEXUS_NODE_CODE_DIR"
 elif [ -f "/data/code/examples/nexus-node/reference-node.ts" ]; then
@@ -78,11 +120,13 @@ fi
 
 DEPLOY_DIR="${NEXUS_NODE_DEPLOY_DIR:-$HOME/nexus-node-deploy}"
 STATE_DIR="${NEXUS_NODE_STATE_HOST_DIR:-$DEFAULT_STATE_DIR}"
+DEFAULT_NODE_TZ="$(detect_default_timezone)"
 
 log "Platform: $PLATFORM_LABEL"
 log "Using deployment directory: $DEPLOY_DIR"
 log "Using code directory: $CODE_DIR"
 log "Using node state directory: $STATE_DIR"
+log "Using node timezone: $DEFAULT_NODE_TZ"
 
 if [ ! -d "$CODE_DIR" ]; then
   error "Code directory not found: $CODE_DIR"
@@ -126,6 +170,7 @@ services:
       NEXUS_NODE_ALLOW_COMMANDS: \${NEXUS_NODE_ALLOW_COMMANDS:-echo,uname,whoami,pwd,date,ls}
       NEXUS_NODE_RECONNECT_MIN_MS: \${NEXUS_NODE_RECONNECT_MIN_MS:-2000}
       NEXUS_NODE_RECONNECT_MAX_MS: \${NEXUS_NODE_RECONNECT_MAX_MS:-30000}
+      TZ: \${NEXUS_NODE_TZ:-$DEFAULT_NODE_TZ}
       NEXUS_NODE_STATE_DIR: /data/nexus-node
     volumes:
       - $STATE_DIR:/data/nexus-node
@@ -152,6 +197,7 @@ NEXUS_NODE_GATEWAY_URL=$DEFAULT_GATEWAY_URL
 # NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls
 # NEXUS_NODE_RECONNECT_MIN_MS=2000
 # NEXUS_NODE_RECONNECT_MAX_MS=30000
+# NEXUS_NODE_TZ=$DEFAULT_NODE_TZ
 EOF
 
   if grep -q "CHANGE_ME" .env; then
