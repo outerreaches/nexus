@@ -230,6 +230,29 @@ async function main(): Promise<void> {
     ),
     "utf8",
   );
+  const mcpBridgeConfigPath = path.join(stateDir, "mcp-bridge.json");
+  const mcpFixturePath = path.join(process.cwd(), "examples/nexus-node/fixtures/smoke-mcp-server.js");
+  await fs.writeFile(
+    mcpBridgeConfigPath,
+    JSON.stringify(
+      {
+        enabled: true,
+        servers: [
+          {
+            id: "smoke",
+            label: "Smoke MCP",
+            command: process.execPath,
+            args: [mcpFixturePath],
+            allowTools: ["echo"],
+            allowResources: ["mem://public/*"],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   const nodeId = `smoke-node-${randomUUID().slice(0, 8)}`;
   const gatewayKeys = generateKeyPairSync("ed25519");
   const gatewayPubRaw = publicKeyRaw(gatewayKeys.publicKey);
@@ -349,6 +372,10 @@ async function main(): Promise<void> {
         stateDir,
         "--allow",
         "echo,uname,whoami,pwd,date,ls,sleep,nexus-policyctl",
+        "--mcp-bridge",
+        "1",
+        "--mcp-bridge-config",
+        mcpBridgeConfigPath,
         "--reconnect-min-ms",
         "500",
         "--reconnect-max-ms",
@@ -1034,6 +1061,123 @@ async function main(): Promise<void> {
       });
       assert.equal(auditPageTwo.ok, true, "audit.query page 2 failed");
     }
+
+    const mcpListRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "mcp.list",
+      params: {
+        includeTools: true,
+        includeResources: true,
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(mcpListRes.ok, true, "mcp.list failed");
+    const mcpListPayload = asObject(mcpListRes.payload);
+    const mcpServers = (Array.isArray(mcpListPayload.servers) ? mcpListPayload.servers : []) as Array<Record<string, unknown>>;
+    assert.ok(mcpServers.length >= 1, "mcp.list should return at least one server");
+    const smokeServer = mcpServers.find((server) => asString(server.id) === "smoke");
+    assert.ok(smokeServer, "mcp.list missing smoke server");
+    const mcpTools = (Array.isArray(asObject(smokeServer).tools) ? asObject(smokeServer).tools : []) as Array<Record<string, unknown>>;
+    assert.ok(mcpTools.some((tool) => asString(tool.name) === "echo"), "mcp.list should expose allowlisted tool");
+    assert.ok(!mcpTools.some((tool) => asString(tool.name) === "sum"), "mcp.list should filter non-allowlisted tools");
+    const mcpResources = (Array.isArray(asObject(smokeServer).resources) ? asObject(smokeServer).resources : []) as Array<Record<string, unknown>>;
+    assert.ok(
+      mcpResources.some((resource) => asString(resource.uri) === "mem://public/info"),
+      "mcp.list should include allowlisted resource URI",
+    );
+    assert.ok(
+      !mcpResources.some((resource) => asString(resource.uri) === "mem://secret/token"),
+      "mcp.list should hide non-allowlisted resource URI",
+    );
+
+    const mcpCallEcho = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "mcp.call",
+      params: {
+        serverId: "smoke",
+        tool: "echo",
+        arguments: {
+          text: "bridge-ok",
+        },
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(mcpCallEcho.ok, true, "mcp.call echo should succeed");
+    const mcpCallPayload = asObject(mcpCallEcho.payload);
+    const mcpCallResult = asObject(mcpCallPayload.result);
+    const mcpCallContent = (Array.isArray(mcpCallResult.content) ? mcpCallResult.content : []) as Array<Record<string, unknown>>;
+    assert.ok(
+      mcpCallContent.some((part) => asString(part.text) === "bridge-ok"),
+      "mcp.call echo should return expected content text",
+    );
+
+    const mcpCallSumDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "mcp.call",
+      params: {
+        serverId: "smoke",
+        tool: "sum",
+        arguments: {
+          a: 2,
+          b: 3,
+        },
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(mcpCallSumDenied.ok, false, "mcp.call should deny non-allowlisted tool");
+    assert.equal(asString(asObject(mcpCallSumDenied.error).code), "PERMISSION_DENIED");
+
+    const mcpResourcesReadPublic = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "mcp.resources",
+      params: {
+        serverId: "smoke",
+        action: "read",
+        uri: "mem://public/info",
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(mcpResourcesReadPublic.ok, true, "mcp.resources read public URI should succeed");
+    const publicReadPayload = asObject(mcpResourcesReadPublic.payload);
+    const publicReadResult = asObject(publicReadPayload.result);
+    const publicContents = (Array.isArray(publicReadResult.contents) ? publicReadResult.contents : []) as Array<Record<string, unknown>>;
+    assert.ok(
+      publicContents.some((item) => asString(item.uri) === "mem://public/info"),
+      "mcp.resources read should include requested public URI content",
+    );
+
+    const mcpResourcesReadSecretDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "mcp.resources",
+      params: {
+        serverId: "smoke",
+        action: "read",
+        uri: "mem://secret/token",
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(mcpResourcesReadSecretDenied.ok, false, "mcp.resources should deny non-allowlisted URI");
+    assert.equal(asString(asObject(mcpResourcesReadSecretDenied.error).code), "PERMISSION_DENIED");
 
     const legacyPolicyUpdate = await sendGatewayRequest({
       ws: wsRef!,
@@ -1911,7 +2055,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + process primitives (log stream + policyctl command gating + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement + break-glass downgrade guards) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + MCP bridge allowlist gating + process primitives (log stream + policyctl command gating + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement + break-glass downgrade guards) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -19,6 +19,11 @@ import process from "node:process";
 import type { TLSSocket } from "node:tls";
 
 import { WebSocket } from "ws";
+import {
+  McpStdioClient,
+  type McpResourceInfo,
+  type McpToolInfo,
+} from "../../src/mcp/stdio-client.js";
 
 import {
   ReferenceNodeStateStore,
@@ -33,6 +38,7 @@ const MAX_OUTPUT_CHARS = 60_000;
 const MAX_PROCESS_LOG_CHARS = 120_000;
 const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const FIREWALL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const MCP_BRIDGE_CONFIG_FILE = "mcp-bridge.json";
 const POLICYCTL_COMMAND = "nexus-policyctl";
 const POLICY_PRESET_DIRNAME = "policy-presets";
 const POLICY_ALLOWED_FIELDS = new Set(["version", "label", "defaultQuarantine", "firewallMode", "denyCommands", "updatedAt"]);
@@ -174,6 +180,20 @@ type Config = {
   maxClockSkewMs: number;
   insecureAllowNonLoopbackWs: boolean;
   insecureSkipGatewayProof: boolean;
+  mcpBridgeEnabled: boolean;
+  mcpBridgeConfigPath: string;
+  mcpBridgeTimeoutMs: number;
+};
+
+type McpBridgeServerConfig = {
+  id: string;
+  label: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  timeoutMs: number;
+  allowTools: string[];
+  allowResources: string[];
 };
 
 class NodeToolError extends Error {
@@ -207,6 +227,9 @@ async function main(): Promise<void> {
     ].join(",")}\n`,
   );
   process.stdout.write(`[reference-node] state_db=${stateStore.dbPath}\n`);
+  process.stdout.write(
+    `[reference-node] mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}\n`,
+  );
 
   const shutdown = (): void => {
     client.stop("shutdown");
@@ -237,6 +260,9 @@ class ReferenceNodeClient {
   private readonly policyPath: string;
   private readonly policyPresetDir: string;
   private readonly symbolStoreDir: string;
+  private readonly mcpBridgeConfigPath: string;
+  private readonly mcpBridgeServers = new Map<string, McpBridgeServerConfig>();
+  private readonly mcpBridgeClients = new Map<string, McpStdioClient>();
 
   constructor(
     private readonly config: Config,
@@ -246,10 +272,12 @@ class ReferenceNodeClient {
     this.policyPath = path.join(this.config.stateDir, "hermes-policy.json");
     this.policyPresetDir = path.join(this.config.stateDir, POLICY_PRESET_DIRNAME);
     this.symbolStoreDir = path.join(this.config.stateDir, "hermes-stores");
+    this.mcpBridgeConfigPath = this.config.mcpBridgeConfigPath;
   }
 
   async start(): Promise<void> {
     await this.loadPolicyFromDisk();
+    await this.loadMcpBridgeConfig();
     this.bootstrapPersistedState();
     this.connect();
   }
@@ -269,6 +297,7 @@ class ReferenceNodeClient {
       }
     }
     this.terminateAllProcesses(reason);
+    void this.closeMcpBridgeClients().catch(() => undefined);
     this.stateStore.close();
   }
 
@@ -461,6 +490,138 @@ class ReferenceNodeClient {
     await this.persistPolicyToDisk(this.policy);
   }
 
+  private async loadMcpBridgeConfig(): Promise<void> {
+    this.mcpBridgeServers.clear();
+    if (!this.config.mcpBridgeEnabled) return;
+
+    const resolved = path.resolve(this.mcpBridgeConfigPath);
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    let rawText = "";
+    try {
+      rawText = await fs.readFile(resolved, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        throw new Error(
+          `Failed to read MCP bridge config at ${resolved}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const bootstrap = {
+        enabled: true,
+        servers: [],
+      };
+      await fs.writeFile(resolved, `${JSON.stringify(bootstrap, null, 2)}\n`, "utf8");
+      this.log(`mcp bridge config created path=${resolved} (empty server list)`);
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (err) {
+      throw new Error(
+        `Invalid MCP bridge config JSON at ${resolved}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const root = asObject(parsed);
+    const serversRaw = Array.isArray(root.servers) ? root.servers : [];
+    for (const item of serversRaw) {
+      const itemObj = asObject(item);
+      if (asBoolean(itemObj.enabled) === false) continue;
+      const server = this.parseMcpBridgeServerConfig(item, resolved);
+      if (this.mcpBridgeServers.has(server.id)) {
+        throw new Error(`Duplicate MCP bridge server id '${server.id}' in ${resolved}`);
+      }
+      this.mcpBridgeServers.set(server.id, server);
+    }
+    this.log(`mcp bridge loaded servers=${this.mcpBridgeServers.size} path=${resolved}`);
+  }
+
+  private parseMcpBridgeServerConfig(value: unknown, sourcePath: string): McpBridgeServerConfig {
+    const obj = asObject(value);
+    const id = asString(obj.id);
+    const command = asString(obj.command);
+    if (!id) {
+      throw new Error(`MCP bridge server missing 'id' in ${sourcePath}`);
+    }
+    if (!command) {
+      throw new Error(`MCP bridge server '${id}' missing 'command' in ${sourcePath}`);
+    }
+    const args = Array.isArray(obj.args) ? obj.args.filter((entry): entry is string => typeof entry === "string") : [];
+    const env = asStringMap(obj.env);
+    const timeoutMs = clampInt(obj.timeoutMs, 2_000, 300_000) ?? this.config.mcpBridgeTimeoutMs;
+    const allowTools = normalizeMcpAllowPatterns(obj.allowTools);
+    const allowResources = normalizeMcpAllowPatterns(obj.allowResources);
+    return {
+      id,
+      label: asString(obj.label) ?? id,
+      command,
+      args,
+      env,
+      timeoutMs,
+      allowTools,
+      allowResources,
+    };
+  }
+
+  private assertMcpBridgeEnabled(method: string): void {
+    if (this.config.mcpBridgeEnabled) return;
+    throw new NodeToolError(
+      "CAPABILITY_UNAVAILABLE",
+      `Method ${method} is unavailable because MCP bridge is disabled on this node.`,
+      false,
+    );
+  }
+
+  private selectMcpBridgeServers(serverId: string | null): McpBridgeServerConfig[] {
+    if (serverId) {
+      return [this.requireMcpBridgeServer(serverId)];
+    }
+    return [...this.mcpBridgeServers.values()].sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  private requireMcpBridgeServer(serverId: string): McpBridgeServerConfig {
+    const server = this.mcpBridgeServers.get(serverId);
+    if (!server) {
+      throw new NodeToolError("INVALID_REQUEST", `Unknown MCP bridge server '${serverId}'.`, false);
+    }
+    return server;
+  }
+
+  private async getMcpBridgeClient(server: McpBridgeServerConfig): Promise<McpStdioClient> {
+    const existing = this.mcpBridgeClients.get(server.id);
+    if (existing) return existing;
+    const client = new McpStdioClient({
+      command: server.command,
+      args: server.args,
+      env: server.env,
+      timeoutMs: server.timeoutMs,
+      log: (line) => this.log(`mcp[${server.id}] ${line}`),
+    });
+    try {
+      await client.initialize();
+      this.mcpBridgeClients.set(server.id, client);
+      return client;
+    } catch (err) {
+      await client.close().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private allowlistedMcpName(name: string, allowPatterns: string[]): boolean {
+    if (!allowPatterns.length) return false;
+    return allowPatterns.some((pattern) => mcpPatternMatches(name, pattern));
+  }
+
+  private async closeMcpBridgeClients(): Promise<void> {
+    for (const [serverId, client] of this.mcpBridgeClients.entries()) {
+      await client.close().catch((err) => {
+        this.log(`mcp[${serverId}] close failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }
+    this.mcpBridgeClients.clear();
+  }
+
   private normalizePolicyDocument(value: Record<string, unknown>, nowMs: number): Record<string, unknown> {
     const defaultQuarantine = parseQuarantineState(value.defaultQuarantine, "none");
     const firewallMode = parseFirewallMode(asString(value.firewallMode), "transparent");
@@ -539,6 +700,12 @@ class ReferenceNodeClient {
   private advertisedCapabilities(): string[] {
     const mode = this.currentPolicyFirewallMode();
     const out = new Set<string>(this.config.capabilities);
+    if (this.config.mcpBridgeEnabled) {
+      out.add("mcp.bridge");
+      out.add("mcp.list");
+      out.add("mcp.call");
+      out.add("mcp.resources");
+    }
     out.add("backend.nexus");
     out.add(`hermes.mode.${mode}`);
     if (mode !== "transparent") out.add("hermes.enabled");
@@ -796,6 +963,15 @@ class ReferenceNodeClient {
         return;
       case "audit.query":
         await this.handleAuditQuery(msg);
+        return;
+      case "mcp.list":
+        await this.handleMcpList(msg);
+        return;
+      case "mcp.call":
+        await this.handleMcpCall(msg);
+        return;
+      case "mcp.resources":
+        await this.handleMcpResources(msg);
         return;
       default:
         this.sendRequestError(msg.id, "METHOD_NOT_IMPLEMENTED", `Method ${msg.method} is not implemented by reference node.`, false);
@@ -1603,6 +1779,225 @@ class ReferenceNodeClient {
         events: result.events,
       },
     });
+  }
+
+  private async handleMcpList(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const serverId = asString(params.serverId) ?? asString(params.server);
+    const includeTools = asBoolean(params.includeTools) ?? true;
+    const includeResources = asBoolean(params.includeResources) ?? false;
+    try {
+      this.assertMcpBridgeEnabled("mcp.list");
+      const servers = this.selectMcpBridgeServers(serverId);
+      const summaries: Array<Record<string, unknown>> = [];
+      for (const server of servers) {
+        const summary: Record<string, unknown> = {
+          id: server.id,
+          label: server.label,
+          allowTools: [...server.allowTools],
+          allowResources: [...server.allowResources],
+          timeoutMs: server.timeoutMs,
+          connected: false,
+        };
+        try {
+          const client = await this.getMcpBridgeClient(server);
+          summary.connected = true;
+          if (includeTools) {
+            const listedTools: McpToolInfo[] = await client.listTools();
+            summary.tools = listedTools
+              .filter((tool) => this.allowlistedMcpName(tool.name, server.allowTools))
+              .map((tool) => ({
+                name: tool.name,
+                ...(tool.description ? { description: tool.description } : {}),
+                ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+              }));
+          }
+          if (includeResources) {
+            try {
+              const listedResources = await client.listResources();
+              const resources: McpResourceInfo[] = listedResources.resources;
+              summary.resources = resources
+                .filter((resource) => this.allowlistedMcpName(resource.uri, server.allowResources))
+                .map((resource) => ({
+                  uri: resource.uri,
+                  ...(typeof resource.name === "string" ? { name: resource.name } : {}),
+                  ...(typeof resource.description === "string" ? { description: resource.description } : {}),
+                  ...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+                }));
+              if (listedResources.nextCursor) summary.nextCursor = listedResources.nextCursor;
+            } catch (err) {
+              summary.resourcesError = err instanceof Error ? err.message : String(err);
+            }
+          }
+        } catch (err) {
+          summary.error = err instanceof Error ? err.message : String(err);
+        }
+        summaries.push(summary);
+      }
+
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          bridge: {
+            enabled: true,
+            configPath: this.mcpBridgeConfigPath,
+          },
+          serverId: serverId ?? null,
+          includeTools,
+          includeResources,
+          count: summaries.length,
+          servers: summaries,
+        },
+      });
+      this.writeAuditEvent({
+        type: "mcp.list",
+        details: {
+          serverId: serverId ?? null,
+          includeTools,
+          includeResources,
+          count: summaries.length,
+        },
+      });
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+    }
+  }
+
+  private async handleMcpCall(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const serverId = asString(params.serverId) ?? asString(params.server);
+    const toolName = asString(params.tool) ?? asString(params.name);
+    const toolArgs = asObject(params.arguments ?? params.args);
+    if (!serverId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "mcp.call requires `serverId`.", false);
+      return;
+    }
+    if (!toolName) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "mcp.call requires `tool`.", false);
+      return;
+    }
+    try {
+      this.assertMcpBridgeEnabled("mcp.call");
+      const server = this.requireMcpBridgeServer(serverId);
+      if (!this.allowlistedMcpName(toolName, server.allowTools)) {
+        throw new NodeToolError(
+          "PERMISSION_DENIED",
+          `MCP tool '${toolName}' is not allowlisted for server '${server.id}'.`,
+        );
+      }
+      const client = await this.getMcpBridgeClient(server);
+      const result = await client.callTool(toolName, toolArgs);
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          serverId: server.id,
+          tool: toolName,
+          result,
+        },
+      });
+      this.writeAuditEvent({
+        type: "mcp.call",
+        toolName: "mcp.call",
+        details: {
+          serverId: server.id,
+          tool: toolName,
+        },
+      });
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+    }
+  }
+
+  private async handleMcpResources(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const serverId = asString(params.serverId) ?? asString(params.server);
+    if (!serverId) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "mcp.resources requires `serverId`.", false);
+      return;
+    }
+    const uri = asString(params.uri);
+    const actionRaw = asString(params.action) ?? (uri ? "read" : "list");
+    const action = actionRaw === "read" ? "read" : actionRaw === "list" ? "list" : null;
+    if (!action) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "mcp.resources action must be `list` or `read`.", false);
+      return;
+    }
+    try {
+      this.assertMcpBridgeEnabled("mcp.resources");
+      const server = this.requireMcpBridgeServer(serverId);
+      const client = await this.getMcpBridgeClient(server);
+      if (action === "read") {
+        if (!uri) {
+          this.sendRequestError(msg.id, "INVALID_REQUEST", "mcp.resources read requires `uri`.", false);
+          return;
+        }
+        if (!this.allowlistedMcpName(uri, server.allowResources)) {
+          throw new NodeToolError(
+            "PERMISSION_DENIED",
+            `MCP resource '${uri}' is not allowlisted for server '${server.id}'.`,
+          );
+        }
+        const result = await client.readResource(uri);
+        this.sendSignedEnvelope({
+          type: "res",
+          id: msg.id,
+          ok: true,
+          payload: {
+            serverId: server.id,
+            action,
+            uri,
+            result,
+          },
+        });
+        this.writeAuditEvent({
+          type: "mcp.resources.read",
+          toolName: "mcp.resources",
+          details: {
+            serverId: server.id,
+            uri,
+          },
+        });
+        return;
+      }
+
+      const cursor = asString(params.cursor) ?? undefined;
+      const limit = clampInt(params.limit, 1, 500) ?? 200;
+      const listed = await client.listResources(cursor);
+      const filtered = listed.resources.filter((resource) =>
+        this.allowlistedMcpName(resource.uri, server.allowResources)
+      );
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          serverId: server.id,
+          action,
+          count: Math.min(filtered.length, limit),
+          resources: filtered.slice(0, limit).map((resource) => ({
+            uri: resource.uri,
+            ...(typeof resource.name === "string" ? { name: resource.name } : {}),
+            ...(typeof resource.description === "string" ? { description: resource.description } : {}),
+            ...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+          })),
+          nextCursor: listed.nextCursor ?? null,
+        },
+      });
+      this.writeAuditEvent({
+        type: "mcp.resources.list",
+        toolName: "mcp.resources",
+        details: {
+          serverId: server.id,
+          count: Math.min(filtered.length, limit),
+        },
+      });
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+    }
   }
 
   private async readSymbolCatalog(): Promise<SymbolCatalog> {
@@ -2682,6 +3077,16 @@ function buildConfig(values: Record<string, string>): Config {
     clampInt(values["max-clock-skew-ms"] ?? process.env.NEXUS_NODE_MAX_CLOCK_SKEW_MS, 5_000, 600_000) ?? 120_000;
   const insecureSkipGatewayProof =
     (values["insecure-skip-gateway-proof"] ?? process.env.NEXUS_NODE_INSECURE_SKIP_GATEWAY_PROOF ?? "").trim() === "1";
+  const mcpBridgeEnabled =
+    (values["mcp-bridge"] ?? process.env.NEXUS_NODE_MCP_BRIDGE ?? "").trim() === "1";
+  const mcpBridgeConfigPath = path.resolve(
+    values["mcp-bridge-config"] ??
+      process.env.NEXUS_NODE_MCP_BRIDGE_CONFIG ??
+      path.join(stateDir, MCP_BRIDGE_CONFIG_FILE),
+  );
+  const mcpBridgeTimeoutMs =
+    clampInt(values["mcp-bridge-timeout-ms"] ?? process.env.NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS, 2_000, 300_000) ??
+    30_000;
 
   return {
     gatewayUrl,
@@ -2698,6 +3103,9 @@ function buildConfig(values: Record<string, string>): Config {
     maxClockSkewMs,
     insecureAllowNonLoopbackWs,
     insecureSkipGatewayProof,
+    mcpBridgeEnabled,
+    mcpBridgeConfigPath,
+    mcpBridgeTimeoutMs,
   };
 }
 
@@ -3136,6 +3544,31 @@ function splitCsv(value: string | undefined, fallback: string[]): string[] {
     .filter((item) => item.length > 0);
 }
 
+function normalizeMcpAllowPatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const pattern = entry.trim();
+    if (!pattern) continue;
+    seen.add(pattern);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+
+function mcpPatternMatches(name: string, pattern: string): boolean {
+  const value = name.trim();
+  if (!value) return false;
+  const normalized = pattern.trim();
+  if (!normalized) return false;
+  if (normalized === "*") return true;
+  if (normalized.endsWith("*")) {
+    const prefix = normalized.slice(0, -1);
+    return value.startsWith(prefix);
+  }
+  return value === normalized;
+}
+
 function clampInt(value: unknown, min: number, max: number): number | null {
   const str = typeof value === "string" ? value.trim() : typeof value === "number" ? String(value) : "";
   if (!str) return null;
@@ -3328,6 +3761,9 @@ function printHelp(): void {
       "  --allow <csv>                   Allowlisted command names for system.run",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
+      "  --mcp-bridge 1                  Enable MCP bridge methods (mcp.list/mcp.call/mcp.resources)",
+      "  --mcp-bridge-config <path>      MCP bridge JSON config path (default <stateDir>/mcp-bridge.json)",
+      "  --mcp-bridge-timeout-ms <ms>    MCP bridge request timeout per server (default 30000)",
       "  --reconnect-min-ms <ms>         Minimum reconnect delay (default 2000)",
       "  --reconnect-max-ms <ms>         Maximum reconnect delay (default 30000)",
       "  --max-clock-skew-ms <ms>        Max accepted signed message skew (default 120000)",

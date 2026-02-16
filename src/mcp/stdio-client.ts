@@ -40,6 +40,19 @@ export type McpToolCallResult = {
   [key: string]: unknown;
 };
 
+export type McpResourceInfo = {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+  [key: string]: unknown;
+};
+
+export type McpResourceReadResult = {
+  contents?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+};
+
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -111,6 +124,34 @@ export class McpStdioClient {
       name,
       arguments: args ?? {},
     }) as McpToolCallResult;
+    return result ?? {};
+  }
+
+  async listResources(cursor?: string): Promise<{ resources: McpResourceInfo[]; nextCursor?: string }> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+    const params = cursor ? { cursor } : {};
+    const result = await this.request("resources/list", params) as {
+      resources?: McpResourceInfo[];
+      nextCursor?: string;
+    };
+    const resources = Array.isArray(result.resources)
+      ? result.resources.filter((item): item is McpResourceInfo => {
+          return !!item && typeof item === "object" && typeof item.uri === "string";
+        })
+      : [];
+    return {
+      resources,
+      ...(typeof result.nextCursor === "string" ? { nextCursor: result.nextCursor } : {}),
+    };
+  }
+
+  async readResource(uri: string): Promise<McpResourceReadResult> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+    const result = await this.request("resources/read", { uri }) as McpResourceReadResult;
     return result ?? {};
   }
 

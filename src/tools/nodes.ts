@@ -28,6 +28,27 @@ const nodeAuditQueryRoutingTool: Tool = {
   execute: async () => "ERROR: node_audit_query should be routed via node transport.",
 };
 
+const nodeMcpListRoutingTool: Tool = {
+  name: "node_mcp_list",
+  description: "Internal routing shim for mcp.list dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_mcp_list should be routed via node transport.",
+};
+
+const nodeMcpCallRoutingTool: Tool = {
+  name: "node_mcp_call",
+  description: "Internal routing shim for mcp.call dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_mcp_call should be routed via node transport.",
+};
+
+const nodeMcpResourcesRoutingTool: Tool = {
+  name: "node_mcp_resources",
+  description: "Internal routing shim for mcp.resources dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_mcp_resources should be routed via node transport.",
+};
+
 const nodeSystemRunRoutingTool: Tool = {
   name: "shell_exec",
   description: "Internal routing shim for system.run dispatch.",
@@ -272,6 +293,134 @@ export const nodeAuditQuery = defineTool({
           ...(args.processId ? { processId: args.processId } : {}),
           ...(args.firewallSession ? { firewallSession: args.firewallSession } : {}),
           ...(args.actor ? { actor: args.actor } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeMcpList = defineTool({
+  name: "node_mcp_list",
+  description: "List per-node MCP bridge servers and allowlisted tools/resources via protocol method mcp.list.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    serverId: z.string().min(1).max(128).optional(),
+    includeTools: z.boolean().default(true),
+    includeResources: z.boolean().default(false),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support MCP bridge`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeMcpListRoutingTool,
+        {
+          ...(args.serverId ? { serverId: args.serverId } : {}),
+          includeTools: args.includeTools,
+          includeResources: args.includeResources,
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeMcpCall = defineTool({
+  name: "node_mcp_call",
+  description: "Invoke an allowlisted MCP tool on a specific node via protocol method mcp.call.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    serverId: z.string().min(1).max(128),
+    tool: z.string().min(1).max(256),
+    arguments: z.record(z.unknown()).default({}),
+    timeoutMs: z.number().int().positive().max(300_000).default(60_000),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support MCP bridge`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeMcpCallRoutingTool,
+        {
+          serverId: args.serverId,
+          tool: args.tool,
+          arguments: asObject(args.arguments),
+          timeoutMs: args.timeoutMs,
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeMcpResources = defineTool({
+  name: "node_mcp_resources",
+  description: "List or read allowlisted MCP resources on a specific node via protocol method mcp.resources.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    serverId: z.string().min(1).max(128),
+    action: z.enum(["list", "read"]).default("list"),
+    uri: z.string().max(2048).optional(),
+    cursor: z.string().max(512).optional(),
+    limit: z.number().int().min(1).max(500).default(200),
+    timeoutMs: z.number().int().positive().max(300_000).default(60_000),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support MCP bridge`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    if (args.action === "read" && !args.uri) {
+      return "ERROR: node_mcp_resources with action=read requires `uri`";
+    }
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeMcpResourcesRoutingTool,
+        {
+          serverId: args.serverId,
+          action: args.action,
+          ...(args.uri ? { uri: args.uri } : {}),
+          ...(args.cursor ? { cursor: args.cursor } : {}),
+          limit: args.limit,
+          timeoutMs: args.timeoutMs,
+          ...(args.security ? { security: args.security } : {}),
         },
         {
           ...ctx,

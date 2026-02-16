@@ -135,6 +135,58 @@ node_system_run { "id": "reference-node-macos-1", "command": "nexus-policyctl ap
 node_audit_query { "id": "reference-node-macos-1", "type": "policy.command.applied", "limit": 20 }
 ```
 
+## MCP bridge (`mcp.bridge`)
+
+The reference node can expose a node-local MCP bridge for tool/resource access over node protocol methods:
+
+- `mcp.list`
+- `mcp.call`
+- `mcp.resources`
+
+Enable it explicitly:
+
+```bash
+export NEXUS_NODE_MCP_BRIDGE=1
+# optional override (default: {stateDir}/mcp-bridge.json)
+export NEXUS_NODE_MCP_BRIDGE_CONFIG="$HOME/.nexus-node/mcp-bridge.json"
+```
+
+Config file shape (`mcp-bridge.json`):
+
+```json
+{
+  "enabled": true,
+  "servers": [
+    {
+      "id": "smoke",
+      "label": "Smoke MCP",
+      "command": "/usr/bin/node",
+      "args": ["/path/to/server.js"],
+      "env": {},
+      "timeoutMs": 30000,
+      "allowTools": ["echo", "read_*"],
+      "allowResources": ["mem://public/*"]
+    }
+  ]
+}
+```
+
+Allowlist model:
+
+- Only configured servers are reachable.
+- `allowTools` gates `mcp.call` tool names.
+- `allowResources` gates `mcp.resources` URI list/read access.
+- Empty allowlists deny by default.
+
+Gateway node tools:
+
+```text
+node_mcp_list { "id": "<node-id>", "includeTools": true, "includeResources": true }
+node_mcp_call { "id": "<node-id>", "serverId": "smoke", "tool": "echo", "arguments": { "text": "hello" } }
+node_mcp_resources { "id": "<node-id>", "serverId": "smoke", "action": "list" }
+node_mcp_resources { "id": "<node-id>", "serverId": "smoke", "action": "read", "uri": "mem://public/info" }
+```
+
 ## Transport security policy
 
 - `ws://` is allowed for loopback/local-host style endpoints (`127.0.0.1`, `localhost`, `::1`, `host.docker.internal`).

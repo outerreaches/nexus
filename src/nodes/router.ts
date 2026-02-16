@@ -133,7 +133,15 @@ export class NodeToolRouter implements NodeRouter {
   }
 
   private resolveNodeIdFromArgs(toolName: string, args: unknown): string | null {
-    if (toolName !== "symbols.list" && toolName !== "audit.query") return null;
+    if (
+      toolName !== "symbols.list" &&
+      toolName !== "audit.query" &&
+      toolName !== "mcp.list" &&
+      toolName !== "mcp.call" &&
+      toolName !== "mcp.resources"
+    ) {
+      return null;
+    }
     if (!args || typeof args !== "object" || Array.isArray(args)) return null;
     const id = (args as { id?: unknown }).id;
     if (typeof id !== "string") return null;
@@ -280,6 +288,9 @@ export class NodeToolRouter implements NodeRouter {
     if (toolName === "process_stop") return "process.cancel";
     if (toolName === "node_symbols_list") return "symbols.list";
     if (toolName === "node_audit_query") return "audit.query";
+    if (toolName === "node_mcp_list") return "mcp.list";
+    if (toolName === "node_mcp_call") return "mcp.call";
+    if (toolName === "node_mcp_resources") return "mcp.resources";
     if (toolName === "process_list") {
       throw new NodeRoutingError(
         "NODE_ROUTING_NOT_IMPLEMENTED",

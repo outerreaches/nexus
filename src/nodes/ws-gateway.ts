@@ -248,6 +248,12 @@ export class NodeWebSocketGateway {
         return this.requestSymbolsList(params);
       case "audit.query":
         return this.requestAuditQuery(params);
+      case "mcp.list":
+        return this.requestMcpList(params);
+      case "mcp.call":
+        return this.requestMcpCall(params);
+      case "mcp.resources":
+        return this.requestMcpResources(params);
       default:
         return this.executeTool({
           nodeId: params.nodeId,
@@ -534,6 +540,107 @@ export class NodeWebSocketGateway {
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
       message: `Node ${params.nodeId} failed to query audit events.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestMcpList(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const timeout = this.asNumber(argsObj.timeoutMs) ?? undefined;
+    const includeTools = this.asBoolean(argsObj.includeTools);
+    const includeResources = this.asBoolean(argsObj.includeResources);
+    const serverId = this.asString(argsObj.serverId) ?? this.asString(argsObj.server);
+    const requestParams: Record<string, unknown> = {};
+    if (serverId) requestParams.serverId = serverId;
+    if (includeTools !== null) requestParams.includeTools = includeTools;
+    if (includeResources !== null) requestParams.includeResources = includeResources;
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "mcp.list",
+      params: requestParams,
+      timeoutMs: timeout ?? params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to list MCP bridge targets.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestMcpCall(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const timeout = this.asNumber(argsObj.timeoutMs) ?? undefined;
+    const serverId = this.asString(argsObj.serverId) ?? this.asString(argsObj.server);
+    const tool = this.asString(argsObj.tool) ?? this.asString(argsObj.name);
+    const callArgs = this.asObject(argsObj.arguments ?? argsObj.args);
+    if (!serverId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_mcp_call requires `serverId`.");
+    }
+    if (!tool) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_mcp_call requires `tool`.");
+    }
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "mcp.call",
+      params: {
+        serverId,
+        tool,
+        arguments: callArgs,
+      },
+      timeoutMs: timeout ?? params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed MCP tool call ${tool}.`,
+    });
+    return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestMcpResources(params: {
+    nodeId: string;
+    args: unknown;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const timeout = this.asNumber(argsObj.timeoutMs) ?? undefined;
+    const serverId = this.asString(argsObj.serverId) ?? this.asString(argsObj.server);
+    if (!serverId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_mcp_resources requires `serverId`.");
+    }
+    const action = this.asString(argsObj.action) ?? (this.asString(argsObj.uri) ? "read" : "list");
+    if (action !== "list" && action !== "read") {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_mcp_resources action must be `list` or `read`.");
+    }
+    const uri = this.asString(argsObj.uri);
+    if (action === "read" && !uri) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_mcp_resources read action requires `uri`.");
+    }
+    const limit = this.asNumber(argsObj.limit);
+    const cursor = this.asString(argsObj.cursor);
+    const requestParams: Record<string, unknown> = {
+      serverId,
+      action,
+    };
+    if (uri) requestParams.uri = uri;
+    if (cursor) requestParams.cursor = cursor;
+    if (limit !== null) requestParams.limit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "mcp.resources",
+      params: requestParams,
+      timeoutMs: timeout ?? params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed MCP resources request.`,
     });
     return this.normalizeStructuredResult(response.payload);
   }
