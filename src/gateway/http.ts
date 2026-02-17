@@ -4,6 +4,7 @@ import type { NexusDatabase } from "../storage/database.js";
 import type { ProcessManager } from "../process/manager.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
 import type { NodeWebSocketGateway } from "../nodes/ws-gateway.js";
+import type { ModelRoutingMode } from "../llm/model-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
@@ -17,6 +18,8 @@ export type GatewayHttpDeps = {
   processManager?: ProcessManager;
   agentTracker?: AgentTracker;
   nodeGateway?: NodeWebSocketGateway;
+  getModelMode?: () => ModelRoutingMode;
+  setModelMode?: (mode: ModelRoutingMode) => ModelRoutingMode;
 };
 
 export async function startHttpServer(

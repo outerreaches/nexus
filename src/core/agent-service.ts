@@ -37,6 +37,7 @@ function clampNonNegativeInt(value: number): number {
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
+  private defaultModelMode: ModelRoutingMode;
 
   constructor(
     private readonly deps: {
@@ -65,6 +66,18 @@ export class AgentService {
     const backgroundMax = Math.max(1, deps.limits.maxConcurrentBackground ?? deps.limits.maxConcurrent);
     this.interactiveSemaphore = new Semaphore(interactiveMax);
     this.backgroundSemaphore = new Semaphore(backgroundMax);
+    this.defaultModelMode = deps.toolContext.modelMode === "local_only" ? "local_only" : "default";
+  }
+
+  getDefaultModelMode(): ModelRoutingMode {
+    return this.defaultModelMode;
+  }
+
+  setDefaultModelMode(mode: ModelRoutingMode): ModelRoutingMode {
+    const normalized: ModelRoutingMode = mode === "local_only" ? "local_only" : "default";
+    this.defaultModelMode = normalized;
+    this.deps.toolContext.modelMode = normalized;
+    return normalized;
   }
 
   private defaultLaneForChannel(channel: string): ExecutionLane {
@@ -191,7 +204,7 @@ export class AgentService {
       // Resolve preset and filter tools
       const presetName = params.preset ?? this.deps.defaultPreset;
       const preset = presetName ? getPreset(presetName) : undefined;
-      const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.toolContext.modelMode ?? "default";
+      const runModelMode: ModelRoutingMode = params.modelMode ?? this.defaultModelMode ?? this.deps.toolContext.modelMode ?? "default";
 
       const systemPrompt = !preset || preset.name === "orchestrator"
         ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId })

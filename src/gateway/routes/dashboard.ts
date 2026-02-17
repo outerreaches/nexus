@@ -93,6 +93,18 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     );
   });
 
+  app.post("/dashboard/llm/mode", async (c) => {
+    if (!deps.setModelMode) return c.text("LLM mode control is not available", 503);
+    const body = await c.req.parseBody();
+    const modeRaw = String(body.mode ?? "").trim().toLowerCase();
+    if (modeRaw !== "default" && modeRaw !== "local_only") {
+      return c.text("Invalid mode (expected default|local_only)", 400);
+    }
+    const mode = deps.setModelMode(modeRaw);
+    deps.log(`dashboard: llm model mode set to ${mode}`);
+    return c.redirect("/dashboard");
+  });
+
   app.post("/dashboard/nodes/status", async (c) => {
     if (!deps.db) return c.text("Database not available", 500);
     const body = await c.req.parseBody();

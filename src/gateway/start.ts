@@ -398,6 +398,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
         mode: config.channels.telegram.mode,
         pairingEnabled: config.channels.telegram.pairing.enabled,
       },
+      llm: {
+        modelMode: agent.getDefaultModelMode(),
+      },
       browser: {
         cdpPort,
         headless: process.env.NEXUS_BROWSER_HEADLESS === "1",
@@ -433,6 +436,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
     processManager,
     agentTracker,
     nodeGateway: nodeWsGateway,
+    getModelMode: () => agent.getDefaultModelMode(),
+    setModelMode: (mode) => agent.setDefaultModelMode(mode),
   });
 
   registerNodeRoutes(http.app, { isStandby: () => isStandby });
