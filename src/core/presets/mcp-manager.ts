@@ -14,6 +14,7 @@ export const preset: AgentPreset = {
     "By default, MCP profiles should use MCP-only tools. Only include non-MCP tools when explicitly required by the task.",
     "When creating/updating profiles or delegate requests with non-MCP tools, set `allowNonMcpTools=true` and list the exact additional tools needed.",
     "Keep non-MCP additions minimal and task-scoped; avoid broad tool bundles.",
+    "Node-hosted MCP servers (on remote nodes) are accessed by the orchestrator via node_mcp_* tools. Do not recreate or proxy them with mcp_server_add.",
     "Keep orchestrator context small: do not dump full MCP tool schemas into chat; summarize capabilities and chosen profile.",
     "When handing off between agents, preserve blackboard IDs and correlation identifiers in your outputs.",
     "After any MCP change or delegation run, write a concise artifact to blackboard with server/profile IDs and outcome.",
