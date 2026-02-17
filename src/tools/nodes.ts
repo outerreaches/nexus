@@ -452,15 +452,31 @@ export const nodeMcpResources = defineTool({
 export const nodeFilePull = defineTool({
   name: "node_file_pull",
   description:
-    "Pull a file from a specific node via protocol method file.pull and save it to a local gateway path (state/workspace/code roots).",
+    "Pull a small file from a node (file.pull) and save it locally on the gateway. Requires node allowlist `file_pull`; may be denied by Hermes `denyCommands` in `firewallMode=hermes`. Returns JSON with the saved `localPath` + `sha256`.",
   parameters: z.object({
-    id: z.string().min(1).max(128),
-    remotePath: z.string().min(1).max(4096),
-    localPath: z.string().max(4096).optional(),
-    overwrite: z.boolean().default(false),
-    maxBytes: z.number().int().positive().max(50 * 1024 * 1024).default(5 * 1024 * 1024),
-    timeoutMs: z.number().int().positive().max(300_000).default(120_000),
-    security: remoteSecuritySchema,
+    id: z.string().min(1).max(128).describe("Target node id."),
+    remotePath: z
+      .string()
+      .min(1)
+      .max(4096)
+      .describe("Absolute path on node. Must be within node `NEXUS_NODE_FILE_TRANSFER_ROOTS`."),
+    localPath: z
+      .string()
+      .max(4096)
+      .optional()
+      .describe(
+        "Absolute gateway path to save. Must be within gateway roots (stateDir/workspace/code). If omitted, auto-saves under stateDir/node-transfers/<nodeId>/.",
+      ),
+    overwrite: z.boolean().default(false).describe("If false, fail when destination exists."),
+    maxBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(50 * 1024 * 1024)
+      .default(5 * 1024 * 1024)
+      .describe("Max bytes to accept from node (size check + decode check)."),
+    timeoutMs: z.number().int().positive().max(300_000).default(120_000).describe("Remote request timeout."),
+    security: remoteSecuritySchema.describe("Optional routing constraints (backend=nexus, hermes mode)."),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -496,15 +512,29 @@ export const nodeFilePull = defineTool({
 export const nodeFilePush = defineTool({
   name: "node_file_push",
   description:
-    "Push a local gateway file to a specific node via protocol method file.push (path constrained to state/workspace/code roots).",
+    "Push a small gateway-local file to a node (file.push). Requires node allowlist `file_push`; may be denied by Hermes `denyCommands` in `firewallMode=hermes`. Returns JSON with `sha256` + remote path.",
   parameters: z.object({
-    id: z.string().min(1).max(128),
-    localPath: z.string().min(1).max(4096),
-    remotePath: z.string().min(1).max(4096),
-    overwrite: z.boolean().default(false),
-    maxBytes: z.number().int().positive().max(50 * 1024 * 1024).default(5 * 1024 * 1024),
-    timeoutMs: z.number().int().positive().max(300_000).default(120_000),
-    security: remoteSecuritySchema,
+    id: z.string().min(1).max(128).describe("Target node id."),
+    localPath: z
+      .string()
+      .min(1)
+      .max(4096)
+      .describe("Absolute gateway path to read. Must be within gateway roots (stateDir/workspace/code)."),
+    remotePath: z
+      .string()
+      .min(1)
+      .max(4096)
+      .describe("Absolute path on node. Must be within node `NEXUS_NODE_FILE_TRANSFER_ROOTS`."),
+    overwrite: z.boolean().default(false).describe("If false, fail when remotePath already exists on node."),
+    maxBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(50 * 1024 * 1024)
+      .default(5 * 1024 * 1024)
+      .describe("Max bytes to upload (local file size must be <= maxBytes)."),
+    timeoutMs: z.number().int().positive().max(300_000).default(120_000).describe("Remote request timeout."),
+    security: remoteSecuritySchema.describe("Optional routing constraints (backend=nexus, hermes mode)."),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
