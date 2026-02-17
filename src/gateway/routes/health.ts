@@ -9,7 +9,61 @@ export function registerHealthRoutes(app: Hono, deps: GatewayHttpDeps): void {
     return c.json({ ok: true, timestamp: Date.now() });
   });
 
-  // Readiness: full system check
+  // Traffic health: failover/routing critical checks only.
+  // This endpoint intentionally excludes operational degradation checks
+  // (backup age, memory thresholds, stuck agents, proactive lag).
+  app.get("/health/traffic", async (c) => {
+    const checks: Record<string, { ok: boolean; error?: string; details?: unknown }> = {};
+    const nowMs = Date.now();
+    let mode = "unknown";
+
+    try {
+      if (deps.db) {
+        const stmt = deps.db.db.prepare("SELECT 1 as test");
+        stmt.get();
+        checks.database = { ok: true };
+      } else {
+        checks.database = { ok: false, error: "no database connection" };
+      }
+    } catch (err) {
+      checks.database = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    try {
+      const statusRaw = await deps.getStatus();
+      const status =
+        statusRaw && typeof statusRaw === "object" && !Array.isArray(statusRaw)
+          ? (statusRaw as Record<string, unknown>)
+          : {};
+      mode = typeof status.mode === "string" ? status.mode : "unknown";
+      const activeLeaseRaw = status.activeLease;
+      const activeLease =
+        activeLeaseRaw && typeof activeLeaseRaw === "object" && !Array.isArray(activeLeaseRaw)
+          ? (activeLeaseRaw as Record<string, unknown>)
+          : {};
+      const leaseHeld = typeof activeLease.held === "boolean" ? activeLease.held : null;
+
+      if (mode !== "active") {
+        checks.role = { ok: false, error: `instance mode=${mode}` };
+        checks.lease = { ok: true, details: { held: leaseHeld, mode } };
+      } else {
+        checks.role = { ok: true, details: { mode } };
+        if (leaseHeld === false) {
+          checks.lease = { ok: false, error: "active mode without held lease" };
+        } else {
+          checks.lease = { ok: true, details: { held: leaseHeld } };
+        }
+      }
+    } catch (err) {
+      checks.role = { ok: false, error: "status unavailable" };
+      checks.lease = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    const allOk = Object.values(checks).every((check) => check.ok);
+    return c.json({ ok: allOk, checks, timestamp: nowMs }, allOk ? 200 : 503);
+  });
+
+  // Readiness: full operational check.
   app.get("/health/ready", async (c) => {
     const checks: Record<string, { ok: boolean; error?: string; details?: unknown }> = {};
     const nowMs = Date.now();

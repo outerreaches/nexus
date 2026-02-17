@@ -310,7 +310,7 @@ try_activate_slot() {
   started="$(date +%s)"
   while true; do
     if compose exec -T "$slot" sh -lc "curl -fsS --max-time 8 -X POST http://localhost:18789/api/activate" >/dev/null 2>&1; then
-      wait_for_service_http "$slot" "/health/ready" "$READY_TIMEOUT" || return 1
+      wait_for_service_http "$slot" "/health/traffic" "$READY_TIMEOUT" || return 1
       return 0
     fi
     now="$(date +%s)"
@@ -393,13 +393,13 @@ switch_to_slot() {
   service_post "$from" "/api/deactivate" || warn "deactivate ${from} failed; continuing"
   log "activating ${to}"
   service_post "$to" "/api/activate"
-  log "waiting for ${to} readiness"
-  wait_for_service_http "$to" "/health/ready" "$READY_TIMEOUT" || return 1
+  log "waiting for ${to} traffic health"
+  wait_for_service_http "$to" "/health/traffic" "$READY_TIMEOUT" || return 1
 }
 
 run_smoke_checks() {
   log "running smoke checks via HAProxy"
-  wait_for_public_http "/health/ready" "$SMOKE_TIMEOUT" || return 1
+  wait_for_public_http "/health/traffic" "$SMOKE_TIMEOUT" || return 1
 
   # Verify mode is active
   local mode
@@ -412,14 +412,14 @@ run_smoke_checks() {
       ;;
   esac
 
-  # Verify /health/ready reports all checks ok (database, scheduler, role, etc.)
+  # Verify /health/ready for visibility, but do not fail deploy if only
+  # non-traffic operational checks are degraded.
   local ready_body
   ready_body="$(curl -fsS --max-time 10 "http://localhost:${API_PORT}/health/ready" || true)"
   case "$ready_body" in
     *'"ok":true'*) ;;
     *)
-      warn "smoke: /health/ready not fully ok: ${ready_body}"
-      return 1
+      warn "smoke: /health/ready not fully ok (non-blocking): ${ready_body}"
       ;;
   esac
 
@@ -433,6 +433,50 @@ run_smoke_checks() {
       return 1
       ;;
   esac
+
+  # Validate node endpoint behavior over HAProxy (non-upgrade probe + real WS upgrade).
+  local node_http_code
+  node_http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:${API_PORT}/nx/nodes" || true)"
+  case "$node_http_code" in
+    426) ;;
+    *)
+      warn "smoke: expected /nx/nodes HTTP probe to return 426, got ${node_http_code}"
+      return 1
+      ;;
+  esac
+
+  local ws_smoke_script
+  ws_smoke_script='const url = process.env.NEXUS_NODE_WS_SMOKE_URL || "ws://haproxy:18789/nx/nodes";\
+const timeoutMs = 8000;\
+let opened = false;\
+const ws = new WebSocket(url);\
+const timer = setTimeout(() => {\
+  console.error(`timeout connecting ${url}`);\
+  try { ws.close(); } catch {}\
+  process.exit(2);\
+}, timeoutMs);\
+ws.addEventListener("open", () => {\
+  opened = true;\
+  clearTimeout(timer);\
+  try { ws.close(1000, "ha-rollout-smoke"); } catch {}\
+});\
+ws.addEventListener("close", (ev) => {\
+  clearTimeout(timer);\
+  if (opened) process.exit(0);\
+  console.error(`closed before open code=${ev.code} reason=${ev.reason || ""}`);\
+  process.exit(3);\
+});\
+ws.addEventListener("error", () => {\
+  if (opened) return;\
+  clearTimeout(timer);\
+  console.error(`websocket error before open url=${url}`);\
+  process.exit(1);\
+});'
+
+  if ! compose exec -T "$ACTIVE_SLOT" node -e "$ws_smoke_script" >/dev/null 2>&1; then
+    warn "smoke: websocket upgrade check failed on /nx/nodes via HAProxy"
+    return 1
+  fi
 
   log "smoke checks passed"
   return 0
@@ -458,8 +502,8 @@ rollback_after_failure() {
       warn "failed to re-activate old active ${old_active}"
       rollback_ok=0
     fi
-    if ! wait_for_service_http "$old_active" "/health/ready" "$READY_TIMEOUT"; then
-      warn "old active ${old_active} not ready after re-activation"
+    if ! wait_for_service_http "$old_active" "/health/traffic" "$READY_TIMEOUT"; then
+      warn "old active ${old_active} not traffic-healthy after re-activation"
       rollback_ok=0
     fi
   fi

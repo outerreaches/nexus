@@ -32,7 +32,7 @@ log() {
   echo "[watchdog] $(date -Iseconds) $1"
 }
 
-check_health() {
+check_live() {
   url="$1"
   if curl -sf --max-time 5 "${url}/health/live" > /dev/null 2>&1; then
     return 0
@@ -40,11 +40,28 @@ check_health() {
   return 1
 }
 
-check_ready() {
+check_traffic() {
   url="$1"
-  if curl -sf --max-time 10 "${url}/health/ready" > /dev/null 2>&1; then
+  if curl -sf --max-time 5 "${url}/health/traffic" > /dev/null 2>&1; then
     return 0
   fi
+  return 1
+}
+
+wait_for_active_mode() {
+  url="$1"
+  attempts="${2:-10}"
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    i=$((i + 1))
+    mode_response=$(curl -sf --max-time 5 "${url}/api/mode" 2>&1) || mode_response=""
+    case "$mode_response" in
+      *'"mode":"active"'*)
+        return 0
+        ;;
+    esac
+    sleep 2
+  done
   return 1
 }
 
@@ -110,9 +127,9 @@ failover() {
   log "FAILOVER: Switching to standby ($current_standby)"
 
   # Check if standby is alive (liveness is sufficient here — it may be in
-  # standby mode so /health/ready would fail on the role check, but we are
+  # standby mode so /health/traffic would fail on the role check, but we are
   # about to activate it).
-  if ! check_health "$current_standby"; then
+  if ! check_live "$current_standby"; then
     log "ERROR: Standby is also unhealthy (liveness failed)! Cannot failover."
     return 1
   fi
@@ -128,28 +145,14 @@ failover() {
 
   # Verify standby is actually serving as active before declaring success.
   log "FAILOVER: Verifying new primary reports active mode"
-  local verify_attempts=0
-  local verify_ok=0
-  while [ "$verify_attempts" -lt 10 ]; do
-    verify_attempts=$((verify_attempts + 1))
-    mode_response=$(curl -sf --max-time 5 "${current_standby}/api/mode" 2>&1) || mode_response=""
-    case "$mode_response" in
-      *'"mode":"active"'*)
-        verify_ok=1
-        break
-        ;;
-    esac
-    sleep 2
-  done
-
-  if [ "$verify_ok" -ne 1 ]; then
-    log "ERROR: Standby activated but not reporting active mode after ${verify_attempts} attempts"
+  if ! wait_for_active_mode "$current_standby" 10; then
+    log "ERROR: Standby activated but not reporting active mode"
     return 1
   fi
 
-  # Verify readiness (not just liveness) before trusting failover.
-  if ! check_ready "$current_standby"; then
-    log "WARN: Standby activated as active but /health/ready failing; proceeding cautiously"
+  # Verify traffic health before trusting failover.
+  if ! check_traffic "$current_standby"; then
+    log "WARN: Standby activated as active but /health/traffic failing; proceeding cautiously"
   fi
 
   # Swap primary and standby
@@ -163,7 +166,7 @@ failover() {
   failback_healthy_count=0
 
   # Notify HA event on new primary
-  notify_ha_event "$current_primary" "failover" "$old_primary" "$current_primary" "health check failure"
+  notify_ha_event "$current_primary" "failover" "$old_primary" "$current_primary" "traffic health check failure"
 
   # Wait before resuming checks
   log "Waiting ${RECOVERY_DELAY}s for services to stabilize"
@@ -180,10 +183,10 @@ check_failback() {
     return  # Already on original primary
   fi
 
-  # Check if original primary is healthy
-  if check_health "$original_primary" && check_ready "$original_primary"; then
+  # Check if original primary is alive enough to attempt activation.
+  if check_live "$original_primary"; then
     failback_healthy_count=$((failback_healthy_count + 1))
-    log "FAILBACK: Original primary healthy ($failback_healthy_count/$FAILBACK_THRESHOLD)"
+    log "FAILBACK: Original primary live ($failback_healthy_count/$FAILBACK_THRESHOLD)"
 
     if [ "$failback_healthy_count" -ge "$FAILBACK_THRESHOLD" ]; then
       log "FAILBACK: Initiating failback to original primary ($original_primary)"
@@ -193,6 +196,15 @@ check_failback() {
 
       # Activate original primary
       if activate_standby "$original_primary"; then
+        if ! wait_for_active_mode "$original_primary" 10; then
+          log "FAILBACK: Original primary activated but not reporting active mode"
+          failback_healthy_count=0
+          return
+        fi
+        if ! check_traffic "$original_primary"; then
+          log "WARN: Original primary active after failback but /health/traffic failing"
+        fi
+
         # Swap back
         old_primary="$current_primary"
         temp="$current_primary"
@@ -231,14 +243,14 @@ fi
 sleep 10
 
 while true; do
-  if check_health "$current_primary"; then
+  if check_traffic "$current_primary"; then
     if [ "$consecutive_failures" -gt 0 ]; then
       log "Primary recovered after $consecutive_failures failures"
     fi
     consecutive_failures=0
   else
     consecutive_failures=$((consecutive_failures + 1))
-    log "Primary health check failed ($consecutive_failures/$FAILURE_THRESHOLD)"
+    log "Primary traffic health check failed ($consecutive_failures/$FAILURE_THRESHOLD)"
 
     if [ "$consecutive_failures" -ge "$FAILURE_THRESHOLD" ]; then
       failover || log "Failover failed, will retry"

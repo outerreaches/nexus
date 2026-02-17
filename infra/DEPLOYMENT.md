@@ -636,6 +636,7 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/
 docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml ps
 curl -s http://localhost:18789/api/mode
 curl -s http://localhost:18789/health/live
+curl -s http://localhost:18789/health/traffic
 curl -s http://localhost:18789/health/ready
 curl -sk https://localhost:18790/health/live
 
@@ -835,7 +836,8 @@ curl -X POST http://standby-host:18789/api/activate
 
 **Health Endpoints:**
 - `/health/live` - Liveness probe (HTTP server responding)
-- `/health/ready` - Readiness probe (database, scheduler, backups healthy)
+- `/health/traffic` - Traffic/failover probe (DB reachable, active role, active lease held)
+- `/health/ready` - Full operational readiness probe (includes scheduler, backups, proactive, memory, etc.)
 - `/status` - Full system status including lease info
 
 **Telegram Notifications:** Configure `channels.telegram.enabled` to receive alerts for:

@@ -15,8 +15,8 @@
 #   - Can be activated via POST /api/activate
 #
 # Failover scenarios:
-#   1. HAProxy detects primary is unhealthy → routes to standby automatically
-#   2. Watchdog detects primary is unhealthy → activates standby services
+#   1. Watchdog detects active is traffic-unhealthy → activates standby services
+#   2. HAProxy routes to whichever instance reports /health/traffic as healthy
 
 services:
   # Load balancer - entry point for all traffic

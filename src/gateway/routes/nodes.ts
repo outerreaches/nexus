@@ -53,13 +53,16 @@ export function registerNodeRoutes(app: Hono, deps: NodeRouteDeps): void {
       );
     }
 
+    // If a request with Upgrade headers reaches Hono, the raw HTTP upgrade
+    // pipeline did not claim it. This is usually a proxy/header handling issue.
     return c.json(
       {
         ok: false,
-        error: "NEXUS_NODE_WS_STUB",
-        message: "Node WebSocket transport is scaffolded but not implemented yet.",
+        error: "NODE_WS_UPGRADE_HANDLED_BY_SERVER",
+        message:
+          "Node WebSocket upgrades are handled by the HTTP upgrade pipeline. If this route is hit with Upgrade headers, a proxy likely stripped or altered the upgrade request.",
       },
-      501,
+      426,
     );
   });
 }

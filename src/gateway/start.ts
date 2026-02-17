@@ -556,18 +556,18 @@ export async function startGateway(params: { configPath: string; port?: number; 
     return false;
   };
 
-  const waitPeerReady = async (peerUrl: string, timeoutMs: number, retryMs: number): Promise<boolean> => {
+  const waitPeerTrafficHealthy = async (peerUrl: string, timeoutMs: number, retryMs: number): Promise<boolean> => {
     const deadline = Date.now() + timeoutMs;
     let attempts = 0;
     while (Date.now() < deadline) {
       attempts += 1;
-      const res = await fetchText(`${peerUrl}/health/ready`, { method: "GET" }, Math.min(8000, retryMs * 4));
+      const res = await fetchText(`${peerUrl}/health/traffic`, { method: "GET" }, Math.min(8000, retryMs * 4));
       if (res.ok) {
-        log(`restart: peer ready attempt=${attempts}`);
+        log(`restart: peer traffic-healthy attempt=${attempts}`);
         return true;
       }
       if (attempts === 1 || attempts % 5 === 0) {
-        log(`restart: peer not ready attempt=${attempts} status=${res.status}`);
+        log(`restart: peer not traffic-healthy attempt=${attempts} status=${res.status}`);
       }
       await sleep(retryMs);
     }
@@ -589,7 +589,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
         const handoffDelayMs = Math.max(0, delayMs);
         const activateTimeoutMs = Math.max(5_000, envInt("NEXUS_HA_RESTART_ACTIVATE_TIMEOUT_MS") ?? 30_000);
-        const readyTimeoutMs = Math.max(5_000, envInt("NEXUS_HA_RESTART_READY_TIMEOUT_MS") ?? 45_000);
+        const trafficTimeoutMs = Math.max(
+          5_000,
+          envInt("NEXUS_HA_RESTART_TRAFFIC_TIMEOUT_MS") ?? envInt("NEXUS_HA_RESTART_READY_TIMEOUT_MS") ?? 45_000,
+        );
         const retryMs = Math.max(250, envInt("NEXUS_HA_RESTART_RETRY_MS") ?? 1000);
 
         log(`restart: handoff begin reason=${reason} peer=${restartPeerUrl}`);
@@ -609,7 +612,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
         // the lease only once we release it (or it expires), so we deactivate
         // first only if the peer is already confirmed live above.  To keep the
         // window as short as possible we: (1) release our lease, (2) immediately
-        // ask the peer to activate, (3) verify it actually became ready.
+        // ask the peer to activate, (3) verify it is traffic-healthy.
         if (!isStandby) {
           await deactivateServices(`restart handoff (${reason})`);
         } else {
@@ -634,15 +637,15 @@ export async function startGateway(params: { configPath: string; port?: number; 
         const peerMode = await fetchText(`${restartPeerUrl}/api/mode`, { method: "GET" }, 5000);
         const peerIsActive = peerMode.ok && peerMode.text.includes('"mode":"active"');
         if (!peerIsActive) {
-          log("restart: peer activated but not reporting active mode; waiting for readiness");
+          log("restart: peer activated but not reporting active mode; waiting for traffic health");
         }
 
-        const ready = await waitPeerReady(restartPeerUrl, readyTimeoutMs, retryMs);
-        if (!ready) {
-          log("restart: handoff failed (peer readiness timeout); attempting to re-activate locally");
+        const trafficHealthy = await waitPeerTrafficHealthy(restartPeerUrl, trafficTimeoutMs, retryMs);
+        if (!trafficHealthy) {
+          log("restart: handoff failed (peer traffic health timeout); attempting to re-activate locally");
           const reclaimed = await activateServices();
           if (reclaimed.ok) {
-            log("restart: re-activated locally after peer readiness timeout");
+            log("restart: re-activated locally after peer traffic health timeout");
           } else {
             log("restart: local re-activation also failed; restarting process");
           }
