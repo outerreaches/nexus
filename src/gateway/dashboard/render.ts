@@ -71,6 +71,8 @@ export function renderDashboard(params: {
   const llmMode = llmModeRaw === "local_only" ? "local_only" : "default";
   const llmModeBadgeClass = llmMode === "local_only" ? "status-budget_exhausted" : "status-enabled";
   const llmModeLabel = llmMode === "local_only" ? "LOCAL ONLY" : "DEFAULT";
+  const llmLocalProvider = String((params.status as { llm?: { localProvider?: string } }).llm?.localProvider ?? "local");
+  const llmLocalModel = String((params.status as { llm?: { localModel?: string | null } }).llm?.localModel ?? "unknown");
   const blackboardScopeValue = params.blackboardScope || "all";
   const blackboardClearMessage = blackboardScopeValue === "all"
     ? "Clear ALL blackboard entries?"
@@ -163,24 +165,6 @@ export function renderDashboard(params: {
       <div class="meta">Last updated: ${escapeHtml(updatedAt)}</div>
     </header>
     <main>
-      <section>
-        <div class="section-header">
-          <h2>LLM Routing</h2>
-          <div class="inline-actions">
-            <span class="badge ${llmModeBadgeClass}">${escapeHtml(llmModeLabel)}</span>
-            <form method="post" action="/dashboard/llm/mode" class="form-inline compact">
-              <input type="hidden" name="mode" value="default" />
-              <button type="submit" class="graph-btn" ${llmMode === "default" ? "disabled" : ""}>Use Default</button>
-            </form>
-            <form method="post" action="/dashboard/llm/mode" class="form-inline compact">
-              <input type="hidden" name="mode" value="local_only" />
-              <button type="submit" class="graph-btn" ${llmMode === "local_only" ? "disabled" : ""}>Force Local</button>
-            </form>
-          </div>
-        </div>
-        <div class="meta">Applies to new runs only. In-flight runs keep their current model route.</div>
-      </section>
-
       <section>
         <div class="section-header">
           <h2>Agents (activity ${params.agentWindowMinutes}m)</h2>
@@ -354,6 +338,25 @@ export function renderDashboard(params: {
           </div>
         </div>
         <div class="scroll-16">${renderBlackboardTable(params.blackboard)}</div>
+      </section>
+
+      <section>
+        <div class="section-header">
+          <h2>LLM Routing</h2>
+          <div class="inline-actions">
+            <span class="badge ${llmModeBadgeClass}">${escapeHtml(llmModeLabel)}</span>
+            <form method="post" action="/dashboard/llm/mode" class="form-inline compact">
+              <input type="hidden" name="mode" value="default" />
+              <button type="submit" class="graph-btn" ${llmMode === "default" ? "disabled" : ""}>Use Default</button>
+            </form>
+            <form method="post" action="/dashboard/llm/mode" class="form-inline compact">
+              <input type="hidden" name="mode" value="local_only" />
+              <button type="submit" class="graph-btn" ${llmMode === "local_only" ? "disabled" : ""}>Force Local</button>
+            </form>
+          </div>
+        </div>
+        <div class="meta">Applies to new runs only. In-flight runs keep their current model route.</div>
+        <div class="meta">Local target: provider=<code>${escapeHtml(llmLocalProvider)}</code> model=<code>${escapeHtml(llmLocalModel)}</code></div>
       </section>
 
       <section>

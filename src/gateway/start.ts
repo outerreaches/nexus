@@ -400,6 +400,8 @@ export async function startGateway(params: { configPath: string; port?: number; 
       },
       llm: {
         modelMode: agent.getDefaultModelMode(),
+        localProvider: config.llm.routing.localProvider,
+        localModel: llmProviderConfigs[config.llm.routing.localProvider]?.model ?? null,
       },
       browser: {
         cdpPort,
