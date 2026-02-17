@@ -201,6 +201,7 @@ NEXUS_NODE_GATEWAY_URL=$DEFAULT_GATEWAY_URL
 # NEXUS_NODE_CAPS=system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query
 # NEXUS_NODE_ALLOW_COMMANDS=echo,uname,whoami,pwd,date,ls
 # Add nexus-policyctl only if runtime policy mutation is intentionally enabled.
+# Add nexus-shellctl only if interactive tmux sessions on the node are intentionally enabled.
 # NEXUS_NODE_MCP_BRIDGE=1
 # NEXUS_NODE_MCP_BRIDGE_CONFIG=/data/nexus-node/mcp-bridge.json
 # NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS=30000

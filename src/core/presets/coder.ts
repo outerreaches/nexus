@@ -30,6 +30,7 @@ export const preset: AgentPreset = {
     "file_list",
     "image_analyze",
     "shell_exec",
+    "shell_interactive",
     "tools_reload",
     "ha_deploy",
     "web_fetch",

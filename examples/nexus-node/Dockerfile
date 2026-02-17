@@ -2,6 +2,8 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+RUN apk add --no-cache tmux
+
 # Install dependencies (includes tsx used by reference-node script).
 COPY package.json package-lock.json ./
 RUN npm ci

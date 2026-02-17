@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { exec, spawn as spawnChild, type ChildProcess } from "node:child_process";
+import { exec, execFile, spawn as spawnChild, type ChildProcess } from "node:child_process";
 import {
   createHash,
   createPrivateKey,
@@ -40,9 +40,19 @@ const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const FIREWALL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MCP_BRIDGE_CONFIG_FILE = "mcp-bridge.json";
 const POLICYCTL_COMMAND = "nexus-policyctl";
+const SHELLCTL_COMMAND = "nexus-shellctl";
 const FILE_PULL_COMMAND = "file_pull";
 const FILE_PUSH_COMMAND = "file_push";
 const POLICY_PRESET_DIRNAME = "policy-presets";
+const SHELLCTL_ROOT_DIRNAME = "interactive-shell";
+const SHELLCTL_SESSION_DIRNAME = "sessions";
+const SHELLCTL_LOG_DIRNAME = "logs";
+const SHELLCTL_POLL_INTERVAL_MS = 60;
+const SHELLCTL_MAX_WAIT_MS = 5_000;
+const SHELLCTL_MAX_IDLE_MS = 1_000;
+const SHELLCTL_MAX_CHARS = 12_000;
+const SHELLCTL_MAX_READ_BYTES = 128_000;
+const SHELLCTL_SESSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const POLICY_ALLOWED_FIELDS = new Set(["version", "label", "defaultQuarantine", "firewallMode", "denyCommands", "updatedAt"]);
 const DEFAULT_FILE_TRANSFER_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_CAPABILITIES = [
@@ -90,6 +100,23 @@ type HermesReferenceSummary = {
   safeSummary: string;
   metadata: Record<string, unknown> | null;
 };
+
+type ShellCtlSessionMeta = {
+  sessionId: string;
+  tmuxSession: string;
+  cwd: string;
+  logPath: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type ParsedShellCtlCommand =
+  | { action: "list" }
+  | { action: "open"; sessionId: string; cwd: string | null }
+  | { action: "send"; sessionId: string; payload: string; enter: boolean }
+  | { action: "read"; sessionId: string; cursor: number; waitMs: number; idleMs: number; maxChars: number }
+  | { action: "close"; sessionId: string }
+  | { action: "interrupt"; sessionId: string };
 
 type ReferenceProcess = {
   processId: string;
@@ -1716,6 +1743,405 @@ class ReferenceNodeClient {
     return parts.join(" ");
   }
 
+  private shellCtlRootDir(): string {
+    return path.join(this.config.stateDir, SHELLCTL_ROOT_DIRNAME);
+  }
+
+  private shellCtlMetaDir(): string {
+    return path.join(this.shellCtlRootDir(), SHELLCTL_SESSION_DIRNAME);
+  }
+
+  private shellCtlLogDir(): string {
+    return path.join(this.shellCtlRootDir(), SHELLCTL_LOG_DIRNAME);
+  }
+
+  private shellCtlMetaPath(sessionId: string): string {
+    return path.join(this.shellCtlMetaDir(), `${sessionId}.json`);
+  }
+
+  private shellCtlLogPath(sessionId: string): string {
+    return path.join(this.shellCtlLogDir(), `${sessionId}.log`);
+  }
+
+  private async shellCtlEnsureDirs(): Promise<void> {
+    await fs.mkdir(this.shellCtlMetaDir(), { recursive: true });
+    await fs.mkdir(this.shellCtlLogDir(), { recursive: true });
+  }
+
+  private async shellCtlLoadMeta(sessionId: string): Promise<ShellCtlSessionMeta | null> {
+    try {
+      const raw = await fs.readFile(this.shellCtlMetaPath(sessionId), "utf8");
+      const parsed = asObject(JSON.parse(raw));
+      const parsedSessionId = asString(parsed.sessionId);
+      const tmuxSession = asString(parsed.tmuxSession);
+      const cwd = asString(parsed.cwd);
+      const logPath = asString(parsed.logPath);
+      const createdAt = asNumber(parsed.createdAt);
+      const updatedAt = asNumber(parsed.updatedAt);
+      if (!parsedSessionId || !tmuxSession || !cwd || !logPath) return null;
+      return {
+        sessionId: parsedSessionId,
+        tmuxSession,
+        cwd,
+        logPath,
+        createdAt: createdAt ?? Date.now(),
+        updatedAt: updatedAt ?? Date.now(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async shellCtlSaveMeta(meta: ShellCtlSessionMeta): Promise<void> {
+    await this.shellCtlEnsureDirs();
+    await fs.writeFile(this.shellCtlMetaPath(meta.sessionId), JSON.stringify(meta, null, 2), { mode: 0o600 });
+  }
+
+  private async shellCtlDeleteMeta(sessionId: string): Promise<void> {
+    try {
+      await fs.rm(this.shellCtlMetaPath(sessionId), { force: true });
+    } catch {
+      // ignore
+    }
+  }
+
+  private async shellCtlFileSize(filePath: string): Promise<number> {
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) return 0;
+      return stat.size;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async shellCtlEnsureTmux(): Promise<void> {
+    const probe = await runTmuxCommand(["-V"]);
+    if (probe.ok) return;
+    if (probe.rawCode === "ENOENT") {
+      throw new NodeToolError("CAPABILITY_UNAVAILABLE", `${SHELLCTL_COMMAND} requires tmux to be installed on the node.`);
+    }
+    const detail = [probe.errorMessage, probe.stderr].filter(Boolean).join(" | ");
+    throw new NodeToolError("NODE_EXECUTION_FAILED", `tmux probe failed: ${truncateOutput(detail || "unknown error", 500)}`);
+  }
+
+  private async shellCtlHasSession(tmuxSession: string): Promise<boolean> {
+    const result = await runTmuxCommand(["has-session", "-t", tmuxSession]);
+    return result.ok;
+  }
+
+  private async shellCtlReadTimedOutput(params: {
+    logPath: string;
+    cursor: number;
+    waitMs: number;
+    idleMs: number;
+    maxChars: number;
+  }): Promise<{
+    output: string;
+    nextCursor: number;
+    totalBytes: number;
+    truncated: boolean;
+    resetCursor: boolean;
+  }> {
+    await fs.mkdir(path.dirname(params.logPath), { recursive: true });
+    try {
+      await fs.access(params.logPath);
+    } catch {
+      await fs.writeFile(params.logPath, "", { mode: 0o600 });
+    }
+
+    let startCursor = Math.max(0, Math.floor(params.cursor));
+    const initialSize = await this.shellCtlFileSize(params.logPath);
+    let resetCursor = false;
+    if (startCursor > initialSize) {
+      startCursor = 0;
+      resetCursor = true;
+    }
+
+    const deadline = Date.now() + Math.max(0, params.waitMs);
+    let observedSize = await this.shellCtlFileSize(params.logPath);
+    let hasNewOutput = observedSize > startCursor;
+    while (!hasNewOutput && Date.now() < deadline) {
+      await sleepMs(SHELLCTL_POLL_INTERVAL_MS);
+      observedSize = await this.shellCtlFileSize(params.logPath);
+      hasNewOutput = observedSize > startCursor;
+    }
+
+    let finalSize = observedSize;
+    if (hasNewOutput && params.idleMs > 0) {
+      let quietUntil = Date.now() + params.idleMs;
+      while (Date.now() < deadline && Date.now() < quietUntil) {
+        await sleepMs(SHELLCTL_POLL_INTERVAL_MS);
+        const nextSize = await this.shellCtlFileSize(params.logPath);
+        if (nextSize > finalSize) {
+          finalSize = nextSize;
+          quietUntil = Date.now() + params.idleMs;
+        }
+      }
+    }
+
+    const bytesAvailable = Math.max(0, finalSize - startCursor);
+    const maxBytes = Math.max(256, Math.min(SHELLCTL_MAX_READ_BYTES, params.maxChars * 4));
+    const bytesToRead = Math.min(bytesAvailable, maxBytes);
+    const nextCursor = startCursor + bytesToRead;
+    let output = "";
+    if (bytesToRead > 0) {
+      const handle = await fs.open(params.logPath, "r");
+      try {
+        const buf = Buffer.alloc(bytesToRead);
+        const { bytesRead } = await handle.read(buf, 0, bytesToRead, startCursor);
+        output = buf.subarray(0, bytesRead).toString("utf8");
+      } finally {
+        await handle.close();
+      }
+    }
+
+    return {
+      output,
+      nextCursor,
+      totalBytes: finalSize,
+      truncated: nextCursor < finalSize,
+      resetCursor,
+    };
+  }
+
+  private async execShellCtlCommand(params: {
+    command: string;
+  }): Promise<string> {
+    const parsed = parseShellCtlCommand(params.command);
+    if (parsed.action === "list") {
+      await this.shellCtlEnsureDirs();
+      const files = await fs.readdir(this.shellCtlMetaDir());
+      const sessions: Array<Record<string, unknown>> = [];
+      for (const entry of files.sort((a, b) => a.localeCompare(b))) {
+        if (!entry.endsWith(".json")) continue;
+        const sessionId = entry.slice(0, -5);
+        const meta = await this.shellCtlLoadMeta(sessionId);
+        if (!meta) continue;
+        sessions.push({
+          session: sessionId,
+          cwd: meta.cwd,
+          running: await this.shellCtlHasSession(meta.tmuxSession),
+          logBytes: await this.shellCtlFileSize(meta.logPath),
+          createdAt: meta.createdAt,
+          updatedAt: meta.updatedAt,
+        });
+      }
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "list",
+          count: sessions.length,
+          sessions,
+        },
+        null,
+        2,
+      );
+    }
+
+    if (parsed.action === "open") {
+      await this.shellCtlEnsureTmux();
+      await this.shellCtlEnsureDirs();
+
+      const existingMeta = await this.shellCtlLoadMeta(parsed.sessionId);
+      if (existingMeta && (await this.shellCtlHasSession(existingMeta.tmuxSession))) {
+        return JSON.stringify(
+          {
+            ok: true,
+            action: "open",
+            session: parsed.sessionId,
+            existed: true,
+            cwd: existingMeta.cwd,
+            cursor: await this.shellCtlFileSize(existingMeta.logPath),
+          },
+          null,
+          2,
+        );
+      }
+      if (existingMeta) {
+        await this.shellCtlDeleteMeta(parsed.sessionId);
+      }
+
+      const cwd = parsed.cwd
+        ? path.resolve(path.isAbsolute(parsed.cwd) ? parsed.cwd : path.join(this.config.stateDir, parsed.cwd))
+        : this.config.stateDir;
+      let cwdStat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        cwdStat = await fs.stat(cwd);
+      } catch (err) {
+        throw new NodeToolError("INVALID_REQUEST", `open cwd does not exist: ${cwd} (${err instanceof Error ? err.message : String(err)})`);
+      }
+      if (!cwdStat.isDirectory()) {
+        throw new NodeToolError("INVALID_REQUEST", `open cwd is not a directory: ${cwd}`);
+      }
+
+      const tmuxSession = shellCtlSessionNameFromId(parsed.sessionId);
+      const logPath = this.shellCtlLogPath(parsed.sessionId);
+      await fs.writeFile(logPath, "", { mode: 0o600 });
+
+      const createRes = await runTmuxCommand(["new-session", "-d", "-s", tmuxSession, "-c", cwd]);
+      if (!createRes.ok) {
+        const detail = [createRes.errorMessage, createRes.stderr].filter(Boolean).join(" | ");
+        throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to open tmux session: ${truncateOutput(detail || "unknown error", 500)}`);
+      }
+      await runTmuxCommand(["set-option", "-t", tmuxSession, "history-limit", "200000"]);
+      const pipeCommand = `cat >> ${shellEscape(logPath)}`;
+      const pipeRes = await runTmuxCommand(["pipe-pane", "-o", "-t", `${tmuxSession}:0.0`, pipeCommand]);
+      if (!pipeRes.ok) {
+        await runTmuxCommand(["kill-session", "-t", tmuxSession]);
+        const detail = [pipeRes.errorMessage, pipeRes.stderr].filter(Boolean).join(" | ");
+        throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to attach tmux output pipe: ${truncateOutput(detail || "unknown error", 500)}`);
+      }
+
+      const now = Date.now();
+      await this.shellCtlSaveMeta({
+        sessionId: parsed.sessionId,
+        tmuxSession,
+        cwd,
+        logPath,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "open",
+          session: parsed.sessionId,
+          existed: false,
+          cwd,
+          cursor: 0,
+        },
+        null,
+        2,
+      );
+    }
+
+    if (parsed.action === "send") {
+      await this.shellCtlEnsureTmux();
+      const meta = await this.shellCtlLoadMeta(parsed.sessionId);
+      if (!meta) {
+        throw new NodeToolError("INVALID_REQUEST", `interactive session not found: ${parsed.sessionId}`);
+      }
+      if (!(await this.shellCtlHasSession(meta.tmuxSession))) {
+        throw new NodeToolError("PROCESS_NOT_FOUND", `interactive session is not running: ${parsed.sessionId}`);
+      }
+      const target = `${meta.tmuxSession}:0.0`;
+      const sendRes = await runTmuxCommand(["send-keys", "-t", target, "-l", parsed.payload]);
+      if (!sendRes.ok) {
+        const detail = [sendRes.errorMessage, sendRes.stderr].filter(Boolean).join(" | ");
+        throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to send tmux input: ${truncateOutput(detail || "unknown error", 500)}`);
+      }
+      if (parsed.enter) {
+        const enterRes = await runTmuxCommand(["send-keys", "-t", target, "Enter"]);
+        if (!enterRes.ok) {
+          const detail = [enterRes.errorMessage, enterRes.stderr].filter(Boolean).join(" | ");
+          throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to send Enter key: ${truncateOutput(detail || "unknown error", 500)}`);
+        }
+      }
+      meta.updatedAt = Date.now();
+      await this.shellCtlSaveMeta(meta);
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "send",
+          session: parsed.sessionId,
+          enter: parsed.enter,
+          cursor: await this.shellCtlFileSize(meta.logPath),
+        },
+        null,
+        2,
+      );
+    }
+
+    if (parsed.action === "read") {
+      const meta = await this.shellCtlLoadMeta(parsed.sessionId);
+      if (!meta) {
+        throw new NodeToolError("INVALID_REQUEST", `interactive session not found: ${parsed.sessionId}`);
+      }
+      const read = await this.shellCtlReadTimedOutput({
+        logPath: meta.logPath,
+        cursor: parsed.cursor,
+        waitMs: parsed.waitMs,
+        idleMs: parsed.idleMs,
+        maxChars: parsed.maxChars,
+      });
+      const running = await this.shellCtlHasSession(meta.tmuxSession);
+      meta.updatedAt = Date.now();
+      await this.shellCtlSaveMeta(meta);
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "read",
+          session: parsed.sessionId,
+          output: read.output,
+          nextCursor: read.nextCursor,
+          totalBytes: read.totalBytes,
+          truncated: read.truncated,
+          resetCursor: read.resetCursor,
+          running,
+        },
+        null,
+        2,
+      );
+    }
+
+    if (parsed.action === "interrupt") {
+      await this.shellCtlEnsureTmux();
+      const meta = await this.shellCtlLoadMeta(parsed.sessionId);
+      if (!meta) {
+        throw new NodeToolError("INVALID_REQUEST", `interactive session not found: ${parsed.sessionId}`);
+      }
+      if (!(await this.shellCtlHasSession(meta.tmuxSession))) {
+        throw new NodeToolError("PROCESS_NOT_FOUND", `interactive session is not running: ${parsed.sessionId}`);
+      }
+      const res = await runTmuxCommand(["send-keys", "-t", `${meta.tmuxSession}:0.0`, "C-c"]);
+      if (!res.ok) {
+        const detail = [res.errorMessage, res.stderr].filter(Boolean).join(" | ");
+        throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to interrupt session: ${truncateOutput(detail || "unknown error", 500)}`);
+      }
+      meta.updatedAt = Date.now();
+      await this.shellCtlSaveMeta(meta);
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "interrupt",
+          session: parsed.sessionId,
+        },
+        null,
+        2,
+      );
+    }
+
+    const meta = await this.shellCtlLoadMeta(parsed.sessionId);
+    if (!meta) {
+      return JSON.stringify(
+        {
+          ok: true,
+          action: "close",
+          session: parsed.sessionId,
+          alreadyClosed: true,
+        },
+        null,
+        2,
+      );
+    }
+    const running = await this.shellCtlHasSession(meta.tmuxSession);
+    if (running) {
+      await runTmuxCommand(["kill-session", "-t", meta.tmuxSession]);
+    }
+    await this.shellCtlDeleteMeta(parsed.sessionId);
+    return JSON.stringify(
+      {
+        ok: true,
+        action: "close",
+        session: parsed.sessionId,
+        wasRunning: running,
+      },
+      null,
+      2,
+    );
+  }
+
   private async handleSymbolsList(msg: RequestEnvelope): Promise<void> {
     const params = asObject(msg.params);
     const requestedKindRaw = asString(params.kind);
@@ -2359,6 +2785,12 @@ class ReferenceNodeClient {
       }
       return `${POLICYCTL_COMMAND} (node-builtin)`;
     }
+    if (command === SHELLCTL_COMMAND) {
+      if (!isAllowedCommand(SHELLCTL_COMMAND, this.config.allowCommands)) {
+        throw new NodeToolError("COMMAND_NOT_FOUND", `Command not found: ${command}`);
+      }
+      return `${SHELLCTL_COMMAND} (node-builtin)`;
+    }
 
     const safe = shellEscape(command);
     const result = await execShell(`command -v ${safe}`, {
@@ -2436,6 +2868,10 @@ class ReferenceNodeClient {
         routing,
         toolName: "system.run",
         firewallMode,
+      });
+    } else if (commandName === SHELLCTL_COMMAND) {
+      combined = await this.execShellCtlCommand({
+        command: executionCommand,
       });
     } else {
       const result = await execShell(executionCommand, {
@@ -3548,6 +3984,50 @@ async function execShell(paramsCommand: string, opts: {
   });
 }
 
+async function sleepMs(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function runTmuxCommand(args: string[]): Promise<{
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  rawCode: string | number | undefined;
+  errorMessage: string | null;
+}> {
+  return await new Promise((resolve) => {
+    execFile(
+      "tmux",
+      args,
+      {
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+      },
+      (err, stdout, stderr) => {
+        if (!err) {
+          resolve({
+            ok: true,
+            stdout: stdout ?? "",
+            stderr: stderr ?? "",
+            rawCode: 0,
+            errorMessage: null,
+          });
+          return;
+        }
+        const anyErr = err as NodeJS.ErrnoException & { code?: string | number };
+        resolve({
+          ok: false,
+          stdout: stdout ?? "",
+          stderr: stderr ?? "",
+          rawCode: anyErr.code,
+          errorMessage: anyErr.message ?? String(err),
+        });
+      },
+    );
+  });
+}
+
 function isAllowedCommand(commandName: string, allowCommands: Set<string>): boolean {
   if (allowCommands.has("*")) return true;
   return allowCommands.has(commandName);
@@ -3729,6 +4209,152 @@ function parsePolicyCtlCommand(command: string):
   );
 }
 
+function shellCtlSessionNameFromId(sessionId: string): string {
+  const base = sessionId.length <= 44 ? sessionId : `${sessionId.slice(0, 36)}_${shortStableHash(sessionId)}`;
+  return `nxsh_${base}`;
+}
+
+function parseShellCtlSessionId(value: string | undefined): string {
+  const trimmed = (value ?? "").trim();
+  if (!SHELLCTL_SESSION_PATTERN.test(trimmed)) {
+    throw new NodeToolError(
+      "INVALID_REQUEST",
+      `${SHELLCTL_COMMAND} session must match [A-Za-z0-9._-] and be 1-64 chars.`,
+    );
+  }
+  return trimmed;
+}
+
+function parseShellCtlInteger(value: string, flag: string): number {
+  const num = Number.parseInt(value, 10);
+  if (!Number.isFinite(num) || !Number.isInteger(num)) {
+    throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} ${flag} must be an integer.`);
+  }
+  return num;
+}
+
+function parseShellCtlBool(value: string, flag: string): boolean {
+  const lowered = value.trim().toLowerCase();
+  if (lowered === "1" || lowered === "true" || lowered === "yes" || lowered === "on") return true;
+  if (lowered === "0" || lowered === "false" || lowered === "no" || lowered === "off") return false;
+  throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} ${flag} must be one of 1/0/true/false.`);
+}
+
+function decodeBase64Utf8OrThrow(value: string, flag: string): string {
+  const decoded = decodeBase64Loose(value);
+  if (!decoded) {
+    throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} ${flag} must be valid base64.`);
+  }
+  return decoded.toString("utf8");
+}
+
+function parseShellCtlFlags(tokens: string[]): Map<string, string> {
+  const flags = new Map<string, string>();
+  for (let i = 0; i < tokens.length; i += 2) {
+    const key = tokens[i];
+    const value = tokens[i + 1];
+    if (!key || !key.startsWith("--")) {
+      throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} expected --flag arguments; got "${key ?? ""}".`);
+    }
+    if (value === undefined || value.startsWith("--")) {
+      throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} ${key} requires a value.`);
+    }
+    if (flags.has(key)) {
+      throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} ${key} cannot be specified more than once.`);
+    }
+    flags.set(key, value);
+  }
+  return flags;
+}
+
+function ensureOnlyShellCtlFlags(flags: Map<string, string>, allowed: string[]): void {
+  const allow = new Set(allowed);
+  for (const key of flags.keys()) {
+    if (!allow.has(key)) {
+      throw new NodeToolError(
+        "INVALID_REQUEST",
+        `${SHELLCTL_COMMAND} does not support flag ${key} for this action.`,
+      );
+    }
+  }
+}
+
+function parseShellCtlCommand(command: string): ParsedShellCtlCommand {
+  const tokens = parseCommandTokens(command);
+  if (!tokens || tokens.length < 2 || tokens[0] !== SHELLCTL_COMMAND) {
+    throw new NodeToolError(
+      "INVALID_REQUEST",
+      `${SHELLCTL_COMMAND} command is malformed. Expected: ${SHELLCTL_COMMAND} <open|send|read|list|close|interrupt>.`,
+    );
+  }
+
+  const action = tokens[1];
+  const args = tokens.slice(2);
+  if (action === "list") {
+    if (args.length > 0) {
+      throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} list does not accept additional arguments.`);
+    }
+    return { action: "list" };
+  }
+
+  const flags = parseShellCtlFlags(args);
+  const sessionId = parseShellCtlSessionId(flags.get("--session"));
+  if (action === "open") {
+    ensureOnlyShellCtlFlags(flags, ["--session", "--cwd-b64"]);
+    const cwdB64 = flags.get("--cwd-b64");
+    const cwd = cwdB64 ? decodeBase64Utf8OrThrow(cwdB64, "--cwd-b64") : null;
+    return { action: "open", sessionId, cwd };
+  }
+  if (action === "send") {
+    ensureOnlyShellCtlFlags(flags, ["--session", "--payload-b64", "--enter"]);
+    const payloadB64 = flags.get("--payload-b64");
+    if (!payloadB64) {
+      throw new NodeToolError("INVALID_REQUEST", `${SHELLCTL_COMMAND} send requires --payload-b64.`);
+    }
+    const payload = decodeBase64Utf8OrThrow(payloadB64, "--payload-b64");
+    const enterRaw = flags.get("--enter");
+    const enter = enterRaw ? parseShellCtlBool(enterRaw, "--enter") : true;
+    return {
+      action: "send",
+      sessionId,
+      payload,
+      enter,
+    };
+  }
+  if (action === "read") {
+    ensureOnlyShellCtlFlags(flags, ["--session", "--cursor", "--wait-ms", "--idle-ms", "--max-chars"]);
+    const cursorRaw = flags.get("--cursor");
+    const waitRaw = flags.get("--wait-ms");
+    const idleRaw = flags.get("--idle-ms");
+    const maxCharsRaw = flags.get("--max-chars");
+    const cursor = cursorRaw ? Math.max(0, parseShellCtlInteger(cursorRaw, "--cursor")) : 0;
+    const waitMs = waitRaw ? Math.max(0, Math.min(SHELLCTL_MAX_WAIT_MS, parseShellCtlInteger(waitRaw, "--wait-ms"))) : 1_500;
+    const idleMs = idleRaw ? Math.max(50, Math.min(SHELLCTL_MAX_IDLE_MS, parseShellCtlInteger(idleRaw, "--idle-ms"))) : 200;
+    const maxChars = maxCharsRaw ? Math.max(128, Math.min(SHELLCTL_MAX_CHARS, parseShellCtlInteger(maxCharsRaw, "--max-chars"))) : 4_000;
+    return {
+      action: "read",
+      sessionId,
+      cursor,
+      waitMs,
+      idleMs,
+      maxChars,
+    };
+  }
+  if (action === "close") {
+    ensureOnlyShellCtlFlags(flags, ["--session"]);
+    return { action: "close", sessionId };
+  }
+  if (action === "interrupt") {
+    ensureOnlyShellCtlFlags(flags, ["--session"]);
+    return { action: "interrupt", sessionId };
+  }
+
+  throw new NodeToolError(
+    "INVALID_REQUEST",
+    `${SHELLCTL_COMMAND} action ${action} is not supported. Use open|send|read|list|close|interrupt.`,
+  );
+}
+
 function parseCommandTokens(command: string): string[] | null {
   const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
   if (tokens.length === 0) return [];
@@ -3742,6 +4368,15 @@ function parseCommandTokens(command: string): string[] | null {
     out.push(token);
   }
   return out;
+}
+
+function shortStableHash(input: string): string {
+  let hash = 2166136261 >>> 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(36);
 }
 
 function resolvePolicyPresetPath(policyPresetDir: string, presetName: string): string {
@@ -4034,7 +4669,7 @@ function printHelp(): void {
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ~/.nexus-node)",
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
-      "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,file_pull,file_push to enable control surfaces)",
+      "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,nexus-shellctl,file_pull,file_push to enable control surfaces)",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
       "  --file-transfer-roots <csv>     Allowed absolute roots for file transfer paths (default <stateDir>/file-transfer)",

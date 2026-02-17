@@ -50,7 +50,7 @@ Optional flags:
 - `--name <display-name>`
 - `--state-dir <dir>` (default `~/.nexus-node`)
 - `--caps <csv>`
-- `--allow <csv>` (command allowlist for `system.run`/`process.start`; include `nexus-policyctl,file_pull,file_push` to enable control surfaces)
+- `--allow <csv>` (command allowlist for `system.run`/`process.start`; include `nexus-policyctl,nexus-shellctl,file_pull,file_push` to enable control surfaces)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
 - `--file-transfer-roots <csv>` (allowed roots for node file paths; default `<stateDir>/file-transfer`)
 - `--file-transfer-max-bytes <n>` (max bytes per file transfer payload; default 5242880)
@@ -84,6 +84,14 @@ Runtime policy mutation is command-gated. There is no gateway `policy.update` co
   - policy field validation is strict (unknown fields rejected)
   - firewall-mode downgrade and deny-list clear require `--break-glass`
   - writes are atomic and applied immediately for new executions
+
+## Interactive shell control (`nexus-shellctl`)
+
+`nexus-shellctl` is a node-builtin command for tmux-backed interactive sessions.
+
+- To enable it, add `nexus-shellctl` to `NEXUS_NODE_ALLOW_COMMANDS` (or `--allow`).
+- Supported actions: `open`, `send`, `read`, `list`, `interrupt`, `close`.
+- Session IDs must match `[A-Za-z0-9._-]` and are capped at 64 chars.
 
 ### `NEXUS_NODE_ALLOW_COMMANDS` semantics
 
