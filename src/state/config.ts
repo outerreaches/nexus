@@ -69,14 +69,14 @@ const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
     apiKey: EnvString.optional(),
-    model: z.string().default("moonshot/kimi-k2.5"),
+    model: EnvString.default("moonshotai/kimi-k2.5"),
   })
   .default({});
 
 const LlmRouteTargetSchema = z
   .object({
     provider: z.string().min(1).default("default"),
-    model: z.string().optional(),
+    model: EnvString.optional(),
   })
   .default({ provider: "default" });
 
@@ -179,7 +179,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           openaiCompat: {
             baseUrl: "https://openrouter.ai/api/v1",
             apiKey: "${OPENROUTER_API_KEY}",
-            model: "moonshot/kimi-k2.5",
+            model: "moonshotai/kimi-k2.5",
           },
           providers: {
             local: {

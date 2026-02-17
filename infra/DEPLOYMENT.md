@@ -298,7 +298,7 @@ cat > /data/nexus/nexus.json << 'EOF'
     "openaiCompat": {
       "baseUrl": "https://openrouter.ai/api/v1",
       "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "moonshot/kimi-k2.5"
+      "model": "moonshotai/kimi-k2.5"
     }
   },
   "permissions": {

@@ -115,7 +115,7 @@ if [ ! -f "$STATE_DIR/nexus.json" ]; then
     "openaiCompat": {
       "baseUrl": "https://openrouter.ai/api/v1",
       "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "anthropic/claude-sonnet-4"
+      "model": "moonshotai/kimi-k2.5"
     }
   },
   "permissions": {
