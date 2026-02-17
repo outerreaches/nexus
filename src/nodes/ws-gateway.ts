@@ -1,5 +1,7 @@
-import { randomBytes, randomUUID, type KeyObject } from "node:crypto";
+import { createHash, randomBytes, randomUUID, type KeyObject } from "node:crypto";
+import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
+import path from "node:path";
 import type { Duplex } from "node:stream";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -254,6 +256,10 @@ export class NodeWebSocketGateway {
         return this.requestMcpCall(params);
       case "mcp.resources":
         return this.requestMcpResources(params);
+      case "file.pull":
+        return this.requestFilePull(params);
+      case "file.push":
+        return this.requestFilePush(params);
       default:
         return this.executeTool({
           nodeId: params.nodeId,
@@ -643,6 +649,211 @@ export class NodeWebSocketGateway {
       message: `Node ${params.nodeId} failed MCP resources request.`,
     });
     return this.normalizeStructuredResult(response.payload);
+  }
+
+  private async requestFilePull(params: {
+    nodeId: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const remotePath = this.asString(argsObj.remotePath) ?? this.asString(argsObj.path);
+    if (!remotePath) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_file_pull requires `remotePath`.");
+    }
+    const overwrite = this.asBoolean(argsObj.overwrite) ?? false;
+    const localPathArg = this.asString(argsObj.localPath) ?? this.asString(argsObj.savePath);
+    const maxBytesRaw = this.asNumber(argsObj.maxBytes);
+    const maxBytes = maxBytesRaw !== null ? Math.max(1_024, Math.min(50 * 1024 * 1024, Math.floor(maxBytesRaw))) : 5 * 1024 * 1024;
+    const timeout = this.asNumber(argsObj.timeoutMs) ?? undefined;
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "file.pull",
+      params: {
+        path: remotePath,
+        maxBytes,
+      },
+      timeoutMs: timeout ?? params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed file.pull for ${remotePath}.`,
+    });
+    const payload = this.asObject(response.payload);
+    const contentBase64 = this.asString(payload.contentBase64);
+    if (!contentBase64) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "file.pull response missing contentBase64 payload.");
+    }
+    const bytes = this.decodeBase64Payload(contentBase64);
+    if (bytes.length > maxBytes) {
+      throw new NodeRoutingError(
+        "NODE_PROTOCOL_ERROR",
+        `Decoded file payload exceeded maxBytes (${bytes.length} > ${maxBytes}).`,
+      );
+    }
+    const destinationPath = this.resolveGatewayTransferDestinationPath({
+      localPath: localPathArg,
+      remotePath,
+      nodeId: params.nodeId,
+      ctx: params.ctx,
+    });
+    if (!overwrite) {
+      try {
+        await fs.access(destinationPath);
+        throw new NodeRoutingError(
+          "NODE_PROTOCOL_ERROR",
+          `node_file_pull destination exists: ${destinationPath} (set overwrite=true to replace).`,
+        );
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | undefined)?.code;
+        if (code !== "ENOENT") throw err;
+      }
+    }
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.writeFile(destinationPath, bytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return JSON.stringify(
+      {
+        ok: true,
+        nodeId: params.nodeId,
+        remotePath,
+        localPath: destinationPath,
+        sizeBytes: bytes.length,
+        sha256,
+        pulledAt: Date.now(),
+      },
+      null,
+      2,
+    );
+  }
+
+  private async requestFilePush(params: {
+    nodeId: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const localPathArg = this.asString(argsObj.localPath);
+    if (!localPathArg) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_file_push requires `localPath`.");
+    }
+    const remotePath = this.asString(argsObj.remotePath) ?? this.asString(argsObj.path);
+    if (!remotePath) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "node_file_push requires `remotePath`.");
+    }
+    const overwrite = this.asBoolean(argsObj.overwrite) ?? false;
+    const maxBytesRaw = this.asNumber(argsObj.maxBytes);
+    const maxBytes = maxBytesRaw !== null ? Math.max(1_024, Math.min(50 * 1024 * 1024, Math.floor(maxBytesRaw))) : 5 * 1024 * 1024;
+    const timeout = this.asNumber(argsObj.timeoutMs) ?? undefined;
+    const sourcePath = this.resolveGatewayPathWithinRoots(localPathArg, params.ctx);
+    let bytes: Buffer;
+    try {
+      const stat = await fs.stat(sourcePath);
+      if (!stat.isFile()) {
+        throw new NodeRoutingError("NODE_PROTOCOL_ERROR", `node_file_push localPath is not a file: ${sourcePath}`);
+      }
+      if (stat.size > maxBytes) {
+        throw new NodeRoutingError(
+          "NODE_PROTOCOL_ERROR",
+          `node_file_push local file exceeds maxBytes (${stat.size} > ${maxBytes}).`,
+        );
+      }
+      bytes = await fs.readFile(sourcePath);
+    } catch (err) {
+      if (err instanceof NodeRoutingError) throw err;
+      throw new NodeRoutingError(
+        "NODE_PROTOCOL_ERROR",
+        `Failed to read local file for node_file_push: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "file.push",
+      params: {
+        path: remotePath,
+        contentBase64: bytes.toString("base64"),
+        overwrite,
+        maxBytes,
+      },
+      timeoutMs: timeout ?? params.timeoutMs,
+    });
+    this.throwOnRemoteError(response, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed file.push for ${remotePath}.`,
+    });
+    const payload = this.asObject(response.payload);
+    const sha256 = this.asString(payload.sha256) ?? createHash("sha256").update(bytes).digest("hex");
+    return JSON.stringify(
+      {
+        ok: true,
+        nodeId: params.nodeId,
+        localPath: sourcePath,
+        remotePath: this.asString(payload.path) ?? remotePath,
+        sizeBytes: this.asNumber(payload.sizeBytes) ?? bytes.length,
+        sha256,
+        pushedAt: Date.now(),
+      },
+      null,
+      2,
+    );
+  }
+
+  private resolveGatewayTransferDestinationPath(params: {
+    localPath: string | null;
+    remotePath: string;
+    nodeId: string;
+    ctx: ToolContext;
+  }): string {
+    if (params.localPath) {
+      return this.resolveGatewayPathWithinRoots(params.localPath, params.ctx);
+    }
+    const baseName = path.basename(params.remotePath) || "node-file.bin";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const auto = path.resolve(params.ctx.stateDir, "node-transfers", params.nodeId, `${stamp}-${baseName}`);
+    return this.resolveGatewayPathWithinRoots(auto, params.ctx);
+  }
+
+  private resolveGatewayPathWithinRoots(inputPath: string, ctx: ToolContext): string {
+    const trimmed = inputPath.trim();
+    if (!trimmed) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "file transfer path cannot be empty.");
+    }
+    if (!path.isAbsolute(trimmed)) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "file transfer paths must be absolute.");
+    }
+    const resolved = path.resolve(trimmed);
+    const allowedRoots = [ctx.stateDir, ctx.workspaceDir, ctx.codeDir].map((root) => path.resolve(root));
+    const allowed = allowedRoots.some((root) => {
+      const rel = path.relative(root, resolved);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    });
+    if (!allowed) {
+      throw new NodeRoutingError(
+        "NODE_PROTOCOL_ERROR",
+        `file transfer path is outside allowed roots: ${resolved}`,
+      );
+    }
+    return resolved;
+  }
+
+  private decodeBase64Payload(value: string): Buffer {
+    const normalized = value.trim().replace(/\s+/g, "");
+    if (!normalized) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "file transfer payload is empty.");
+    }
+    if (/[^A-Za-z0-9+/=]/.test(normalized)) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "file transfer payload is not valid base64.");
+    }
+    try {
+      return Buffer.from(normalized, "base64");
+    } catch (err) {
+      throw new NodeRoutingError(
+        "NODE_PROTOCOL_ERROR",
+        `failed to decode base64 payload: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private extractProcessId(value: Record<string, unknown>): string | null {

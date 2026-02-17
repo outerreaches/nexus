@@ -55,6 +55,8 @@ export const preset: AgentPreset = {
     "node_set_status",
     "node_symbols_list",
     "node_audit_query",
+    "node_file_pull",
+    "node_file_push",
     "node_mcp_list",
     "node_mcp_call",
     "node_mcp_resources",

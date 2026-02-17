@@ -138,7 +138,9 @@ export class NodeToolRouter implements NodeRouter {
       toolName !== "audit.query" &&
       toolName !== "mcp.list" &&
       toolName !== "mcp.call" &&
-      toolName !== "mcp.resources"
+      toolName !== "mcp.resources" &&
+      toolName !== "file.pull" &&
+      toolName !== "file.push"
     ) {
       return null;
     }
@@ -291,6 +293,8 @@ export class NodeToolRouter implements NodeRouter {
     if (toolName === "node_mcp_list") return "mcp.list";
     if (toolName === "node_mcp_call") return "mcp.call";
     if (toolName === "node_mcp_resources") return "mcp.resources";
+    if (toolName === "node_file_pull") return "file.pull";
+    if (toolName === "node_file_push") return "file.push";
     if (toolName === "process_list") {
       throw new NodeRoutingError(
         "NODE_ROUTING_NOT_IMPLEMENTED",

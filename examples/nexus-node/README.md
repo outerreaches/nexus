@@ -24,6 +24,8 @@ Current scope:
   - `system.run` / `process.start` symbol template resolution (`{{kind:key}}`, `{{kind:key:field}}`) against node-local stores
 - Audit:
   - `audit.query` (append-only node-local audit retrieval with filters/pagination)
+- File transfer (node allowlisted):
+  - `file.pull` / `file.push` for moving small artifacts between node and gateway
 - Sanitized Hermes outputs:
   - non-transparent modes return safe summaries + node-local reference handles (no raw payload mirroring to gateway metadata)
 - Node-local durable state (`state/reference-node.db`):
@@ -48,8 +50,10 @@ Optional flags:
 - `--name <display-name>`
 - `--state-dir <dir>` (default `~/.nexus-node`)
 - `--caps <csv>`
-- `--allow <csv>` (command allowlist for `system.run`; include `nexus-policyctl` to allow runtime policy changes)
+- `--allow <csv>` (command allowlist for `system.run`/`process.start`; include `nexus-policyctl,file_pull,file_push` to enable control surfaces)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
+- `--file-transfer-roots <csv>` (allowed roots for node file paths; default `<stateDir>/file-transfer`)
+- `--file-transfer-max-bytes <n>` (max bytes per file transfer payload; default 5242880)
 - `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
 - `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
 
@@ -214,6 +218,98 @@ Common MCP troubleshooting:
      - `NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS`
   2. Recreate the node container (`docker compose up -d --build --force-recreate`).
   3. Re-run `node_mcp_list`.
+
+### MCP on macOS host mode (Puppeteer + GitHub)
+
+For local automation on macOS (browser/session workflows), run the node on the host instead of inside Docker. The MCP bridge spawns servers locally via stdio, so host mode gives MCP servers direct access to host runtime and user session context.
+
+Recommended `~/.nexus-node/mcp-bridge.json` (validated):
+
+```json
+{
+  "enabled": true,
+  "servers": [
+    {
+      "id": "puppeteer",
+      "label": "Puppeteer MCP",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer@2025.5.12"],
+      "timeoutMs": 120000,
+      "allowTools": ["*"],
+      "allowResources": []
+    },
+    {
+      "id": "github",
+      "label": "GitHub MCP",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+      "timeoutMs": 120000,
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "<set token here>"
+      },
+      "allowTools": ["*"],
+      "allowResources": []
+    }
+  ]
+}
+```
+
+Host runtime env reminders:
+
+- `NEXUS_NODE_MCP_BRIDGE=1`
+- `NEXUS_NODE_MCP_BRIDGE_CONFIG=/Users/<user>/.nexus-node/mcp-bridge.json`
+- `NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS=120000` (recommended for first-run MCP bootstrap)
+- `GITHUB_PERSONAL_ACCESS_TOKEN=<pat>` (required for GitHub MCP calls)
+
+Operational notes from live validation:
+
+- First Puppeteer call can take noticeably longer due to `npx`/package bootstrap and first browser launch. Subsequent calls should be much faster.
+- Keep exactly one node process writing to a given `stateDir` (`~/.nexus-node`). Running host and container nodes against the same state database can corrupt SQLite indexes.
+- If logs show `database disk image is malformed`, stop the node, back up DB, run `REINDEX`, and restart:
+
+```bash
+~/nexus-node-host/stop-node.sh
+cp ~/.nexus-node/state/reference-node.db ~/.nexus-node/state/reference-node.db.bak
+sqlite3 ~/.nexus-node/state/reference-node.db "REINDEX; PRAGMA integrity_check;"
+~/nexus-node-host/run-node-background.sh
+```
+
+Current Telegram behavior for MCP screenshots:
+
+- `node_mcp_call` returns screenshot payload/resource data to the agent.
+- Automatic Telegram file attachment from MCP screenshot output is not wired yet.
+- Use explicit `telegram_send_file` with a gateway-local file path when sending files/images today.
+
+## Node file transfer (`file.pull` / `file.push`)
+
+To move small artifacts between node and gateway (e.g., screenshots, logs, generated files), the reference node exposes two protocol methods:
+
+- `file.pull` — node -> gateway
+- `file.push` — gateway -> node
+
+This surface is **disabled by default** and must be explicitly allowlisted on the node:
+
+```bash
+# Enable by allowlisting the file transfer command names:
+export NEXUS_NODE_ALLOW_COMMANDS="echo,uname,whoami,pwd,date,ls,nexus-policyctl,file_pull,file_push"
+# optional: restrict paths to a subdir (recommended)
+export NEXUS_NODE_FILE_TRANSFER_ROOTS="$HOME/.nexus-node/file-transfer"
+export NEXUS_NODE_FILE_TRANSFER_MAX_BYTES=5242880
+```
+
+Gateway tools:
+
+```text
+node_file_pull { "id": "<node-id>", "remotePath": "/abs/path/on/node", "overwrite": false }
+node_file_push { "id": "<node-id>", "localPath": "/abs/path/on/gateway", "remotePath": "/abs/path/on/node", "overwrite": false }
+```
+
+Notes:
+
+- Node paths are constrained to `NEXUS_NODE_FILE_TRANSFER_ROOTS` (default `<stateDir>/file-transfer`). Relative node paths are resolved under `<stateDir>`.
+- `node_file_pull` writes the downloaded bytes to a gateway-local file (under `stateDir/node-transfers/<node-id>/...` if `localPath` is omitted) and returns the saved path.
+- Allowlist gate is `NEXUS_NODE_ALLOW_COMMANDS` via command names `file_pull` / `file_push`.
+- Hermes gate: in `firewallMode=hermes`, `denyCommands` can deny `file_pull` / `file_push` like other command names.
 
 ## Transport security policy
 

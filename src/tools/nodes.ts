@@ -49,6 +49,20 @@ const nodeMcpResourcesRoutingTool: Tool = {
   execute: async () => "ERROR: node_mcp_resources should be routed via node transport.",
 };
 
+const nodeFilePullRoutingTool: Tool = {
+  name: "node_file_pull",
+  description: "Internal routing shim for file.pull dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_file_pull should be routed via node transport.",
+};
+
+const nodeFilePushRoutingTool: Tool = {
+  name: "node_file_push",
+  description: "Internal routing shim for file.push dispatch.",
+  jsonSchema: {},
+  execute: async () => "ERROR: node_file_push should be routed via node transport.",
+};
+
 const nodeSystemRunRoutingTool: Tool = {
   name: "shell_exec",
   description: "Internal routing shim for system.run dispatch.",
@@ -419,6 +433,94 @@ export const nodeMcpResources = defineTool({
           ...(args.uri ? { uri: args.uri } : {}),
           ...(args.cursor ? { cursor: args.cursor } : {}),
           limit: args.limit,
+          timeoutMs: args.timeoutMs,
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeFilePull = defineTool({
+  name: "node_file_pull",
+  description:
+    "Pull a file from a specific node via protocol method file.pull and save it to a local gateway path (state/workspace/code roots).",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    remotePath: z.string().min(1).max(4096),
+    localPath: z.string().max(4096).optional(),
+    overwrite: z.boolean().default(false),
+    maxBytes: z.number().int().positive().max(50 * 1024 * 1024).default(5 * 1024 * 1024),
+    timeoutMs: z.number().int().positive().max(300_000).default(120_000),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support file transfer`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeFilePullRoutingTool,
+        {
+          remotePath: args.remotePath,
+          ...(args.localPath ? { localPath: args.localPath } : {}),
+          overwrite: args.overwrite,
+          maxBytes: args.maxBytes,
+          timeoutMs: args.timeoutMs,
+          ...(args.security ? { security: args.security } : {}),
+        },
+        {
+          ...ctx,
+          executionNode: args.id,
+          executionMode: "remote",
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return `ERROR: ${message}`;
+    }
+  },
+});
+
+export const nodeFilePush = defineTool({
+  name: "node_file_push",
+  description:
+    "Push a local gateway file to a specific node via protocol method file.push (path constrained to state/workspace/code roots).",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    localPath: z.string().min(1).max(4096),
+    remotePath: z.string().min(1).max(4096),
+    overwrite: z.boolean().default(false),
+    maxBytes: z.number().int().positive().max(50 * 1024 * 1024).default(5 * 1024 * 1024),
+    timeoutMs: z.number().int().positive().max(300_000).default(120_000),
+    security: remoteSecuritySchema,
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support file transfer`;
+    if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
+    try {
+      return await ctx.nodeRouter.routeToolExecution(
+        nodeFilePushRoutingTool,
+        {
+          localPath: args.localPath,
+          remotePath: args.remotePath,
+          overwrite: args.overwrite,
+          maxBytes: args.maxBytes,
           timeoutMs: args.timeoutMs,
           ...(args.security ? { security: args.security } : {}),
         },

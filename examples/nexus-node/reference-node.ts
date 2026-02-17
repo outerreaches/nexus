@@ -40,8 +40,11 @@ const DELIVERED_OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const FIREWALL_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MCP_BRIDGE_CONFIG_FILE = "mcp-bridge.json";
 const POLICYCTL_COMMAND = "nexus-policyctl";
+const FILE_PULL_COMMAND = "file_pull";
+const FILE_PUSH_COMMAND = "file_push";
 const POLICY_PRESET_DIRNAME = "policy-presets";
 const POLICY_ALLOWED_FIELDS = new Set(["version", "label", "defaultQuarantine", "firewallMode", "denyCommands", "updatedAt"]);
+const DEFAULT_FILE_TRANSFER_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_CAPABILITIES = [
   "system.run",
   "system.which",
@@ -183,6 +186,8 @@ type Config = {
   mcpBridgeEnabled: boolean;
   mcpBridgeConfigPath: string;
   mcpBridgeTimeoutMs: number;
+  fileTransferRoots: string[];
+  fileTransferMaxBytes: number;
 };
 
 type McpBridgeServerConfig = {
@@ -229,6 +234,12 @@ async function main(): Promise<void> {
   process.stdout.write(`[reference-node] state_db=${stateStore.dbPath}\n`);
   process.stdout.write(
     `[reference-node] mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}\n`,
+  );
+  const fileTransferOps: string[] = [];
+  if (isAllowedCommand(FILE_PULL_COMMAND, config.allowCommands)) fileTransferOps.push("pull");
+  if (isAllowedCommand(FILE_PUSH_COMMAND, config.allowCommands)) fileTransferOps.push("push");
+  process.stdout.write(
+    `[reference-node] file_transfer=${fileTransferOps.join(",") || "disabled"} roots=${config.fileTransferRoots.join(",")} max_bytes=${config.fileTransferMaxBytes}\n`,
   );
 
   const shutdown = (): void => {
@@ -705,6 +716,9 @@ class ReferenceNodeClient {
   private advertisedCapabilities(): string[] {
     const mode = this.currentPolicyFirewallMode();
     const out = new Set<string>(this.config.capabilities);
+    // File transfer is gated by the same allowlist surface as system.run/process.start.
+    if (isAllowedCommand(FILE_PULL_COMMAND, this.config.allowCommands)) out.add("file.pull");
+    if (isAllowedCommand(FILE_PUSH_COMMAND, this.config.allowCommands)) out.add("file.push");
     if (this.config.mcpBridgeEnabled) {
       out.add("mcp.bridge");
       out.add("mcp.list");
@@ -1003,6 +1017,12 @@ class ReferenceNodeClient {
         return;
       case "mcp.resources":
         await this.handleMcpResources(msg);
+        return;
+      case "file.pull":
+        await this.handleFilePull(msg);
+        return;
+      case "file.push":
+        await this.handleFilePush(msg);
         return;
       default:
         this.sendRequestError(msg.id, "METHOD_NOT_IMPLEMENTED", `Method ${msg.method} is not implemented by reference node.`, false);
@@ -2031,6 +2051,180 @@ class ReferenceNodeClient {
     }
   }
 
+  private async handleFilePull(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const requestedPath = asString(params.path) ?? asString(params.remotePath);
+    if (!requestedPath) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "file.pull requires `path`.", false);
+      return;
+    }
+    const maxBytes = clampInt(params.maxBytes, 1_024, this.config.fileTransferMaxBytes) ?? this.config.fileTransferMaxBytes;
+    try {
+      this.assertFileTransferAllowed("pull");
+      await this.refreshPolicyFromDiskIfChanged("file.pull");
+      const firewallMode = this.currentPolicyFirewallMode();
+      this.enforceHermesCommandPolicy({
+        toolName: "file.pull",
+        commandName: FILE_PULL_COMMAND,
+        firewallMode,
+      });
+      const resolvedPath = await this.resolveFileTransferPath(requestedPath, "read");
+      const stat = await fs.stat(resolvedPath);
+      if (!stat.isFile()) {
+        throw new NodeToolError("INVALID_REQUEST", `file.pull path is not a regular file: ${requestedPath}`);
+      }
+      if (stat.size > maxBytes) {
+        throw new NodeToolError(
+          "PAYLOAD_TOO_LARGE",
+          `file.pull exceeded maxBytes (${stat.size} > ${maxBytes}); increase maxBytes or use a smaller file.`,
+        );
+      }
+      const bytes = await fs.readFile(resolvedPath);
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          path: resolvedPath,
+          sizeBytes: bytes.length,
+          mtimeMs: Math.floor(stat.mtimeMs),
+          sha256,
+          encoding: "base64",
+          contentBase64: bytes.toString("base64"),
+        },
+      });
+      this.writeAuditEvent({
+        type: "file.pull",
+        toolName: "file.pull",
+        details: {
+          path: resolvedPath,
+          sizeBytes: bytes.length,
+          maxBytes,
+          sha256,
+        },
+      });
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+    }
+  }
+
+  private async handleFilePush(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const requestedPath = asString(params.path) ?? asString(params.remotePath);
+    if (!requestedPath) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "file.push requires `path`.", false);
+      return;
+    }
+    const contentBase64 = asString(params.contentBase64) ?? asString(params.base64);
+    if (!contentBase64) {
+      this.sendRequestError(msg.id, "INVALID_REQUEST", "file.push requires base64 payload in `contentBase64`.", false);
+      return;
+    }
+    const overwrite = asBoolean(params.overwrite) ?? false;
+    const maxBytes = clampInt(params.maxBytes, 1_024, this.config.fileTransferMaxBytes) ?? this.config.fileTransferMaxBytes;
+    try {
+      this.assertFileTransferAllowed("push");
+      await this.refreshPolicyFromDiskIfChanged("file.push");
+      const firewallMode = this.currentPolicyFirewallMode();
+      this.enforceHermesCommandPolicy({
+        toolName: "file.push",
+        commandName: FILE_PUSH_COMMAND,
+        firewallMode,
+      });
+      const bytes = decodeBase64Loose(contentBase64);
+      if (!bytes) {
+        throw new NodeToolError("INVALID_REQUEST", "file.push contentBase64 is not valid base64.");
+      }
+      if (bytes.length > maxBytes) {
+        throw new NodeToolError(
+          "PAYLOAD_TOO_LARGE",
+          `file.push exceeded maxBytes (${bytes.length} > ${maxBytes}); increase maxBytes or upload a smaller file.`,
+        );
+      }
+      const resolvedPath = await this.resolveFileTransferPath(requestedPath, "write");
+      if (!overwrite) {
+        try {
+          await fs.access(resolvedPath);
+          throw new NodeToolError(
+            "FILE_EXISTS",
+            `file.push target already exists: ${resolvedPath} (set overwrite=true to replace).`,
+          );
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException | undefined)?.code;
+          if (code !== "ENOENT") throw err;
+        }
+      }
+      await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+      await fs.writeFile(resolvedPath, bytes, { mode: 0o600 });
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      this.sendSignedEnvelope({
+        type: "res",
+        id: msg.id,
+        ok: true,
+        payload: {
+          path: resolvedPath,
+          sizeBytes: bytes.length,
+          sha256,
+          overwritten: overwrite,
+        },
+      });
+      this.writeAuditEvent({
+        type: "file.push",
+        toolName: "file.push",
+        details: {
+          path: resolvedPath,
+          sizeBytes: bytes.length,
+          maxBytes,
+          sha256,
+          overwrite,
+        },
+      });
+    } catch (err) {
+      this.sendToolExecutionError(msg.id, err);
+    }
+  }
+
+  private assertFileTransferAllowed(direction: "pull" | "push"): void {
+    const commandName = direction === "pull" ? FILE_PULL_COMMAND : FILE_PUSH_COMMAND;
+    if (isAllowedCommand(commandName, this.config.allowCommands)) return;
+    throw new NodeToolError(
+      "PERMISSION_DENIED",
+      `file.${direction} is not allowlisted on this node (add "${commandName}" to NEXUS_NODE_ALLOW_COMMANDS).`,
+    );
+  }
+
+  private async resolveFileTransferPath(requestedPath: string, mode: "read" | "write"): Promise<string> {
+    const trimmed = requestedPath.trim();
+    if (!trimmed) throw new NodeToolError("INVALID_REQUEST", "file transfer path cannot be empty.");
+    const candidate = path.resolve(path.isAbsolute(trimmed) ? trimmed : path.join(this.config.stateDir, trimmed));
+    let resolved = "";
+    if (mode === "read") {
+      try {
+        resolved = await fs.realpath(candidate);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | undefined)?.code;
+        if (code === "ENOENT") throw new NodeToolError("FILE_NOT_FOUND", `File not found: ${requestedPath}`);
+        throw err;
+      }
+    } else {
+      resolved = await resolvePathViaExistingParent(candidate);
+    }
+    const allowed = await this.isFileTransferPathAllowed(resolved);
+    if (!allowed) {
+      throw new NodeToolError("PERMISSION_DENIED", `Path is outside allowed file-transfer roots: ${requestedPath}`);
+    }
+    return resolved;
+  }
+
+  private async isFileTransferPathAllowed(resolvedPath: string): Promise<boolean> {
+    for (const root of this.config.fileTransferRoots) {
+      const normalizedRoot = await resolvePathViaExistingParent(root);
+      if (isWithinPath(resolvedPath, normalizedRoot)) return true;
+    }
+    return false;
+  }
+
   private async readSymbolCatalog(): Promise<SymbolCatalog> {
     const contactsRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "contacts.json"));
     const accountsRaw = await this.readJsonUnknown(path.join(this.symbolStoreDir, "accounts.json"));
@@ -2704,7 +2898,7 @@ class ReferenceNodeClient {
   }
 
   private enforceHermesCommandPolicy(params: {
-    toolName: "system.run" | "process.start";
+    toolName: "system.run" | "process.start" | "file.pull" | "file.push";
     commandName: string;
     firewallMode: FirewallMode;
     processId?: string | null;
@@ -3099,6 +3293,13 @@ function buildConfig(values: Record<string, string>): Config {
   const allowCommands = new Set(
     splitCsv(values.allow ?? process.env.NEXUS_NODE_ALLOW_COMMANDS, DEFAULT_ALLOW_COMMANDS),
   );
+  const legacyFileTransferSetting = (values["allow-file-transfer"] ?? process.env.NEXUS_NODE_ALLOW_FILE_TRANSFER ?? "").trim();
+  if (legacyFileTransferSetting) {
+    throw new Error(
+      `NEXUS_NODE_ALLOW_FILE_TRANSFER/--allow-file-transfer is no longer supported. ` +
+        `Allowlist ${FILE_PULL_COMMAND},${FILE_PUSH_COMMAND} via NEXUS_NODE_ALLOW_COMMANDS or --allow instead.`,
+    );
+  }
   const runTimeoutMs = clampInt(values["run-timeout-ms"] ?? process.env.NEXUS_NODE_RUN_TIMEOUT_MS, 1_000, 300_000) ?? 60_000;
   const reconnectMinMs =
     clampInt(values["reconnect-min-ms"] ?? process.env.NEXUS_NODE_RECONNECT_MIN_MS, 500, 60_000) ?? 2_000;
@@ -3118,6 +3319,13 @@ function buildConfig(values: Record<string, string>): Config {
   const mcpBridgeTimeoutMs =
     clampInt(values["mcp-bridge-timeout-ms"] ?? process.env.NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS, 2_000, 300_000) ??
     30_000;
+  const fileTransferRoots = normalizeFileTransferRoots(
+    values["file-transfer-roots"] ?? process.env.NEXUS_NODE_FILE_TRANSFER_ROOTS,
+    stateDir,
+  );
+  const fileTransferMaxBytes =
+    clampInt(values["file-transfer-max-bytes"] ?? process.env.NEXUS_NODE_FILE_TRANSFER_MAX_BYTES, 1_024, 50 * 1024 * 1024) ??
+    DEFAULT_FILE_TRANSFER_MAX_BYTES;
 
   return {
     gatewayUrl,
@@ -3137,6 +3345,8 @@ function buildConfig(values: Record<string, string>): Config {
     mcpBridgeEnabled,
     mcpBridgeConfigPath,
     mcpBridgeTimeoutMs,
+    fileTransferRoots,
+    fileTransferMaxBytes,
   };
 }
 
@@ -3575,6 +3785,41 @@ function splitCsv(value: string | undefined, fallback: string[]): string[] {
     .filter((item) => item.length > 0);
 }
 
+function normalizeFileTransferRoots(value: string | undefined, stateDir: string): string[] {
+  const rawRoots = splitCsv(value, [path.join(stateDir, "file-transfer")]);
+  const out = new Set<string>();
+  for (const raw of rawRoots) {
+    const resolved = path.resolve(path.isAbsolute(raw) ? raw : path.join(stateDir, raw));
+    out.add(resolved);
+  }
+  return [...out.values()].sort((a, b) => a.localeCompare(b));
+}
+
+function isWithinPath(candidatePath: string, rootPath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function resolvePathViaExistingParent(targetPath: string): Promise<string> {
+  let cursor = path.resolve(targetPath);
+  const tail: string[] = [];
+  while (true) {
+    try {
+      const base = await fs.realpath(cursor);
+      return tail.length > 0 ? path.join(base, ...tail) : base;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") throw err;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        return tail.length > 0 ? path.join(cursor, ...tail) : cursor;
+      }
+      tail.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
 function normalizeMcpAllowPatterns(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -3789,9 +4034,11 @@ function printHelp(): void {
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ~/.nexus-node)",
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
-      "  --allow <csv>                   Allowlisted command names for system.run",
+      "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,file_pull,file_push to enable control surfaces)",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
+      "  --file-transfer-roots <csv>     Allowed absolute roots for file transfer paths (default <stateDir>/file-transfer)",
+      "  --file-transfer-max-bytes <n>   Max bytes per file.pull/file.push payload (default 5242880)",
       "  --mcp-bridge 1                  Enable MCP bridge methods (mcp.list/mcp.call/mcp.resources)",
       "  --mcp-bridge-config <path>      MCP bridge JSON config path (default <stateDir>/mcp-bridge.json)",
       "  --mcp-bridge-timeout-ms <ms>    MCP bridge request timeout per server (default 30000)",

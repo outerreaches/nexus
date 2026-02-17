@@ -167,6 +167,8 @@ services:
       NEXUS_NODE_MCP_BRIDGE: \${NEXUS_NODE_MCP_BRIDGE:-0}
       NEXUS_NODE_MCP_BRIDGE_CONFIG: \${NEXUS_NODE_MCP_BRIDGE_CONFIG:-/data/nexus-node/mcp-bridge.json}
       NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS: \${NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS:-30000}
+      NEXUS_NODE_FILE_TRANSFER_ROOTS: \${NEXUS_NODE_FILE_TRANSFER_ROOTS:-/data/nexus-node/file-transfer}
+      NEXUS_NODE_FILE_TRANSFER_MAX_BYTES: \${NEXUS_NODE_FILE_TRANSFER_MAX_BYTES:-5242880}
       NEXUS_NODE_ID: \${NEXUS_NODE_ID:-$DEFAULT_NODE_ID}
       NEXUS_NODE_NAME: \${NEXUS_NODE_NAME:-$DEFAULT_NODE_NAME}
       NEXUS_NODE_CAPS: \${NEXUS_NODE_CAPS:-system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query}
@@ -202,6 +204,10 @@ NEXUS_NODE_GATEWAY_URL=$DEFAULT_GATEWAY_URL
 # NEXUS_NODE_MCP_BRIDGE=1
 # NEXUS_NODE_MCP_BRIDGE_CONFIG=/data/nexus-node/mcp-bridge.json
 # NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS=30000
+# Optional file transfer controls (node_file_pull/node_file_push):
+# Add "file_pull,file_push" to NEXUS_NODE_ALLOW_COMMANDS to enable file.pull/file.push capabilities.
+# NEXUS_NODE_FILE_TRANSFER_ROOTS=/data/nexus-node/file-transfer
+# NEXUS_NODE_FILE_TRANSFER_MAX_BYTES=5242880
 # NEXUS_NODE_RECONNECT_MIN_MS=2000
 # NEXUS_NODE_RECONNECT_MAX_MS=30000
 # NEXUS_NODE_TZ=$DEFAULT_NODE_TZ

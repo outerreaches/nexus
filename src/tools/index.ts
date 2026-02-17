@@ -9,6 +9,8 @@ import { processList, processLogs, processStart, processStatus, processStop } fr
 import {
   nodeAuditQuery,
   nodeDelete,
+  nodeFilePull,
+  nodeFilePush,
   nodeGet,
   nodeMcpCall,
   nodeMcpList,
@@ -95,6 +97,8 @@ export function getBuiltInTools(): Tool[] {
     processStop,
     nodeList,
     nodeGet,
+    nodeFilePull,
+    nodeFilePush,
     nodeMcpList,
     nodeMcpCall,
     nodeMcpResources,

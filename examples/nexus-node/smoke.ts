@@ -230,6 +230,12 @@ async function main(): Promise<void> {
     ),
     "utf8",
   );
+  const transferDir = path.join(stateDir, "file-transfer");
+  await fs.mkdir(transferDir, { recursive: true });
+  const pullSourcePath = path.join(transferDir, "pull-source.txt");
+  const pullSourceContent = `node-file-pull-smoke-${randomUUID().slice(0, 8)}`;
+  await fs.writeFile(pullSourcePath, `${pullSourceContent}\n`, "utf8");
+  const pushTargetPath = path.join(transferDir, "push-target.txt");
   const mcpBridgeConfigPath = path.join(stateDir, "mcp-bridge.json");
   const mcpFixturePath = path.join(process.cwd(), "examples/nexus-node/fixtures/smoke-mcp-server.js");
   await fs.writeFile(
@@ -371,7 +377,9 @@ async function main(): Promise<void> {
         "--state-dir",
         stateDir,
         "--allow",
-        "echo,uname,whoami,pwd,date,ls,sleep,nexus-policyctl",
+        "echo,uname,whoami,pwd,date,ls,sleep,nexus-policyctl,file_pull,file_push",
+        "--file-transfer-roots",
+        transferDir,
         "--mcp-bridge",
         "1",
         "--mcp-bridge-config",
@@ -1179,6 +1187,75 @@ async function main(): Promise<void> {
     assert.equal(mcpResourcesReadSecretDenied.ok, false, "mcp.resources should deny non-allowlisted URI");
     assert.equal(asString(asObject(mcpResourcesReadSecretDenied.error).code), "PERMISSION_DENIED");
 
+    const filePullRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.pull",
+      params: {
+        path: pullSourcePath,
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(filePullRes.ok, true, "file.pull should succeed for allowlisted root path");
+    const filePullPayload = asObject(filePullRes.payload);
+    const pulledBase64 = asString(filePullPayload.contentBase64);
+    assert.ok(pulledBase64, "file.pull should return contentBase64");
+    const pulledText = Buffer.from(pulledBase64 ?? "", "base64").toString("utf8").trimEnd();
+    assert.equal(pulledText, pullSourceContent, "file.pull payload should match source file bytes");
+
+    const pushedText = `node-file-push-smoke-${randomUUID().slice(0, 8)}\n`;
+    const filePushRes = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.push",
+      params: {
+        path: pushTargetPath,
+        contentBase64: Buffer.from(pushedText, "utf8").toString("base64"),
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(filePushRes.ok, true, "file.push should succeed for allowlisted root path");
+    const pushedDiskText = await fs.readFile(pushTargetPath, "utf8");
+    assert.equal(pushedDiskText, pushedText, "file.push should persist bytes on node state path");
+
+    const filePullDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.pull",
+      params: {
+        path: "/etc/hosts",
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(filePullDenied.ok, false, "file.pull should reject paths outside allowlisted roots");
+    assert.equal(asString(asObject(filePullDenied.error).code), "PERMISSION_DENIED");
+
+    const filePushDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.push",
+      params: {
+        path: path.join(path.dirname(stateDir), "outside-file-push.txt"),
+        contentBase64: Buffer.from("outside", "utf8").toString("base64"),
+        overwrite: true,
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(filePushDenied.ok, false, "file.push should reject paths outside allowlisted roots");
+    assert.equal(asString(asObject(filePushDenied.error).code), "PERMISSION_DENIED");
+
     const legacyPolicyUpdate = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -1952,6 +2029,70 @@ async function main(): Promise<void> {
       "hermes deny policy should return structured deny reason",
     );
 
+    const denyFilePull = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl deny add file_pull",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(denyFilePull.ok, true, "nexus-policyctl deny add file_pull failed");
+    const hermesFilePullDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.pull",
+      params: {
+        path: pullSourcePath,
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(hermesFilePullDenied.ok, false, "hermes deny policy should block file.pull");
+    assert.equal(asString(asObject(hermesFilePullDenied.error).code), "HERMES_POLICY_DENIED");
+
+    const denyFilePush = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command: "nexus-policyctl deny add file_push",
+        },
+      },
+      timeoutMs: 10_000,
+    });
+    assert.equal(denyFilePush.ok, true, "nexus-policyctl deny add file_push failed");
+    const hermesFilePushDenied = await sendGatewayRequest({
+      ws: wsRef!,
+      gatewayPrivateKey: gatewayKeys.privateKey,
+      gatewaySender: "gateway:smoke",
+      pendingResponses,
+      nodePublicKey: parsedNodePublic.key,
+      method: "file.push",
+      params: {
+        path: pushTargetPath,
+        contentBase64: Buffer.from("blocked", "utf8").toString("base64"),
+        overwrite: true,
+      },
+      timeoutMs: 15_000,
+    });
+    assert.equal(hermesFilePushDenied.ok, false, "hermes deny policy should block file.push");
+    assert.equal(asString(asObject(hermesFilePushDenied.error).code), "HERMES_POLICY_DENIED");
+
     const denyClearBlocked = await sendGatewayRequest({
       ws: wsRef!,
       gatewayPrivateKey: gatewayKeys.privateKey,
@@ -2055,7 +2196,7 @@ async function main(): Promise<void> {
     );
 
     process.stdout.write(
-      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + MCP bridge allowlist gating + process primitives (log stream + policyctl command gating + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement + break-glass downgrade guards) + reconnect continuity + outbox replay + tamper rejection verified\n",
+      "[smoke] PASS: transport policy + bidirectional handshake proof rejection + signed handshake + symbols catalog/resolution + audit.query + MCP bridge allowlist gating + file transfer allowlist gating + process primitives (log stream + policyctl command gating + firewall session continuity) + firewall modes (transparent pass-through + audit-only/hermes sanitization + hermes deny enforcement + break-glass downgrade guards) + reconnect continuity + outbox replay + tamper rejection verified\n",
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
