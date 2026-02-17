@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { z } from "zod";
 
 import { defineTool, type Tool } from "../core/tools.js";
@@ -12,6 +16,95 @@ function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function extractBase64Payload(value: string): { base64: string; mimeType: string | null } | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^data:([^;]+);base64,(.+)$/);
+  if (match) {
+    const mimeType = match[1]?.trim() ?? null;
+    const base64 = match[2] ?? "";
+    return { base64, mimeType: mimeType && mimeType.length > 0 ? mimeType : null };
+  }
+  return { base64: trimmed, mimeType: null };
+}
+
+function decodeBase64Loose(value: string): Buffer | null {
+  const normalized = value.trim().replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+  if (!normalized) return null;
+  if (/[^A-Za-z0-9+/=]/.test(normalized)) return null;
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  try {
+    return Buffer.from(padded, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function guessExtensionFromMimeType(mimeType: string | null): string {
+  switch ((mimeType ?? "").toLowerCase()) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    default:
+      return "bin";
+  }
+}
+
+function sanitizePathSegment(value: string, maxLen: number = 80): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const trimmed = normalized.replace(/^_+|_+$/g, "");
+  const collapsed = trimmed.length > 0 ? trimmed : "artifact";
+  return collapsed.length > maxLen ? collapsed.slice(0, maxLen) : collapsed;
+}
+
+async function persistGatewayArtifact(params: {
+  ctx: { stateDir: string };
+  nodeId: string;
+  serverId: string;
+  toolName: string;
+  mimeType: string | null;
+  bytes: Buffer;
+  nameHint?: string | null;
+}): Promise<{ path: string; sizeBytes: number; sha256: string; mimeType: string }> {
+  const sha256 = createHash("sha256").update(params.bytes).digest("hex");
+  const ext = guessExtensionFromMimeType(params.mimeType);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const hint = sanitizePathSegment(params.nameHint ?? params.toolName);
+  const dir = path.resolve(params.ctx.stateDir, "mcp-artifacts", "nodes", params.nodeId, params.serverId);
+  await fs.mkdir(dir, { recursive: true });
+  const fullPath = path.join(dir, `${stamp}-${hint}-${sha256.slice(0, 12)}.${ext}`);
+  await fs.writeFile(fullPath, params.bytes, { mode: 0o600 });
+  return {
+    path: fullPath,
+    sizeBytes: params.bytes.length,
+    sha256: `sha256:${sha256}`,
+    mimeType: params.mimeType ?? "application/octet-stream",
+  };
+}
+
+function hermesNonTextFilteringEnabled(): boolean {
+  // Default-on: disable only when explicitly set to 0/false/off.
+  const raw = (process.env.NEXUS_MCP_FILTER_NON_TEXT ?? "").trim().toLowerCase();
+  if (!raw) return true;
+  if (raw === "0" || raw === "false" || raw === "off" || raw === "no") return false;
+  return true;
 }
 
 const nodeSymbolsListRoutingTool: Tool = {
@@ -362,7 +455,8 @@ export const nodeMcpList = defineTool({
 
 export const nodeMcpCall = defineTool({
   name: "node_mcp_call",
-  description: "Invoke an allowlisted MCP tool on a specific node via protocol method mcp.call.",
+  description:
+    "Invoke an allowlisted MCP tool on a specific node via mcp.call. Non-text payloads (e.g., screenshots) are persisted as gateway-local files by default to avoid context bloat; set NEXUS_MCP_FILTER_NON_TEXT=0 to disable.",
   parameters: z.object({
     id: z.string().min(1).max(128),
     serverId: z.string().min(1).max(128),
@@ -379,7 +473,7 @@ export const nodeMcpCall = defineTool({
     if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support MCP bridge`;
     if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
     try {
-      return await ctx.nodeRouter.routeToolExecution(
+      const raw = await ctx.nodeRouter.routeToolExecution(
         nodeMcpCallRoutingTool,
         {
           serverId: args.serverId,
@@ -394,6 +488,91 @@ export const nodeMcpCall = defineTool({
           executionMode: "remote",
         },
       );
+      // Default behavior: sanitize non-text payloads to avoid context bloat and prevent
+      // binary data from landing in transcripts. Set NEXUS_MCP_FILTER_NON_TEXT=0 to disable.
+      if (!hermesNonTextFilteringEnabled()) return raw;
+
+      const parsed = parseJsonObject(raw);
+      if (!parsed) return raw;
+      const resultObj = asObject(parsed.result);
+      const contentRaw = resultObj.content;
+      if (!Array.isArray(contentRaw) || contentRaw.length === 0) return raw;
+
+      const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
+      const callArgs = asObject(args.arguments);
+      const nameHint = typeof callArgs.name === "string" ? callArgs.name : args.tool;
+      const savedFiles: Array<Record<string, unknown>> = [];
+      const nextContent: Array<Record<string, unknown>> = [];
+      let changed = false;
+
+      for (const part of contentRaw) {
+        const obj = asObject(part);
+        const type = typeof obj.type === "string" ? obj.type : null;
+        if (type !== "image") {
+          nextContent.push(obj);
+          continue;
+        }
+        const dataRaw = typeof obj.data === "string" ? obj.data : null;
+        if (!dataRaw) {
+          nextContent.push(obj);
+          continue;
+        }
+        const extracted = extractBase64Payload(dataRaw);
+        if (!extracted) {
+          nextContent.push({ ...obj, data: undefined, error: "empty_image_payload" });
+          changed = true;
+          continue;
+        }
+        const mimeTypeFromPart = typeof obj.mimeType === "string" ? obj.mimeType : null;
+        const mimeType = mimeTypeFromPart ?? extracted.mimeType;
+        const bytes = decodeBase64Loose(extracted.base64);
+        if (!bytes) {
+          nextContent.push({ type: "image", mimeType: mimeType ?? "application/octet-stream", error: "invalid_base64" });
+          changed = true;
+          continue;
+        }
+        if (bytes.length > MAX_ARTIFACT_BYTES) {
+          nextContent.push({
+            type: "image",
+            mimeType: mimeType ?? "application/octet-stream",
+            error: `artifact_too_large (${bytes.length} bytes)`,
+          });
+          changed = true;
+          continue;
+        }
+        const saved = await persistGatewayArtifact({
+          ctx,
+          nodeId: args.id,
+          serverId: args.serverId,
+          toolName: args.tool,
+          mimeType,
+          bytes,
+          nameHint,
+        });
+        savedFiles.push(saved);
+        nextContent.push({
+          type: "image",
+          mimeType: saved.mimeType,
+          savedPath: saved.path,
+          sizeBytes: saved.sizeBytes,
+          sha256: saved.sha256,
+        });
+        changed = true;
+      }
+
+      if (!changed) return raw;
+      return JSON.stringify(
+        {
+          ...parsed,
+          savedFiles,
+          result: {
+            ...resultObj,
+            content: nextContent,
+          },
+        },
+        null,
+        2,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return `ERROR: ${message}`;
@@ -403,7 +582,8 @@ export const nodeMcpCall = defineTool({
 
 export const nodeMcpResources = defineTool({
   name: "node_mcp_resources",
-  description: "List or read allowlisted MCP resources on a specific node via protocol method mcp.resources.",
+  description:
+    "List or read allowlisted MCP resources on a specific node via mcp.resources. Blob payloads are persisted as gateway-local files by default to avoid context bloat; set NEXUS_MCP_FILTER_NON_TEXT=0 to disable.",
   parameters: z.object({
     id: z.string().min(1).max(128),
     serverId: z.string().min(1).max(128),
@@ -425,7 +605,7 @@ export const nodeMcpResources = defineTool({
       return "ERROR: node_mcp_resources with action=read requires `uri`";
     }
     try {
-      return await ctx.nodeRouter.routeToolExecution(
+      const raw = await ctx.nodeRouter.routeToolExecution(
         nodeMcpResourcesRoutingTool,
         {
           serverId: args.serverId,
@@ -441,6 +621,78 @@ export const nodeMcpResources = defineTool({
           executionNode: args.id,
           executionMode: "remote",
         },
+      );
+      if (args.action !== "read") return raw;
+      if (!hermesNonTextFilteringEnabled()) return raw;
+
+      const parsed = parseJsonObject(raw);
+      if (!parsed) return raw;
+      const resultObj = asObject(parsed.result);
+      const contentsRaw = resultObj.contents;
+      if (!Array.isArray(contentsRaw) || contentsRaw.length === 0) return raw;
+
+      const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
+      const savedFiles: Array<Record<string, unknown>> = [];
+      const nextContents: Array<Record<string, unknown>> = [];
+      let changed = false;
+      for (const item of contentsRaw) {
+        const obj = asObject(item);
+        const blobRaw = typeof obj.blob === "string" ? obj.blob : null;
+        if (!blobRaw) {
+          nextContents.push(obj);
+          continue;
+        }
+        const mimeType = typeof obj.mimeType === "string" ? obj.mimeType : null;
+        const extracted = extractBase64Payload(blobRaw);
+        if (!extracted) {
+          nextContents.push({ ...obj, blob: undefined, error: "empty_blob" });
+          changed = true;
+          continue;
+        }
+        const bytes = decodeBase64Loose(extracted.base64);
+        if (!bytes) {
+          nextContents.push({ ...obj, blob: undefined, error: "invalid_base64" });
+          changed = true;
+          continue;
+        }
+        if (bytes.length > MAX_ARTIFACT_BYTES) {
+          nextContents.push({ ...obj, blob: undefined, error: `artifact_too_large (${bytes.length} bytes)` });
+          changed = true;
+          continue;
+        }
+        const uriHint = typeof obj.uri === "string" ? obj.uri : args.uri ?? "resource";
+        const saved = await persistGatewayArtifact({
+          ctx,
+          nodeId: args.id,
+          serverId: args.serverId,
+          toolName: "mcp.resources.read",
+          mimeType: mimeType ?? extracted.mimeType,
+          bytes,
+          nameHint: uriHint,
+        });
+        savedFiles.push(saved);
+        nextContents.push({
+          ...obj,
+          blob: undefined,
+          savedPath: saved.path,
+          sizeBytes: saved.sizeBytes,
+          sha256: saved.sha256,
+        });
+        changed = true;
+      }
+
+      if (!changed) return raw;
+      return JSON.stringify(
+        {
+          ...parsed,
+          savedFiles,
+          result: {
+            ...resultObj,
+            contents: nextContents,
+          },
+        },
+        null,
+        2,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

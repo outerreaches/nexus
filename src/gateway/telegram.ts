@@ -560,8 +560,16 @@ export async function startTelegramBot(deps: {
     // sendDocument so Telegram receives them as file attachments.
     const TELEGRAM_PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif"]);
     if (TELEGRAM_PHOTO_MIME_TYPES.has(mimeType)) {
-      await bot.api.sendPhoto(chatId, new InputFile(absolute), { caption: options?.caption });
-      return;
+      try {
+        await bot.api.sendPhoto(chatId, new InputFile(absolute), { caption: options?.caption });
+        return;
+      } catch (err) {
+        // Some valid images still fail Telegram's photo pipeline (dimension/encoding quirks).
+        // Fall back to sendDocument so the user still receives the file.
+        deps.log(
+          `telegram: sendPhoto failed chat_id=${chatId} path=${absolute} error=${err instanceof Error ? err.message : String(err)}; falling back to sendDocument`,
+        );
+      }
     }
     await bot.api.sendDocument(chatId, new InputFile(absolute), { caption: options?.caption });
   };
