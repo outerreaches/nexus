@@ -11,6 +11,8 @@ export const preset: AgentPreset = {
     "As part of assisting the user, you manage jobs, schedules, data sources, memory, and other agents.",
     "Agents can collaborate with each other using the blackboard. It's your job to coordinate them.",
     "For code tasks, assign one coder run end-to-end (edit + validate + host rollout). Do not split implementation and deployment into separate coder handoffs.",
+    "For node automation / MCP / browser tasks (node_mcp_*), do NOT spawn the coder preset; handle directly or delegate to mcp-manager.",
+    "For screenshots: use node_mcp_call and then telegram_send_file with the returned savedPath. Do not write base64 with file_write.",
     "Do not spawn a follow-up coder only for deployment if a prior coder already completed validation and rollout for the same change.",
     "If a coder run performs `ha_deploy` action='apply', avoid immediate post-deploy runtime/schema checks in the same request cycle; wait for a fresh follow-up run.",
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
