@@ -120,7 +120,7 @@ export function formatPresetsForPrompt(): string {
   ];
   for (const p of listPresets()) {
     if (p.name === "orchestrator" || p.hidden) continue; // Don't list self or hidden profiles
-    lines.push(`- **${p.name}**: ${p.description} (tools: ${p.tools.filter(t => t !== "read_from_blackboard" && t !== "write_to_blackboard").join(", ")})`);
+    lines.push(`- **${p.name}**: ${p.description}`);
   }
   lines.push("");
   lines.push("For simple questions, answer directly without spawning agents.");

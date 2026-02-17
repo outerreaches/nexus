@@ -416,11 +416,24 @@ export const nodeAuditQuery = defineTool({
 
 export const nodeMcpList = defineTool({
   name: "node_mcp_list",
-  description: "List per-node MCP bridge servers and allowlisted tools/resources via protocol method mcp.list.",
+  description:
+    "List per-node MCP bridge servers and allowlisted tools/resources via protocol method mcp.list. By default returns tool names and descriptions without full JSON schemas; use includeSchemas=true (optionally with toolName filter) to fetch full inputSchema for constructing node_mcp_call arguments.",
   parameters: z.object({
     id: z.string().min(1).max(128),
     serverId: z.string().min(1).max(128).optional(),
+    toolName: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe("Filter to a specific tool by name. Requires includeTools=true."),
     includeTools: z.boolean().default(true),
+    includeSchemas: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Include full inputSchema for each tool. Default false for lightweight discovery; set true (with optional serverId/toolName filter) when you need argument details for node_mcp_call.",
+      ),
     includeResources: z.boolean().default(false),
     security: remoteSecuritySchema,
   }),
@@ -432,7 +445,7 @@ export const nodeMcpList = defineTool({
     if (row.backend !== "nexus") return `ERROR: node backend ${row.backend} does not support MCP bridge`;
     if (!ctx.nodeRouter) return "ERROR: node routing transport is not available";
     try {
-      return await ctx.nodeRouter.routeToolExecution(
+      const raw = await ctx.nodeRouter.routeToolExecution(
         nodeMcpListRoutingTool,
         {
           ...(args.serverId ? { serverId: args.serverId } : {}),
@@ -446,12 +459,102 @@ export const nodeMcpList = defineTool({
           executionMode: "remote",
         },
       );
+
+      // Post-process: strip schemas and/or filter by toolName
+      if (args.includeTools && (!args.includeSchemas || args.toolName)) {
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const obj = parsed as Record<string, unknown>;
+            const changed = stripMcpListSchemas(obj, !args.includeSchemas, args.toolName);
+            if (changed) return JSON.stringify(obj, null, 2);
+          }
+        } catch {
+          // Parse failed — return raw response as-is
+        }
+      }
+      return raw;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return `ERROR: ${message}`;
     }
   },
 });
+
+/**
+ * Walk an mcp.list response and optionally strip inputSchema from tools
+ * and/or filter to a specific toolName. Returns true if any mutation occurred.
+ */
+function stripMcpListSchemas(
+  obj: Record<string, unknown>,
+  removeSchemas: boolean,
+  toolName?: string,
+): boolean {
+  let changed = false;
+
+  // Response may have top-level `servers` array or `tools` array depending on format
+  const containers: unknown[] = [];
+
+  // Case 1: { servers: [{ tools: [...] }] }
+  if (Array.isArray(obj.servers)) {
+    for (const server of obj.servers) {
+      const s = server && typeof server === "object" && !Array.isArray(server) ? server : null;
+      if (s && Array.isArray((s as Record<string, unknown>).tools)) {
+        containers.push(s);
+      }
+    }
+  }
+
+  // Case 2: { tools: [...] } (single-server response)
+  if (Array.isArray(obj.tools)) {
+    containers.push(obj);
+  }
+
+  // Case 3: { result: { servers: [...] } } or { result: { tools: [...] } }
+  const result = obj.result && typeof obj.result === "object" && !Array.isArray(obj.result)
+    ? (obj.result as Record<string, unknown>)
+    : null;
+  if (result) {
+    if (Array.isArray(result.servers)) {
+      for (const server of result.servers) {
+        const s = server && typeof server === "object" && !Array.isArray(server) ? server : null;
+        if (s && Array.isArray((s as Record<string, unknown>).tools)) {
+          containers.push(s);
+        }
+      }
+    }
+    if (Array.isArray(result.tools)) {
+      containers.push(result);
+    }
+  }
+
+  for (const container of containers) {
+    const c = container as Record<string, unknown>;
+    let tools = c.tools as Array<Record<string, unknown>>;
+
+    if (toolName) {
+      const filtered = tools.filter(
+        (t) => typeof t.name === "string" && t.name === toolName,
+      );
+      if (filtered.length !== tools.length) {
+        c.tools = filtered;
+        tools = filtered;
+        changed = true;
+      }
+    }
+
+    if (removeSchemas) {
+      for (const tool of tools) {
+        if ("inputSchema" in tool) {
+          delete tool.inputSchema;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
 
 export const nodeMcpCall = defineTool({
   name: "node_mcp_call",
