@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
+import { startSecretSidecar } from "../secrets/sidecar.js";
 
 const RUNTIME_PROFILES = [
   "standard",
@@ -51,6 +52,65 @@ export async function runCli(argv: string[]): Promise<void> {
         verbose: options.verbose,
         standby: opts.standby,
         profile,
+      });
+    });
+
+  program
+    .command("secret-sidecar")
+    .description("Start the local secret sidecar API (process-boundary secret resolver)")
+    .option("--state-dir <path>", "State directory (defaults to resolved runtime state dir)")
+    .option("--bind <host>", "Bind host for TCP mode (ignored when --socket-path is set)")
+    .option("--port <port>", "TCP port for sidecar", (v) => Number(v))
+    .option("--socket-path <path>", "Unix socket path for sidecar (recommended in strict mode)")
+    .option("--max-body-bytes <bytes>", "Maximum request body size in bytes", (v) => Number(v))
+    .action(async (opts) => {
+      const options = program.opts<{ config: string; verbose: boolean }>();
+      const log = (line: string) => {
+        if (!options.verbose) return;
+        process.stdout.write(`[nexus] ${line}\n`);
+      };
+
+      let resolvedStateDir = typeof opts.stateDir === "string" && opts.stateDir.trim().length > 0
+        ? opts.stateDir.trim()
+        : "";
+      if (!resolvedStateDir) {
+        const { ensureConfigExists, loadConfig } = await import("../state/config.js");
+        const { bootstrapState } = await import("../state/bootstrap.js");
+        const { resolveRuntimePaths } = await import("../state/paths.js");
+        await ensureConfigExists(options.config);
+        const config = await loadConfig(options.config);
+        await bootstrapState(config);
+        const paths = await resolveRuntimePaths(config);
+        resolvedStateDir = paths.stateDir;
+      }
+
+      const bearerToken = (process.env.NEXUS_SECRET_SIDECAR_BEARER_TOKEN ?? process.env.NEXUS_SECRET_BROKER_BEARER_TOKEN ?? "").trim();
+      const sidecar = await startSecretSidecar({
+        stateDir: resolvedStateDir,
+        bindHost: typeof opts.bind === "string" && opts.bind.trim().length > 0 ? opts.bind.trim() : process.env.NEXUS_SECRET_SIDECAR_BIND,
+        port: Number.isFinite(opts.port) ? opts.port : Number(process.env.NEXUS_SECRET_SIDECAR_PORT ?? 7788),
+        socketPath: typeof opts.socketPath === "string" && opts.socketPath.trim().length > 0
+          ? opts.socketPath.trim()
+          : (process.env.NEXUS_SECRET_SIDECAR_SOCKET_PATH ?? "").trim() || null,
+        maxBodyBytes: Number.isFinite(opts.maxBodyBytes)
+          ? opts.maxBodyBytes
+          : Number(process.env.NEXUS_SECRET_SIDECAR_MAX_BODY_BYTES ?? 32768),
+        bearerToken: bearerToken || null,
+        log,
+      });
+
+      const shutdown = async (signal: string) => {
+        log(`secret-sidecar: received ${signal}, shutting down`);
+        try {
+          await sidecar.stop();
+        } finally {
+          process.exit(0);
+        }
+      };
+      process.once("SIGINT", () => void shutdown("SIGINT"));
+      process.once("SIGTERM", () => void shutdown("SIGTERM"));
+      await new Promise<void>(() => {
+        // Keep process alive until signal.
       });
     });
 

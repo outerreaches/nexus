@@ -57,6 +57,7 @@ import {
   setIdentityKeyStatusByScope,
   setFederationPeerTrustState,
   type FederationExportResourceType,
+  upsertFederationSession,
   upsertFederationPeer,
   upsertFederationExport,
   upsertFederationGrant,
@@ -73,6 +74,13 @@ import {
   upsertIdentityKey,
   updateFederationTask,
 } from "../../storage/federation.js";
+import {
+  getSecretProviderProfileById,
+  listSecretAccessEvents,
+  listSecretProviderProfiles,
+  type SecretProviderKind,
+  upsertSecretProviderProfile,
+} from "../../storage/secrets.js";
 import { parseNodePublicKey, verifyProtocolEnvelope } from "../../nodes/auth.js";
 import type { FederationSignedEnvelope } from "../../federation/types.js";
 import { evaluateFederationFirewall } from "../../federation/firewall.js";
@@ -83,8 +91,9 @@ import {
   verifyWebhookCanonicalInput,
 } from "../../federation/webhook.js";
 import { applySharedEventProjection } from "../../federation/sharing.js";
+import { validateSecretBrokerProfile } from "../../secrets/broker.js";
 import { deleteCredential } from "../../secrets/credentials.js";
-import { parseSecretReference } from "../../secrets/provider.js";
+import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../../secrets/provider.js";
 
 type McpEventApiRow = {
   id: string;
@@ -98,8 +107,10 @@ type McpEventApiRow = {
 const FEDERATION_ENVELOPE_MAX_SKEW_MS = 5 * 60_000;
 const FEDERATION_KEY_ROTATION_OVERLAP_MS = 24 * 60 * 60 * 1000;
 const FEDERATION_WEBHOOK_MAX_SKEW_MS = 5 * 60_000;
+const FEDERATION_SESSION_HEARTBEAT_TTL_MS = 10 * 60_000;
 const FEDERATION_INGRESS_MAX_BODY_BYTES = parseEnvByteLimit("NEXUS_FEDERATION_INGRESS_MAX_BODY_BYTES", 256 * 1024);
 const FEDERATION_WEBHOOK_MAX_BODY_BYTES = parseEnvByteLimit("NEXUS_FEDERATION_WEBHOOK_MAX_BODY_BYTES", 256 * 1024);
+const SECRET_PROVIDER_STATIC_MATERIAL_KEY_PATTERN = /(token|secret|password|api[_-]?key|client[_-]?secret|access[_-]?key)/i;
 
 export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/status", async (c) => c.json(await deps.getStatus()));
@@ -128,6 +139,32 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     });
   };
   const isFederationGloballyDisabled = (): boolean => deps.getFederationBreakglassState?.().globalDisable === true;
+  const recordFederationSessionHeartbeat = (params: {
+    peerId: string;
+    kid: string;
+    transportKind: string;
+    envelopeId: string | null;
+    traceId: string | null;
+    nowMs: number;
+  }): void => {
+    if (!deps.db) return;
+    const kid = params.kid.trim();
+    if (!kid) return;
+    upsertFederationSession(deps.db, {
+      id: `session:${params.peerId}:${kid}`,
+      peerId: params.peerId,
+      status: "active",
+      establishedAt: params.nowMs,
+      expiresAt: params.nowMs + FEDERATION_SESSION_HEARTBEAT_TTL_MS,
+      lastHeartbeatAt: params.nowMs,
+      metadata: {
+        source: "ingress_heartbeat",
+        transportKind: params.transportKind,
+        envelopeId: params.envelopeId,
+        traceId: params.traceId,
+      },
+    });
+  };
 
   app.get("/api/federation/status", async (c) => {
     const status = await deps.getStatus();
@@ -228,6 +265,263 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       nowMs,
     });
     return c.json({ ok: true, revoked: id, timestamp: nowMs });
+  });
+
+  app.get("/api/secrets/providers", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const limit = clampInt(c.req.query("limit"), 1, 500) ?? 200;
+    const includeDisabled = parseBooleanQuery(c.req.query("includeDisabled"), true);
+    const rows = listSecretProviderProfiles(deps.db, {
+      includeDisabled,
+      limit,
+    });
+    return c.json({ providers: rows, timestamp: Date.now() });
+  });
+
+  app.get("/api/secrets/providers/:id", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const id = parseOptionalText(c.req.param("id"), 200);
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const row = getSecretProviderProfileById(deps.db, id);
+    if (!row) return c.json({ error: "provider profile not found" }, 404);
+    return c.json({ provider: row, timestamp: Date.now() });
+  });
+
+  app.post("/api/secrets/providers", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const payload = asObject(body);
+    const id = parseUnknownText(payload.id, 200);
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const kind = parseSecretProviderKind(payload.kind);
+    if (!kind) {
+      return c.json(
+        { error: "kind must be one of local_file|sidecar_http|vault|openbao|aws_sm|gcp_sm|azure_kv" },
+        400,
+      );
+    }
+    const authMode = parseSecretProviderAuthMode(payload.authMode);
+    if (!authMode) {
+      return c.json({ error: "authMode must be one of none|unix_peer|mtls|workload_identity" }, 400);
+    }
+    const endpointRef = parseUnknownText(payload.endpointRef, 4096);
+    const strictMode = parseOptionalBoolean(payload.strictMode) ?? true;
+    const enabled = parseOptionalBoolean(payload.enabled) ?? true;
+    const config = parseOptionalRecord(payload.config) ?? {};
+    const validationError = validateSecretProviderProfileDefinition({
+      kind,
+      endpointRef,
+      authMode,
+      strictMode,
+      config,
+    });
+    if (validationError) return c.json({ error: validationError }, 400);
+
+    const nowMs = Date.now();
+    upsertSecretProviderProfile(deps.db, {
+      id,
+      kind,
+      endpointRef: endpointRef ?? null,
+      authMode,
+      strictMode,
+      config,
+      enabled,
+      nowMs,
+    });
+    const row = getSecretProviderProfileById(deps.db, id);
+    writeFederationAudit({
+      eventType: "control.secret_provider_profile.upsert",
+      decision: "info",
+      actor: "instance:gateway",
+      details: {
+        providerId: id,
+        kind,
+        authMode,
+        strictMode,
+        enabled,
+        endpointConfigured: Boolean(endpointRef),
+      },
+      nowMs,
+    });
+    return c.json({ ok: true, provider: row, timestamp: nowMs });
+  });
+
+  app.post("/api/secrets/providers/:id/state", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const id = parseOptionalText(c.req.param("id"), 200);
+    if (!id) return c.json({ error: "id is required" }, 400);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const payload = asObject(body);
+    const enabled = parseOptionalBoolean(payload.enabled);
+    if (enabled == null) {
+      return c.json({ error: "enabled (boolean) is required" }, 400);
+    }
+    const existing = getSecretProviderProfileById(deps.db, id);
+    if (!existing) return c.json({ error: "provider profile not found" }, 404);
+
+    const nowMs = Date.now();
+    upsertSecretProviderProfile(deps.db, {
+      id: existing.id,
+      kind: existing.kind,
+      endpointRef: existing.endpointRef,
+      authMode: existing.authMode,
+      strictMode: existing.strictMode,
+      config: existing.config,
+      enabled,
+      nowMs,
+    });
+    const updated = getSecretProviderProfileById(deps.db, id);
+    writeFederationAudit({
+      eventType: "control.secret_provider_profile.state",
+      decision: "info",
+      actor: "instance:gateway",
+      details: {
+        providerId: id,
+        enabled,
+      },
+      nowMs,
+    });
+    return c.json({ ok: true, provider: updated, timestamp: nowMs });
+  });
+
+  app.post("/api/secrets/providers/:id/test", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const id = parseOptionalText(c.req.param("id"), 200);
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const profile = getSecretProviderProfileById(deps.db, id);
+    if (!profile) return c.json({ error: "provider profile not found" }, 404);
+    if (!profile.enabled) {
+      return c.json({ error: "provider profile is disabled" }, 409);
+    }
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const payload = asObject(body);
+    const reference = parseUnknownText(payload.reference, 512);
+    if (reference) {
+      const parsedReference = parseSecretReference(reference);
+      if (!parsedReference) {
+        return c.json({ error: "reference must be a valid secret reference ({{secret:provider/path#field}})" }, 400);
+      }
+      if (parsedReference.providerId !== profile.id) {
+        return c.json({ error: "reference providerId must match route provider id" }, 400);
+      }
+    }
+    const strictMode = parseOptionalBoolean(payload.strictMode) ?? profile.strictMode;
+    const revokeLease = parseOptionalBoolean(payload.revokeLease) ?? true;
+    const traceId = parseUnknownText(payload.traceId, 200) ?? crypto.randomUUID();
+    const nowMs = Date.now();
+
+    try {
+      let brokerValidation: Awaited<ReturnType<typeof validateSecretBrokerProfile>> | null = null;
+      if (profile.kind !== "local_file") {
+        brokerValidation = await validateSecretBrokerProfile({
+          profile,
+          strictMode,
+        });
+      }
+
+      let resolution: Record<string, unknown> | null = null;
+      if (reference) {
+        const resolved = await resolveSecretReference({
+          db: deps.db,
+          stateDir: deps.stateDir,
+          reference,
+          traceId,
+          actor: "instance:gateway:secret_provider_test",
+          nowMs,
+        });
+        let leaseRevoked = false;
+        if (resolved.leaseId && revokeLease) {
+          leaseRevoked = revokeSecretLease({
+            db: deps.db,
+            leaseId: resolved.leaseId,
+            nowMs,
+          });
+        }
+        resolution = {
+          providerId: resolved.providerId,
+          secretPath: resolved.secretPath,
+          secretClass: resolved.secretClass,
+          leaseId: resolved.leaseId,
+          leaseRevoked,
+          expiresAt: resolved.expiresAt,
+        };
+      }
+
+      writeFederationAudit({
+        eventType: "control.secret_provider_profile.test",
+        decision: "info",
+        actor: "instance:gateway",
+        traceId,
+        details: {
+          providerId: profile.id,
+          kind: profile.kind,
+          strictMode,
+          referenceProvided: Boolean(reference),
+          resolved: Boolean(resolution),
+        },
+        nowMs,
+      });
+
+      return c.json({
+        ok: true,
+        test: {
+          providerId: profile.id,
+          kind: profile.kind,
+          strictMode,
+          validated: true,
+          brokerValidation,
+          resolution,
+        },
+        traceId,
+        timestamp: nowMs,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeFederationAudit({
+        eventType: "control.secret_provider_profile.test",
+        decision: "deny",
+        actor: "instance:gateway",
+        traceId,
+        details: {
+          providerId: profile.id,
+          kind: profile.kind,
+          strictMode,
+          error: message.slice(0, 240),
+        },
+        nowMs,
+      });
+      return c.json({ error: `provider test failed: ${message}` }, mapSecretProviderTestErrorStatus(message));
+    }
+  });
+
+  app.get("/api/secrets/access-events", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const limit = clampInt(c.req.query("limit"), 1, 1000) ?? 200;
+    const traceId = parseOptionalText(c.req.query("traceId"), 200);
+    const events = listSecretAccessEvents(deps.db, {
+      limit,
+      traceId: traceId ?? undefined,
+    });
+    return c.json({
+      events,
+      timestamp: Date.now(),
+    });
   });
 
   app.post("/api/federation/inbox", async (c) => {
@@ -426,6 +720,15 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
         401,
       );
     }
+
+    recordFederationSessionHeartbeat({
+      peerId: peer.id,
+      kid: envelope.kid,
+      transportKind: envelope.transportKind,
+      envelopeId: envelope.envelopeId,
+      traceId: envelope.traceId ?? null,
+      nowMs,
+    });
 
     const eventId = crypto.randomUUID();
     appendFederationEvent(deps.db, {
@@ -1418,6 +1721,14 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     if (endpoint.ownerScope === "federation_peer" && endpoint.peerId !== peer.id) {
       return c.json({ error: "endpoint peer binding mismatch" }, 403);
     }
+    recordFederationSessionHeartbeat({
+      peerId: peer.id,
+      kid: keyIdHeader,
+      transportKind: "federation_http",
+      envelopeId: envelope.eventId,
+      traceId: envelope.traceId,
+      nowMs: Date.now(),
+    });
     const subscriptions = listWebhookSubscriptions(deps.db, {
       endpointId: endpoint.id,
       enabledOnly: true,
@@ -1870,6 +2181,148 @@ function parseStringArrayJson(value: string | null | undefined): string[] {
   } catch {
     return [];
   }
+}
+
+function parseSecretProviderKind(value: unknown): SecretProviderKind | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  switch (normalized) {
+    case "local_file":
+    case "sidecar_http":
+    case "vault":
+    case "openbao":
+    case "aws_sm":
+    case "gcp_sm":
+    case "azure_kv":
+      return normalized;
+    default:
+      return null;
+  }
+}
+
+function parseSecretProviderAuthMode(value: unknown): string | null {
+  if (value == null) return "none";
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  switch (normalized) {
+    case "none":
+    case "unix_peer":
+    case "mtls":
+    case "workload_identity":
+      return normalized;
+    default:
+      return null;
+  }
+}
+
+function containsStaticSecretMaterial(value: unknown, parentKey = ""): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") {
+    if (!parentKey) return false;
+    return SECRET_PROVIDER_STATIC_MATERIAL_KEY_PATTERN.test(parentKey) && value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (containsStaticSecretMaterial(item, parentKey)) return true;
+    }
+    return false;
+  }
+  if (typeof value !== "object") return false;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (containsStaticSecretMaterial(nested, key.trim())) return true;
+  }
+  return false;
+}
+
+function validateSecretProviderProfileDefinition(params: {
+  kind: SecretProviderKind;
+  endpointRef: string | null;
+  authMode: string;
+  strictMode: boolean;
+  config: Record<string, unknown>;
+}): string | null {
+  if (params.strictMode && containsStaticSecretMaterial(params.config)) {
+    return "config contains static secret/auth material; use env/identity-bound auth instead";
+  }
+
+  const endpoint = params.endpointRef?.trim() ?? "";
+  if (params.kind !== "local_file" && endpoint.length === 0) {
+    return `endpointRef is required for provider kind ${params.kind}`;
+  }
+  if (endpoint.length > 0) {
+    if (endpoint.startsWith("unix://")) {
+      let parsedUnix: URL;
+      try {
+        parsedUnix = new URL(endpoint);
+      } catch {
+        return "endpointRef must be a valid unix:// URL";
+      }
+      const socketPath = decodeURIComponent(parsedUnix.pathname || "").trim();
+      if (!socketPath || !socketPath.startsWith("/")) {
+        return "endpointRef unix:// URL must include an absolute socket path";
+      }
+    } else {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(endpoint);
+      } catch {
+        return "endpointRef must be a valid URL";
+      }
+      if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        return "endpointRef protocol must be http, https, or unix";
+      }
+    }
+  }
+
+  if (params.authMode === "unix_peer" && !endpoint.startsWith("unix://")) {
+    return "authMode unix_peer requires endpointRef with unix:// scheme";
+  }
+  if (params.authMode === "mtls") {
+    if (!endpoint || endpoint.startsWith("unix://")) {
+      return "authMode mtls requires an https endpointRef";
+    }
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== "https:") return "authMode mtls requires an https endpointRef";
+    } catch {
+      return "authMode mtls requires an https endpointRef";
+    }
+  }
+  if (params.authMode === "workload_identity") {
+    if (!endpoint || endpoint.startsWith("unix://")) {
+      return "authMode workload_identity requires an http or https endpointRef";
+    }
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return "authMode workload_identity requires an http or https endpointRef";
+      }
+      if (params.strictMode && parsed.protocol !== "https:") {
+        return "strictMode requires https endpointRef for workload_identity auth";
+      }
+    } catch {
+      return "authMode workload_identity requires an http or https endpointRef";
+    }
+  }
+  if (params.authMode === "none" && params.strictMode && params.kind !== "local_file") {
+    return "strictMode requires hardened authMode for non-local providers";
+  }
+  return null;
+}
+
+function mapSecretProviderTestErrorStatus(message: string): 400 | 409 | 502 | 504 {
+  if (message.includes("secret_broker_timeout")) return 504;
+  if (message.startsWith("secret_broker_http_")) return 502;
+  if (
+    message.includes("missing_or_disabled") ||
+    message.includes("auth_mode_not_hardened") ||
+    message.includes("requires_https") ||
+    message.includes("workload_identity_token_missing") ||
+    message.includes("mtls_material_missing")
+  ) {
+    return 409;
+  }
+  return 400;
 }
 
 function asObject(value: unknown): Record<string, unknown> {

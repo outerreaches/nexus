@@ -1185,6 +1185,19 @@ export function upsertFederationSession(db: NexusDatabase, params: UpsertFederat
     );
 }
 
+export function expireFederationSessions(db: NexusDatabase, nowMs: number = Date.now()): number {
+  const result = db.db
+    .prepare(
+      `UPDATE federation_sessions
+       SET status = 'expired'
+       WHERE status = 'active'
+         AND expires_at IS NOT NULL
+         AND expires_at <= ?`,
+    )
+    .run(nowMs);
+  return result.changes;
+}
+
 export function createFederationTask(db: NexusDatabase, params: CreateFederationTaskParams): void {
   const nowMs = params.nowMs ?? Date.now();
   db.db
@@ -2568,6 +2581,8 @@ export function getFederationStatusSnapshot(params: {
       peers: [],
     };
   }
+
+  expireFederationSessions(params.db, nowMs);
 
   const identityRow = params.db.db
     .prepare(

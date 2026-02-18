@@ -40,6 +40,23 @@ export type FederationDispatcherDeps = {
     traceId: string | null;
     details: Record<string, unknown>;
   }) => void | Promise<void>;
+  observeRouteHealth?: (entry: {
+    peerId: string;
+    adapter: "federation_http";
+    endpoint: string;
+    healthy: boolean;
+    error?: string | null;
+    nowMs: number;
+  }) => void | Promise<void>;
+  observeSessionHeartbeat?: (entry: {
+    peerId: string;
+    kid: string;
+    transportKind: "federation_http";
+    direction: "egress";
+    envelopeId: string;
+    traceId: string | null;
+    nowMs: number;
+  }) => void | Promise<void>;
   log?: (msg: string) => void;
 };
 
@@ -97,6 +114,8 @@ export function createFederationHttpDispatcher(deps: FederationDispatcherDeps): 
   const nonceFactory = deps.nonceFactory ?? (() => crypto.randomUUID());
   const log = deps.log ?? (() => {});
   const audit = deps.audit ?? (() => {});
+  const observeRouteHealth = deps.observeRouteHealth ?? (() => {});
+  const observeSessionHeartbeat = deps.observeSessionHeartbeat ?? (() => {});
   const safeAudit = async (entry: {
     peerId: string | null;
     eventType: string;
@@ -110,6 +129,37 @@ export function createFederationHttpDispatcher(deps: FederationDispatcherDeps): 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`federation/dispatch: audit write failed peer=${entry.peerId ?? "unknown"} error=${message}`);
+    }
+  };
+  const safeObserveRouteHealth = async (entry: {
+    peerId: string;
+    adapter: "federation_http";
+    endpoint: string;
+    healthy: boolean;
+    error?: string | null;
+    nowMs: number;
+  }): Promise<void> => {
+    try {
+      await observeRouteHealth(entry);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`federation/dispatch: route observation failed peer=${entry.peerId} error=${message}`);
+    }
+  };
+  const safeObserveSessionHeartbeat = async (entry: {
+    peerId: string;
+    kid: string;
+    transportKind: "federation_http";
+    direction: "egress";
+    envelopeId: string;
+    traceId: string | null;
+    nowMs: number;
+  }): Promise<void> => {
+    try {
+      await observeSessionHeartbeat(entry);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`federation/dispatch: session heartbeat observation failed peer=${entry.peerId} error=${message}`);
     }
   };
 
@@ -259,17 +309,52 @@ export function createFederationHttpDispatcher(deps: FederationDispatcherDeps): 
         signal: controller.signal,
       });
 
-      if (response.ok || response.status === 409) return { ok: true };
+      if (response.ok || response.status === 409) {
+        await safeObserveRouteHealth({
+          peerId: peer.id,
+          adapter: "federation_http",
+          endpoint: targetEndpoint,
+          healthy: true,
+          error: null,
+          nowMs: timestampMs,
+        });
+        await safeObserveSessionHeartbeat({
+          peerId: peer.id,
+          kid: signingMaterial.keyId,
+          transportKind: "federation_http",
+          direction: "egress",
+          envelopeId: envelope.envelopeId,
+          traceId: envelope.traceId ?? null,
+          nowMs: timestampMs,
+        });
+        return { ok: true };
+      }
 
       const status = response.status;
       if (isRetryableHttpStatus(status)) {
         const retryAt = parseRetryAfterHeaderMs(response.headers.get("retry-after"), timestampMs);
+        await safeObserveRouteHealth({
+          peerId: peer.id,
+          adapter: "federation_http",
+          endpoint: targetEndpoint,
+          healthy: false,
+          error: `http_${status}`,
+          nowMs: timestampMs,
+        });
         return {
           ok: false,
           retryAt: retryAt ?? (timestampMs + 10_000),
           error: `http_${status}`,
         };
       }
+      await safeObserveRouteHealth({
+        peerId: peer.id,
+        adapter: "federation_http",
+        endpoint: targetEndpoint,
+        healthy: false,
+        error: `http_${status}`,
+        nowMs: timestampMs,
+      });
       return {
         ok: false,
         terminal: true,
@@ -278,6 +363,14 @@ export function createFederationHttpDispatcher(deps: FederationDispatcherDeps): 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`federation/dispatch: send failed peer=${peer.id} error=${message}`);
+      await safeObserveRouteHealth({
+        peerId: peer.id,
+        adapter: "federation_http",
+        endpoint: targetEndpoint,
+        healthy: false,
+        error: `network_error:${message}`,
+        nowMs: timestampMs,
+      });
       return {
         ok: false,
         retryAt: timestampMs + 10_000,

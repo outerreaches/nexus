@@ -81,6 +81,16 @@ type ProtocolEvent = {
 
 type ProtocolMessage = ProtocolRequest | ProtocolResponse | ProtocolEvent;
 
+export type NodeTransportOperationResult = {
+  ok: boolean;
+  payload?: unknown;
+  error?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+  };
+};
+
 type PendingGatewayRequest = {
   id: string;
   nodeId: string;
@@ -269,6 +279,34 @@ export class NodeWebSocketGateway {
           timeoutMs: params.timeoutMs,
         });
     }
+  }
+
+  async requestTransportOperation(params: {
+    nodeId: string;
+    method: string;
+    params?: unknown;
+    timeoutMs?: number;
+  }): Promise<NodeTransportOperationResult> {
+    const response = await this.requestNode({
+      nodeId: params.nodeId,
+      method: params.method,
+      params: params.params,
+      timeoutMs: params.timeoutMs,
+    });
+    if (response.ok) {
+      return {
+        ok: true,
+        payload: response.payload,
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        code: response.error?.code ?? "NODE_EXECUTION_FAILED",
+        message: response.error?.message ?? "node transport request failed",
+        retryable: response.error?.retryable,
+      },
+    };
   }
 
   private async requestNode(params: {

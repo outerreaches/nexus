@@ -39,13 +39,17 @@ import {
   getFederationPeerById,
   getFederationStatusSnapshot,
   getPreferredTransportRouteForPeer,
+  upsertFederationSession,
+  upsertTransportRoute,
 } from "../storage/federation.js";
+import { listSecretProviderProfiles } from "../storage/secrets.js";
 import { startFederationOutboxWorker, type FederationOutboxWorker } from "../federation/outbox-worker.js";
 import { createFederationHttpDispatcher } from "../federation/dispatcher.js";
 import { loadOrCreateFederationSigningIdentity } from "../federation/identity.js";
 import { deriveFederationFirewallRuntimeState } from "../federation/firewall.js";
 import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from "../federation/webhook-worker.js";
 import { createFederationTransportRouter } from "../federation/transport.js";
+import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
 
@@ -351,6 +355,64 @@ export async function startGateway(
   let federationOutboxWorker: FederationOutboxWorker | null = null;
   let webhookDeliveryWorker: WebhookDeliveryWorker | null = null;
   let federationGlobalDisabled = false;
+  const federationSessionHeartbeatTtlMs = Math.max(
+    60_000,
+    envInt("NEXUS_FEDERATION_SESSION_HEARTBEAT_TTL_MS") ?? 10 * 60_000,
+  );
+  const recordTransportRouteObservation = (entry: {
+    peerId: string;
+    adapter: "federation_http" | "node_ws";
+    endpoint: string;
+    healthy: boolean;
+    error?: string | null;
+    nowMs: number;
+  }): void => {
+    const existing = getPreferredTransportRouteForPeer(db, {
+      peerId: entry.peerId,
+      adapter: entry.adapter,
+    });
+    const endpointHash = crypto.createHash("sha256").update(entry.endpoint).digest("hex").slice(0, 16);
+    upsertTransportRoute(db, {
+      routeId: existing?.routeId ?? `route:${entry.peerId}:${entry.adapter}:${endpointHash}`,
+      peerId: entry.peerId,
+      adapter: entry.adapter,
+      endpoint: entry.endpoint,
+      healthy: entry.healthy,
+      lastCheckedAt: entry.nowMs,
+      lastError: entry.error ?? null,
+      metadata: {
+        source: "dispatcher_observation",
+      },
+      nowMs: entry.nowMs,
+    });
+  };
+  const recordFederationSessionObservation = (entry: {
+    peerId: string;
+    kid: string;
+    transportKind: "federation_http";
+    direction: "egress";
+    envelopeId: string;
+    traceId: string | null;
+    nowMs: number;
+  }): void => {
+    const kid = entry.kid.trim();
+    if (!kid) return;
+    upsertFederationSession(db, {
+      id: `session:egress:${entry.peerId}:${kid}`,
+      peerId: entry.peerId,
+      status: "active",
+      establishedAt: entry.nowMs,
+      expiresAt: entry.nowMs + federationSessionHeartbeatTtlMs,
+      lastHeartbeatAt: entry.nowMs,
+      metadata: {
+        source: "egress_heartbeat",
+        transportKind: entry.transportKind,
+        direction: entry.direction,
+        envelopeId: entry.envelopeId,
+        traceId: entry.traceId,
+      },
+    });
+  };
   const federationDispatcher = (() => {
     if (!config.federation.enabled || !config.federation.outbox.enabled) return null;
     if (!federationSigningIdentity) {
@@ -382,6 +444,12 @@ export async function startGateway(
       requireMtls: config.federation.transport.requireMtls,
       allowInsecureSignedOnlyDev: config.federation.transport.allowInsecureSignedOnlyDev,
       requestTimeoutMs: config.federation.outbox.requestTimeoutMs,
+      observeRouteHealth: async (entry) => {
+        recordTransportRouteObservation(entry);
+      },
+      observeSessionHeartbeat: async (entry) => {
+        recordFederationSessionObservation(entry);
+      },
       audit: async (entry) => {
         appendFederationAudit(db, {
           id: randomId("FDA"),
@@ -396,9 +464,23 @@ export async function startGateway(
       },
       log,
     });
+    const nodeWsDispatcher = createNodeWsDispatcher({
+      nodeGateway: nodeWsGateway,
+      getRouteForPeer: (peerId, adapter) =>
+        getPreferredTransportRouteForPeer(db, {
+          peerId,
+          adapter,
+          requireHealthy: true,
+        }),
+      observeRouteHealth: async (entry) => {
+        recordTransportRouteObservation(entry);
+      },
+      log,
+    });
     return createFederationTransportRouter({
       adapterDispatchers: {
         federation_http: federationHttpDispatcher,
+        node_ws: nodeWsDispatcher,
       },
       log,
     });
@@ -509,6 +591,19 @@ export async function startGateway(
     },
     getStatus: async () => {
       const nowMs = Date.now();
+      const secretsStrictMode = parseStrictModeRaw(process.env.NEXUS_SECRETS_STRICT);
+      const secretProviders = listSecretProviderProfiles(db, {
+        includeDisabled: true,
+        limit: 500,
+      });
+      const secretProviderEnabled = secretProviders.filter((profile) => profile.enabled);
+      const secretProviderKinds = [...new Set(secretProviders.map((profile) => profile.kind))];
+      const sidecarUnixProfiles = secretProviderEnabled.filter(
+        (profile) => profile.kind === "sidecar_http" && typeof profile.endpointRef === "string" && profile.endpointRef.startsWith("unix://"),
+      ).length;
+      const sidecarTcpProfiles = secretProviderEnabled.filter(
+        (profile) => profile.kind === "sidecar_http" && typeof profile.endpointRef === "string" && !profile.endpointRef.startsWith("unix://"),
+      ).length;
       const federationFirewall = deriveFederationFirewallRuntimeState({
         enabled: config.federation.enabled,
         transportAdapter: config.federation.transport.adapter,
@@ -573,6 +668,16 @@ export async function startGateway(
           modelMode: agent.getDefaultModelMode(),
           localProvider: config.llm.routing.localProvider,
           localModel: llmProviderConfigs[config.llm.routing.localProvider]?.model ?? null,
+        },
+        secrets: {
+          strictMode: secretsStrictMode,
+          providerProfiles: {
+            total: secretProviders.length,
+            enabled: secretProviderEnabled.length,
+            kinds: secretProviderKinds,
+            sidecarUnixEnabled: sidecarUnixProfiles,
+            sidecarTcpEnabled: sidecarTcpProfiles,
+          },
         },
         browser: {
           cdpPort,
@@ -1125,6 +1230,11 @@ function envBool(key: string): boolean | null {
   if (raw === "1" || raw === "true" || raw === "yes" || raw === "y") return true;
   if (raw === "0" || raw === "false" || raw === "no" || raw === "n") return false;
   return null;
+}
+
+function parseStrictModeRaw(value: string | undefined): boolean {
+  const normalized = (value ?? "1").trim().toLowerCase();
+  return !(normalized === "0" || normalized === "false" || normalized === "no");
 }
 
 function normalizeHttpBaseUrl(raw: string): string | null {

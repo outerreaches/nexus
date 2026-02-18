@@ -50,6 +50,31 @@ async function withDb(fn: (db: NexusDatabase, app: Hono, stateDir: string) => Pr
   }
 }
 
+function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  const restore = () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<void>).then === "function") {
+      return (result as Promise<void>).finally(restore);
+    }
+    restore();
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
+
 test("federation status route returns status payload", async () => {
   await withDb(async (_db, app) => {
     const res = await app.request("http://localhost/api/federation/status");
@@ -127,6 +152,106 @@ test("breakglass controls toggle global disable and support pause/revoke actions
       }),
     });
     assert.equal(revokeRes.status, 200);
+  });
+});
+
+test("secret provider profile lifecycle routes support upsert/state/test and emit access events", async () => {
+  await withEnv(
+    {
+      NEXUS_CREDENTIALS_KEY: "federation-api-secret-provider-test-key",
+      NEXUS_SECRETS_STRICT: "1",
+    },
+    async () => {
+      await withDb(async (_db, app, stateDir) => {
+        const createRes = await app.request("http://localhost/api/secrets/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "local-main",
+            kind: "local_file",
+            strictMode: true,
+            enabled: true,
+            config: {
+              leaseTtlMs: 10_000,
+            },
+          }),
+        });
+        assert.equal(createRes.status, 200);
+        const createBody = await createRes.json() as { provider: { id: string; kind: string; enabled: boolean } };
+        assert.equal(createBody.provider.id, "local-main");
+        assert.equal(createBody.provider.kind, "local_file");
+        assert.equal(createBody.provider.enabled, true);
+
+        await upsertCredential({
+          stateDir,
+          id: "cred-secret-test",
+          password: "pw-test",
+        });
+
+        const testRes = await app.request("http://localhost/api/secrets/providers/local-main/test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            reference: "{{secret:local-main/cred-secret-test#password}}",
+          }),
+        });
+        assert.equal(testRes.status, 200);
+        const testBody = await testRes.json() as {
+          test: {
+            validated: boolean;
+            resolution: { secretClass: string; leaseId: string | null; leaseRevoked: boolean } | null;
+          };
+        };
+        assert.equal(testBody.test.validated, true);
+        assert.equal(testBody.test.resolution?.secretClass, "credential");
+        assert.equal(testBody.test.resolution?.leaseRevoked, true);
+
+        const eventsRes = await app.request("http://localhost/api/secrets/access-events?limit=20");
+        assert.equal(eventsRes.status, 200);
+        const eventsBody = await eventsRes.json() as {
+          events: Array<{ providerProfileId: string | null; decision: string }>;
+        };
+        assert.ok(eventsBody.events.some((event) => event.providerProfileId === "local-main" && event.decision === "allow"));
+
+        const stateRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: false,
+          }),
+        });
+        assert.equal(stateRes.status, 200);
+        const stateBody = await stateRes.json() as { provider: { enabled: boolean } };
+        assert.equal(stateBody.provider.enabled, false);
+
+        const getRes = await app.request("http://localhost/api/secrets/providers/local-main");
+        assert.equal(getRes.status, 200);
+        const getBody = await getRes.json() as { provider: { enabled: boolean } };
+        assert.equal(getBody.provider.enabled, false);
+      });
+    },
+  );
+});
+
+test("secret provider profile validation blocks static secret material in strict mode", async () => {
+  await withDb(async (_db, app) => {
+    const res = await app.request("http://localhost/api/secrets/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "sidecar-invalid-1",
+        kind: "sidecar_http",
+        endpointRef: "https://127.0.0.1:7777/resolve",
+        authMode: "workload_identity",
+        strictMode: true,
+        config: {
+          apiKey: "do-not-store-here",
+        },
+      }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error?: string };
+    assert.match(body.error ?? "", /static secret\/auth material/i);
   });
 });
 

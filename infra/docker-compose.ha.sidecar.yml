@@ -1,0 +1,48 @@
+# Optional HA overlay: run Nexus secret sidecar on the existing instance
+# (same VM/host, process/API boundary; no additional VM required).
+#
+# Usage:
+#   COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml" \
+#   REQUIRE_TLS_OVERLAY=0 infra/scripts/ha-rollout.sh deploy HEAD
+#
+# Provider profile example:
+#   kind: sidecar_http
+#   endpointRef: unix:///run/nexus/secret-sidecar.sock
+#   authMode: unix_peer
+#   strictMode: true
+
+services:
+  nexus-primary:
+    volumes:
+      - secret-sidecar-run:/run/nexus
+
+  nexus-standby:
+    volumes:
+      - secret-sidecar-run:/run/nexus
+
+  secret-sidecar:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: secret-sidecar --socket-path /run/nexus/secret-sidecar.sock
+    volumes:
+      - /data/nexus:/data/nexus
+      - secret-sidecar-run:/run/nexus
+    environment:
+      - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_SECRET_SIDECAR_SOCKET_PATH=/run/nexus/secret-sidecar.sock
+      - NEXUS_SECRET_SIDECAR_MAX_BODY_BYTES=32768
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --unix-socket /run/nexus/secret-sidecar.sock http://localhost/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - nexus-net
+
+volumes:
+  secret-sidecar-run:

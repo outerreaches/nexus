@@ -655,6 +655,89 @@ Notes:
 - `ha-rollout.sh` enforces TLS overlay by default (`REQUIRE_TLS_OVERLAY=1`). Set `REQUIRE_TLS_OVERLAY=0` only for explicit non-TLS lab runs.
 - For legacy environments still exporting only `COMPOSE_FILE=...ha.yml`, `ha-rollout.sh` auto-appends `infra/docker-compose.ha.tls.yml` when present.
 
+### 7.3.0a Secret Sidecar On Existing Instance (No New VM)
+
+Use the sidecar overlay when you want process/API boundary secret resolution on the same VM/host as the HA stack.
+
+Overlay file:
+- `infra/docker-compose.ha.sidecar.yml`
+
+It adds:
+- `secret-sidecar` service (`nexus secret-sidecar`)
+- shared unix socket volume (`/run/nexus/secret-sidecar.sock`) mounted into primary + standby
+- sidecar healthcheck via unix socket
+
+Deploy with sidecar overlay:
+
+```bash
+cd /data/code
+export COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml:/data/code/infra/docker-compose.ha.tls.yml"
+export NEXUS_HA_API_KEY="$NEXUS_HA_API_KEY"
+
+infra/scripts/ha-rollout.sh deploy HEAD
+infra/scripts/ha-rollout.sh finalize HEAD
+infra/scripts/ha-rollout.sh status
+```
+
+If you intentionally run without TLS overlay in a trusted private network:
+
+```bash
+export COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml"
+export REQUIRE_TLS_OVERLAY=0
+```
+
+Provider profile (strict + unix socket):
+
+```bash
+curl -s -X POST http://localhost:18789/api/secrets/providers \
+  -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "sidecar-main",
+    "kind": "sidecar_http",
+    "endpointRef": "unix:///run/nexus/secret-sidecar.sock",
+    "authMode": "unix_peer",
+    "strictMode": true,
+    "enabled": true
+  }' | jq .
+```
+
+Validation (no secret value in request):
+
+```bash
+curl -s -X POST http://localhost:18789/api/secrets/providers/sidecar-main/test \
+  -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"strictMode": true}' | jq .
+```
+
+Bootstrap helper (upsert + test + recent audit events):
+
+```bash
+cd /data/code
+NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+infra/scripts/ha-sidecar-bootstrap.sh
+```
+
+Test-only run (no provider mutation):
+
+```bash
+cd /data/code
+NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+infra/scripts/ha-sidecar-bootstrap.sh --test-only
+```
+
+Optional overrides for non-default profile wiring:
+- `PROVIDER_ID` (default `sidecar-main`)
+- `PROVIDER_ENDPOINT` (default `unix:///run/nexus/secret-sidecar.sock`)
+- `PROVIDER_AUTH_MODE` (default `unix_peer`)
+- `PROVIDER_STRICT_MODE` / `PROVIDER_ENABLED` (`true|false`, `1|0`)
+
+Notes:
+- In strict mode, unix socket + `authMode=unix_peer` is the recommended same-host baseline.
+- `ha-rollout.sh` now refreshes `secret-sidecar` automatically when the service exists in selected compose files.
+- Keep sidecar socket volume private to the Nexus stack (`secret-sidecar-run`).
+
 ### 7.3.0 Secure Node Transport (`wss://`)
 
 To use strict node transport security for non-loopback nodes, enable TLS on HAProxy and pin the certificate fingerprint on the node.

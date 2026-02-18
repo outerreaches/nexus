@@ -349,3 +349,66 @@ test("dispatcher prefers healthy federation transport route when available", asy
   assert.equal(result.ok, true);
   assert.equal(capturedUrl, "https://peer-route.internal/api/federation/inbox");
 });
+
+test("dispatcher emits egress session heartbeat observation on successful delivery", async () => {
+  const pair = generateKeyPairSync("ed25519");
+  const parsed = parseNodePublicKey(pair.publicKey.export({ format: "pem", type: "spki" }).toString());
+  assert.ok(parsed);
+  const sessionEvents: Array<Record<string, unknown>> = [];
+  const now = 1_700_000_123_000;
+
+  const dispatch = createFederationHttpDispatcher({
+    localInstanceId: "local-1",
+    privateKey: pair.privateKey,
+    keyId: "kid-local-1",
+    publicKeyRaw: parsed!.raw,
+    getPeerById: () => makePeer(),
+    requireMtls: true,
+    allowInsecureSignedOnlyDev: false,
+    requestTimeoutMs: 5000,
+    nowMs: () => now,
+    fetchImpl: async () => new Response("", { status: 202 }),
+    observeSessionHeartbeat: async (entry) => {
+      sessionEvents.push(entry as unknown as Record<string, unknown>);
+    },
+  });
+
+  const result = await dispatch(makeOutboxRecord({ id: "outbox-session-1", traceId: "trace-session-1" }));
+  assert.equal(result.ok, true);
+  assert.equal(sessionEvents.length, 1);
+  const event = sessionEvents[0]!;
+  assert.equal(event.peerId, "peer-1");
+  assert.equal(event.kid, "kid-local-1");
+  assert.equal(event.transportKind, "federation_http");
+  assert.equal(event.direction, "egress");
+  assert.equal(event.envelopeId, "outbox-session-1");
+  assert.equal(event.traceId, "trace-session-1");
+  assert.equal(event.nowMs, now);
+});
+
+test("dispatcher continues when session heartbeat observation sink fails", async () => {
+  const pair = generateKeyPairSync("ed25519");
+  const parsed = parseNodePublicKey(pair.publicKey.export({ format: "pem", type: "spki" }).toString());
+  assert.ok(parsed);
+  const logs: string[] = [];
+
+  const dispatch = createFederationHttpDispatcher({
+    localInstanceId: "local-1",
+    privateKey: pair.privateKey,
+    keyId: "kid-local-1",
+    publicKeyRaw: parsed!.raw,
+    getPeerById: () => makePeer(),
+    requireMtls: true,
+    allowInsecureSignedOnlyDev: false,
+    requestTimeoutMs: 5000,
+    fetchImpl: async () => new Response("", { status: 202 }),
+    observeSessionHeartbeat: async () => {
+      throw new Error("session sink unavailable");
+    },
+    log: (msg) => logs.push(msg),
+  });
+
+  const result = await dispatch(makeOutboxRecord({ id: "outbox-session-2" }));
+  assert.equal(result.ok, true);
+  assert.ok(logs.some((line) => line.includes("session heartbeat observation failed")));
+});

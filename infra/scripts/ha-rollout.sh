@@ -17,6 +17,8 @@
 # Environment overrides:
 #   CODE_DIR=/data/code
 #   COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.tls.yml
+#   # optional sidecar overlay:
+#   # COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml
 #   COMPOSE_FILE=/data/code/infra/docker-compose.ha.yml   # legacy single-file override (still supported)
 #   COMPOSE_PROJECT=infra
 #   STATE_DIR=/data/nexus
@@ -183,6 +185,22 @@ compose() {
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
+compose_has_service() {
+  local service="$1"
+  compose config --services 2>/dev/null | grep -Fxq "$service"
+}
+
+refresh_secret_sidecar_if_present() {
+  if ! compose_has_service "secret-sidecar"; then
+    return 0
+  fi
+  log "secret-sidecar detected in compose; rebuilding/recreating"
+  build_slot "secret-sidecar"
+  recreate_slot "secret-sidecar"
+  wait_for_service_container_ready "secret-sidecar" "$LIVE_TIMEOUT"
+  log "secret-sidecar health check passed"
+}
+
 ensure_tls_preflight() {
   if [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ]; then
     if [ "$REQUIRE_TLS_OVERLAY" = "1" ]; then
@@ -301,6 +319,32 @@ wait_for_service_http() {
   while true; do
     if compose_service_get "$service" "$path" 5 >/dev/null 2>&1; then
       return 0
+    fi
+    now="$(date +%s)"
+    if [ $((now - started)) -ge "$timeout" ]; then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+wait_for_service_container_ready() {
+  local service="$1"
+  local timeout="$2"
+  local started now cid status
+  started="$(date +%s)"
+  while true; do
+    cid="$(compose ps -q "$service" 2>/dev/null | head -n1)"
+    if [ -n "$cid" ]; then
+      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || true)"
+      case "$status" in
+        healthy|running)
+          return 0
+          ;;
+        unhealthy|exited|dead)
+          return 1
+          ;;
+      esac
     fi
     now="$(date +%s)"
     if [ $((now - started)) -ge "$timeout" ]; then
@@ -676,6 +720,11 @@ cmd_apply_local() {
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 
+  if ! refresh_secret_sidecar_if_present; then
+    rollback_after_failure "secret-sidecar refresh failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during secret-sidecar refresh"
+  fi
+
   # Phase 1: Build candidate and verify it's healthy
   if ! build_slot "$candidate"; then
     rollback_after_failure "build failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
@@ -792,6 +841,11 @@ cmd_deploy() {
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 
+  if ! refresh_secret_sidecar_if_present; then
+    rollback_after_failure "secret-sidecar refresh failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$target_sha"
+    fail "deploy failed during secret-sidecar refresh"
+  fi
+
   if ! build_slot "$candidate"; then
     rollback_after_failure "build failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$target_sha"
     fail "deploy failed during build"
@@ -847,6 +901,10 @@ cmd_rollback() {
   old_active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
 
+  if ! refresh_secret_sidecar_if_present; then
+    fail "rollback failed during secret-sidecar refresh"
+  fi
+
   build_slot "$candidate"
   recreate_slot "$candidate"
   wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || fail "rollback candidate not live"
@@ -886,6 +944,10 @@ cmd_finalize() {
   detect_slots
   active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
+
+  if ! refresh_secret_sidecar_if_present; then
+    fail "finalize failed during secret-sidecar refresh"
+  fi
 
   build_slot "$candidate"
   recreate_slot "$candidate"

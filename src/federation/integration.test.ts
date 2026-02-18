@@ -11,6 +11,7 @@ import { registerApiRoutes } from "../gateway/routes/api.js";
 import type { GatewayHttpDeps } from "../gateway/http.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import {
+  enqueueFederationOutbox,
   federationPeerIdentityScope,
   getFederationPeerById,
   listFederationEvents,
@@ -22,6 +23,7 @@ import {
 } from "../storage/federation.js";
 import { createFederationHttpDispatcher } from "./dispatcher.js";
 import { startFederationOutboxWorker } from "./outbox-worker.js";
+import { createFederationTransportRouter } from "./transport.js";
 
 type TestInstance = {
   instanceId: string;
@@ -400,5 +402,191 @@ test("failure: dropped response triggers retry and duplicate-safe single finaliz
     assert.equal(matchingEnvelopeEvents.length, 1);
   } finally {
     await Promise.all([primary.close(), service.close()]);
+  }
+});
+
+test("integration: outbox worker routes mixed adapters through unified transport router", async () => {
+  const instance = await createTestInstance({
+    instanceId: "router-int",
+    endpointHost: "router.internal",
+    runtimeProfile: "primary",
+  });
+  try {
+    const nowMs = Date.now();
+    upsertFederationPeer(instance.db, {
+      id: "peer-http",
+      label: "Peer HTTP",
+      endpoint: "https://peer-http.internal",
+      signingKey: "ed25519:peer-http",
+      trustState: "trusted",
+      enabled: true,
+      nowMs,
+    });
+    upsertFederationPeer(instance.db, {
+      id: "peer-node",
+      label: "Peer Node",
+      endpoint: "node://peer-node",
+      signingKey: "ed25519:peer-node",
+      trustState: "trusted",
+      enabled: true,
+      nowMs: nowMs + 1,
+    });
+
+    const adapterCalls: string[] = [];
+    const router = createFederationTransportRouter({
+      adapterDispatchers: {
+        federation_http: async (item) => {
+          adapterCalls.push(`federation_http:${item.id}`);
+          return { ok: true };
+        },
+        node_ws: async (item) => {
+          adapterCalls.push(`node_ws:${item.id}`);
+          return { ok: true };
+        },
+      },
+    });
+
+    enqueueFederationOutbox(instance.db, {
+      id: "outbox-http-1",
+      peerId: "peer-http",
+      transportKind: "federation_http",
+      envelope: { method: "submit_task", request: { symbol: "BTC-USD" } },
+      traceId: "trace-http-1",
+      nowMs,
+    });
+    enqueueFederationOutbox(instance.db, {
+      id: "outbox-node-1",
+      peerId: "peer-node",
+      transportKind: "node_ws",
+      envelope: { method: "transport.request.send", request: { op: "ping" } },
+      traceId: "trace-node-1",
+      nowMs: nowMs + 1,
+    });
+
+    const worker = startFederationOutboxWorker({
+      db: instance.db,
+      dispatch: router.dispatch,
+      intervalMs: 60_000,
+      maxBatch: 50,
+    });
+    await worker.tick();
+    worker.stop();
+
+    assert.deepEqual(adapterCalls.sort(), [
+      "federation_http:outbox-http-1",
+      "node_ws:outbox-node-1",
+    ]);
+
+    const rows = listFederationOutbox(instance.db, { limit: 20 });
+    const httpRow = rows.find((row) => row.id === "outbox-http-1");
+    const nodeRow = rows.find((row) => row.id === "outbox-node-1");
+    assert.equal(httpRow?.status, "sent");
+    assert.equal(nodeRow?.status, "sent");
+  } finally {
+    await instance.close();
+  }
+});
+
+test("integration: failover path primary->standby->primary preserves mixed-adapter outbox dispatch", async () => {
+  const instance = await createTestInstance({
+    instanceId: "failover-int",
+    endpointHost: "failover.internal",
+    runtimeProfile: "primary",
+  });
+  try {
+    const nowMs = Date.now();
+    upsertFederationPeer(instance.db, {
+      id: "peer-http",
+      label: "Peer HTTP",
+      endpoint: "https://peer-http.internal",
+      signingKey: "ed25519:peer-http",
+      trustState: "trusted",
+      enabled: true,
+      nowMs,
+    });
+    upsertFederationPeer(instance.db, {
+      id: "peer-node",
+      label: "Peer Node",
+      endpoint: "node://peer-node",
+      signingKey: "ed25519:peer-node",
+      trustState: "trusted",
+      enabled: true,
+      nowMs: nowMs + 1,
+    });
+
+    const adapterCalls: string[] = [];
+    let activeSlot: "primary" | "standby" = "primary";
+    const router = createFederationTransportRouter({
+      adapterDispatchers: {
+        federation_http: async (item) => {
+          adapterCalls.push(`${activeSlot}:federation_http:${item.id}`);
+          return { ok: true };
+        },
+        node_ws: async (item) => {
+          adapterCalls.push(`${activeSlot}:node_ws:${item.id}`);
+          return { ok: true };
+        },
+      },
+    });
+
+    const enqueuePhase = (phase: "p1" | "p2" | "p3", phaseNowMs: number) => {
+      enqueueFederationOutbox(instance.db, {
+        id: `${phase}-http`,
+        peerId: "peer-http",
+        transportKind: "federation_http",
+        envelope: { method: "submit_task", request: { phase } },
+        traceId: `${phase}-trace-http`,
+        nowMs: phaseNowMs,
+      });
+      enqueueFederationOutbox(instance.db, {
+        id: `${phase}-node`,
+        peerId: "peer-node",
+        transportKind: "node_ws",
+        envelope: { method: "transport.request.send", request: { phase } },
+        traceId: `${phase}-trace-node`,
+        nowMs: phaseNowMs + 1,
+      });
+    };
+
+    const runTick = async () => {
+      const worker = startFederationOutboxWorker({
+        db: instance.db,
+        dispatch: router.dispatch,
+        intervalMs: 60_000,
+        maxBatch: 100,
+      });
+      await worker.tick();
+      worker.stop();
+    };
+
+    enqueuePhase("p1", nowMs + 10);
+    activeSlot = "primary";
+    await runTick();
+
+    enqueuePhase("p2", nowMs + 20);
+    activeSlot = "standby";
+    await runTick();
+
+    enqueuePhase("p3", nowMs + 30);
+    activeSlot = "primary";
+    await runTick();
+
+    assert.deepEqual(adapterCalls.sort(), [
+      "primary:federation_http:p1-http",
+      "primary:federation_http:p3-http",
+      "primary:node_ws:p1-node",
+      "primary:node_ws:p3-node",
+      "standby:federation_http:p2-http",
+      "standby:node_ws:p2-node",
+    ]);
+
+    const rows = listFederationOutbox(instance.db, { limit: 40 });
+    const expectedIds = new Set(["p1-http", "p1-node", "p2-http", "p2-node", "p3-http", "p3-node"]);
+    for (const row of rows) {
+      if (!expectedIds.has(row.id)) continue;
+      assert.equal(row.status, "sent");
+    }
+  } finally {
+    await instance.close();
   }
 });

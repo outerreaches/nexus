@@ -26,6 +26,13 @@ export type SecretBrokerResolveResult = {
   reason: string;
 };
 
+export type SecretBrokerProfileValidationResult = {
+  endpointKind: "local" | "unix" | "url";
+  endpointScheme: "local" | "unix" | "http" | "https";
+  authMode: string;
+  strictMode: boolean;
+};
+
 const SECRETISH_CONFIG_KEY_PATTERN = /(token|secret|password|api[_-]?key|client[_-]?secret|access[_-]?key)/i;
 const DEFAULT_RESOLVE_PATH = "/v1/secrets/resolve";
 
@@ -432,4 +439,41 @@ export async function resolveSecretThroughBroker(params: SecretBrokerResolveInpu
     actor: params.actor,
     requestTimeoutMs: Math.max(1_000, params.requestTimeoutMs ?? 5_000),
   });
+}
+
+export async function validateSecretBrokerProfile(params: {
+  profile: SecretProviderProfileRecord;
+  strictMode?: boolean;
+}): Promise<SecretBrokerProfileValidationResult> {
+  const strictMode = params.strictMode ?? params.profile.strictMode;
+  if (params.profile.kind === "local_file") {
+    return {
+      endpointKind: "local",
+      endpointScheme: "local",
+      authMode: params.profile.authMode,
+      strictMode,
+    };
+  }
+
+  const endpoint = parseBrokerEndpoint(params.profile);
+  await validateBrokerPolicy({
+    profile: params.profile,
+    endpoint,
+    strictMode,
+  });
+  if (endpoint.kind === "unix") {
+    return {
+      endpointKind: "unix",
+      endpointScheme: "unix",
+      authMode: params.profile.authMode,
+      strictMode,
+    };
+  }
+  const endpointScheme = endpoint.url.protocol === "https:" ? "https" : "http";
+  return {
+    endpointKind: "url",
+    endpointScheme,
+    authMode: params.profile.authMode,
+    strictMode,
+  };
 }

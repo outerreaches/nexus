@@ -6,7 +6,7 @@ import test from "node:test";
 
 import type { SecretProviderProfileRecord } from "../storage/secrets.js";
 import { upsertCredential } from "./credentials.js";
-import { resolveSecretThroughBroker, setSecretBrokerRequestInvokerForTests } from "./broker.js";
+import { resolveSecretThroughBroker, setSecretBrokerRequestInvokerForTests, validateSecretBrokerProfile } from "./broker.js";
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
   const previous = new Map<string, string | undefined>();
@@ -204,6 +204,20 @@ test("secret broker strict mode requires https for workload identity", async () 
       },
     );
   });
+});
+
+test("secret broker profile validation reports local provider metadata", async () => {
+  const result = await validateSecretBrokerProfile({
+    profile: makeProfile({
+      id: "local-main",
+      kind: "local_file",
+      endpointRef: null,
+      authMode: "none",
+    }),
+    strictMode: true,
+  });
+  assert.equal(result.endpointKind, "local");
+  assert.equal(result.endpointScheme, "local");
 });
 
 test("secret broker mtls mode forwards client certificate material", async () => {

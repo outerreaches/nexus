@@ -8,6 +8,7 @@ import { openDatabase, type NexusDatabase } from "./database.js";
 import {
   appendFederationEvent,
   consumeFederationReplayNonce,
+  expireFederationSessions,
   federationPeerIdentityScope,
   getFederationEventByEnvelopeId,
   getFederationGrantProjectionForPeerResource,
@@ -349,6 +350,37 @@ test("federation status snapshot is standalone when disabled", async () => {
     assert.equal(status.derivedState, "standalone");
     assert.equal(status.peerCount, 0);
     assert.equal(status.identityValid, false);
+  });
+});
+
+test("session expiry transitions active sessions to expired", async () => {
+  await withDb(async (db) => {
+    const nowMs = 1_700_000_000_000;
+    upsertFederationPeer(db, {
+      id: "peer-expire",
+      label: "Peer",
+      endpoint: "https://peer-expire.internal",
+      signingKey: "ed25519:peer-expire",
+      trustState: "trusted",
+      nowMs,
+    });
+    upsertFederationSession(db, {
+      id: "session-expire-1",
+      peerId: "peer-expire",
+      status: "active",
+      establishedAt: nowMs,
+      expiresAt: nowMs + 5_000,
+      lastHeartbeatAt: nowMs,
+    });
+
+    const changes = expireFederationSessions(db, nowMs + 5_001);
+    assert.equal(changes, 1);
+
+    const row = db.db
+      .prepare("SELECT status FROM federation_sessions WHERE id = ?")
+      .get("session-expire-1") as { status: string } | undefined;
+    assert.ok(row);
+    assert.equal(row?.status, "expired");
   });
 });
 
