@@ -25,6 +25,8 @@
 #   LIVE_TIMEOUT=90
 #   READY_TIMEOUT=120
 #   SMOKE_TIMEOUT=60
+#   WS_SMOKE_TIMEOUT=20               # retry window for websocket smoke probe
+#   SKIP_WS_SMOKE=0                   # set to 1 to skip websocket smoke probe
 #   REQUIRE_TLS_OVERLAY=1
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
 #   NEXUS_HA_API_KEY=<token>            # optional bearer token for /api/* control-plane calls
@@ -46,6 +48,8 @@ API_PORT="${API_PORT:-18789}"
 LIVE_TIMEOUT="${LIVE_TIMEOUT:-90}"
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
+WS_SMOKE_TIMEOUT="${WS_SMOKE_TIMEOUT:-20}"
+SKIP_WS_SMOKE="${SKIP_WS_SMOKE:-0}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 REQUIRE_TLS_OVERLAY="${REQUIRE_TLS_OVERLAY:-1}"
@@ -482,6 +486,12 @@ run_smoke_checks() {
       ;;
   esac
 
+  if [ "$SKIP_WS_SMOKE" = "1" ]; then
+    warn "smoke: websocket upgrade probe skipped (SKIP_WS_SMOKE=1)"
+    log "smoke checks passed"
+    return 0
+  fi
+
   local ws_smoke_script
   ws_smoke_script='const url = process.env.NEXUS_NODE_WS_SMOKE_URL || "ws://haproxy:18789/nx/nodes";\
 const timeoutMs = 8000;\
@@ -510,10 +520,19 @@ ws.addEventListener("error", () => {\
   process.exit(1);\
 });'
 
-  if ! compose exec -T "$ACTIVE_SLOT" node -e "$ws_smoke_script" >/dev/null 2>&1; then
-    warn "smoke: websocket upgrade check failed on /nx/nodes via HAProxy"
-    return 1
-  fi
+  local ws_started ws_now
+  ws_started="$(date +%s)"
+  while true; do
+    if compose exec -T "$ACTIVE_SLOT" node -e "$ws_smoke_script" >/dev/null 2>&1; then
+      break
+    fi
+    ws_now="$(date +%s)"
+    if [ $((ws_now - ws_started)) -ge "$WS_SMOKE_TIMEOUT" ]; then
+      warn "smoke: websocket upgrade check failed on /nx/nodes via HAProxy (timeout=${WS_SMOKE_TIMEOUT}s)"
+      return 1
+    fi
+    sleep 2
+  done
 
   log "smoke checks passed"
   return 0
@@ -711,6 +730,8 @@ cmd_apply_local() {
     rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed during switchover"
   fi
+  ACTIVE_SLOT="$candidate"
+  INACTIVE_SLOT="$old_active"
   if ! run_smoke_checks; then
     rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed during smoke checks"
@@ -792,6 +813,8 @@ cmd_deploy() {
     rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$target_sha"
     fail "deploy failed during switchover"
   fi
+  ACTIVE_SLOT="$candidate"
+  INACTIVE_SLOT="$old_active"
   if ! run_smoke_checks; then
     rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$target_sha"
     fail "deploy failed during smoke checks"
@@ -832,6 +855,8 @@ cmd_rollback() {
   recreate_slot "$candidate"
   wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || fail "rollback candidate not live"
   switch_to_slot "$old_active" "$candidate" || fail "rollback switchover failed"
+  ACTIVE_SLOT="$candidate"
+  INACTIVE_SLOT="$old_active"
   run_smoke_checks || fail "rollback smoke checks failed"
 
   LAST_GOOD_SHA="$target_sha"
