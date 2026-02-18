@@ -667,7 +667,7 @@ async function executeOnNode(params: {
 export const shellInteractive = defineTool({
   name: "shell_interactive",
   description:
-    "Manage interactive tmux shell sessions with timed output reads. Supports local sessions and node sessions via node target.",
+    "Manage interactive tmux shell sessions on the gateway (local) with timed output reads. Use target=node to run on a remote Nexus node (requires nexus-shellctl allowlisted and firewallMode=transparent on the node).",
   parameters: z.object({
     action: z.enum(["open", "send", "read", "list", "close", "interrupt"]),
     target: z.enum(["local", "node"]).default("local"),
