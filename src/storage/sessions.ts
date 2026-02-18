@@ -243,7 +243,5 @@ export function loadRecentHistory(params: {
       .run(nextAnchorId, nowMs, params.sessionId);
   }
 
-  const preferredRecentStart = Math.max(0, sanitized.length - activeWindow);
-  const recentStart = findSliceStart(sanitized, preferredRecentStart);
-  return sanitized.slice(recentStart).map((entry) => entry.message);
+  return sanitized.map((entry) => entry.message);
 }
