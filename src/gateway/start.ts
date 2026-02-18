@@ -223,7 +223,7 @@ export async function startGateway(
   const llmConfig = startupRoute.primary;
   const fallbackLlmConfig = startupRoute.fallback;
   const builtIns = getBuiltInTools();
-  const mcp = new McpManager({ db, log });
+  const mcp = new McpManager({ db, log, stateDir: paths.stateDir });
   await mcp.init();
   const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
   await registry.init();

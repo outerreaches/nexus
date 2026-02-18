@@ -62,6 +62,7 @@ process.on("message", async (msg: ParentMessage) => {
       ? new McpManager({
           db,
           log: (line) => log(line),
+          stateDir: cfg.stateDir,
         })
       : null;
     if (mcp) {

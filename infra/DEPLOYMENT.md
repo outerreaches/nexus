@@ -795,6 +795,7 @@ Notes:
 - `ha-rollout.sh` now refreshes `secret-sidecar` automatically when the service exists in selected compose files.
 - Keep sidecar socket volume private to the Nexus stack (`secret-sidecar-run`).
 - The sidecar overlay mounts `/data/nexus-secrets` only into `secret-sidecar`; primary/standby do not receive that mount.
+- For MCP servers, set sensitive env values as secret refs (for example `{{secret:sidecar-main/mcp.github.pat#password}}`) rather than plaintext tokens.
 
 Cutover completion checklist (2026-02-18):
 

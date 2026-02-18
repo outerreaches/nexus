@@ -1,5 +1,6 @@
 import { Semaphore } from "../core/semaphore.js";
 import type { Tool } from "../core/tools.js";
+import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import type { NexusDatabase } from "../storage/database.js";
 import {
   appendMcpEvent,
@@ -78,6 +79,55 @@ function formatToolResult(result: McpToolCallResult): string {
   return serialized;
 }
 
+export async function resolveMcpServerEnvSecrets(params: {
+  db: NexusDatabase;
+  stateDir: string;
+  serverId: string;
+  env: Record<string, string>;
+  nowMs?: number;
+}): Promise<Record<string, string>> {
+  const rawEntries = Object.entries(params.env ?? {});
+  if (rawEntries.length === 0) return {};
+
+  const secretEntries = rawEntries.filter(([, value]) => parseSecretReference(value) !== null);
+  if (secretEntries.length === 0) {
+    return { ...params.env };
+  }
+
+  const stateDir = params.stateDir.trim();
+  if (!stateDir) {
+    throw new Error(`MCP server '${params.serverId}' cannot resolve secret references without stateDir`);
+  }
+
+  const nowMs = params.nowMs ?? Date.now();
+  const resolvedEnv: Record<string, string> = { ...params.env };
+  for (const [envKey, reference] of secretEntries) {
+    try {
+      const traceId = `mcp-env:${params.serverId}:${envKey}:${nowMs}`;
+      const resolved = await resolveSecretReference({
+        db: params.db,
+        stateDir,
+        reference,
+        traceId,
+        actor: `mcp_server:${params.serverId}:env:${envKey}`,
+        nowMs,
+      });
+      resolvedEnv[envKey] = resolved.value;
+      if (resolved.leaseId) {
+        revokeSecretLease({
+          db: params.db,
+          leaseId: resolved.leaseId,
+          nowMs: nowMs + 1,
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`mcp_env_secret_resolution_failed:${params.serverId}:${envKey}:${message}`);
+    }
+  }
+  return resolvedEnv;
+}
+
 export class McpManager {
   private readonly connected = new Map<string, ConnectedServer>();
   private managedTools: ManagedToolRecord[] = [];
@@ -86,6 +136,7 @@ export class McpManager {
     private readonly deps: {
       db: NexusDatabase;
       log: (line: string) => void;
+      stateDir?: string;
     },
   ) {}
 
@@ -404,10 +455,16 @@ export class McpManager {
     if (!server.command) {
       throw new Error(`MCP server '${server.id}' is missing a command`);
     }
+    const env = await resolveMcpServerEnvSecrets({
+      db: this.deps.db,
+      stateDir: this.deps.stateDir ?? "",
+      serverId: server.id,
+      env: server.env,
+    });
     const client = new McpStdioClient({
       command: server.command,
       args: server.args,
-      env: server.env,
+      env,
       timeoutMs: server.timeoutMs,
       log: (line) => this.deps.log(`mcp[${server.id}] ${line}`),
     });

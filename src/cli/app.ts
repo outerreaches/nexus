@@ -201,7 +201,7 @@ export async function runCli(argv: string[]): Promise<void> {
       });
 
       const builtIns = getBuiltInTools();
-      const mcp = new McpManager({ db, log });
+      const mcp = new McpManager({ db, log, stateDir: paths.stateDir });
       await mcp.init();
       const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
       await registry.init();
@@ -363,7 +363,7 @@ export async function runCli(argv: string[]): Promise<void> {
         });
 
         const builtIns = getBuiltInTools();
-        mcp = new McpManager({ db, log });
+        mcp = new McpManager({ db, log, stateDir: paths.stateDir });
         await mcp.init();
         const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
         await registry.init();
