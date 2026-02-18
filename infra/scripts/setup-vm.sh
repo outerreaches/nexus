@@ -249,44 +249,16 @@ else
 set -euo pipefail
 sudo mkdir -p /data/code /data/nexus /data/workspace
 sudo chown -R nexus:nexus /data
-cat > /home/nexus/pull-deploy.sh <<'PULLDEPLOY'
-#!/usr/bin/env bash
-set -euo pipefail
-
-CODE_DIR="${CODE_DIR:-/data/code}"
-COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
-BASE_COMPOSE="${BASE_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.yml}"
-TLS_COMPOSE="${TLS_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.tls.yml}"
-TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
-
-if [ ! -d "$CODE_DIR" ]; then
-  echo "[pull-deploy] missing code dir: $CODE_DIR" >&2
-  exit 1
-fi
-
-cd "$CODE_DIR"
-git fetch origin main
-git merge --ff-only origin/main
-
-if [ ! -f "$BASE_COMPOSE" ]; then
-  echo "[pull-deploy] missing compose file: $BASE_COMPOSE" >&2
-  exit 1
-fi
-if [ ! -f "$TLS_COMPOSE" ]; then
-  echo "[pull-deploy] missing TLS compose overlay: $TLS_COMPOSE" >&2
-  exit 1
-fi
-if [ ! -f "$TLS_CERT_PEM" ]; then
-  echo "[pull-deploy] missing TLS cert bundle: $TLS_CERT_PEM" >&2
-  echo "[pull-deploy] run: bash infra/scripts/ha-generate-tls-cert.sh --san <gateway-host-or-ip>" >&2
-  exit 1
-fi
-
-docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" up -d --build --force-recreate
-docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" ps
-PULLDEPLOY
-chmod +x /home/nexus/pull-deploy.sh
 VMSCRIPT
+
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PULL_DEPLOY_SCRIPT="${SCRIPT_DIR}/pull-deploy.sh"
+  if [[ ! -f "${PULL_DEPLOY_SCRIPT}" ]]; then
+    error "Missing helper script in repo: ${PULL_DEPLOY_SCRIPT}"
+  fi
+
+  scp -o StrictHostKeyChecking=no "${PULL_DEPLOY_SCRIPT}" "${VM_USER}@${VM_IP}:/home/nexus/pull-deploy.sh"
+  ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_IP}" "chmod +x /home/nexus/pull-deploy.sh"
 fi
 
 if [[ "${ENABLE_FORWARDING}" == "1" ]]; then
