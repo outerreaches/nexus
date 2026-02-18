@@ -113,16 +113,49 @@ notify_ha_event() {
 }
 
 DEPLOY_LOCK_DIR="${DEPLOY_LOCK_DIR:-/data/nexus/ha-rollout.lock}"
+DEPLOY_LOCK_STALE_SECONDS="${DEPLOY_LOCK_STALE_SECONDS:-1800}"
+
+normalize_positive_int() {
+  value="$1"
+  fallback="$2"
+  case "$value" in
+    ''|*[!0-9]*) echo "$fallback" ;;
+    *) echo "$value" ;;
+  esac
+}
+
+DEPLOY_LOCK_STALE_SECONDS="$(normalize_positive_int "$DEPLOY_LOCK_STALE_SECONDS" 1800)"
 
 check_deploy_in_progress() {
-  if [ -d "$DEPLOY_LOCK_DIR" ]; then
-    local owner_pid
-    owner_pid="$(cat "${DEPLOY_LOCK_DIR}/pid" 2>/dev/null || echo "")"
-    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
-      return 0  # deploy is in progress
-    fi
+  if [ ! -d "$DEPLOY_LOCK_DIR" ]; then
+    return 1  # no deploy running
   fi
-  return 1  # no deploy running
+
+  # Important: ha-rollout runs on the host, while watchdog runs in a container.
+  # Host PID checks are not reliable across PID namespaces, so lock directory
+  # presence is the primary signal.
+  lock_mtime="$(stat -c %Y "$DEPLOY_LOCK_DIR" 2>/dev/null || echo "")"
+  now_ts="$(date +%s)"
+  if [ -z "$lock_mtime" ]; then
+    return 0
+  fi
+  case "$lock_mtime" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  lock_age=$((now_ts - lock_mtime))
+  if [ "$lock_age" -lt 0 ]; then
+    lock_age=0
+  fi
+  if [ "$lock_age" -le "$DEPLOY_LOCK_STALE_SECONDS" ]; then
+    return 0  # deploy likely in progress
+  fi
+
+  owner_pid="$(cat "${DEPLOY_LOCK_DIR}/pid" 2>/dev/null || echo "")"
+  if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+    return 0  # pid visible in current namespace
+  fi
+  log "WARN: Ignoring stale deploy lock (age=${lock_age}s > ${DEPLOY_LOCK_STALE_SECONDS}s)"
+  return 1
 }
 
 failover() {
@@ -252,6 +285,7 @@ fi
 if [ "$ENABLE_FAILBACK" = "true" ]; then
   log "Failback threshold: $FAILBACK_THRESHOLD"
 fi
+log "Deploy lock guard: dir=${DEPLOY_LOCK_DIR} stale_after=${DEPLOY_LOCK_STALE_SECONDS}s"
 
 # Wait for services to start
 sleep 10

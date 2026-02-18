@@ -499,32 +499,7 @@ run_smoke_checks() {
   fi
 
   local ws_smoke_script
-  ws_smoke_script='const url = process.env.NEXUS_NODE_WS_SMOKE_URL || "ws://haproxy:18789/nx/nodes";\
-const timeoutMs = Number(process.env.NEXUS_NODE_WS_SMOKE_TIMEOUT_MS || 8000);\
-let opened = false;\
-const ws = new WebSocket(url);\
-const timer = setTimeout(() => {\
-  console.error(`timeout connecting ${url}`);\
-  try { ws.close(); } catch {}\
-  process.exit(2);\
-}, timeoutMs);\
-ws.addEventListener("open", () => {\
-  opened = true;\
-  clearTimeout(timer);\
-  try { ws.close(1000, "ha-rollout-smoke"); } catch {}\
-});\
-ws.addEventListener("close", (ev) => {\
-  clearTimeout(timer);\
-  if (opened) process.exit(0);\
-  console.error(`closed before open code=${ev.code} reason=${ev.reason || ""}`);\
-  process.exit(3);\
-});\
-ws.addEventListener("error", () => {\
-  if (opened) return;\
-  clearTimeout(timer);\
-  console.error(`websocket error before open url=${url}`);\
-  process.exit(1);\
-});'
+  ws_smoke_script='const url=process.env.NEXUS_NODE_WS_SMOKE_URL||"ws://haproxy:18789/nx/nodes";const timeoutMs=Number(process.env.NEXUS_NODE_WS_SMOKE_TIMEOUT_MS||8000);let opened=false;const ws=new WebSocket(url);const timer=setTimeout(()=>{console.error(`timeout connecting ${url}`);try{ws.close();}catch{}process.exit(2);},timeoutMs);ws.addEventListener("open",()=>{opened=true;clearTimeout(timer);try{ws.close(1000,"ha-rollout-smoke");}catch{}});ws.addEventListener("close",(ev)=>{clearTimeout(timer);if(opened)process.exit(0);console.error(`closed before open code=${ev.code} reason=${ev.reason||""}`);process.exit(3);});ws.addEventListener("error",()=>{if(opened)return;clearTimeout(timer);console.error(`websocket error before open url=${url}`);process.exit(1);});'
 
   local ws_started ws_now ws_probe_out last_ws_probe_out compact_ws_probe_out
   ws_started="$(date +%s)"
