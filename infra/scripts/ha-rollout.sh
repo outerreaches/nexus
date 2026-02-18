@@ -27,8 +27,11 @@
 #   SMOKE_TIMEOUT=60
 #   WS_SMOKE_TIMEOUT=20               # retry window for websocket smoke probe
 #   SKIP_WS_SMOKE=0                   # set to 1 to skip websocket smoke probe
+#   WS_SMOKE_WARN_ONLY=0              # set to 1 to warn (not fail) on websocket smoke timeout
+#   WS_SMOKE_ATTEMPT_TIMEOUT_MS=8000  # per-attempt websocket probe timeout in milliseconds
 #   REQUIRE_TLS_OVERLAY=1
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
+#   ROLLBACK_RESTORE_GIT=1            # set to 0 to keep current checkout on failed deploy rollback
 #   NEXUS_HA_API_KEY=<token>            # optional bearer token for /api/* control-plane calls
 #                                        # fallback: NEXUS_HTTP_API_KEY, NEXUS_HTTP_AUTH_TOKEN, NEXUS_DASHBOARD_PASSWORD
 
@@ -50,9 +53,12 @@ READY_TIMEOUT="${READY_TIMEOUT:-120}"
 SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
 WS_SMOKE_TIMEOUT="${WS_SMOKE_TIMEOUT:-20}"
 SKIP_WS_SMOKE="${SKIP_WS_SMOKE:-0}"
+WS_SMOKE_WARN_ONLY="${WS_SMOKE_WARN_ONLY:-0}"
+WS_SMOKE_ATTEMPT_TIMEOUT_MS="${WS_SMOKE_ATTEMPT_TIMEOUT_MS:-8000}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 REQUIRE_TLS_OVERLAY="${REQUIRE_TLS_OVERLAY:-1}"
+ROLLBACK_RESTORE_GIT="${ROLLBACK_RESTORE_GIT:-1}"
 CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
 
 declare -a COMPOSE_FILES_LIST=()
@@ -494,7 +500,7 @@ run_smoke_checks() {
 
   local ws_smoke_script
   ws_smoke_script='const url = process.env.NEXUS_NODE_WS_SMOKE_URL || "ws://haproxy:18789/nx/nodes";\
-const timeoutMs = 8000;\
+const timeoutMs = Number(process.env.NEXUS_NODE_WS_SMOKE_TIMEOUT_MS || 8000);\
 let opened = false;\
 const ws = new WebSocket(url);\
 const timer = setTimeout(() => {\
@@ -520,15 +526,26 @@ ws.addEventListener("error", () => {\
   process.exit(1);\
 });'
 
-  local ws_started ws_now
+  local ws_started ws_now ws_probe_out last_ws_probe_out compact_ws_probe_out
   ws_started="$(date +%s)"
+  last_ws_probe_out=""
   while true; do
-    if compose exec -T "$ACTIVE_SLOT" node -e "$ws_smoke_script" >/dev/null 2>&1; then
+    if ws_probe_out="$(compose exec -T -e NEXUS_NODE_WS_SMOKE_TIMEOUT_MS="$WS_SMOKE_ATTEMPT_TIMEOUT_MS" "$ACTIVE_SLOT" node -e "$ws_smoke_script" 2>&1)"; then
       break
     fi
+    last_ws_probe_out="$ws_probe_out"
     ws_now="$(date +%s)"
     if [ $((ws_now - ws_started)) -ge "$WS_SMOKE_TIMEOUT" ]; then
       warn "smoke: websocket upgrade check failed on /nx/nodes via HAProxy (timeout=${WS_SMOKE_TIMEOUT}s)"
+      if [ -n "$last_ws_probe_out" ]; then
+        compact_ws_probe_out="$(printf '%s' "$last_ws_probe_out" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g' | cut -c1-260)"
+        warn "smoke: websocket probe detail: ${compact_ws_probe_out}"
+      fi
+      if [ "$WS_SMOKE_WARN_ONLY" = "1" ]; then
+        warn "smoke: continuing despite websocket smoke failure (WS_SMOKE_WARN_ONLY=1)"
+        log "smoke checks passed (websocket warn-only)"
+        return 0
+      fi
       return 1
     fi
     sleep 2
@@ -565,22 +582,26 @@ rollback_after_failure() {
   fi
 
   if [ -n "$rollback_sha" ]; then
-    warn "restoring git checkout to last-good ${rollback_sha}"
-    if ! reset_clean_to_commit "$rollback_sha"; then
-      warn "git restore to ${rollback_sha} failed"
-      rollback_ok=0
+    if [ "$ROLLBACK_RESTORE_GIT" != "1" ]; then
+      warn "skipping git checkout restore (ROLLBACK_RESTORE_GIT=${ROLLBACK_RESTORE_GIT}); leaving host checkout unchanged"
+    else
+      warn "restoring git checkout to last-good ${rollback_sha}"
+      if ! reset_clean_to_commit "$rollback_sha"; then
+        warn "git restore to ${rollback_sha} failed"
+        rollback_ok=0
+      fi
+      # Restore branch ref if we ended up in detached HEAD
+      git -C "$CODE_DIR" checkout main >/dev/null 2>&1 || true
+      if ! build_slot "$candidate"; then
+        warn "rebuild of candidate ${candidate} failed"
+        rollback_ok=0
+      fi
+      if ! recreate_slot "$candidate"; then
+        warn "recreate of candidate ${candidate} failed"
+        rollback_ok=0
+      fi
+      wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || true
     fi
-    # Restore branch ref if we ended up in detached HEAD
-    git -C "$CODE_DIR" checkout main >/dev/null 2>&1 || true
-    if ! build_slot "$candidate"; then
-      warn "rebuild of candidate ${candidate} failed"
-      rollback_ok=0
-    fi
-    if ! recreate_slot "$candidate"; then
-      warn "recreate of candidate ${candidate} failed"
-      rollback_ok=0
-    fi
-    wait_for_service_http "$candidate" "/health/live" "$LIVE_TIMEOUT" || true
   fi
 
   LAST_DEPLOY_SHA="$target_sha"
