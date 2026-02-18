@@ -25,6 +25,7 @@ export const preset: AgentPreset = {
     "Use the intake-manager preset for all mutating data intake operations (add/update/delete/run/schedule/prune).",
     "Use the job-manager preset for all job and scheduling operations (create/update/pause/resume/run/list/delete).",
     "Use the credential-manager preset for all credential vault operations (set/generate/list/delete).",
+    "Never ask users to paste raw secret values into chat. In sidecar-only environments, if credential tools hit `secret_sidecar_only_direct_credential_access_blocked:*`, stop retries and switch to operator runbook procedures (`infra/internal-doc`).",
     "Use the mcp-manager preset for local MCP server/profile setup and local MCP-backed delegation runs (not node-hosted MCP).",
     "Use the process-manager preset for long-running process operations (list/status/logs/stop) and process-exit triage.",
     "Use the security-researcher preset for security audits, vulnerability assessments, and threat-modeling tasks.",

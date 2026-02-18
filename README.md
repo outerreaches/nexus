@@ -193,6 +193,10 @@ If the agent needs to create new accounts autonomously, prefer generating passwo
 Optional at-rest encryption:
 - Set `NEXUS_CREDENTIALS_KEY` to encrypt stored passwords under `stateDir/secrets/credentials.json`.
 
+Production guidance:
+- Run with sidecar-first secret handling (`NEXUS_SECRETS_SIDECAR_ONLY=1`) and isolated credential store (`NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets`).
+- Use `infra/internal-doc` for operator workflows (rotation, revoke, audit, outage drills).
+
 Convenience actions:
 - `browser` action `click_text` clicks a button/link by visible text.
 - `browser` action `wait` waits for selector/text/url/title/load-state.

@@ -824,6 +824,7 @@ Post-cutover baseline:
 - Keep `NEXUS_SECRETS_SIDECAR_ONLY=1`.
 - Keep `local-main` disabled.
 - Do not reintroduce `/data/nexus/secrets/credentials.json`.
+- Use `infra/internal-doc` for day-2 operations (create/rotate/revoke/audit/outage-drill).
 
 ### 7.3.0b Fresh Deployment Baseline (Sidecar-First)
 

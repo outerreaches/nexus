@@ -15,6 +15,7 @@ This file is loaded into the **coder** prompt. Keep it short and operational.
 - Do not use `gateway_restart` for code rollout.
 - Do not run mutating git commands from coder runs (`git add/commit/push/reset`).
 - Use `ha_deploy` for host-side git + Docker rollout.
+- For secret-related changes, preserve fail-closed/sidecar-only behavior (`NEXUS_SECRETS_SIDECAR_ONLY=1` in production) and update `infra/internal-doc` when operator workflows change.
 
 ## Runtime Paths
 - `stateDir`: persistent state/config (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`)

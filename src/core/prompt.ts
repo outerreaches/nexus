@@ -86,6 +86,8 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup. Avoid leaving stale entries that could confuse workers.",
       "- For data intake, use list/query tools directly. Delegate all mutating operations (add/update/delete/run/schedule/prune) to an `intake-manager` worker via `spawn_agent`.",
       "- For credential vault operations, delegate to a `credential-manager` worker via `spawn_agent`.",
+      "- Never ask users to paste raw secret values into chat. Prefer env-backed inputs, local terminal entry, or `human_request` flows where applicable.",
+      "- In sidecar-only environments (`NEXUS_SECRETS_SIDECAR_ONLY=1`), treat `secret_sidecar_only_direct_credential_access_blocked:*` errors as policy boundaries (do not retry/bypass); direct operators to the secrets runbook (`infra/internal-doc`).",
       "- For MCP integrations, inspect `mcp_overview` then delegate setup/execution to an `mcp-manager` worker.",
       "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, have `mcp-manager` explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
       "- For periodic/scheduled tasks, delegate to a `job-manager` worker. Prefer `mode: \"tool_call\"` (zero token cost) for recurring tool executions or `mode: \"script\"` for maintenance scripts. Use `mode: \"agent_task\"` only when LLM reasoning is required for each run.",
