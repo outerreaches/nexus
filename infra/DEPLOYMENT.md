@@ -796,6 +796,77 @@ Notes:
 - Keep sidecar socket volume private to the Nexus stack (`secret-sidecar-run`).
 - The sidecar overlay mounts `/data/nexus-secrets` only into `secret-sidecar`; primary/standby do not receive that mount.
 
+Cutover completion checklist (2026-02-18):
+
+```bash
+# 1) Active store path and legacy retirement
+test -f /data/nexus-secrets/credentials.json
+test ! -e /data/nexus/secrets/credentials.json
+
+# 2) Provider state
+curl -s -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  http://localhost:18789/api/secrets/providers | jq .
+
+# expected:
+# - sidecar-main enabled=true
+# - local-main enabled=false (or removed)
+
+# 3) HA/state health
+infra/scripts/ha-rollout.sh status
+curl -s http://localhost:18789/health/traffic | jq .
+```
+
+Audit interpretation note:
+- `access-events` may still show old `local-main` allow entries from pre-cutover traces.
+- Treat only post-cutover events as regression signals (for example, any new `local-main` allow event after sidecar-only + isolated-store cutover).
+
+Post-cutover baseline:
+- Keep `NEXUS_SECRETS_SIDECAR_ONLY=1`.
+- Keep `local-main` disabled.
+- Do not reintroduce `/data/nexus/secrets/credentials.json`.
+
+### 7.3.0b Fresh Deployment Baseline (Sidecar-First)
+
+Use this path for new installs where there is no legacy credential file to migrate.
+
+```bash
+cd /data/code
+
+# 1) Prepare isolated secrets path on host
+sudo mkdir -p /data/nexus-secrets
+sudo chown root:root /data/nexus-secrets
+sudo chmod 700 /data/nexus-secrets
+
+# 2) Configure /data/code/.env (minimum secrets settings)
+# NEXUS_SECRETS_STRICT=1
+# NEXUS_CREDENTIALS_KEY=<strong random secret>
+# NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
+# NEXUS_SECRETS_SIDECAR_ONLY=1
+# NEXUS_HTTP_API_KEY=<token>
+# NEXUS_HA_API_KEY=<token>
+
+# 3) Start stack with sidecar overlay (add tls overlay when available)
+docker compose -p infra \
+  -f /data/code/infra/docker-compose.ha.yml \
+  -f /data/code/infra/docker-compose.ha.sidecar.yml \
+  up -d --build --force-recreate
+
+# 4) Bootstrap/verify sidecar provider profile
+NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+infra/scripts/ha-sidecar-bootstrap.sh
+
+# 5) Sanity checks
+curl -s http://localhost:18789/health/traffic | jq .
+curl -s -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  http://localhost:18789/api/secrets/providers | jq .
+test ! -e /data/nexus/secrets/credentials.json
+test -d /data/nexus-secrets
+```
+
+Expected provider state on fresh deployment:
+- `sidecar-main` enabled=true
+- `local-main` absent or disabled
+
 ### 7.3.0 Secure Node Transport (`wss://`)
 
 To use strict node transport security for non-loopback nodes, enable TLS on HAProxy and pin the certificate fingerprint on the node.
