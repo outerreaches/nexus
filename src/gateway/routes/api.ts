@@ -313,6 +313,9 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     const strictMode = parseOptionalBoolean(payload.strictMode) ?? true;
     const enabled = parseOptionalBoolean(payload.enabled) ?? true;
     const config = parseOptionalRecord(payload.config) ?? {};
+    if (isSecretSidecarOnlyMode() && kind === "local_file" && enabled) {
+      return c.json({ error: "local_file providers are disabled when NEXUS_SECRETS_SIDECAR_ONLY=1" }, 409);
+    }
     const validationError = validateSecretProviderProfileDefinition({
       kind,
       endpointRef,
@@ -368,6 +371,9 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     }
     const existing = getSecretProviderProfileById(deps.db, id);
     if (!existing) return c.json({ error: "provider profile not found" }, 404);
+    if (isSecretSidecarOnlyMode() && existing.kind === "local_file" && enabled) {
+      return c.json({ error: "local_file providers are disabled when NEXUS_SECRETS_SIDECAR_ONLY=1" }, 409);
+    }
 
     const nowMs = Date.now();
     upsertSecretProviderProfile(deps.db, {
@@ -2314,6 +2320,7 @@ function mapSecretProviderTestErrorStatus(message: string): 400 | 409 | 502 | 50
   if (message.includes("secret_broker_timeout")) return 504;
   if (message.startsWith("secret_broker_http_")) return 502;
   if (
+    message.includes("local_file_disabled_in_sidecar_only_mode") ||
     message.includes("missing_or_disabled") ||
     message.includes("auth_mode_not_hardened") ||
     message.includes("requires_https") ||
@@ -2344,6 +2351,11 @@ function parseOptionalBoolean(value: unknown): boolean | null {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
   return null;
+}
+
+function isSecretSidecarOnlyMode(): boolean {
+  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function parseOptionalRecord(value: unknown): Record<string, unknown> | null {

@@ -92,6 +92,35 @@ test("secret broker local_file resolves credential field", async () => {
   );
 });
 
+test("secret broker sidecar-only mode blocks local_file provider", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await assert.rejects(
+      async () => {
+        await withEnv(
+          {
+            NEXUS_SECRETS_SIDECAR_ONLY: "1",
+          },
+          async () => {
+            await resolveSecretThroughBroker({
+              profile: makeProfile({
+                id: "local-main",
+                kind: "local_file",
+                endpointRef: null,
+                authMode: "none",
+              }),
+              stateDir,
+              secretPath: "cred-1",
+              field: "password",
+              strictMode: true,
+            });
+          },
+        );
+      },
+      /secret_provider_local_file_disabled_in_sidecar_only_mode/,
+    );
+  });
+});
+
 test("secret broker strict mode blocks non-private sidecar endpoint", async () => {
   await withTempStateDir(async (stateDir) => {
     await assert.rejects(

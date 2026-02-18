@@ -70,6 +70,10 @@ export async function runCli(argv: string[]): Promise<void> {
         process.stdout.write(`[nexus] ${line}\n`);
       };
 
+      // Sidecar mode is the only process allowed direct credential-file access
+      // when NEXUS_SECRETS_SIDECAR_ONLY=1 is enabled.
+      process.env.NEXUS_SECRETS_PROCESS_ROLE = "sidecar";
+
       let resolvedStateDir = typeof opts.stateDir === "string" && opts.stateDir.trim().length > 0
         ? opts.stateDir.trim()
         : "";

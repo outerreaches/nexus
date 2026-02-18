@@ -112,6 +112,56 @@ test("credential writes are encrypted when vault key is configured", async () =>
   );
 });
 
+test("sidecar-only mode blocks direct credential access outside sidecar role", async () => {
+  await withEnv(
+    {
+      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_CREDENTIALS_KEY: "sidecar-only-key",
+      NEXUS_SECRETS_SIDECAR_ONLY: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "gateway",
+    },
+    async () => {
+      await withTempStateDir(async (stateDir) => {
+        await assert.rejects(
+          () =>
+            upsertCredential({
+              stateDir,
+              id: "cred-sidecar-only",
+              password: "secret",
+            }),
+          /secret_sidecar_only_direct_credential_access_blocked:upsert/,
+        );
+      });
+    },
+  );
+});
+
+test("sidecar-only mode allows direct credential access for sidecar role", async () => {
+  await withEnv(
+    {
+      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_CREDENTIALS_KEY: "sidecar-only-key",
+      NEXUS_SECRETS_SIDECAR_ONLY: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+    },
+    async () => {
+      await withTempStateDir(async (stateDir) => {
+        await upsertCredential({
+          stateDir,
+          id: "cred-sidecar-ok",
+          password: "secret",
+        });
+        const value = await getCredentialField({
+          stateDir,
+          id: "cred-sidecar-ok",
+          field: "password",
+        });
+        assert.equal(value, "secret");
+      });
+    },
+  );
+});
+
 test("monetization-local credential ids are blocked outside monetization profile", async () => {
   await withEnv(
     {

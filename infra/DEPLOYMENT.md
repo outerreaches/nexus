@@ -733,6 +733,18 @@ Optional overrides for non-default profile wiring:
 - `PROVIDER_AUTH_MODE` (default `unix_peer`)
 - `PROVIDER_STRICT_MODE` / `PROVIDER_ENABLED` (`true|false`, `1|0`)
 
+Sidecar-only enforcement toggle (recommended after migration validation):
+
+```bash
+# in /data/code/.env
+NEXUS_SECRETS_SIDECAR_ONLY=1
+```
+
+When enabled:
+- `local_file` provider enablement is blocked by the API.
+- non-sidecar processes are blocked from direct credential-file access.
+- `nexus secret-sidecar` auto-sets `NEXUS_SECRETS_PROCESS_ROLE=sidecar` so sidecar resolution still works.
+
 Notes:
 - In strict mode, unix socket + `authMode=unix_peer` is the recommended same-host baseline.
 - `ha-rollout.sh` now refreshes `secret-sidecar` automatically when the service exists in selected compose files.

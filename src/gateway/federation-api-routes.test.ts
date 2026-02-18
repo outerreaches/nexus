@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { parseNodePublicKey, signProtocolEnvelope } from "../nodes/auth.js";
 import { buildWebhookCanonicalSigningInput, signWebhookCanonicalInput } from "../federation/webhook.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
+import { upsertSecretProviderProfile } from "../storage/secrets.js";
 import { upsertCredential } from "../secrets/credentials.js";
 import type { GatewayHttpDeps } from "./http.js";
 import { registerApiRoutes } from "./routes/api.js";
@@ -253,6 +254,55 @@ test("secret provider profile validation blocks static secret material in strict
     const body = await res.json() as { error?: string };
     assert.match(body.error ?? "", /static secret\/auth material/i);
   });
+});
+
+test("sidecar-only mode blocks local_file provider enablement", async () => {
+  await withEnv(
+    {
+      NEXUS_SECRETS_SIDECAR_ONLY: "1",
+    },
+    async () => {
+      await withDb(async (db, app) => {
+        const createRes = await app.request("http://localhost/api/secrets/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "local-main",
+            kind: "local_file",
+            strictMode: true,
+            enabled: true,
+          }),
+        });
+        assert.equal(createRes.status, 409);
+
+        upsertSecretProviderProfile(db, {
+          id: "local-main",
+          kind: "local_file",
+          authMode: "none",
+          strictMode: true,
+          enabled: false,
+        });
+
+        const enableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: true,
+          }),
+        });
+        assert.equal(enableRes.status, 409);
+
+        const disableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: false,
+          }),
+        });
+        assert.equal(disableRes.status, 200);
+      });
+    },
+  );
 });
 
 test("federation peers/tasks/outbox routes support basic flow", async () => {

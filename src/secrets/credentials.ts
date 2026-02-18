@@ -29,6 +29,21 @@ function isSecretsStrictMode(): boolean {
   return true;
 }
 
+function isSecretsSidecarOnlyMode(): boolean {
+  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function getSecretsProcessRole(): string {
+  return (process.env.NEXUS_SECRETS_PROCESS_ROLE ?? "gateway").trim().toLowerCase();
+}
+
+function assertDirectCredentialAccessAllowed(operation: string): void {
+  if (!isSecretsSidecarOnlyMode()) return;
+  if (getSecretsProcessRole() === "sidecar") return;
+  throw new Error(`secret_sidecar_only_direct_credential_access_blocked:${operation}`);
+}
+
 function getVaultKey(): Buffer | null {
   const raw = (process.env.NEXUS_CREDENTIALS_KEY ?? "").trim();
   if (!raw) return null;
@@ -100,6 +115,7 @@ export async function upsertCredential(params: {
   note?: string;
   overwrite?: boolean;
 }): Promise<{ credential: StoredCredential; passwordEncrypted: boolean }> {
+  assertDirectCredentialAccessAllowed("upsert");
   assertCredentialLocality({
     credentialId: params.id,
     operation: "upsert",
@@ -142,6 +158,7 @@ export async function upsertCredential(params: {
 }
 
 export async function deleteCredential(params: { stateDir: string; id: string }): Promise<boolean> {
+  assertDirectCredentialAccessAllowed("delete");
   assertCredentialLocality({
     credentialId: params.id,
     operation: "delete",
@@ -155,6 +172,7 @@ export async function deleteCredential(params: { stateDir: string; id: string })
 }
 
 export async function listCredentials(stateDir: string): Promise<Array<{ id: string; hasUsername: boolean; hasPassword: boolean; updatedAt: number; note?: string }>> {
+  assertDirectCredentialAccessAllowed("list");
   const store = await loadStore(stateDir);
   return store.credentials.map((c) => ({
     id: c.id,
@@ -170,6 +188,7 @@ export async function getCredentialField(params: {
   id: string;
   field: "username" | "password";
 }): Promise<string> {
+  assertDirectCredentialAccessAllowed("read");
   assertCredentialLocality({
     credentialId: params.id,
     operation: "read",

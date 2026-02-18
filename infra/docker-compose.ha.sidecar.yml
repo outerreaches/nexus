@@ -30,6 +30,7 @@ services:
       - secret-sidecar-run:/run/nexus
     environment:
       - NEXUS_STATE_DIR=/data/nexus
+      - NEXUS_SECRETS_PROCESS_ROLE=sidecar
       - NEXUS_SECRET_SIDECAR_SOCKET_PATH=/run/nexus/secret-sidecar.sock
       - NEXUS_SECRET_SIDECAR_MAX_BODY_BYTES=32768
     env_file:

@@ -36,6 +36,11 @@ export type SecretBrokerProfileValidationResult = {
 const SECRETISH_CONFIG_KEY_PATTERN = /(token|secret|password|api[_-]?key|client[_-]?secret|access[_-]?key)/i;
 const DEFAULT_RESOLVE_PATH = "/v1/secrets/resolve";
 
+function isSecretsSidecarOnlyMode(): boolean {
+  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 type ParsedBrokerEndpoint =
   | {
       kind: "unix";
@@ -415,6 +420,9 @@ async function resolveViaSidecar(params: {
 
 export async function resolveSecretThroughBroker(params: SecretBrokerResolveInput): Promise<SecretBrokerResolveResult> {
   if (params.profile.kind === "local_file") {
+    if (isSecretsSidecarOnlyMode()) {
+      throw new Error("secret_provider_local_file_disabled_in_sidecar_only_mode");
+    }
     const value = await getCredentialField({
       stateDir: params.stateDir,
       id: params.secretPath,
@@ -447,6 +455,9 @@ export async function validateSecretBrokerProfile(params: {
 }): Promise<SecretBrokerProfileValidationResult> {
   const strictMode = params.strictMode ?? params.profile.strictMode;
   if (params.profile.kind === "local_file") {
+    if (isSecretsSidecarOnlyMode()) {
+      throw new Error("secret_provider_local_file_disabled_in_sidecar_only_mode");
+    }
     return {
       endpointKind: "local",
       endpointScheme: "local",
