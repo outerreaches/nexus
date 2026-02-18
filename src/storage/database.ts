@@ -598,6 +598,31 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
     CREATE INDEX IF NOT EXISTS idx_mcp_events_created ON mcp_events(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_mcp_events_server ON mcp_events(server_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS mcp_grants (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      server_id TEXT NOT NULL,
+      target_preset TEXT NOT NULL,
+      tool_names_json TEXT NOT NULL DEFAULT '[]',
+      max_calls INTEGER,
+      call_count INTEGER NOT NULL DEFAULT 0,
+      expires_at INTEGER,
+      status TEXT NOT NULL DEFAULT 'active',
+      run_id TEXT,
+      parent_run_id TEXT,
+      issued_by_agent_id TEXT,
+      issued_by_run_id TEXT,
+      revoke_reason TEXT,
+      revoked_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(profile_id) REFERENCES mcp_profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_grants_status_expires ON mcp_grants(status, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_mcp_grants_target ON mcp_grants(target_preset, status, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_mcp_grants_run ON mcp_grants(run_id, status, expires_at);
   `);
 
   try {
@@ -812,6 +837,51 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_events_server ON mcp_events(server_id, created_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS mcp_grants (" +
+      "id TEXT PRIMARY KEY, " +
+      "profile_id TEXT NOT NULL, " +
+      "server_id TEXT NOT NULL, " +
+      "target_preset TEXT NOT NULL, " +
+      "tool_names_json TEXT NOT NULL DEFAULT '[]', " +
+      "max_calls INTEGER, " +
+      "call_count INTEGER NOT NULL DEFAULT 0, " +
+      "expires_at INTEGER, " +
+      "status TEXT NOT NULL DEFAULT 'active', " +
+      "run_id TEXT, " +
+      "parent_run_id TEXT, " +
+      "issued_by_agent_id TEXT, " +
+      "issued_by_run_id TEXT, " +
+      "revoke_reason TEXT, " +
+      "revoked_at INTEGER, " +
+      "created_at INTEGER NOT NULL, " +
+      "updated_at INTEGER NOT NULL, " +
+      "FOREIGN KEY(profile_id) REFERENCES mcp_profiles(id) ON DELETE CASCADE" +
+      ");",
+    );
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_grants_status_expires ON mcp_grants(status, expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_grants_target ON mcp_grants(target_preset, status, expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_mcp_grants_run ON mcp_grants(run_id, status, expires_at);");
   } catch {
     // already exists
   }

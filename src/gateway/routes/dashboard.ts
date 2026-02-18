@@ -3,6 +3,19 @@ import type { GatewayHttpDeps } from "../http.js";
 import { initDataIntake, listDataSources } from "../../data-intake/index.js";
 import { deleteDataItemsBySource } from "../../data-intake/store.js";
 import { createIntakeSource, deleteIntakeSource, listIntakeSources, updateIntakeSource } from "../../data-intake/source-store.js";
+import type { NexusDatabase } from "../../storage/database.js";
+import {
+  getMcpGrant,
+  getMcpProfile,
+  getMcpServer,
+  listMcpGrants,
+  listMcpProfiles,
+  listMcpServers,
+  revokeMcpGrant,
+  updateMcpProfile,
+  updateMcpServer,
+  type McpGrantRecord,
+} from "../../mcp/store.js";
 import {
   clampInt,
   listProcesses,
@@ -21,6 +34,49 @@ import { renderDashboard } from "../dashboard/render.js";
 import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
 import { archiveAndDeleteJob } from "../../storage/job-archive.js";
 import { deleteNodeCascadeById, getNodeById, setNodeStatus, type NodeStatus } from "../../storage/nodes.js";
+
+type McpEventRow = {
+  id: string;
+  server_id: string | null;
+  profile_id: string | null;
+  kind: string;
+  payload_json: string;
+  created_at: number;
+};
+
+function parseFormBoolean(value: unknown): boolean | null {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  return null;
+}
+
+function listRecentMcpEvents(db: NexusDatabase, limit: number): McpEventRow[] {
+  try {
+    return db.db
+      .prepare("SELECT id, server_id, profile_id, kind, payload_json, created_at FROM mcp_events ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as McpEventRow[];
+  } catch {
+    return [];
+  }
+}
+
+function revokeMatchingActiveMcpGrants(params: {
+  db: NexusDatabase;
+  nowMs: number;
+  reason: string;
+  shouldRevoke: (grant: McpGrantRecord) => boolean;
+}): number {
+  let revoked = 0;
+  const activeGrants = listMcpGrants(params.db, { includeExpired: false, includeRevoked: false });
+  for (const grant of activeGrants) {
+    if (grant.status !== "active") continue;
+    if (!params.shouldRevoke(grant)) continue;
+    const updated = revokeMcpGrant(params.db, grant.id, params.reason, params.nowMs);
+    if (updated) revoked += 1;
+  }
+  return revoked;
+}
 
 export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/dashboard", async (c) => {
@@ -63,6 +119,68 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);
     const blackboard = listBlackboard(deps.db, blackboardLimit, blackboardScope);
     const blackboardScopes = listBlackboardScopes(deps.db, 100);
+    const mcpOverview = deps.mcp
+      ? deps.mcp.getOverview()
+      : {
+          servers: deps.db
+            ? listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
+                id: server.id,
+                label: server.label,
+                enabled: server.enabled,
+                active: server.active,
+                connected: false,
+                trustLevel: server.trustLevel,
+                capabilityTags: server.capabilityTags,
+                discoveredTools: server.lastDiscoveredTools.length,
+                lastError: server.lastError,
+                lastErrorAt: server.lastErrorAt,
+                lastUsedAt: server.lastUsedAt,
+              }))
+            : [],
+          profiles: deps.db
+            ? listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
+                id: profile.id,
+                name: profile.name,
+                serverId: profile.serverId,
+                enabled: profile.enabled,
+                hidden: profile.hidden,
+                ephemeral: profile.ephemeral,
+                toolCount: profile.toolNames.length,
+                updatedAt: profile.updatedAt,
+              }))
+            : [],
+        };
+    const profileNameById = new Map(mcpOverview.profiles.map((profile) => [profile.id, profile.name]));
+    const mcpGrants = deps.db
+      ? listMcpGrants(deps.db, { includeExpired: false, includeRevoked: false })
+          .filter((grant) => grant.status === "active")
+          .slice(0, 100)
+          .map((grant) => ({
+            id: grant.id,
+            profileId: grant.profileId,
+            profileName: profileNameById.get(grant.profileId) ?? grant.profileId,
+            serverId: grant.serverId,
+            targetPreset: grant.targetPreset,
+            runId: grant.runId,
+            parentRunId: grant.parentRunId,
+            maxCalls: grant.maxCalls,
+            callCount: grant.callCount,
+            expiresAt: grant.expiresAt,
+            status: grant.status,
+            createdAt: grant.createdAt,
+            updatedAt: grant.updatedAt,
+          }))
+      : [];
+    const mcpEvents = deps.db
+      ? listRecentMcpEvents(deps.db, 50).map((row) => ({
+          id: row.id,
+          serverId: row.server_id,
+          profileId: row.profile_id,
+          kind: row.kind,
+          payloadJson: row.payload_json,
+          createdAt: row.created_at,
+        }))
+      : [];
 
     return c.html(
       renderDashboard({
@@ -79,6 +197,13 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         runningJobRuns,
         dataIntake,
         dataIntakeCatalog,
+        mcp: {
+          available: Boolean(deps.mcp),
+          servers: mcpOverview.servers,
+          profiles: mcpOverview.profiles,
+          grants: mcpGrants,
+          events: mcpEvents,
+        },
         blackboard,
         blackboardScope: blackboardScopeRaw || "all",
         blackboardScopes,
@@ -91,6 +216,117 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         db: deps.db,
       }),
     );
+  });
+
+  app.post("/dashboard/mcp/server/enabled", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    if (!deps.mcp) return c.text("MCP manager not available", 503);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing server id", 400);
+    const enabled = parseFormBoolean(body.enabled);
+    if (enabled === null) return c.text("Invalid enabled value", 400);
+    const existing = getMcpServer(deps.db, id);
+    if (!existing) return c.text("MCP server not found", 404);
+
+    const nowMs = Date.now();
+    if (!enabled) {
+      if (existing.active) {
+        await deps.mcp.deactivateServer(id);
+      }
+      const updated = updateMcpServer(deps.db, id, { enabled: false, active: false }, nowMs);
+      if (!updated) return c.text("MCP server not found", 404);
+      const revoked = revokeMatchingActiveMcpGrants({
+        db: deps.db,
+        nowMs,
+        reason: `server_disabled:${id}`,
+        shouldRevoke: (grant) => grant.serverId === id,
+      });
+      deps.log(`mcp: disabled server=${id} revoked_grants=${revoked}`);
+    } else {
+      const updated = updateMcpServer(deps.db, id, { enabled: true }, nowMs);
+      if (!updated) return c.text("MCP server not found", 404);
+      deps.log(`mcp: enabled server=${id}`);
+    }
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/mcp/server/active", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    if (!deps.mcp) return c.text("MCP manager not available", 503);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing server id", 400);
+    const active = parseFormBoolean(body.active);
+    if (active === null) return c.text("Invalid active value", 400);
+    const existing = getMcpServer(deps.db, id);
+    if (!existing) return c.text("MCP server not found", 404);
+    if (active && !existing.enabled) {
+      return c.text("Cannot activate a disabled server. Enable it first.", 400);
+    }
+
+    if (active) {
+      await deps.mcp.activateServer(id);
+      deps.log(`mcp: activated server=${id}`);
+    } else {
+      await deps.mcp.deactivateServer(id);
+      deps.log(`mcp: deactivated server=${id}`);
+    }
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/mcp/server/probe", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    if (!deps.mcp) return c.text("MCP manager not available", 503);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing server id", 400);
+    const existing = getMcpServer(deps.db, id);
+    if (!existing) return c.text("MCP server not found", 404);
+    await deps.mcp.probeServer(id);
+    deps.log(`mcp: probed server=${id}`);
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/mcp/profile/enabled", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing profile id", 400);
+    const enabled = parseFormBoolean(body.enabled);
+    if (enabled === null) return c.text("Invalid enabled value", 400);
+    const existing = getMcpProfile(deps.db, id);
+    if (!existing) return c.text("MCP profile not found", 404);
+    const nowMs = Date.now();
+    const updated = updateMcpProfile(deps.db, id, { enabled }, nowMs);
+    if (!updated) return c.text("MCP profile not found", 404);
+    if (!enabled) {
+      const revoked = revokeMatchingActiveMcpGrants({
+        db: deps.db,
+        nowMs,
+        reason: `profile_disabled:${id}`,
+        shouldRevoke: (grant) => grant.profileId === id,
+      });
+      deps.log(`mcp: disabled profile=${existing.name} revoked_grants=${revoked}`);
+    } else {
+      deps.log(`mcp: enabled profile=${existing.name}`);
+    }
+    return c.redirect("/dashboard");
+  });
+
+  app.post("/dashboard/mcp/grants/revoke", async (c) => {
+    if (!deps.db) return c.text("Database not available", 500);
+    const body = await c.req.parseBody();
+    const id = String(body.id ?? "").trim();
+    if (!id) return c.text("Missing grant id", 400);
+    const existing = getMcpGrant(deps.db, id);
+    if (!existing) return c.text("MCP grant not found", 404);
+    const reasonRaw = String(body.reason ?? "").trim();
+    const reason = reasonRaw.length > 0 ? reasonRaw.slice(0, 120) : "dashboard_revoke";
+    const updated = revokeMcpGrant(deps.db, id, reason, Date.now());
+    if (!updated) return c.text("MCP grant not found", 404);
+    deps.log(`mcp: revoked grant=${id} reason=${reason}`);
+    return c.redirect("/dashboard");
   });
 
   app.post("/dashboard/llm/mode", async (c) => {

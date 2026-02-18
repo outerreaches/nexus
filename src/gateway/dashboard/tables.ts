@@ -8,6 +8,10 @@ import type {
   DataIntakePanelState,
   DataIntakeCatalogEntry,
   HAEventRow,
+  McpServerPanelRow,
+  McpProfilePanelRow,
+  McpGrantPanelRow,
+  McpEventPanelRow,
 } from "./types.js";
 
 export function renderAgentTable(rows: AgentRunInfo[]): string {
@@ -507,6 +511,194 @@ export function renderBlackboardTable(rows: BlackboardRow[]): string {
           </tr>`;
       })
       .join("")}
+    </tbody>
+  </table>`;
+}
+
+function renderMcpServerActions(row: McpServerPanelRow): string {
+  const enableValue = row.enabled ? "false" : "true";
+  const enableLabel = row.enabled ? "Disable" : "Enable";
+  const enableConfirm = row.enabled
+    ? `return confirm('Disable MCP server ${escapeHtml(row.id)}? This deactivates the server and revokes active grants for this server.')`
+    : "";
+  const activeValue = row.active ? "false" : "true";
+  const activeLabel = row.active ? "Deactivate" : "Activate";
+  const activeDisabled = !row.enabled && !row.active ? " disabled" : "";
+  const activeConfirm = row.active
+    ? `return confirm('Deactivate MCP server ${escapeHtml(row.id)}?')`
+    : `return confirm('Activate MCP server ${escapeHtml(row.id)}?')`;
+  const probeDisabled = !row.enabled ? " disabled" : "";
+  const probeConfirm = `return confirm('Probe MCP server ${escapeHtml(row.id)} now?')`;
+  return `<form method="post" action="/dashboard/mcp/server/enabled"${enableConfirm ? ` onsubmit="${enableConfirm}"` : ""}>
+      <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+      <input type="hidden" name="enabled" value="${enableValue}" />
+      <button type="submit" class="graph-btn${row.enabled ? " btn-danger" : ""}">${enableLabel}</button>
+    </form>
+    <form method="post" action="/dashboard/mcp/server/active" onsubmit="${activeConfirm}">
+      <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+      <input type="hidden" name="active" value="${activeValue}" />
+      <button type="submit" class="graph-btn"${activeDisabled}>${activeLabel}</button>
+    </form>
+    <form method="post" action="/dashboard/mcp/server/probe" onsubmit="${probeConfirm}">
+      <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+      <button type="submit" class="graph-btn"${probeDisabled}>Probe</button>
+    </form>`;
+}
+
+export function renderMcpServersTable(rows: McpServerPanelRow[]): string {
+  if (rows.length === 0) return `<div class="no-data">No MCP servers configured.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>ID</th>
+        <th>Label</th>
+        <th>Trust</th>
+        <th>Tools</th>
+        <th>Last Used</th>
+        <th>Last Error</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => {
+          const lastError = row.lastError ? truncate(row.lastError, 120) : "-";
+          return `<tr>
+            <td>
+              <div class="inline-actions">
+                <span class="badge ${row.enabled ? "status-enabled" : "status-disabled"}">${row.enabled ? "enabled" : "disabled"}</span>
+                <span class="badge ${row.active ? "status-running" : "status-disabled"}">${row.active ? "active" : "inactive"}</span>
+                <span class="badge ${row.connected ? "status-complete" : "status-failed"}">${row.connected ? "connected" : "disconnected"}</span>
+              </div>
+            </td>
+            <td>${escapeHtml(row.id)}</td>
+            <td>${escapeHtml(row.label)}</td>
+            <td>${escapeHtml(row.trustLevel)}</td>
+            <td>${escapeHtml(String(row.discoveredTools))}</td>
+            <td>${escapeHtml(row.lastUsedAt ? formatTime(row.lastUsedAt) : "-")}</td>
+            <td>${escapeHtml(lastError)}</td>
+            <td><div class="inline-actions">${renderMcpServerActions(row)}</div></td>
+          </tr>`;
+        })
+        .join("")}
+    </tbody>
+  </table>`;
+}
+
+function renderMcpProfileActions(row: McpProfilePanelRow): string {
+  const enableValue = row.enabled ? "false" : "true";
+  const enableLabel = row.enabled ? "Disable" : "Enable";
+  const confirm = row.enabled
+    ? `return confirm('Disable MCP profile ${escapeHtml(row.name)}? Active grants for this profile will be revoked.')`
+    : "";
+  return `<form method="post" action="/dashboard/mcp/profile/enabled"${confirm ? ` onsubmit="${confirm}"` : ""}>
+    <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+    <input type="hidden" name="enabled" value="${enableValue}" />
+    <button type="submit" class="graph-btn${row.enabled ? " btn-danger" : ""}">${enableLabel}</button>
+  </form>`;
+}
+
+export function renderMcpProfilesTable(rows: McpProfilePanelRow[]): string {
+  if (rows.length === 0) return `<div class="no-data">No MCP profiles configured.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Name</th>
+        <th>Server</th>
+        <th>Tools</th>
+        <th>Updated</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => `<tr>
+            <td><span class="badge ${row.enabled ? "status-enabled" : "status-disabled"}">${row.enabled ? "enabled" : "disabled"}</span></td>
+            <td>${escapeHtml(row.name)}</td>
+            <td>${escapeHtml(row.serverId)}</td>
+            <td>${escapeHtml(String(row.toolCount))}</td>
+            <td>${escapeHtml(formatTime(row.updatedAt))}</td>
+            <td><div class="inline-actions">${renderMcpProfileActions(row)}</div></td>
+          </tr>`)
+        .join("")}
+    </tbody>
+  </table>`;
+}
+
+export function renderMcpGrantsTable(rows: McpGrantPanelRow[]): string {
+  if (rows.length === 0) return `<div class="no-data">No active MCP grants.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Grant</th>
+        <th>Profile</th>
+        <th>Server</th>
+        <th>Preset</th>
+        <th>Run</th>
+        <th>Calls</th>
+        <th>Expires</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => {
+          const callBudget = row.maxCalls === null ? `${row.callCount}/∞` : `${row.callCount}/${row.maxCalls}`;
+          return `<tr>
+            <td>${escapeHtml(truncate(row.id, 24))}</td>
+            <td>${escapeHtml(row.profileName)}</td>
+            <td>${escapeHtml(row.serverId)}</td>
+            <td>${escapeHtml(row.targetPreset)}</td>
+            <td>${escapeHtml(row.runId ? truncate(row.runId, 24) : "-")}</td>
+            <td>${escapeHtml(callBudget)}</td>
+            <td>${escapeHtml(row.expiresAt ? formatTime(row.expiresAt) : "-")}</td>
+            <td>
+              <div class="inline-actions">
+                <form method="post" action="/dashboard/mcp/grants/revoke" onsubmit="return confirm('Revoke MCP grant ${escapeHtml(row.id)}?')">
+                  <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+                  <button type="submit" class="graph-btn btn-danger">Revoke</button>
+                </form>
+              </div>
+            </td>
+          </tr>`;
+        })
+        .join("")}
+    </tbody>
+  </table>`;
+}
+
+export function renderMcpEventsTable(rows: McpEventPanelRow[]): string {
+  if (rows.length === 0) return `<div class="no-data">No MCP events recorded.</div>`;
+  return `<table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Kind</th>
+        <th>Server</th>
+        <th>Profile</th>
+        <th>Payload</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => {
+          let payloadText = row.payloadJson;
+          try {
+            payloadText = JSON.stringify(JSON.parse(row.payloadJson));
+          } catch {
+            // keep raw payload
+          }
+          return `<tr>
+            <td>${escapeHtml(formatTime(row.createdAt))}</td>
+            <td>${escapeHtml(row.kind)}</td>
+            <td>${escapeHtml(row.serverId ?? "-")}</td>
+            <td>${escapeHtml(row.profileId ?? "-")}</td>
+            <td>${escapeHtml(truncate(payloadText, 120))}</td>
+          </tr>`;
+        })
+        .join("")}
     </tbody>
   </table>`;
 }

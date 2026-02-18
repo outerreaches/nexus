@@ -50,6 +50,28 @@ export type McpProfileRecord = {
   lastUsedAt: number | null;
 };
 
+export type McpGrantStatus = "active" | "revoked" | "expired";
+
+export type McpGrantRecord = {
+  id: string;
+  profileId: string;
+  serverId: string;
+  targetPreset: string;
+  toolNames: string[];
+  maxCalls: number | null;
+  callCount: number;
+  expiresAt: number | null;
+  status: McpGrantStatus;
+  runId: string | null;
+  parentRunId: string | null;
+  issuedByAgentId: string | null;
+  issuedByRunId: string | null;
+  revokeReason: string | null;
+  revokedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
 type McpServerRow = {
   id: string;
   label: string;
@@ -93,6 +115,26 @@ type McpProfileRow = {
   created_at: number;
   updated_at: number;
   last_used_at: number | null;
+};
+
+type McpGrantRow = {
+  id: string;
+  profile_id: string;
+  server_id: string;
+  target_preset: string;
+  tool_names_json: string;
+  max_calls: number | null;
+  call_count: number;
+  expires_at: number | null;
+  status: string;
+  run_id: string | null;
+  parent_run_id: string | null;
+  issued_by_agent_id: string | null;
+  issued_by_run_id: string | null;
+  revoke_reason: string | null;
+  revoked_at: number | null;
+  created_at: number;
+  updated_at: number;
 };
 
 export type McpServerCreateInput = {
@@ -157,6 +199,20 @@ export type McpProfileUpdateInput = {
   llmDisableFallback?: boolean;
   budgetMaxToolCalls?: number | null;
   budgetMaxIterations?: number | null;
+};
+
+export type McpGrantCreateInput = {
+  id?: string;
+  profileId: string;
+  serverId: string;
+  targetPreset: string;
+  toolNames: string[];
+  maxCalls?: number | null;
+  expiresAt?: number | null;
+  runId?: string | null;
+  parentRunId?: string | null;
+  issuedByAgentId?: string | null;
+  issuedByRunId?: string | null;
 };
 
 function randomId(prefix: string): string {
@@ -239,6 +295,34 @@ function mapProfileRow(row: McpProfileRow): McpProfileRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastUsedAt: row.last_used_at,
+  };
+}
+
+function mapGrantRow(row: McpGrantRow): McpGrantRecord {
+  const status: McpGrantStatus =
+    row.status === "revoked"
+      ? "revoked"
+      : row.status === "expired"
+        ? "expired"
+        : "active";
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    serverId: row.server_id,
+    targetPreset: row.target_preset,
+    toolNames: parseStringArray(row.tool_names_json),
+    maxCalls: row.max_calls,
+    callCount: row.call_count,
+    expiresAt: row.expires_at,
+    status,
+    runId: row.run_id,
+    parentRunId: row.parent_run_id,
+    issuedByAgentId: row.issued_by_agent_id,
+    issuedByRunId: row.issued_by_run_id,
+    revokeReason: row.revoke_reason,
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -499,6 +583,89 @@ export function deleteMcpProfile(db: NexusDatabase, idOrName: string): boolean {
   if (!current) return false;
   const res = db.db.prepare("DELETE FROM mcp_profiles WHERE id = ?").run(current.id);
   return res.changes > 0;
+}
+
+export function listMcpGrants(
+  db: NexusDatabase,
+  opts: { includeExpired?: boolean; includeRevoked?: boolean } = {},
+): McpGrantRecord[] {
+  const includeExpired = opts.includeExpired ?? false;
+  const includeRevoked = opts.includeRevoked ?? false;
+  const clauses: string[] = [];
+  if (!includeRevoked) clauses.push("status != 'revoked'");
+  if (!includeExpired) {
+    clauses.push("(status != 'expired' AND (expires_at IS NULL OR expires_at > strftime('%s','now') * 1000))");
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db.db.prepare(`SELECT * FROM mcp_grants ${where} ORDER BY updated_at DESC`).all() as McpGrantRow[];
+  return rows.map(mapGrantRow);
+}
+
+export function getMcpGrant(db: NexusDatabase, id: string): McpGrantRecord | null {
+  const row = db.db.prepare("SELECT * FROM mcp_grants WHERE id = ?").get(id) as McpGrantRow | undefined;
+  return row ? mapGrantRow(row) : null;
+}
+
+export function createMcpGrant(db: NexusDatabase, input: McpGrantCreateInput, nowMs: number): McpGrantRecord {
+  const id = (input.id ?? randomId("MPG")).trim();
+  const toolNames = Array.from(new Set(input.toolNames.map((name) => name.trim()).filter(Boolean)));
+  db.db
+    .prepare(
+      `INSERT INTO mcp_grants
+       (id, profile_id, server_id, target_preset, tool_names_json, max_calls, call_count, expires_at, status, run_id, parent_run_id, issued_by_agent_id, issued_by_run_id, revoke_reason, revoked_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'active', ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      id,
+      input.profileId.trim(),
+      input.serverId.trim(),
+      input.targetPreset.trim(),
+      toJson(toolNames),
+      input.maxCalls ?? null,
+      input.expiresAt ?? null,
+      input.runId ?? null,
+      input.parentRunId ?? null,
+      input.issuedByAgentId ?? null,
+      input.issuedByRunId ?? null,
+      nowMs,
+      nowMs,
+    );
+  const created = getMcpGrant(db, id);
+  if (!created) throw new Error("failed to create MCP grant");
+  return created;
+}
+
+export function bindMcpGrantToRun(
+  db: NexusDatabase,
+  grantId: string,
+  params: { runId: string; parentRunId?: string | null },
+  nowMs: number,
+): McpGrantRecord | null {
+  db.db
+    .prepare("UPDATE mcp_grants SET run_id = ?, parent_run_id = COALESCE(?, parent_run_id), updated_at = ? WHERE id = ?")
+    .run(params.runId, params.parentRunId ?? null, nowMs, grantId);
+  return getMcpGrant(db, grantId);
+}
+
+export function revokeMcpGrant(db: NexusDatabase, grantId: string, reason: string | null, nowMs: number): McpGrantRecord | null {
+  db.db
+    .prepare("UPDATE mcp_grants SET status = 'revoked', revoke_reason = ?, revoked_at = ?, updated_at = ? WHERE id = ?")
+    .run(reason, nowMs, nowMs, grantId);
+  return getMcpGrant(db, grantId);
+}
+
+export function expireMcpGrant(db: NexusDatabase, grantId: string, nowMs: number): McpGrantRecord | null {
+  db.db
+    .prepare("UPDATE mcp_grants SET status = 'expired', updated_at = ? WHERE id = ?")
+    .run(nowMs, grantId);
+  return getMcpGrant(db, grantId);
+}
+
+export function incrementMcpGrantCallCount(db: NexusDatabase, grantId: string, nowMs: number): McpGrantRecord | null {
+  db.db
+    .prepare("UPDATE mcp_grants SET call_count = call_count + 1, updated_at = ? WHERE id = ?")
+    .run(nowMs, grantId);
+  return getMcpGrant(db, grantId);
 }
 
 export function appendMcpEvent(

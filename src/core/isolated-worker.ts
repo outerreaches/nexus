@@ -49,28 +49,48 @@ process.on("message", async (msg: ParentMessage) => {
       onFallback: (line) => log(line),
     });
     const builtIns = getBuiltInTools();
-    const mcp = new McpManager({
-      db,
-      log: (line) => log(line),
-    });
-    await mcp.init();
-    const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir, mcp });
-    await registry.init();
-    const processManager = new ProcessManager({ stateDir: cfg.stateDir, db });
-    const agentTracker = new AgentTracker({ db });
-
-    // Resolve preset and filter tools
     const preset = getPreset(cfg.presetName);
     if (!preset) {
       throw new Error(`Unknown preset: ${cfg.presetName}`);
     }
+    const mcpGrantIds = Array.from(new Set((cfg.mcpGrantIds ?? []).map((id) => id.trim()).filter(Boolean)));
+    const needsMcp =
+      mcpGrantIds.length > 0 ||
+      preset.tools.some((name) => name.startsWith("mcp_") || name.startsWith("mcp."));
+
+    const mcp = needsMcp
+      ? new McpManager({
+          db,
+          log: (line) => log(line),
+        })
+      : null;
+    if (mcp) {
+      await mcp.init();
+    }
+
+    const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir, ...(mcp ? { mcp } : {}) });
+    await registry.init();
+    const processManager = new ProcessManager({ stateDir: cfg.stateDir, db });
+    const agentTracker = new AgentTracker({ db });
 
     const allowedNames = new Set(preset.tools);
     // Remove spawn_agent if at max depth
     if (cfg.currentDepth >= cfg.maxDepth) {
       allowedNames.delete("spawn_agent");
     }
-    const workerTools = registry.list().filter((t) => allowedNames.has(t.name));
+    const baseTools = registry.list().filter((t) => allowedNames.has(t.name));
+    const grantTools = mcp
+      ? mcp.listToolsForGrants({
+          grantIds: mcpGrantIds,
+          presetName: cfg.presetName,
+          runId: cfg.runId,
+        })
+      : [];
+    const byName = new Map(baseTools.map((tool) => [tool.name, tool] as const));
+    for (const tool of grantTools) {
+      byName.set(tool.name, tool);
+    }
+    const workerTools = [...byName.values()];
 
     // Build ToolContext
     const toolContext: ToolContext = {
@@ -85,7 +105,7 @@ process.on("message", async (msg: ParentMessage) => {
       browser: undefined, // Workers do NOT get a browser instance
       registry,
       processManager,
-      mcp,
+      mcp: mcp ?? undefined,
       agentTracker,
       telegram: undefined,
       allowShellExec: cfg.allowShellExec,
@@ -180,7 +200,9 @@ process.on("message", async (msg: ParentMessage) => {
       },
     });
 
-    await mcp.close();
+    if (mcp) {
+      await mcp.close();
+    }
     db.close();
     process.exit(0);
   } catch (err) {

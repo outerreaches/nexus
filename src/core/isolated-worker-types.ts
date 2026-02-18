@@ -59,6 +59,9 @@ export type WorkerConfig = {
   // Depth enforcement
   currentDepth: number;
   maxDepth: number;
+
+  // Optional run-scoped MCP grants for this worker.
+  mcpGrantIds?: string[];
 };
 
 /**

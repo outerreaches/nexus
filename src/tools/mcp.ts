@@ -3,15 +3,20 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { McpManager } from "../mcp/manager.js";
+import { getPreset } from "../core/presets.js";
 import {
+  createMcpGrant,
   createMcpProfile,
   createMcpServer,
   deleteMcpProfile,
   deleteMcpServer,
+  getMcpGrant,
   getMcpProfile,
   getMcpServer,
+  listMcpGrants,
   listMcpProfiles,
   listMcpServers,
+  revokeMcpGrant,
   updateMcpProfile,
   updateMcpServer,
 } from "../mcp/store.js";
@@ -106,10 +111,28 @@ const McpProfileUpdateSchema = z.object({
   budget: McpProfileBudgetSchema,
 });
 
+function normalizeSegment(segment: string): string {
+  return segment.toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+}
+
+function mcpServerToolPrefix(serverId: string): string {
+  return `mcp.${normalizeSegment(serverId)}.`;
+}
+
+function ensureProfileNameAllowed(name: string): string | null {
+  const trimmed = name.trim();
+  const preset = getPreset(trimmed);
+  if (preset) {
+    return `profile name '${trimmed}' collides with built-in preset '${preset.name}'.`;
+  }
+  return null;
+}
+
 function normalizeRequestedToolNames(params: {
   toolNames: string[];
   allowNonMcpTools: boolean;
   registry: ToolRegistry | null;
+  serverId?: string;
 }): { toolNames: string[]; error?: string } {
   const normalized = Array.from(
     new Set(
@@ -126,6 +149,16 @@ function normalizeRequestedToolNames(params: {
   }
 
   const nonMcp = normalized.filter((name) => !name.startsWith("mcp."));
+  if (params.serverId) {
+    const prefix = mcpServerToolPrefix(params.serverId);
+    const crossServer = normalized.filter((name) => name.startsWith("mcp.") && !name.startsWith(prefix));
+    if (crossServer.length > 0) {
+      return {
+        toolNames: normalized,
+        error: `MCP profile tools must match server '${params.serverId}' prefix '${prefix}': ${crossServer.join(", ")}`,
+      };
+    }
+  }
   if (!params.allowNonMcpTools && nonMcp.length > 0) {
     return {
       toolNames: normalized,
@@ -156,6 +189,7 @@ function normalizeDelegateTask(task: string, blackboardTitle?: string): string {
 }
 
 const McpDelegateSchema = z.object({
+  preset: z.string().min(1).default("researcher").describe("Worker preset that will receive scoped MCP grant tools."),
   task: z.string().min(1).max(8000),
   inputBlackboardId: z.string().min(1).optional(),
   context: z.array(z.string().min(1)).max(20).default([]),
@@ -170,6 +204,8 @@ const McpDelegateSchema = z.object({
     maxIterations: z.number().int().min(1).max(80).optional(),
   }).optional(),
   modelMode: z.enum(["default", "local_only"]).optional(),
+  grantTtlMs: z.number().int().min(10_000).max(86_400_000).optional(),
+  grantMaxCalls: z.number().int().min(1).max(500).optional(),
   cleanupPolicy: z.enum(["keep_active", "deactivate", "deactivate_and_delete_ephemeral_profile"]).default("deactivate_and_delete_ephemeral_profile"),
 });
 
@@ -372,7 +408,7 @@ export const mcpServerRemove = defineTool({
 
 export const mcpProfileList = defineTool({
   name: "mcp_profile_list",
-  description: "List MCP runtime profiles used for dynamic worker presets.",
+  description: "List configured MCP capability profiles.",
   parameters: z.object({
     includeDisabled: z.boolean().default(true),
   }),
@@ -386,17 +422,20 @@ export const mcpProfileList = defineTool({
 
 export const mcpProfileCreate = defineTool({
   name: "mcp_profile_create",
-  description: "Create an MCP profile mapped to a dynamic (usually hidden) worker preset.",
+  description: "Create an MCP capability profile for scoped delegation.",
   parameters: McpProfileCreateSchema,
   execute: async (args, ctx) => {
     try {
       const db = ctx.db as any;
       const registry = requireRegistry(ctx);
       if (!db) return "ERROR: database unavailable";
+      const nameError = ensureProfileNameAllowed(args.name);
+      if (nameError) return `ERROR: ${nameError}`;
       const normalized = normalizeRequestedToolNames({
         toolNames: args.toolNames,
         allowNonMcpTools: args.allowNonMcpTools,
         registry,
+        serverId: args.serverId,
       });
       if (normalized.error) {
         return `ERROR: ${normalized.error}`;
@@ -431,19 +470,26 @@ export const mcpProfileCreate = defineTool({
 
 export const mcpProfileUpdate = defineTool({
   name: "mcp_profile_update",
-  description: "Update MCP profile settings and dynamic preset mapping.",
+  description: "Update MCP profile settings and scoped capability mapping.",
   parameters: McpProfileUpdateSchema,
   execute: async (args, ctx) => {
     try {
       const db = ctx.db as any;
       const registry = requireRegistry(ctx);
       if (!db) return "ERROR: database unavailable";
+      const current = getMcpProfile(db, args.idOrName);
+      if (!current) return `ERROR: MCP profile not found: ${args.idOrName}`;
+      if (args.name && args.name.trim() !== current.name) {
+        const nameError = ensureProfileNameAllowed(args.name);
+        if (nameError) return `ERROR: ${nameError}`;
+      }
       let normalizedToolNames: string[] | undefined;
       if (args.toolNames) {
         const normalized = normalizeRequestedToolNames({
           toolNames: args.toolNames,
           allowNonMcpTools: args.allowNonMcpTools ?? false,
           registry,
+          serverId: current.serverId,
         });
         if (normalized.error) {
           return `ERROR: ${normalized.error}`;
@@ -479,7 +525,7 @@ export const mcpProfileUpdate = defineTool({
 
 export const mcpProfileDelete = defineTool({
   name: "mcp_profile_delete",
-  description: "Delete an MCP profile (dynamic worker preset).",
+  description: "Delete an MCP capability profile.",
   parameters: z.object({
     idOrName: z.string().min(1),
   }),
@@ -502,21 +548,127 @@ export const mcpProfileDelete = defineTool({
   },
 });
 
+const McpGrantIssueSchema = z.object({
+  profile: z.string().min(1).describe("Profile id or name."),
+  targetPreset: z.string().min(1).describe("Preset that may use this grant."),
+  ttlMs: z.number().int().min(10_000).max(86_400_000).default(1_800_000),
+  maxCalls: z.number().int().min(1).max(500).optional(),
+  runId: z.string().min(1).optional(),
+  parentRunId: z.string().min(1).optional(),
+});
+
+export const mcpGrantIssue = defineTool({
+  name: "mcp_grant_issue",
+  description: "Issue a run-scoped MCP capability grant from a profile.",
+  parameters: McpGrantIssueSchema,
+  execute: async (args, ctx) => {
+    try {
+      const db = ctx.db as any;
+      const manager = requireManager(ctx);
+      if (!db) return "ERROR: database unavailable";
+
+      const profile = getMcpProfile(db, args.profile);
+      if (!profile) return `ERROR: MCP profile not found: ${args.profile}`;
+      if (!profile.enabled) return `ERROR: MCP profile '${profile.name}' is disabled`;
+
+      const server = getMcpServer(db, profile.serverId);
+      if (!server) return `ERROR: MCP server not found for profile '${profile.name}'`;
+      if (!server.enabled) return `ERROR: MCP server '${server.id}' is disabled`;
+
+      if (!getPreset(args.targetPreset)) {
+        return `ERROR: target preset '${args.targetPreset}' not found`;
+      }
+
+      const toolNames = profile.toolNames.length > 0 ? profile.toolNames : manager.getToolNamesForServer(profile.serverId);
+      if (toolNames.length === 0) {
+        return `ERROR: profile '${profile.name}' has no resolved tools`;
+      }
+      const nonMcpTools = toolNames.filter((name) => !name.startsWith("mcp."));
+      if (nonMcpTools.length > 0) {
+        return `ERROR: profile '${profile.name}' contains non-MCP tools not supported by mcp_grant_issue: ${nonMcpTools.join(", ")}`;
+      }
+
+      const nowMs = ctx.nowMs();
+      const grant = createMcpGrant(db, {
+        profileId: profile.id,
+        serverId: profile.serverId,
+        targetPreset: args.targetPreset,
+        toolNames,
+        maxCalls: args.maxCalls ?? null,
+        expiresAt: nowMs + args.ttlMs,
+        runId: args.runId ?? null,
+        parentRunId: args.parentRunId ?? null,
+        issuedByAgentId: ctx.request?.agentId ?? null,
+        issuedByRunId: ctx.request?.runId ?? null,
+      }, nowMs);
+      return JSON.stringify({ ok: true, grant }, null, 2);
+    } catch (err) {
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
+export const mcpGrantList = defineTool({
+  name: "mcp_grant_list",
+  description: "List active/recent MCP grants.",
+  parameters: z.object({
+    includeExpired: z.boolean().default(false),
+    includeRevoked: z.boolean().default(false),
+  }),
+  execute: async (args, ctx) => {
+    const db = ctx.db as any;
+    if (!db) return "ERROR: database unavailable";
+    const grants = listMcpGrants(db, {
+      includeExpired: args.includeExpired,
+      includeRevoked: args.includeRevoked,
+    });
+    return JSON.stringify({ total: grants.length, grants }, null, 2);
+  },
+});
+
+export const mcpGrantRevoke = defineTool({
+  name: "mcp_grant_revoke",
+  description: "Revoke an active MCP grant.",
+  parameters: z.object({
+    id: z.string().min(1),
+    reason: z.string().max(400).optional(),
+  }),
+  execute: async (args, ctx) => {
+    try {
+      const db = ctx.db as any;
+      if (!db) return "ERROR: database unavailable";
+      const existing = getMcpGrant(db, args.id);
+      if (!existing) return `ERROR: MCP grant not found: ${args.id}`;
+      const updated = revokeMcpGrant(db, args.id, args.reason ?? "revoked_by_operator", ctx.nowMs());
+      return JSON.stringify({ ok: true, grant: updated }, null, 2);
+    } catch (err) {
+      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
 export const mcpDelegate = defineTool({
   name: "mcp_delegate",
   description:
-    "MCP orchestration helper: activate/provision profile, spawn scoped worker for task, and optionally cleanup server/profile.",
+    "MCP orchestration helper: activate/provision profile, issue scoped grant, spawn worker, and optionally cleanup.",
   parameters: McpDelegateSchema,
   execute: async (args, ctx) => {
+    let createdProfileId: string | null = null;
+    let profileIdForCleanup: string | null = null;
+    let serverIdForCleanup: string | null = null;
+    let activatedByDelegate = false;
+    let grantId: string | null = null;
+
     try {
       const manager = requireManager(ctx);
       const registry = requireRegistry(ctx);
       const db = ctx.db as any;
       if (!db) return "ERROR: database unavailable";
       if (!registry) return "ERROR: tool registry unavailable";
+      if (!getPreset(args.preset)) return `ERROR: target preset '${args.preset}' not found`;
+      if (args.preset === "orchestrator") return "ERROR: mcp_delegate cannot target orchestrator";
 
       let profile = args.profile ? getMcpProfile(db, args.profile) : null;
-      let createdProfileId: string | null = null;
 
       if (!profile) {
         if (!args.serverId) return "ERROR: mcp_delegate requires either `profile` or `serverId`.";
@@ -528,6 +680,7 @@ export const mcpDelegate = defineTool({
               toolNames: args.toolNames,
               allowNonMcpTools: args.allowNonMcpTools,
               registry,
+              serverId: server.id,
             });
             if (normalized.error) {
               throw new Error(normalized.error);
@@ -551,13 +704,22 @@ export const mcpDelegate = defineTool({
         createdProfileId = profile.id;
       }
 
+      profileIdForCleanup = profile.id;
+      serverIdForCleanup = profile.serverId;
+      if (!profile.enabled) return `ERROR: MCP profile '${profile.name}' is disabled`;
+
       const server = getMcpServer(db, profile.serverId);
       if (!server) return `ERROR: MCP server missing for profile '${profile.name}'.`;
       if (profile.toolNames.length === 0) {
         return `ERROR: MCP profile '${profile.name}' has no tools configured.`;
       }
+      const nonMcpTools = profile.toolNames.filter((name) => !name.startsWith("mcp."));
+      if (nonMcpTools.length > 0) {
+        return `ERROR: MCP delegate profiles must be MCP-only for grant-scoped execution: ${nonMcpTools.join(", ")}`;
+      }
       if (!server.active) {
         await manager.activateServer(server.id);
+        activatedByDelegate = true;
       }
       await reloadRegistry(ctx);
 
@@ -570,31 +732,36 @@ export const mcpDelegate = defineTool({
       ]));
 
       const spawnTask = normalizeDelegateTask(args.task, args.blackboardTitle);
+      const nowMs = ctx.nowMs();
+      const grant = createMcpGrant(db, {
+        profileId: profile.id,
+        serverId: profile.serverId,
+        targetPreset: args.preset,
+        toolNames: profile.toolNames,
+        maxCalls: args.grantMaxCalls ?? null,
+        expiresAt: nowMs + (args.grantTtlMs ?? 1_800_000),
+        parentRunId: ctx.request?.runId ?? null,
+        issuedByAgentId: ctx.request?.agentId ?? null,
+        issuedByRunId: ctx.request?.runId ?? null,
+      }, nowMs);
+      grantId = grant.id;
+
       const spawnResult = await spawnTool.execute({
-        preset: profile.name,
+        preset: args.preset,
         task: spawnTask,
         context: contextIds,
+        mcpGrantIds: [grant.id],
         ...(args.budget ? { budget: args.budget } : {}),
         ...(args.modelMode ? { modelMode: args.modelMode } : {}),
       }, ctx);
 
       manager.touchProfileUsed(profile.id);
 
-      if (args.cleanupPolicy === "deactivate" || args.cleanupPolicy === "deactivate_and_delete_ephemeral_profile") {
-        await manager.deactivateServer(profile.serverId);
-      }
-      if (args.cleanupPolicy === "deactivate_and_delete_ephemeral_profile") {
-        const current = getMcpProfile(db, profile.id);
-        if (current?.ephemeral || createdProfileId) {
-          deleteMcpProfile(db, profile.id);
-        }
-      }
-
-      await reloadRegistry(ctx);
-
       return JSON.stringify({
         ok: !spawnResult.trimStart().startsWith("ERROR:"),
+        targetPreset: args.preset,
         profile: profile.name,
+        grantId: grant.id,
         serverId: profile.serverId,
         createdEphemeralProfile: createdProfileId !== null,
         cleanupPolicy: args.cleanupPolicy,
@@ -602,6 +769,27 @@ export const mcpDelegate = defineTool({
       }, null, 2);
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      const db = ctx.db as any;
+      const manager = (ctx.mcp as McpManager | undefined);
+      if (db && grantId) {
+        revokeMcpGrant(db, grantId, "delegate_completed", ctx.nowMs());
+      }
+      if (manager && serverIdForCleanup && activatedByDelegate &&
+        (args.cleanupPolicy === "deactivate" || args.cleanupPolicy === "deactivate_and_delete_ephemeral_profile")) {
+        try {
+          await manager.deactivateServer(serverIdForCleanup);
+        } catch (err) {
+          ctx.log(`mcp_delegate cleanup deactivate failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (db && profileIdForCleanup && args.cleanupPolicy === "deactivate_and_delete_ephemeral_profile") {
+        const current = getMcpProfile(db, profileIdForCleanup);
+        if (current?.ephemeral || createdProfileId) {
+          deleteMcpProfile(db, profileIdForCleanup);
+        }
+      }
+      await reloadRegistry(ctx);
     }
   },
 });

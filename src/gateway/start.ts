@@ -438,6 +438,7 @@ export async function startGateway(params: { configPath: string; port?: number; 
     processManager,
     agentTracker,
     nodeGateway: nodeWsGateway,
+    mcp,
     getModelMode: () => agent.getDefaultModelMode(),
     setModelMode: (mode) => agent.setDefaultModelMode(mode),
   });

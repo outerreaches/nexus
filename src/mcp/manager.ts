@@ -1,22 +1,18 @@
 import { Semaphore } from "../core/semaphore.js";
-import type { AgentPreset } from "../core/presets.js";
-import {
-  clearDynamicPresetsBySource,
-  registerDynamicPreset,
-} from "../core/presets.js";
 import type { Tool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import {
   appendMcpEvent,
-  getMcpProfile,
+  expireMcpGrant,
+  getMcpGrant,
   getMcpServer,
+  incrementMcpGrantCallCount,
   listMcpProfiles,
   listMcpServers,
   setMcpServerDiscoveredTools,
   setMcpServerError,
   touchMcpProfileUsed,
   touchMcpServerUsed,
-  type McpProfileRecord,
   type McpServerRecord,
 } from "./store.js";
 import { McpStdioClient, type McpToolCallResult, type McpToolInfo } from "./stdio-client.js";
@@ -37,7 +33,6 @@ type ManagedToolRecord = {
   inputSchema: Record<string, unknown>;
 };
 
-const DYNAMIC_PRESET_SOURCE = "mcp-profile";
 const MCP_TOOL_PREFIX = "mcp";
 
 function asError(err: unknown): Error {
@@ -112,7 +107,6 @@ export class McpManager {
         setMcpServerError(this.deps.db, server.id, error.message, nowMs);
       }
     }
-    await this.syncDynamicPresets();
   }
 
   async close(): Promise<void> {
@@ -154,7 +148,6 @@ export class McpManager {
     if (!current) throw new Error(`MCP server not found: ${serverId}`);
     await this.disconnectServer(serverId);
     const updated = this.updateServerFlags(serverId, { active: false }, nowMs);
-    await this.syncDynamicPresets();
     appendMcpEvent(this.deps.db, {
       serverId,
       kind: "server_deactivated",
@@ -251,17 +244,6 @@ export class McpManager {
     return { servers, profiles };
   }
 
-  async syncDynamicPresets(): Promise<void> {
-    clearDynamicPresetsBySource(DYNAMIC_PRESET_SOURCE);
-    const profiles = listMcpProfiles(this.deps.db, { includeDisabled: false });
-    for (const profile of profiles) {
-      const server = getMcpServer(this.deps.db, profile.serverId);
-      if (!server || !server.enabled) continue;
-      const preset = this.profileToPreset(profile, server);
-      registerDynamicPreset(preset);
-    }
-  }
-
   async executeTool(localToolName: string, args: Record<string, unknown>): Promise<string> {
     const tool = this.managedTools.find((entry) => entry.localName === localToolName);
     if (!tool) return `ERROR: unknown MCP tool '${localToolName}'`;
@@ -285,16 +267,117 @@ export class McpManager {
     touchMcpProfileUsed(this.deps.db, idOrName, Date.now());
   }
 
+  listToolsForGrants(params: {
+    grantIds: string[];
+    presetName: string;
+    runId: string | null;
+  }): Tool[] {
+    const uniqueGrantIds = Array.from(new Set(params.grantIds.map((id) => id.trim()).filter(Boolean)));
+    const tools: Tool[] = [];
+    const seen = new Set<string>();
+    for (const grantId of uniqueGrantIds) {
+      const grant = getMcpGrant(this.deps.db, grantId);
+      if (!grant) {
+        this.deps.log(`mcp: grant ${grantId} not found`);
+        continue;
+      }
+      if (grant.status !== "active") {
+        this.deps.log(`mcp: grant ${grantId} ignored (status=${grant.status})`);
+        continue;
+      }
+      if (grant.expiresAt !== null && grant.expiresAt <= Date.now()) {
+        expireMcpGrant(this.deps.db, grantId, Date.now());
+        this.deps.log(`mcp: grant ${grantId} expired`);
+        continue;
+      }
+      if (grant.targetPreset !== params.presetName) {
+        this.deps.log(
+          `mcp: grant ${grantId} ignored (target_preset=${grant.targetPreset}, preset=${params.presetName})`,
+        );
+        continue;
+      }
+      if (grant.runId && !params.runId) {
+        this.deps.log(`mcp: grant ${grantId} ignored (requires bound run_id=${grant.runId})`);
+        continue;
+      }
+      if (grant.runId && params.runId && grant.runId !== params.runId) {
+        this.deps.log(
+          `mcp: grant ${grantId} ignored (run_id=${grant.runId}, expected=${params.runId})`,
+        );
+        continue;
+      }
+      for (const localToolName of grant.toolNames) {
+        if (seen.has(localToolName)) continue;
+        const record = this.managedTools.find((entry) => entry.localName === localToolName);
+        if (!record) continue;
+        seen.add(localToolName);
+        tools.push({
+          name: localToolName,
+          description: record.description,
+          jsonSchema: record.inputSchema,
+          execute: async (args, _ctx) => this.executeToolWithGrant({
+            grantId,
+            localToolName,
+            args: safeObject(args),
+            presetName: params.presetName,
+            runId: params.runId,
+          }),
+        });
+      }
+    }
+    return tools;
+  }
+
+  async executeToolWithGrant(params: {
+    grantId: string;
+    localToolName: string;
+    args: Record<string, unknown>;
+    presetName: string;
+    runId: string | null;
+  }): Promise<string> {
+    const nowMs = Date.now();
+    const grant = getMcpGrant(this.deps.db, params.grantId);
+    if (!grant) return `ERROR: MCP grant '${params.grantId}' not found`;
+    if (grant.status !== "active") return `ERROR: MCP grant '${params.grantId}' is ${grant.status}`;
+    if (grant.expiresAt !== null && grant.expiresAt <= nowMs) {
+      expireMcpGrant(this.deps.db, params.grantId, nowMs);
+      return `ERROR: MCP grant '${params.grantId}' expired`;
+    }
+    if (grant.targetPreset !== params.presetName) {
+      return `ERROR: MCP grant '${params.grantId}' does not allow preset '${params.presetName}'`;
+    }
+    if (grant.runId && !params.runId) {
+      return `ERROR: MCP grant '${params.grantId}' requires a bound run`;
+    }
+    if (grant.runId && params.runId && grant.runId !== params.runId) {
+      return `ERROR: MCP grant '${params.grantId}' is bound to another run`;
+    }
+    if (!grant.toolNames.includes(params.localToolName)) {
+      return `ERROR: MCP grant '${params.grantId}' does not include tool '${params.localToolName}'`;
+    }
+    if (grant.maxCalls !== null && grant.callCount >= grant.maxCalls) {
+      expireMcpGrant(this.deps.db, params.grantId, nowMs);
+      return `ERROR: MCP grant '${params.grantId}' exceeded max calls`;
+    }
+
+    const updated = incrementMcpGrantCallCount(this.deps.db, params.grantId, nowMs);
+    const result = await this.executeTool(params.localToolName, params.args);
+
+    if (updated && updated.maxCalls !== null && updated.callCount >= updated.maxCalls) {
+      expireMcpGrant(this.deps.db, params.grantId, Date.now());
+    }
+
+    return result;
+  }
+
   private async reconnectServer(serverId: string): Promise<void> {
     await this.disconnectServer(serverId);
     const server = getMcpServer(this.deps.db, serverId);
     if (!server || !server.active || !server.enabled) {
       this.rebuildManagedTools();
-      await this.syncDynamicPresets();
       return;
     }
     await this.connectServer(server, Date.now());
-    await this.syncDynamicPresets();
   }
 
   private async connectServer(server: McpServerRecord, nowMs: number): Promise<void> {
@@ -365,50 +448,6 @@ export class McpManager {
     return updated;
   }
 
-  private profileToPreset(profile: McpProfileRecord, server: McpServerRecord): AgentPreset {
-    const toolNames = Array.from(new Set([
-      ...profile.toolNames.map((name) => name.trim()).filter(Boolean),
-      "read_from_blackboard",
-      "write_to_blackboard",
-    ]));
-    const llm = profile.llmPrimaryProvider || profile.llmPrimaryModel || profile.llmDisableFallback || profile.llmFallbackProvider || profile.llmFallbackModel
-      ? {
-        primary: profile.llmPrimaryProvider || profile.llmPrimaryModel
-          ? {
-            provider: profile.llmPrimaryProvider ?? undefined,
-            model: profile.llmPrimaryModel ?? undefined,
-          }
-          : undefined,
-        fallback: profile.llmDisableFallback
-          ? null
-          : (profile.llmFallbackProvider || profile.llmFallbackModel)
-            ? {
-              provider: profile.llmFallbackProvider ?? undefined,
-              model: profile.llmFallbackModel ?? undefined,
-            }
-            : undefined,
-      }
-      : undefined;
-    return {
-      name: profile.name,
-      source: DYNAMIC_PRESET_SOURCE,
-      hidden: profile.hidden,
-      description: profile.description.trim() || `Runtime MCP profile for server '${server.label}'`,
-      systemPrompt: [
-        `You are a specialized MCP worker for server '${server.label}' (${server.id}).`,
-        "Focus on the requested task and use only the MCP tools provided in this profile.",
-        "Read input from blackboard context IDs when provided and write your final result to blackboard.",
-      ].join("\n"),
-      tools: toolNames,
-      budget: {
-        ...(profile.budgetMaxToolCalls ? { maxToolCalls: profile.budgetMaxToolCalls } : {}),
-        ...(profile.budgetMaxIterations ? { maxIterations: profile.budgetMaxIterations } : {}),
-      },
-      llm,
-      isolated: true,
-    };
-  }
-
   private async disconnectServer(serverId: string): Promise<void> {
     const connected = this.connected.get(serverId);
     if (!connected) return;
@@ -423,22 +462,4 @@ export class McpManager {
       await this.disconnectServer(id);
     }
   }
-}
-
-export function resolveProfileToolNames(
-  profile: McpProfileRecord,
-  manager: McpManager,
-): string[] {
-  const profileToolSet = new Set(profile.toolNames.map((name) => name.trim()).filter(Boolean));
-  if (profileToolSet.size > 0) {
-    return [...profileToolSet];
-  }
-  return manager.getToolNamesForServer(profile.serverId);
-}
-
-export function resolveMcpProfile(
-  db: NexusDatabase,
-  idOrName: string,
-): McpProfileRecord | null {
-  return getMcpProfile(db, idOrName);
 }

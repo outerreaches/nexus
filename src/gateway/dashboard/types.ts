@@ -141,3 +141,60 @@ export type LlmMessageRow = {
   tool_calls_json: string | null;
   created_at: number;
 };
+
+export type McpServerPanelRow = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  active: boolean;
+  connected: boolean;
+  trustLevel: string;
+  discoveredTools: number;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  lastUsedAt: number | null;
+};
+
+export type McpProfilePanelRow = {
+  id: string;
+  name: string;
+  serverId: string;
+  enabled: boolean;
+  hidden: boolean;
+  ephemeral: boolean;
+  toolCount: number;
+  updatedAt: number;
+};
+
+export type McpGrantPanelRow = {
+  id: string;
+  profileId: string;
+  profileName: string;
+  serverId: string;
+  targetPreset: string;
+  runId: string | null;
+  parentRunId: string | null;
+  maxCalls: number | null;
+  callCount: number;
+  expiresAt: number | null;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type McpEventPanelRow = {
+  id: string;
+  serverId: string | null;
+  profileId: string | null;
+  kind: string;
+  payloadJson: string;
+  createdAt: number;
+};
+
+export type McpPanelState = {
+  available: boolean;
+  servers: McpServerPanelRow[];
+  profiles: McpProfilePanelRow[];
+  grants: McpGrantPanelRow[];
+  events: McpEventPanelRow[];
+};

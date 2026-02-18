@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
-import { defineTool, type ToolContext } from "../core/tools.js";
+import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
 import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
@@ -15,6 +15,8 @@ import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
+import { bindMcpGrantToRun } from "../mcp/store.js";
+import type { McpManager } from "../mcp/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,6 +69,11 @@ export const spawnAgent = defineTool({
       .enum(["default", "local_only"])
       .optional()
       .describe("Optional model routing mode for this worker (`local_only` forces local provider routing)"),
+    mcpGrantIds: z
+      .array(z.string().min(1))
+      .max(20)
+      .default([])
+      .describe("Internal: run-scoped MCP grant IDs to inject for this worker."),
   }),
   execute: async (args, ctx) => {
     const spawnStartedAtMs = ctx.nowMs();
@@ -235,6 +242,21 @@ export const spawnAgent = defineTool({
       task: args.task,
     });
 
+    const mcpGrantIds = Array.from(new Set((args.mcpGrantIds ?? []).map((id) => id.trim()).filter(Boolean)));
+    if (mcpGrantIds.length > 0 && runId && db) {
+      for (const grantId of mcpGrantIds) {
+        bindMcpGrantToRun(db, grantId, { runId, parentRunId: effectiveParentRunId }, ctx.nowMs());
+      }
+    }
+    const grantedTools = resolveMcpGrantTools({
+      ctx,
+      presetName: preset.name,
+      runId: runId ?? null,
+      grantIds: mcpGrantIds,
+    });
+    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth);
+    const workerTools = mergeToolsByName(baseTools, grantedTools);
+
     // Branch: isolated process vs in-process
     let workerResult: string;
     if (preset.isolated) {
@@ -252,6 +274,7 @@ export const spawnAgent = defineTool({
         modelMode: workerModelMode,
         tracker,
         blackboardTitle,
+        mcpGrantIds,
       });
     } else {
       workerResult = await runInProcess({
@@ -264,7 +287,7 @@ export const spawnAgent = defineTool({
         parentRunId: effectiveParentRunId,
         agentId,
         modelMode: workerModelMode,
-        workerTools: filterToolsForPreset(registry.list(), preset, isMaxDepth),
+        workerTools,
         tracker,
         blackboardTitle,
       });
@@ -409,6 +432,7 @@ async function runIsolated(params: {
   modelMode: ModelRoutingMode;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
+  mcpGrantIds: string[];
 }): Promise<string> {
   const {
     ctx,
@@ -424,6 +448,7 @@ async function runIsolated(params: {
     modelMode,
     tracker,
     blackboardTitle,
+    mcpGrantIds,
   } = params;
 
   const log = ctx.log;
@@ -599,6 +624,7 @@ async function runIsolated(params: {
       modelMode,
       currentDepth: workerDepth,
       maxDepth,
+      mcpGrantIds,
     };
 
     const taskMsg: ParentMessage = { type: "task", config };
@@ -609,6 +635,33 @@ async function runIsolated(params: {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+function resolveMcpGrantTools(params: {
+  ctx: ToolContext;
+  presetName: string;
+  runId: string | null;
+  grantIds: string[];
+}): Tool[] {
+  if (params.grantIds.length === 0) return [];
+  const manager = params.ctx.mcp as McpManager | undefined;
+  if (!manager) {
+    params.ctx.log(`spawn_agent: mcp grants requested for preset=${params.presetName} but mcp manager unavailable`);
+    return [];
+  }
+  return manager.listToolsForGrants({
+    grantIds: params.grantIds,
+    presetName: params.presetName,
+    runId: params.runId,
+  });
+}
+
+function mergeToolsByName(base: Tool[], extras: Tool[]): Tool[] {
+  if (extras.length === 0) return base;
+  const byName = new Map<string, Tool>();
+  for (const tool of base) byName.set(tool.name, tool);
+  for (const tool of extras) byName.set(tool.name, tool);
+  return [...byName.values()];
+}
 
 function filterToolsForPreset(
   allTools: ReturnType<ToolRegistry["list"]>,

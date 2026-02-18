@@ -49,6 +49,9 @@ import { spawnAgent } from "./spawn-agent.js";
 import { shellInteractive } from "./shell-interactive.js";
 import {
   mcpDelegate,
+  mcpGrantIssue,
+  mcpGrantList,
+  mcpGrantRevoke,
   mcpOverview,
   mcpProfileCreate,
   mcpProfileDelete,
@@ -180,6 +183,9 @@ export function getBuiltInTools(): Tool[] {
     mcpProfileCreate,
     mcpProfileUpdate,
     mcpProfileDelete,
+    mcpGrantIssue,
+    mcpGrantList,
+    mcpGrantRevoke,
     mcpDelegate,
   ];
 }

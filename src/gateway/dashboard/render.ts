@@ -9,6 +9,7 @@ import type {
   BlackboardRow,
   DataIntakePanelState,
   DataIntakeCatalogEntry,
+  McpPanelState,
 } from "./types.js";
 import { listHAEvents, getLastBackup } from "./queries.js";
 import { dashboardStyles } from "./styles.js";
@@ -20,6 +21,10 @@ import {
   renderJobRunsTable,
   renderDataIntakeTable,
   renderBlackboardTable,
+  renderMcpServersTable,
+  renderMcpProfilesTable,
+  renderMcpGrantsTable,
+  renderMcpEventsTable,
   renderHAEventsTable,
   escapeHtml,
   safeJsonForScript,
@@ -49,6 +54,7 @@ export function renderDashboard(params: {
   runningJobRuns: JobRunRow[];
   dataIntake: DataIntakePanelState;
   dataIntakeCatalog: DataIntakeCatalogEntry[];
+  mcp: McpPanelState;
   blackboard: BlackboardRow[];
   blackboardScope: string;
   blackboardScopes: string[];
@@ -142,6 +148,11 @@ export function renderDashboard(params: {
   const backupAgeHours = backupAgeMs ? Math.round(backupAgeMs / 3600000) : null;
   const backupStatus = lastBackup?.status ?? "none";
   const backupStatusClass = backupStatus === "completed" ? "enabled" : backupStatus === "failed" ? "failed" : "disabled";
+  const mcpServerDisabled = params.mcp.servers.filter((row) => !row.enabled).length;
+  const mcpServerActive = params.mcp.servers.filter((row) => row.active).length;
+  const mcpServerConnected = params.mcp.servers.filter((row) => row.connected).length;
+  const mcpServerDegraded = params.mcp.servers.filter((row) => row.lastError).length;
+  const mcpProfileDisabled = params.mcp.profiles.filter((row) => !row.enabled).length;
 
   return `<!doctype html>
 <html lang="en">
@@ -314,6 +325,30 @@ export function renderDashboard(params: {
       <section>
         <h2>Data Intake</h2>
         <div class="scroll-12">${renderDataIntakeTable(params.dataIntake, params.dataIntakeCatalog)}</div>
+      </section>
+
+      <section>
+        <div class="section-header">
+          <h2>MCP Operations</h2>
+          <div class="inline-actions">
+            <span class="badge status-enabled">servers ${params.mcp.servers.length}</span>
+            <span class="badge status-running">active ${mcpServerActive}</span>
+            <span class="badge status-complete">connected ${mcpServerConnected}</span>
+            <span class="badge status-disabled">disabled ${mcpServerDisabled}</span>
+            <span class="badge ${mcpServerDegraded > 0 ? "status-failed" : "status-enabled"}">degraded ${mcpServerDegraded}</span>
+            <span class="badge status-disabled">profiles disabled ${mcpProfileDisabled}</span>
+            <span class="badge status-running">active grants ${params.mcp.grants.length}</span>
+          </div>
+        </div>
+        ${params.mcp.available ? `<div class="meta">Minimal MCP controls: enable/disable, activate/deactivate, probe, and grant revoke.</div>` : `<div class="meta">MCP manager unavailable in this gateway process.</div>`}
+        <h3>Servers</h3>
+        <div class="scroll-12">${renderMcpServersTable(params.mcp.servers)}</div>
+        <h3>Profiles</h3>
+        <div class="scroll-12">${renderMcpProfilesTable(params.mcp.profiles)}</div>
+        <h3>Active Grants</h3>
+        <div class="scroll-12">${renderMcpGrantsTable(params.mcp.grants)}</div>
+        <h3>Recent Events</h3>
+        <div class="scroll-12">${renderMcpEventsTable(params.mcp.events)}</div>
       </section>
 
       <section>

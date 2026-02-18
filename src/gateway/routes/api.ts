@@ -15,7 +15,17 @@ import {
   listLlmSessions,
   listLlmMessages,
 } from "../dashboard/queries.js";
+import { listMcpGrants, listMcpProfiles, listMcpServers } from "../../mcp/store.js";
 import { getNodeById as getNodeRecordById, setNodeStatus as setNodeRecordStatus } from "../../storage/nodes.js";
+
+type McpEventApiRow = {
+  id: string;
+  server_id: string | null;
+  profile_id: string | null;
+  kind: string;
+  payload_json: string;
+  created_at: number;
+};
 
 export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/status", async (c) => c.json(await deps.getStatus()));
@@ -209,6 +219,72 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     }
   });
 
+  app.get("/api/mcp/overview", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    const overview = deps.mcp
+      ? deps.mcp.getOverview()
+      : {
+          servers: listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
+            id: server.id,
+            label: server.label,
+            enabled: server.enabled,
+            active: server.active,
+            connected: false,
+            trustLevel: server.trustLevel,
+            capabilityTags: server.capabilityTags,
+            discoveredTools: server.lastDiscoveredTools.length,
+            lastError: server.lastError,
+            lastErrorAt: server.lastErrorAt,
+            lastUsedAt: server.lastUsedAt,
+          })),
+          profiles: listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
+            id: profile.id,
+            name: profile.name,
+            serverId: profile.serverId,
+            enabled: profile.enabled,
+            hidden: profile.hidden,
+            ephemeral: profile.ephemeral,
+            toolCount: profile.toolNames.length,
+            updatedAt: profile.updatedAt,
+          })),
+        };
+    const profileNameById = new Map(overview.profiles.map((profile) => [profile.id, profile.name]));
+    const grants = listMcpGrants(deps.db, { includeExpired: false, includeRevoked: false })
+      .filter((grant) => grant.status === "active")
+      .slice(0, 200)
+      .map((grant) => ({
+        id: grant.id,
+        profileId: grant.profileId,
+        profileName: profileNameById.get(grant.profileId) ?? grant.profileId,
+        serverId: grant.serverId,
+        targetPreset: grant.targetPreset,
+        runId: grant.runId,
+        parentRunId: grant.parentRunId,
+        maxCalls: grant.maxCalls,
+        callCount: grant.callCount,
+        expiresAt: grant.expiresAt,
+        status: grant.status,
+        createdAt: grant.createdAt,
+        updatedAt: grant.updatedAt,
+      }));
+    const events = listRecentMcpEvents(deps.db, 100).map((event) => ({
+      id: event.id,
+      serverId: event.server_id,
+      profileId: event.profile_id,
+      kind: event.kind,
+      payloadJson: event.payload_json,
+      createdAt: event.created_at,
+    }));
+    return c.json({
+      available: Boolean(deps.mcp),
+      servers: overview.servers,
+      profiles: overview.profiles,
+      grants,
+      events,
+      timestamp: Date.now(),
+    });
+  });
+
   app.post("/api/nodes/:id/status", async (c) => {
     if (!deps.db) return c.json({ error: "database is not available" }, 503);
     const id = String(c.req.param("id") ?? "").trim();
@@ -318,6 +394,16 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     c.header("Content-Disposition", `attachment; filename="job-runs-${new Date().toISOString().slice(0, 10)}.csv"`);
     return c.body(csv);
   });
+}
+
+function listRecentMcpEvents(db: NonNullable<GatewayHttpDeps["db"]>, limit: number): McpEventApiRow[] {
+  try {
+    return db.db
+      .prepare("SELECT id, server_id, profile_id, kind, payload_json, created_at FROM mcp_events ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as McpEventApiRow[];
+  } catch {
+    return [];
+  }
 }
 
 function parseStringArrayJson(value: string | null | undefined): string[] {
