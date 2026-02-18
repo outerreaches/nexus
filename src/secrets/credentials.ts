@@ -50,6 +50,26 @@ function getVaultKey(): Buffer | null {
   return crypto.createHash("sha256").update(raw, "utf8").digest();
 }
 
+function resolveCredentialStorePath(stateDir: string): string {
+  const explicitFile = (process.env.NEXUS_CREDENTIALS_STORE_PATH ?? "").trim();
+  if (explicitFile) {
+    if (!path.isAbsolute(explicitFile)) {
+      throw new Error("NEXUS_CREDENTIALS_STORE_PATH must be an absolute path.");
+    }
+    return explicitFile;
+  }
+
+  const explicitDir = (process.env.NEXUS_CREDENTIALS_STORE_DIR ?? "").trim();
+  if (explicitDir) {
+    if (!path.isAbsolute(explicitDir)) {
+      throw new Error("NEXUS_CREDENTIALS_STORE_DIR must be an absolute path.");
+    }
+    return path.join(explicitDir, "credentials.json");
+  }
+
+  return path.join(stateDir, "secrets", "credentials.json");
+}
+
 function encryptSecret(value: string, key: Buffer): StoredSecret {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
@@ -83,7 +103,7 @@ function decryptSecret(secret: StoredSecret, key: Buffer | null): string {
 }
 
 export function getCredentialStorePath(stateDir: string): string {
-  return path.join(stateDir, "secrets", "credentials.json");
+  return resolveCredentialStorePath(stateDir);
 }
 
 async function loadStore(stateDir: string): Promise<CredentialStoreFileV1> {

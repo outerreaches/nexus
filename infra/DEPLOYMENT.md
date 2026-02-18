@@ -745,10 +745,56 @@ When enabled:
 - non-sidecar processes are blocked from direct credential-file access.
 - `nexus secret-sidecar` auto-sets `NEXUS_SECRETS_PROCESS_ROLE=sidecar` so sidecar resolution still works.
 
+Phase 2 storage isolation (sidecar-only filesystem access):
+
+```bash
+cd /data/code
+
+# 1) Prepare/migrate credential store to dedicated host path
+infra/scripts/ha-sidecar-secrets-isolation.sh --prepare
+infra/scripts/ha-sidecar-secrets-isolation.sh --migrate
+infra/scripts/ha-sidecar-secrets-isolation.sh --status
+
+# 2) Enable isolated store + sidecar-only enforcement
+#    (in /data/code/.env)
+# NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
+# NEXUS_SECRETS_SIDECAR_ONLY=1
+
+# 3) Recreate stack with sidecar overlay so only secret-sidecar mounts /data/nexus-secrets
+docker compose -p infra \
+  -f /data/code/infra/docker-compose.ha.yml \
+  -f /data/code/infra/docker-compose.ha.sidecar.yml \
+  up -d --build --force-recreate nexus-primary nexus-standby secret-sidecar haproxy
+```
+
+Validation checks:
+
+```bash
+# sidecar health over unix socket
+docker compose -p infra \
+  -f /data/code/infra/docker-compose.ha.yml \
+  -f /data/code/infra/docker-compose.ha.sidecar.yml \
+  exec -T nexus-primary sh -lc \
+  'curl -fsS --unix-socket /run/nexus/secret-sidecar.sock http://localhost/health'
+
+# sidecar provider still resolves
+curl -s -X POST http://localhost:18789/api/secrets/providers/sidecar-main/test \
+  -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"strictMode":true,"traceId":"sidecar-isolation-1","reference":"{{secret:sidecar-main/test.brave.api#password}}"}' | jq .
+
+# local_file enablement remains blocked
+curl -s -X POST http://localhost:18789/api/secrets/providers \
+  -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"local-block-test","kind":"local_file","strictMode":true,"enabled":true}' | jq .
+```
+
 Notes:
 - In strict mode, unix socket + `authMode=unix_peer` is the recommended same-host baseline.
 - `ha-rollout.sh` now refreshes `secret-sidecar` automatically when the service exists in selected compose files.
 - Keep sidecar socket volume private to the Nexus stack (`secret-sidecar-run`).
+- The sidecar overlay mounts `/data/nexus-secrets` only into `secret-sidecar`; primary/standby do not receive that mount.
 
 ### 7.3.0 Secure Node Transport (`wss://`)
 

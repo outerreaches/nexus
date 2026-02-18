@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getCredentialField, upsertCredential } from "./credentials.js";
+import { getCredentialField, getCredentialStorePath, upsertCredential } from "./credentials.js";
 
 async function withTempStateDir(fn: (stateDir: string) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-credentials-test-"));
@@ -206,6 +206,34 @@ test("monetization-local credential ids are allowed in monetization profile", as
         });
         assert.equal(value, "secret");
       });
+    },
+  );
+});
+
+test("credentials store path honors NEXUS_CREDENTIALS_STORE_DIR override", async () => {
+  await withEnv(
+    {
+      NEXUS_CREDENTIALS_STORE_DIR: "/tmp/nexus-secrets",
+      NEXUS_CREDENTIALS_STORE_PATH: undefined,
+    },
+    async () => {
+      const p = getCredentialStorePath("/data/nexus");
+      assert.equal(p, "/tmp/nexus-secrets/credentials.json");
+    },
+  );
+});
+
+test("credentials store path rejects non-absolute override path", async () => {
+  await withEnv(
+    {
+      NEXUS_CREDENTIALS_STORE_PATH: "relative/credentials.json",
+      NEXUS_CREDENTIALS_STORE_DIR: undefined,
+    },
+    async () => {
+      assert.throws(
+        () => getCredentialStorePath("/data/nexus"),
+        /NEXUS_CREDENTIALS_STORE_PATH must be an absolute path/,
+      );
     },
   );
 });
