@@ -34,6 +34,7 @@ import { renderDashboard } from "../dashboard/render.js";
 import { cleanupManagedBlackboardAttachments } from "../../storage/blackboard-attachments.js";
 import { archiveAndDeleteJob } from "../../storage/job-archive.js";
 import { deleteNodeCascadeById, getNodeById, setNodeStatus, type NodeStatus } from "../../storage/nodes.js";
+import { getGatewayRequestAuth } from "../auth.js";
 
 type McpEventRow = {
   id: string;
@@ -82,6 +83,8 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
   app.get("/dashboard", async (c) => {
     const status = await deps.getStatus();
     const nowMs = Date.now();
+    const requestAuth = getGatewayRequestAuth(c);
+    const csrfToken = requestAuth?.mode === "session" ? requestAuth.csrfToken : null;
 
     initDataIntake();
     const dataIntakeCatalog = listDataSources().map((source) => ({
@@ -208,6 +211,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         blackboardScope: blackboardScopeRaw || "all",
         blackboardScopes,
         blackboardLimit,
+        csrfToken,
         nodeLimit,
         jobLimit,
         runLimit,

@@ -22,6 +22,7 @@ export type MaintenanceResult = {
   archive: Record<string, TableArchiveResult>;
   cleanup: Record<string, TableCleanupResult>;
   ttl: Record<string, TableTtlResult>;
+  operational: Record<string, TableTtlResult>;
   errors: string[];
 };
 
@@ -36,7 +37,13 @@ const ARCHIVE_TABLES = [
   "job_events_archive",
 ] as const;
 const CLEANUP_TABLES = ["job_runs", "job_events"] as const;
-const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes"] as const;
+const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes", "federation_replay_nonces"] as const;
+const OPERATIONAL_CLEANUP_TABLES = [
+  "federation_outbox",
+  "federation_events",
+  "webhook_deliveries",
+  "webhook_dlq",
+] as const;
 
 // Date column mapping for each archivable/cleanable table
 const DATE_COLUMNS: Record<string, string> = {
@@ -72,6 +79,7 @@ const TTL_CONFIG: Record<string, { expiresCol: string; statusCol?: string; expir
   human_actions: { expiresCol: "expires_at", statusCol: "status", expiredStatus: "expired" },
   pairing_requests: { expiresCol: "expires_at" },
   pairing_codes: { expiresCol: "expires_at" },
+  federation_replay_nonces: { expiresCol: "expires_at" },
 };
 
 export async function runMaintenance(params: {
@@ -92,6 +100,7 @@ export async function runMaintenance(params: {
     archive: {},
     cleanup: {},
     ttl: {},
+    operational: {},
     errors: [],
   };
 
@@ -99,6 +108,7 @@ export async function runMaintenance(params: {
   for (const t of ARCHIVE_TABLES) result.archive[t] = { archived: 0, errors: [] };
   for (const t of CLEANUP_TABLES) result.cleanup[t] = { deleted: 0, summaryId: null };
   for (const t of TTL_TABLES) result.ttl[t] = { deleted: 0 };
+  for (const t of OPERATIONAL_CLEANUP_TABLES) result.operational[t] = { deleted: 0 };
 
   // Calculate cutoff timestamps
   const archiveCutoffMs = nowMs - config.archiveRetentionDays * 24 * 60 * 60 * 1000;
@@ -170,11 +180,89 @@ export async function runMaintenance(params: {
     }
   }
 
+  // 4. Operational retention cleanup for federation/webhook tables
+  try {
+    const outboxDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM federation_outbox
+            WHERE status IN ('sent', 'acked', 'dead_letter')
+              AND updated_at < ?`,
+      args: [cleanupCutoffMs],
+      dryRun,
+    });
+    result.operational.federation_outbox!.deleted = outboxDeleted;
+  } catch (e) {
+    const msg = `operational federation_outbox: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
+  try {
+    const eventsDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM federation_events WHERE created_at < ?`,
+      args: [archiveCutoffMs],
+      dryRun,
+    });
+    result.operational.federation_events!.deleted = eventsDeleted;
+  } catch (e) {
+    const msg = `operational federation_events: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
+  try {
+    const deliveriesDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM webhook_deliveries
+            WHERE status IN ('acked', 'dead_letter')
+              AND updated_at < ?`,
+      args: [cleanupCutoffMs],
+      dryRun,
+    });
+    result.operational.webhook_deliveries!.deleted = deliveriesDeleted;
+  } catch (e) {
+    const msg = `operational webhook_deliveries: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
+  try {
+    const dlqDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM webhook_dlq
+            WHERE replayed_at IS NOT NULL
+              AND replayed_at < ?`,
+      args: [archiveCutoffMs],
+      dryRun,
+    });
+    result.operational.webhook_dlq!.deleted = dlqDeleted;
+  } catch (e) {
+    const msg = `operational webhook_dlq: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
   result.errors = errors;
   result.durationMs = Date.now() - startMs;
   if (errors.length > 0) result.status = "error";
 
   return result;
+}
+
+function cleanupOperationalTable(params: {
+  db: NexusDatabase;
+  sql: string;
+  args: unknown[];
+  dryRun: boolean;
+}): number {
+  if (params.dryRun) {
+    const countSql = params.sql.replace(/^DELETE FROM/i, "SELECT COUNT(*) as cnt FROM");
+    const row = params.db.db.prepare(countSql).get(...params.args) as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+  const result = params.db.db.prepare(params.sql).run(...params.args);
+  return result.changes;
 }
 
 async function archiveTable(params: {

@@ -623,6 +623,272 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_mcp_grants_status_expires ON mcp_grants(status, expires_at);
     CREATE INDEX IF NOT EXISTS idx_mcp_grants_target ON mcp_grants(target_preset, status, expires_at);
     CREATE INDEX IF NOT EXISTS idx_mcp_grants_run ON mcp_grants(run_id, status, expires_at);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Federation / transport / webhook / secrets (P1 scaffolding)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS federation_peers (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      signing_key TEXT NOT NULL,
+      trust_state TEXT NOT NULL DEFAULT 'pending', -- pending | trusted | revoked | quarantined
+      enabled INTEGER NOT NULL DEFAULT 1,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_peers_trust_enabled ON federation_peers(trust_state, enabled, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_sessions (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT NOT NULL REFERENCES federation_peers(id) ON DELETE CASCADE,
+      session_token_hash TEXT,
+      status TEXT NOT NULL, -- active | expired | revoked | failed
+      established_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      last_heartbeat_at INTEGER,
+      revoked_at INTEGER,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_sessions_peer_status ON federation_sessions(peer_id, status, expires_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_tasks (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT NOT NULL REFERENCES federation_peers(id) ON DELETE CASCADE,
+      status TEXT NOT NULL, -- pending | running | completed | failed | cancelled
+      method TEXT NOT NULL,
+      idempotency_key TEXT,
+      request_json TEXT NOT NULL DEFAULT '{}',
+      result_json TEXT,
+      error_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_tasks_peer_status ON federation_tasks(peer_id, status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_events (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT REFERENCES federation_peers(id) ON DELETE SET NULL,
+      event_type TEXT NOT NULL,
+      direction TEXT NOT NULL, -- inbound | outbound
+      envelope_id TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      trace_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_events_peer_created ON federation_events(peer_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_federation_events_trace ON federation_events(trace_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_outbox (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT REFERENCES federation_peers(id) ON DELETE SET NULL,
+      transport_kind TEXT NOT NULL,
+      envelope_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- pending | sending | sent | acked | failed | dead_letter
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      last_attempt_at INTEGER,
+      last_error TEXT,
+      trace_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_outbox_status_next ON federation_outbox(status, next_attempt_at, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_replay_nonces (
+      source_instance TEXT NOT NULL,
+      nonce TEXT NOT NULL,
+      key_id TEXT,
+      envelope_id TEXT,
+      trace_id TEXT,
+      first_seen_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      PRIMARY KEY(source_instance, nonce)
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_replay_nonces_expires ON federation_replay_nonces(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_federation_replay_nonces_source_seen ON federation_replay_nonces(source_instance, first_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_audit (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT REFERENCES federation_peers(id) ON DELETE SET NULL,
+      event_type TEXT NOT NULL,
+      decision TEXT, -- allow | deny | info
+      actor TEXT,
+      trace_id TEXT,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_audit_created ON federation_audit(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_federation_audit_peer ON federation_audit(peer_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS transport_routes (
+      route_id TEXT PRIMARY KEY,
+      peer_id TEXT REFERENCES federation_peers(id) ON DELETE CASCADE,
+      adapter TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      healthy INTEGER NOT NULL DEFAULT 0,
+      last_checked_at INTEGER,
+      last_error TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(peer_id, adapter, endpoint)
+    );
+    CREATE INDEX IF NOT EXISTS idx_transport_routes_peer_health ON transport_routes(peer_id, healthy, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id TEXT PRIMARY KEY,
+      owner_scope TEXT NOT NULL DEFAULT 'local', -- local | federation_peer
+      peer_id TEXT REFERENCES federation_peers(id) ON DELETE SET NULL,
+      url TEXT NOT NULL,
+      event_filter_json TEXT NOT NULL DEFAULT '[]',
+      signing_mode TEXT NOT NULL DEFAULT 'hmac', -- hmac | ed25519
+      secret_ref TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'active', -- active | paused | revoked
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_enabled_status ON webhook_endpoints(enabled, status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+      id TEXT PRIMARY KEY,
+      endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(endpoint_id, event_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_endpoint ON webhook_subscriptions(endpoint_id, enabled);
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY,
+      endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+      event_id TEXT,
+      status TEXT NOT NULL, -- pending | sent | acked | failed | dead_letter
+      attempts INTEGER NOT NULL DEFAULT 0,
+      response_code INTEGER,
+      response_body TEXT,
+      next_attempt_at INTEGER,
+      last_attempt_at INTEGER,
+      trace_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status_next ON webhook_deliveries(status, next_attempt_at, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint_created ON webhook_deliveries(endpoint_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS webhook_dlq (
+      id TEXT PRIMARY KEY,
+      delivery_id TEXT NOT NULL REFERENCES webhook_deliveries(id) ON DELETE CASCADE,
+      endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      replayed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_dlq_created ON webhook_dlq(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_exports (
+      id TEXT PRIMARY KEY,
+      resource_type TEXT NOT NULL, -- node_pool | data_intake | blackboard | mcp
+      resource_selector_json TEXT NOT NULL DEFAULT '{}',
+      projection_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_exports_type_enabled ON federation_exports(resource_type, enabled, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS federation_grants (
+      id TEXT PRIMARY KEY,
+      peer_id TEXT NOT NULL REFERENCES federation_peers(id) ON DELETE CASCADE,
+      export_id TEXT NOT NULL REFERENCES federation_exports(id) ON DELETE CASCADE,
+      permission TEXT NOT NULL DEFAULT 'read',
+      sensitivity_ceiling TEXT NOT NULL DEFAULT 'internal',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(peer_id, export_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_federation_grants_peer_enabled ON federation_grants(peer_id, enabled, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS secret_provider_profiles (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      endpoint_ref TEXT,
+      auth_mode TEXT NOT NULL DEFAULT 'none',
+      strict_mode INTEGER NOT NULL DEFAULT 1,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_secret_provider_profiles_kind_enabled ON secret_provider_profiles(kind, enabled, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS secret_access_events (
+      id TEXT PRIMARY KEY,
+      provider_profile_id TEXT REFERENCES secret_provider_profiles(id) ON DELETE SET NULL,
+      trace_id TEXT,
+      firewall_session TEXT,
+      actor TEXT,
+      secret_path_hash TEXT NOT NULL,
+      secret_class TEXT,
+      decision TEXT NOT NULL, -- allow | deny | error
+      reason TEXT,
+      lease_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_secret_access_events_created ON secret_access_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_secret_access_events_trace ON secret_access_events(trace_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS secret_leases (
+      id TEXT PRIMARY KEY,
+      provider_profile_id TEXT REFERENCES secret_provider_profiles(id) ON DELETE SET NULL,
+      lease_ref TEXT NOT NULL,
+      secret_class TEXT,
+      status TEXT NOT NULL, -- active | expired | revoked
+      issued_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      revoked_at INTEGER,
+      trace_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_secret_leases_status_expires ON secret_leases(status, expires_at DESC);
+
+    CREATE TABLE IF NOT EXISTS http_auth_sessions (
+      session_hash TEXT PRIMARY KEY,
+      csrf_token TEXT NOT NULL,
+      user_label TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      revoked_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_http_auth_sessions_expires ON http_auth_sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_http_auth_sessions_revoked ON http_auth_sessions(revoked_at, expires_at);
+
+    CREATE TABLE IF NOT EXISTS identity_keyring (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL, -- federation | node
+      kid TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      private_key_ref TEXT,
+      status TEXT NOT NULL DEFAULT 'active', -- active | next | revoked | expired
+      not_before INTEGER,
+      not_after INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(scope, kid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_identity_keyring_scope_status ON identity_keyring(scope, status, not_after DESC);
   `);
 
   try {

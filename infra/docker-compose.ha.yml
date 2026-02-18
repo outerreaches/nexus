@@ -117,6 +117,8 @@ services:
       - FAILURE_THRESHOLD=3
       - RECOVERY_DELAY=30
       - DEPLOY_LOCK_DIR=/data/nexus/ha-rollout.lock
+      # Optional control-plane auth for /api/* calls when gateway HTTP auth is enabled.
+      - NEXUS_HA_API_KEY=${NEXUS_HA_API_KEY}
     depends_on:
       - nexus-primary
       - nexus-standby

@@ -1,92 +1,182 @@
-#!/bin/bash
-# Nexus VM Setup Script for host
-# Run this on the host host after installing Ubuntu 24.04
+#!/usr/bin/env bash
+# Nexus VM Setup Script for libvirt hosts
 
-set -e
+set -euo pipefail
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 log() { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[!]${NC} $1"; exit 1; }
 
-# Check if running as root
-if [ "$EUID" -eq 0 ]; then
-  error "Don't run this script as root. Run as your regular user."
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [options]
+
+Options:
+  --vm-name <name>             VM name (default: nexus-vm)
+  --hostname <name>            Guest hostname (default: <vm-name>)
+  --memory-mb <mb>             VM memory in MB (default: 4096)
+  --cpus <count>               VM vCPU count (default: 2)
+  --disk-size <size>           VM disk size (default: 20G)
+  --network <name>             libvirt network name (default: default)
+  --enable-forwarding          Configure host systemd TCP forwarders to guest ports
+  --forward-http-port <port>   Host TCP listen port for HTTP (default: 18789)
+  --forward-https-port <port>  Host TCP listen port for HTTPS/WSS (default: 18790)
+  --skip-packages              Skip apt package install/updates
+  --help                       Show this help message
+
+Environment overrides:
+  VM_NAME, VM_MEMORY_MB, VM_CPUS, VM_DISK_SIZE, VM_NETWORK
+  ENABLE_FORWARDING, FORWARD_HTTP_PORT, FORWARD_HTTPS_PORT
+USAGE
+}
+
+if [[ "${EUID}" -eq 0 ]]; then
+  error "Do not run this script as root. Run as a regular user with sudo access."
 fi
 
-# Configuration
-VM_NAME="nexus-vm"
-VM_MEMORY="4096"  # 4GB
-VM_CPUS="2"
-VM_DISK_SIZE="20G"
-VM_CONFIG_DIR="/var/lib/libvirt/boot"  # Use libvirt-accessible directory
+VM_NAME="${VM_NAME:-nexus-vm}"
+VM_HOSTNAME="${VM_HOSTNAME:-}"
+VM_MEMORY_MB="${VM_MEMORY_MB:-4096}"
+VM_CPUS="${VM_CPUS:-2}"
+VM_DISK_SIZE="${VM_DISK_SIZE:-20G}"
+VM_NETWORK="${VM_NETWORK:-default}"
+ENABLE_FORWARDING="${ENABLE_FORWARDING:-0}"
+FORWARD_HTTP_PORT="${FORWARD_HTTP_PORT:-18789}"
+FORWARD_HTTPS_PORT="${FORWARD_HTTPS_PORT:-18790}"
+SKIP_PACKAGES="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm-name)
+      VM_NAME="$2"
+      shift 2
+      ;;
+    --hostname)
+      VM_HOSTNAME="$2"
+      shift 2
+      ;;
+    --memory-mb)
+      VM_MEMORY_MB="$2"
+      shift 2
+      ;;
+    --cpus)
+      VM_CPUS="$2"
+      shift 2
+      ;;
+    --disk-size)
+      VM_DISK_SIZE="$2"
+      shift 2
+      ;;
+    --network)
+      VM_NETWORK="$2"
+      shift 2
+      ;;
+    --enable-forwarding)
+      ENABLE_FORWARDING="1"
+      shift
+      ;;
+    --forward-http-port)
+      FORWARD_HTTP_PORT="$2"
+      shift 2
+      ;;
+    --forward-https-port)
+      FORWARD_HTTPS_PORT="$2"
+      shift 2
+      ;;
+    --skip-packages)
+      SKIP_PACKAGES="1"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      error "Unknown option: $1"
+      ;;
+  esac
+done
+
+if [[ -z "${VM_HOSTNAME}" ]]; then
+  VM_HOSTNAME="${VM_NAME}"
+fi
+
+VM_CONFIG_DIR="/var/lib/libvirt/boot"
 CLOUD_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+CLOUD_IMAGE_PATH="/var/lib/libvirt/images/noble-server-cloudimg-amd64.img"
+VM_DISK_PATH="/var/lib/libvirt/images/${VM_NAME}.qcow2"
+CLOUD_INIT_YAML="${VM_CONFIG_DIR}/${VM_NAME}-cloud-init.yaml"
+CLOUD_INIT_ISO="${VM_CONFIG_DIR}/${VM_NAME}-cloud-init.iso"
+VM_USER="nexus"
 
-log "Starting Nexus VM setup..."
+safe_vm_name() {
+  echo "$1" | tr -c 'a-zA-Z0-9_.-' '-'
+}
 
-# Step 1: Install packages
-log "Installing required packages..."
-sudo apt update
-sudo apt install -y \
-  qemu-kvm \
-  libvirt-daemon-system \
-  libvirt-clients \
-  bridge-utils \
-  virtinst \
-  cloud-image-utils \
-  socat \
-  curl \
-  jq
+get_vm_ip() {
+  virsh domifaddr "${VM_NAME}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -n1
+}
 
-# Step 2: Configure user groups
-log "Configuring user groups..."
-sudo usermod -aG libvirt $USER
-sudo usermod -aG kvm $USER
+log "Starting VM setup for ${VM_NAME}"
 
-# Step 3: Start services
-log "Starting services..."
+if [[ "${SKIP_PACKAGES}" != "1" ]]; then
+  log "Installing required packages"
+  sudo apt update
+  sudo apt install -y \
+    qemu-kvm \
+    libvirt-daemon-system \
+    libvirt-clients \
+    bridge-utils \
+    virtinst \
+    cloud-image-utils \
+    socat \
+    curl \
+    jq
+else
+  warn "Skipping package installation (--skip-packages set)"
+fi
+
+log "Ensuring host groups/services are configured"
+sudo usermod -aG libvirt "$USER"
+sudo usermod -aG kvm "$USER"
 sudo systemctl enable --now libvirtd
 
-# Step 4: Create directories
-log "Creating directories..."
-sudo mkdir -p "$VM_CONFIG_DIR"
-sudo chown $USER:$USER "$VM_CONFIG_DIR"
+log "Preparing libvirt boot directory"
+sudo mkdir -p "${VM_CONFIG_DIR}"
+sudo chown "$USER:$USER" "${VM_CONFIG_DIR}"
 
-# Step 5: Download cloud image
-log "Downloading Ubuntu cloud image..."
-if [ ! -f /var/lib/libvirt/images/noble-server-cloudimg-amd64.img ]; then
-  sudo wget -O /var/lib/libvirt/images/noble-server-cloudimg-amd64.img "$CLOUD_IMAGE_URL"
+log "Ensuring Ubuntu cloud image is present"
+if [[ ! -f "${CLOUD_IMAGE_PATH}" ]]; then
+  sudo wget -O "${CLOUD_IMAGE_PATH}" "${CLOUD_IMAGE_URL}"
 else
-  log "Cloud image already exists, skipping download"
+  log "Cloud image already present at ${CLOUD_IMAGE_PATH}"
 fi
 
-# Step 6: Get SSH key
-if [ -f ~/.ssh/id_ed25519.pub ]; then
-  SSH_KEY=$(cat ~/.ssh/id_ed25519.pub)
-elif [ -f ~/.ssh/id_rsa.pub ]; then
-  SSH_KEY=$(cat ~/.ssh/id_rsa.pub)
+if [[ -f ~/.ssh/id_ed25519.pub ]]; then
+  SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+elif [[ -f ~/.ssh/id_rsa.pub ]]; then
+  SSH_KEY="$(cat ~/.ssh/id_rsa.pub)"
 else
-  warn "No SSH key found. Generating one..."
+  warn "No SSH key found; generating ~/.ssh/id_ed25519"
   ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
-  SSH_KEY=$(cat ~/.ssh/id_ed25519.pub)
+  SSH_KEY="$(cat ~/.ssh/id_ed25519.pub)"
 fi
 
-# Step 7: Create cloud-init config
-log "Creating cloud-init configuration..."
-cat > "$VM_CONFIG_DIR/cloud-init.yaml" << EOF
+log "Writing cloud-init config ${CLOUD_INIT_YAML}"
+cat > "${CLOUD_INIT_YAML}" <<CLOUDINIT
 #cloud-config
-hostname: nexus-vm
+hostname: ${VM_HOSTNAME}
 users:
-  - name: nexus
+  - name: ${VM_USER}
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     ssh_authorized_keys:
-      - $SSH_KEY
+      - ${SSH_KEY}
 package_update: true
 packages:
   - docker.io
@@ -95,89 +185,71 @@ packages:
   - curl
 runcmd:
   - systemctl enable docker
-  - usermod -aG docker nexus
+  - usermod -aG docker ${VM_USER}
   - mkdir -p /data/{code,nexus,workspace}
-  - chown -R nexus:nexus /data
-EOF
+  - chown -R ${VM_USER}:${VM_USER} /data
+CLOUDINIT
 
-# Step 8: Create cloud-init ISO
-log "Creating cloud-init ISO..."
-cloud-localds "$VM_CONFIG_DIR/cloud-init.iso" "$VM_CONFIG_DIR/cloud-init.yaml"
+log "Creating cloud-init ISO ${CLOUD_INIT_ISO}"
+cloud-localds "${CLOUD_INIT_ISO}" "${CLOUD_INIT_YAML}"
 
-# Step 9: Create VM disk
-log "Creating VM disk..."
-if [ -f /var/lib/libvirt/images/nexus-vm.qcow2 ]; then
-  warn "VM disk already exists. Skipping creation."
+if [[ -f "${VM_DISK_PATH}" ]]; then
+  warn "VM disk already exists: ${VM_DISK_PATH}"
 else
-  sudo qemu-img create -f qcow2 \
-    -F qcow2 \
-    -b /var/lib/libvirt/images/noble-server-cloudimg-amd64.img \
-    /var/lib/libvirt/images/nexus-vm.qcow2 "$VM_DISK_SIZE"
+  log "Creating VM disk ${VM_DISK_PATH} (${VM_DISK_SIZE})"
+  sudo qemu-img create -f qcow2 -F qcow2 -b "${CLOUD_IMAGE_PATH}" "${VM_DISK_PATH}" "${VM_DISK_SIZE}"
 fi
 
-# Step 10: Check if VM already exists
-if virsh list --all | grep -q "$VM_NAME"; then
-  warn "VM '$VM_NAME' already exists."
-  read -p "Delete and recreate? (y/N) " -n 1 -r
-  echo
-  if [[ $REPLY =~ ^[Yy]$ ]]; then
-    virsh destroy "$VM_NAME" 2>/dev/null || true
-    virsh undefine "$VM_NAME" --remove-all-storage 2>/dev/null || true
-    sudo qemu-img create -f qcow2 \
-      -F qcow2 \
-      -b /var/lib/libvirt/images/noble-server-cloudimg-amd64.img \
-      /var/lib/libvirt/images/nexus-vm.qcow2 "$VM_DISK_SIZE"
+if virsh list --all | grep -qE "^\s*[-0-9]+\s+${VM_NAME}\s+"; then
+  warn "VM '${VM_NAME}' already exists"
+  read -r -p "Delete and recreate? (y/N) " reply
+  if [[ "${reply}" =~ ^[Yy]$ ]]; then
+    virsh destroy "${VM_NAME}" 2>/dev/null || true
+    virsh undefine "${VM_NAME}" --remove-all-storage 2>/dev/null || true
+    sudo qemu-img create -f qcow2 -F qcow2 -b "${CLOUD_IMAGE_PATH}" "${VM_DISK_PATH}" "${VM_DISK_SIZE}"
   else
-    log "Keeping existing VM."
+    log "Keeping existing VM"
     exit 0
   fi
 fi
 
-# Step 11: Create VM
-log "Creating VM..."
+log "Creating VM ${VM_NAME}"
 sudo virt-install \
-  --name "$VM_NAME" \
-  --memory "$VM_MEMORY" \
-  --vcpus "$VM_CPUS" \
-  --disk /var/lib/libvirt/images/nexus-vm.qcow2 \
-  --disk "$VM_CONFIG_DIR/cloud-init.iso,device=cdrom" \
+  --name "${VM_NAME}" \
+  --memory "${VM_MEMORY_MB}" \
+  --vcpus "${VM_CPUS}" \
+  --disk "${VM_DISK_PATH}" \
+  --disk "${CLOUD_INIT_ISO},device=cdrom" \
   --os-variant ubuntu24.04 \
-  --network network=default \
+  --network "network=${VM_NETWORK}" \
   --graphics none \
   --console pty,target_type=serial \
   --import \
   --noautoconsole
 
-log "Waiting for VM to boot (60 seconds)..."
+log "Waiting for VM boot"
 sleep 60
 
-# Step 12: Get VM IP
-VM_IP=$(virsh domifaddr "$VM_NAME" 2>/dev/null | grep -oE '192\.168\.[0-9]+\.[0-9]+' || echo "")
-
-if [ -z "$VM_IP" ]; then
-  warn "Could not get VM IP. VM might still be booting."
-  log "Try running: virsh domifaddr $VM_NAME"
+VM_IP="$(get_vm_ip || true)"
+if [[ -z "${VM_IP}" ]]; then
+  warn "Unable to resolve ${VM_NAME} IP via virsh domifaddr"
+  warn "Run manually: virsh domifaddr ${VM_NAME}"
 else
-  log "VM IP: $VM_IP"
-
-  # Step 13: Wait for SSH
-  log "Waiting for SSH to be available..."
-  for i in {1..30}; do
-    if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no "nexus@$VM_IP" "echo ok" 2>/dev/null; then
+  log "VM IP: ${VM_IP}"
+  log "Waiting for SSH readiness"
+  for _ in {1..30}; do
+    if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no "${VM_USER}@${VM_IP}" "echo ok" >/dev/null 2>&1; then
       break
     fi
     sleep 2
   done
 
-  # Step 14: Configure VM
-  log "Configuring VM..."
-  ssh -o StrictHostKeyChecking=no "nexus@$VM_IP" << 'VMSCRIPT'
-    # Ensure mount points exist
-    sudo mkdir -p /data/code /data/nexus /data/workspace
-    sudo chown -R nexus:nexus /data
-
-    # Install a robust pull+deploy helper that always includes TLS overlay.
-    cat > /home/nexus/pull-deploy.sh << 'PULLDEPLOY'
+  log "Configuring guest filesystem helper script"
+  ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_IP}" "bash -s" <<'VMSCRIPT'
+set -euo pipefail
+sudo mkdir -p /data/code /data/nexus /data/workspace
+sudo chown -R nexus:nexus /data
+cat > /home/nexus/pull-deploy.sh <<'PULLDEPLOY'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -212,124 +284,92 @@ fi
 
 docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" up -d --build --force-recreate
 docker compose -p "$COMPOSE_PROJECT" -f "$BASE_COMPOSE" -f "$TLS_COMPOSE" ps
-
-if command -v openssl >/dev/null 2>&1; then
-  FP="$(openssl x509 -in "$TLS_CERT_PEM" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' || true)"
-  if [ -n "$FP" ]; then
-    echo "[pull-deploy] gateway TLS fingerprint: $FP"
-    echo "[pull-deploy] node setting: NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=$FP"
-  fi
-fi
 PULLDEPLOY
-    chmod +x /home/nexus/pull-deploy.sh
-
-    # Verify
-    echo "Mounted directories:"
-    ls -la /data/
+chmod +x /home/nexus/pull-deploy.sh
 VMSCRIPT
+fi
 
-  # Step 15: Setup port forwarding
-  log "Setting up port forwarding (18789 + 18790)..."
+if [[ "${ENABLE_FORWARDING}" == "1" ]]; then
+  SAFE_VM_NAME="$(safe_vm_name "${VM_NAME}")"
+  CONNECT_HELPER="/usr/local/bin/nexus-forward-connect-${SAFE_VM_NAME}.sh"
+  HTTP_SERVICE="nexus-forward-${SAFE_VM_NAME}-http.service"
+  HTTPS_SERVICE="nexus-forward-${SAFE_VM_NAME}-https.service"
 
-  # Some older installs created a separate legacy TLS unit that can conflict with
-  # nexus-forward-tls.service by binding :18790 first.
-  if [ -f /etc/systemd/system/nexus-forward-18790.service ]; then
-    warn "Found legacy unit nexus-forward-18790.service; disabling to avoid :18790 bind conflicts."
-    sudo systemctl disable --now nexus-forward-18790.service || true
-    sudo rm -f /etc/systemd/system/nexus-forward-18790.service
-  fi
+  log "Configuring optional host forwarding (${FORWARD_HTTP_PORT}, ${FORWARD_HTTPS_PORT})"
 
-  # Resolve VM IP per accepted connection. This keeps forwarding working if the
-  # VM gets a new DHCP lease after restart.
-  sudo tee /usr/local/bin/nexus-forward-connect.sh > /dev/null << 'EOF'
+  sudo tee "${CONNECT_HELPER}" >/dev/null <<EOF_CONNECT
 #!/usr/bin/env bash
 set -euo pipefail
-
-VM_NAME="${NEXUS_FORWARD_VM_NAME:-nexus-vm}"
-PORT="${NEXUS_FORWARD_PORT:-}"
-
-if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-  echo "nexus-forward-connect: invalid NEXUS_FORWARD_PORT='${PORT}'" >&2
+VM_NAME="${VM_NAME}"
+PORT="\${NEXUS_FORWARD_PORT:-}"
+if ! [[ "\${PORT}" =~ ^[0-9]+$ ]]; then
+  echo "invalid NEXUS_FORWARD_PORT='\${PORT}'" >&2
   exit 64
 fi
-
 lookup_vm_ip() {
-  virsh domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -n1
+  virsh domifaddr "\${VM_NAME}" 2>/dev/null | awk '/ipv4/ {print \$4}' | cut -d/ -f1 | head -n1
 }
-
 for _ in {1..20}; do
-  VM_IP="$(lookup_vm_ip || true)"
-  if [ -n "$VM_IP" ]; then
-    exec /usr/bin/socat STDIO "TCP:${VM_IP}:${PORT}"
+  VM_IP="\$(lookup_vm_ip || true)"
+  if [ -n "\${VM_IP}" ]; then
+    exec /usr/bin/socat STDIO "TCP:\${VM_IP}:\${PORT}"
   fi
   sleep 1
 done
-
-echo "nexus-forward-connect: unable to resolve IPv4 for VM '${VM_NAME}'" >&2
+echo "unable to resolve IPv4 for VM '\${VM_NAME}'" >&2
 exit 1
-EOF
-  sudo chmod 0755 /usr/local/bin/nexus-forward-connect.sh
+EOF_CONNECT
+  sudo chmod 0755 "${CONNECT_HELPER}"
 
-  sudo tee /etc/systemd/system/nexus-forward.service > /dev/null << 'EOF'
+  sudo tee "/etc/systemd/system/${HTTP_SERVICE}" >/dev/null <<EOF_HTTP
 [Unit]
-Description=Nexus port forward to VM
+Description=Nexus forward ${VM_NAME} HTTP
 After=libvirtd.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
-Environment=NEXUS_FORWARD_PORT=18789
-ExecStart=/usr/bin/socat TCP-LISTEN:18789,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
+Environment=NEXUS_FORWARD_PORT=${FORWARD_HTTP_PORT}
+ExecStart=/usr/bin/socat TCP-LISTEN:${FORWARD_HTTP_PORT},fork,reuseaddr EXEC:${CONNECT_HELPER},nofork
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_HTTP
 
-  sudo tee /etc/systemd/system/nexus-forward-tls.service > /dev/null << 'EOF'
+  sudo tee "/etc/systemd/system/${HTTPS_SERVICE}" >/dev/null <<EOF_HTTPS
 [Unit]
-Description=Nexus TLS port forward to VM
+Description=Nexus forward ${VM_NAME} HTTPS/WSS
 After=libvirtd.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=NEXUS_FORWARD_VM_NAME=nexus-vm
-Environment=NEXUS_FORWARD_PORT=18790
-ExecStart=/usr/bin/socat TCP-LISTEN:18790,fork,reuseaddr EXEC:/usr/local/bin/nexus-forward-connect.sh,nofork
+Environment=NEXUS_FORWARD_PORT=${FORWARD_HTTPS_PORT}
+ExecStart=/usr/bin/socat TCP-LISTEN:${FORWARD_HTTPS_PORT},fork,reuseaddr EXEC:${CONNECT_HELPER},nofork
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_HTTPS
 
   sudo systemctl daemon-reload
-  sudo systemctl enable --now nexus-forward
-  sudo systemctl enable --now nexus-forward-tls
-
-  log "Port forwarding configured with dynamic VM IP resolution for 18789 (HTTP) and 18790 (HTTPS/WSS)"
+  sudo systemctl enable --now "${HTTP_SERVICE%.service}"
+  sudo systemctl enable --now "${HTTPS_SERVICE%.service}"
+  log "Forwarding services enabled: ${HTTP_SERVICE}, ${HTTPS_SERVICE}"
+else
+  log "Forwarding not configured (default). Use --enable-forwarding if needed."
 fi
 
-echo ""
+echo
 echo "======================================"
-log "VM setup complete!"
+log "VM setup complete"
 echo "======================================"
-echo ""
-echo "Next steps:"
-echo "1. Push code to the host bare repo from your laptop"
-echo "   git remote add host ssh://user@host/~/git/nexus.git"
-echo "   git push host main"
-echo ""
-echo "2. After code is pushed, SSH into VM and clone the repo:"
-echo "   ssh nexus@$VM_IP"
-echo "   git clone ssh://user@host/~/git/nexus.git /data/code"
-echo "   /home/nexus/pull-deploy.sh   # Pull + rebuild using TLS-safe compose files"
-echo ""
-echo "3. VM management commands:"
-echo "   virsh list --all      # List VMs"
-echo "   virsh console $VM_NAME  # VM console"
-echo "   virsh shutdown $VM_NAME # Graceful shutdown"
-echo ""
+echo "VM name: ${VM_NAME}"
+echo "VM hostname: ${VM_HOSTNAME}"
+echo "VM disk: ${VM_DISK_PATH}"
+if [[ -n "${VM_IP:-}" ]]; then
+  echo "VM IP: ${VM_IP}"
+fi

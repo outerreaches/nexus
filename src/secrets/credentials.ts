@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { assertCredentialLocality } from "./locality.js";
+
 export type StoredSecret =
   | { format: "plain"; value: string }
   | { format: "aes-256-gcm"; ivB64: string; tagB64: string; ciphertextB64: string };
@@ -20,6 +22,12 @@ type CredentialStoreFileV1 = {
   updatedAt: number;
   credentials: StoredCredential[];
 };
+
+function isSecretsStrictMode(): boolean {
+  const raw = (process.env.NEXUS_SECRETS_STRICT ?? "1").trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "no") return false;
+  return true;
+}
 
 function getVaultKey(): Buffer | null {
   const raw = (process.env.NEXUS_CREDENTIALS_KEY ?? "").trim();
@@ -41,7 +49,12 @@ function encryptSecret(value: string, key: Buffer): StoredSecret {
 }
 
 function decryptSecret(secret: StoredSecret, key: Buffer | null): string {
-  if (secret.format === "plain") return secret.value;
+  if (secret.format === "plain") {
+    if (isSecretsStrictMode()) {
+      throw new Error("Plaintext credentials are blocked in strict mode. Set NEXUS_CREDENTIALS_KEY and rotate this entry.");
+    }
+    return secret.value;
+  }
   if (!key) {
     throw new Error("Credential is encrypted but NEXUS_CREDENTIALS_KEY is not set.");
   }
@@ -87,11 +100,18 @@ export async function upsertCredential(params: {
   note?: string;
   overwrite?: boolean;
 }): Promise<{ credential: StoredCredential; passwordEncrypted: boolean }> {
+  assertCredentialLocality({
+    credentialId: params.id,
+    operation: "upsert",
+  });
   const store = await loadStore(params.stateDir);
   const now = Date.now();
   const existing = store.credentials.find((c) => c.id === params.id) ?? null;
 
   const vaultKey = getVaultKey();
+  if (params.password !== undefined && !vaultKey && isSecretsStrictMode()) {
+    throw new Error("Plaintext credential writes are blocked in strict mode. Set NEXUS_CREDENTIALS_KEY or disable strict mode.");
+  }
   const passwordEncrypted = Boolean(params.password && vaultKey);
   const passwordStored: StoredSecret | undefined =
     params.password === undefined ? undefined : vaultKey ? encryptSecret(params.password, vaultKey) : { format: "plain", value: params.password };
@@ -122,6 +142,10 @@ export async function upsertCredential(params: {
 }
 
 export async function deleteCredential(params: { stateDir: string; id: string }): Promise<boolean> {
+  assertCredentialLocality({
+    credentialId: params.id,
+    operation: "delete",
+  });
   const store = await loadStore(params.stateDir);
   const before = store.credentials.length;
   store.credentials = store.credentials.filter((c) => c.id !== params.id);
@@ -146,6 +170,10 @@ export async function getCredentialField(params: {
   id: string;
   field: "username" | "password";
 }): Promise<string> {
+  assertCredentialLocality({
+    credentialId: params.id,
+    operation: "read",
+  });
   const store = await loadStore(params.stateDir);
   const c = store.credentials.find((x) => x.id === params.id);
   if (!c) throw new Error(`Unknown credential id: ${params.id}`);
@@ -159,4 +187,3 @@ export async function getCredentialField(params: {
   if (!c.password) throw new Error(`Credential ${params.id} has no password.`);
   return decryptSecret(c.password, getVaultKey());
 }
-

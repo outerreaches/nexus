@@ -27,6 +27,8 @@
 #   SMOKE_TIMEOUT=60
 #   REQUIRE_TLS_OVERLAY=1
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
+#   NEXUS_HA_API_KEY=<token>            # optional bearer token for /api/* control-plane calls
+#                                        # fallback: NEXUS_HTTP_API_KEY, NEXUS_HTTP_AUTH_TOKEN, NEXUS_DASHBOARD_PASSWORD
 
 set -euo pipefail
 
@@ -47,6 +49,7 @@ SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-60}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 REQUIRE_TLS_OVERLAY="${REQUIRE_TLS_OVERLAY:-1}"
+CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
 
 declare -a COMPOSE_FILES_LIST=()
 declare -a COMPOSE_BASE_CMD=()
@@ -96,6 +99,40 @@ fail() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+curl_with_auth() {
+  if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+    curl -H "authorization: Bearer ${CONTROL_PLANE_API_KEY}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
+compose_service_get() {
+  local service="$1"
+  local path="$2"
+  local timeout="${3:-5}"
+  if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+    compose exec -T -e NEXUS_HA_API_KEY="$CONTROL_PLANE_API_KEY" "$service" sh -lc \
+      "curl -fsS --max-time ${timeout} -H \"authorization: Bearer \$NEXUS_HA_API_KEY\" http://localhost:18789${path}"
+  else
+    compose exec -T "$service" sh -lc \
+      "curl -fsS --max-time ${timeout} http://localhost:18789${path}"
+  fi
+}
+
+compose_service_post() {
+  local service="$1"
+  local path="$2"
+  local timeout="${3:-10}"
+  if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+    compose exec -T -e NEXUS_HA_API_KEY="$CONTROL_PLANE_API_KEY" "$service" sh -lc \
+      "curl -fsS --max-time ${timeout} -X POST -H \"authorization: Bearer \$NEXUS_HA_API_KEY\" http://localhost:18789${path}"
+  else
+    compose exec -T "$service" sh -lc \
+      "curl -fsS --max-time ${timeout} -X POST http://localhost:18789${path}"
+  fi
 }
 
 init_compose_files() {
@@ -234,7 +271,7 @@ reset_clean_to_commit() {
 service_mode() {
   local service="$1"
   local raw
-  if ! raw="$(compose exec -T "$service" sh -lc "curl -fsS --max-time 5 http://localhost:18789/api/mode" 2>/dev/null)"; then
+  if ! raw="$(compose_service_get "$service" "/api/mode" 5 2>/dev/null)"; then
     echo "down"
     return 0
   fi
@@ -252,7 +289,7 @@ wait_for_service_http() {
   local started now
   started="$(date +%s)"
   while true; do
-    if compose exec -T "$service" sh -lc "curl -fsS --max-time 5 http://localhost:18789${path}" >/dev/null 2>&1; then
+    if compose_service_get "$service" "$path" 5 >/dev/null 2>&1; then
       return 0
     fi
     now="$(date +%s)"
@@ -269,7 +306,7 @@ wait_for_public_http() {
   local started now
   started="$(date +%s)"
   while true; do
-    if curl -fsS --max-time 5 "http://localhost:${API_PORT}${path}" >/dev/null 2>&1; then
+    if curl_with_auth -fsS --max-time 5 "http://localhost:${API_PORT}${path}" >/dev/null 2>&1; then
       return 0
     fi
     now="$(date +%s)"
@@ -283,7 +320,7 @@ wait_for_public_http() {
 service_post() {
   local service="$1"
   local path="$2"
-  compose exec -T "$service" sh -lc "curl -fsS --max-time 10 -X POST http://localhost:18789${path}" >/dev/null
+  compose_service_post "$service" "$path" 10 >/dev/null
 }
 
 set_slots_from_modes() {
@@ -309,7 +346,7 @@ try_activate_slot() {
   local started now
   started="$(date +%s)"
   while true; do
-    if compose exec -T "$slot" sh -lc "curl -fsS --max-time 8 -X POST http://localhost:18789/api/activate" >/dev/null 2>&1; then
+    if compose_service_post "$slot" "/api/activate" 8 >/dev/null 2>&1; then
       wait_for_service_http "$slot" "/health/traffic" "$READY_TIMEOUT" || return 1
       return 0
     fi
@@ -403,7 +440,7 @@ run_smoke_checks() {
 
   # Verify mode is active
   local mode
-  mode="$(curl -fsS --max-time 5 "http://localhost:${API_PORT}/api/mode" || true)"
+  mode="$(curl_with_auth -fsS --max-time 5 "http://localhost:${API_PORT}/api/mode" || true)"
   case "$mode" in
     *'"mode":"active"'*) ;;
     *)
@@ -415,7 +452,7 @@ run_smoke_checks() {
   # Verify /health/ready for visibility, but do not fail deploy if only
   # non-traffic operational checks are degraded.
   local ready_body
-  ready_body="$(curl -fsS --max-time 10 "http://localhost:${API_PORT}/health/ready" || true)"
+  ready_body="$(curl_with_auth -fsS --max-time 10 "http://localhost:${API_PORT}/health/ready" || true)"
   case "$ready_body" in
     *'"ok":true'*) ;;
     *)
@@ -425,7 +462,7 @@ run_smoke_checks() {
 
   # Verify /status endpoint responds (exercises config loading + DB)
   local status_body
-  status_body="$(curl -fsS --max-time 10 "http://localhost:${API_PORT}/status" || true)"
+  status_body="$(curl_with_auth -fsS --max-time 10 "http://localhost:${API_PORT}/status" || true)"
   case "$status_body" in
     *'"ok":true'*) ;;
     *)

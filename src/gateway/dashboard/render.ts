@@ -58,6 +58,7 @@ export function renderDashboard(params: {
   blackboard: BlackboardRow[];
   blackboardScope: string;
   blackboardScopes: string[];
+  csrfToken?: string | null;
   db?: NexusDatabase;
 }): string {
   const updatedAt = new Date(params.nowMs).toISOString();
@@ -65,7 +66,27 @@ export function renderDashboard(params: {
   const modeRaw = String((params.status as { mode?: string }).mode ?? "unknown").toLowerCase();
   const modeLabel = modeRaw === "active" ? "ACTIVE" : modeRaw === "standby" ? "STANDBY" : modeRaw.toUpperCase();
   const modeClass = modeRaw === "active" ? "active" : modeRaw === "standby" ? "standby" : "unknown";
-  const hasAgents = params.agents.active.length + params.agents.recent.length > 0;
+  const runtimeProfile = String((params.status as { runtime?: { profile?: string } }).runtime?.profile ?? "standard");
+  const federation = (params.status as {
+    federation?: {
+      enabled?: boolean;
+      derivedState?: string;
+      trustedPeerCount?: number;
+      healthyTrustedPeerCount?: number;
+      identityValid?: boolean;
+      firewallActive?: boolean;
+    };
+  }).federation;
+  const federationEnabled = federation?.enabled === true;
+  const federationState = String(federation?.derivedState ?? (federationEnabled ? "federation_capable" : "standalone"));
+  const federationTrustedPeers = Number.isFinite(federation?.trustedPeerCount)
+    ? Number(federation?.trustedPeerCount ?? 0)
+    : 0;
+  const federationHealthyTrustedPeers = Number.isFinite(federation?.healthyTrustedPeerCount)
+    ? Number(federation?.healthyTrustedPeerCount ?? 0)
+    : 0;
+  const federationIdentity = federation?.identityValid === true ? "Valid" : "Missing";
+  const federationFirewall = federation?.firewallActive === true ? "Active" : "Inactive";
   const heartbeat = (params.status as { proactive?: { enabled?: boolean; paused?: boolean; lastTickAt?: number | null; nextTickAt?: number | null; lastStatus?: string } })
     .proactive ?? { enabled: false };
   const heartbeatLabel = heartbeat.enabled ? (heartbeat.paused ? "Heartbeat (paused)" : "Heartbeat") : "Heartbeat (disabled)";
@@ -153,8 +174,12 @@ export function renderDashboard(params: {
   const mcpServerConnected = params.mcp.servers.filter((row) => row.connected).length;
   const mcpServerDegraded = params.mcp.servers.filter((row) => row.lastError).length;
   const mcpProfileDisabled = params.mcp.profiles.filter((row) => !row.enabled).length;
+  const csrfHiddenInput = params.csrfToken
+    ? `<input type="hidden" name="csrfToken" value="${escapeHtml(params.csrfToken)}" />`
+    : "";
+  const csrfTokenJson = safeJsonForScript(params.csrfToken ?? null);
 
-  return `<!doctype html>
+  const page = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -174,6 +199,7 @@ export function renderDashboard(params: {
     <header>
       <h1>Nexus Dashboard <span class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</span></h1>
       <div class="meta">Last updated: ${escapeHtml(updatedAt)}</div>
+      ${params.csrfToken ? `<form method="post" action="/auth/logout" class="form-inline compact"><button type="submit" class="graph-btn">Sign Out</button></form>` : ""}
     </header>
     <main>
       <section>
@@ -415,6 +441,13 @@ export function renderDashboard(params: {
             <table>
               <tbody>
                 <tr><td>Mode</td><td><span class="badge status-${modeClass}">${escapeHtml(modeLabel)}</span></td></tr>
+                <tr><td>Runtime Profile</td><td>${escapeHtml(runtimeProfile)}</td></tr>
+                <tr><td>Federation</td><td>${federationEnabled ? "Enabled" : "Disabled"}</td></tr>
+                <tr><td>Federation State</td><td>${escapeHtml(federationState)}</td></tr>
+                <tr><td>Federation Identity</td><td>${escapeHtml(federationIdentity)}</td></tr>
+                <tr><td>Federation Firewall</td><td>${escapeHtml(federationFirewall)}</td></tr>
+                <tr><td>Trusted Peers</td><td>${federationTrustedPeers}</td></tr>
+                <tr><td>Healthy Trusted Peers</td><td>${federationHealthyTrustedPeers}</td></tr>
                 <tr><td>Lease Holder</td><td>${escapeHtml(truncate(leaseInfo.holderId, 40))}</td></tr>
                 <tr><td>Lease Held</td><td>${leaseInfo.held ? "Yes" : "No"}</td></tr>
                 <tr><td>Lease Expires</td><td>${leaseInfo.expiresAt ? escapeHtml(formatTime(leaseInfo.expiresAt)) : "-"}</td></tr>
@@ -484,6 +517,23 @@ export function renderDashboard(params: {
       const nodeAuditActorInput = document.getElementById("node-audit-actor");
       const nodeAuditFetchBtn = document.getElementById("node-audit-fetch");
       const nodeAuditOlderBtn = document.getElementById("node-audit-older");
+      const csrfToken = ${csrfTokenJson};
+
+      const withCsrfHeaders = (init = {}) => {
+        const method = String(init.method ?? "GET").toUpperCase();
+        if (!csrfToken || method === "GET" || method === "HEAD" || method === "OPTIONS") {
+          return init;
+        }
+        const headers = new Headers(init.headers ?? {});
+        if (!headers.has("x-csrf-token")) {
+          headers.set("x-csrf-token", csrfToken);
+        }
+        return { ...init, headers };
+      };
+
+      const fetchWithAuth = (input, init = {}) => {
+        return fetch(input, withCsrfHeaders(init));
+      };
 
       const escapeLogHtml = (value) =>
         String(value ?? "")
@@ -565,7 +615,7 @@ export function renderDashboard(params: {
         if (!logsPre) return;
         const maxChars = Math.min(200000, Math.max(200, Number(logsMaxInput?.value ?? 50000) || 50000));
         try {
-          const res = await fetch("/api/logs?maxChars=" + maxChars);
+          const res = await fetchWithAuth("/api/logs?maxChars=" + maxChars);
           if (!res.ok) {
             logsPre.innerHTML = renderHighlightedLogs("ERROR: " + res.status);
             return;
@@ -689,7 +739,7 @@ export function renderDashboard(params: {
         }
 
         try {
-          const res = await fetch("/api/nodes/" + encodeURIComponent(nodeId) + "/audit?" + params.toString());
+          const res = await fetchWithAuth("/api/nodes/" + encodeURIComponent(nodeId) + "/audit?" + params.toString());
           const payload = await res.json();
           if (!res.ok) {
             const code = payload?.code ? " code=" + String(payload.code) : "";
@@ -800,7 +850,7 @@ export function renderDashboard(params: {
           url += "&beforeId=" + encodeURIComponent(String(llmState.nextBeforeId));
         }
         try {
-          const res = await fetch(url);
+          const res = await fetchWithAuth(url);
           if (!res.ok) {
             llmPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
             return;
@@ -826,7 +876,7 @@ export function renderDashboard(params: {
         if (llmSessionsLimitInput) llmSessionsLimitInput.value = String(limit);
         const previousSessionId = llmState.selectedSessionId;
         try {
-          const res = await fetch("/api/llm/sessions?limit=" + limit);
+          const res = await fetchWithAuth("/api/llm/sessions?limit=" + limit);
           if (!res.ok) {
             llmPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
             return;
@@ -1038,7 +1088,7 @@ export function renderDashboard(params: {
         heartbeatPauseBtn.addEventListener("click", async () => {
           heartbeatPauseBtn.disabled = true;
           try {
-            const res = await fetch("/api/proactive/pause", { method: "POST" });
+            const res = await fetchWithAuth("/api/proactive/pause", { method: "POST" });
             if (res.ok) updateHeartbeatUI(true);
           } finally {
             heartbeatPauseBtn.disabled = false;
@@ -1049,7 +1099,7 @@ export function renderDashboard(params: {
         heartbeatResumeBtn.addEventListener("click", async () => {
           heartbeatResumeBtn.disabled = true;
           try {
-            const res = await fetch("/api/proactive/resume", { method: "POST" });
+            const res = await fetchWithAuth("/api/proactive/resume", { method: "POST" });
             if (res.ok) updateHeartbeatUI(false);
           } finally {
             heartbeatResumeBtn.disabled = false;
@@ -1078,7 +1128,7 @@ export function renderDashboard(params: {
       // Fetch new data and update scene
       const fetchAndUpdate = async () => {
         try {
-          const res = await fetch(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`);
+          const res = await fetchWithAuth(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`);
           if (!res.ok) return;
           const data = await res.json();
           graphData = data.nodes;
@@ -1500,4 +1550,10 @@ export function renderDashboard(params: {
     </script>
   </body>
 </html>`;
+  return injectHiddenInputIntoPostForms(page, csrfHiddenInput);
+}
+
+function injectHiddenInputIntoPostForms(html: string, hiddenInput: string): string {
+  if (!hiddenInput) return html;
+  return html.replace(/<form\b([^>]*\bmethod=(?:"post"|'post')[^>]*)>/gi, `<form$1>${hiddenInput}`);
 }

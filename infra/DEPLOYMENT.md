@@ -6,6 +6,8 @@ This guide sets up Nexus on a host workstation with:
 - Fault-tolerant deployment (optional HA mode)
 - Self-editing capability for the agent
 
+For gateway API/dashboard auth rollout, use `infra/internal-doc` before enabling `NEXUS_HTTP_AUTH_ENABLED=1`.
+
 ## Prerequisites
 
 - host with Ubuntu 24.04 LTS installed
@@ -1089,3 +1091,179 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep 
 | `finalize-pending` | ha-deployer (host) | Waiting for orchestrator ack |
 | `deploy-ack` | agent-service (container) | Orchestrator finished, safe to rebuild |
 | `ha-rollout.lock` | ha-rollout.sh (host) | Deploy lock (prevents watchdog failover) |
+
+---
+
+## Federation Deployment Addendum
+
+### Target Topology (v1)
+
+- `nexus-vm` = primary instance (`runtime.profile=primary`)
+- `nexus-monetization-vm` = service instance (`runtime.profile=monetization`)
+- Optional: `nexus-standby-vm` or VPS standby (`runtime.profile=standby`)
+- Execution-node-host installs remain separate from full gateway instances.
+
+Principles:
+
+- Keep inter-instance traffic private (libvirt/internal network) by default.
+- Do not expose monetization VM services publicly unless required.
+- Forward host ports only when explicitly needed.
+
+### VM Provisioning (parameterized)
+
+Use `infra/scripts/setup-vm.sh` with explicit resources per VM:
+
+```bash
+# Primary VM
+bash infra/scripts/setup-vm.sh \
+  --vm-name nexus-vm \
+  --memory-mb 8192 \
+  --cpus 4 \
+  --disk-size 80G
+
+# Monetization VM (no host forwarding by default)
+bash infra/scripts/setup-vm.sh \
+  --vm-name nexus-monetization-vm \
+  --memory-mb 12288 \
+  --cpus 4 \
+  --disk-size 120G
+
+# Optional host forwarding only when needed
+bash infra/scripts/setup-vm.sh \
+  --vm-name nexus-vm \
+  --enable-forwarding \
+  --forward-http-port 18789 \
+  --forward-https-port 18790
+```
+
+### Profile-based Deploy/Bootstrap
+
+Use one script for all runtime profiles:
+
+```bash
+# Primary
+bash infra/scripts/deploy-instance-profile.sh --profile primary
+
+# Standby
+bash infra/scripts/deploy-instance-profile.sh --profile standby
+
+# Service custom
+bash infra/scripts/deploy-instance-profile.sh --profile service_custom
+
+# Monetization shortcut (uses isolated state/workspace defaults)
+bash infra/scripts/deploy-monetization-mode.sh
+```
+
+Monetization compose overlay (when using shared compose stacks):
+
+- `infra/docker-compose.monetization.yml`
+
+### Security Enforcement Scripts
+
+Network policy between primary and monetization VMs:
+
+```bash
+# Dry-run
+bash infra/scripts/apply-federation-vm-network-policy.sh \
+  --primary-ip 10.10.0.11 \
+  --monetization-ip 10.10.0.12 \
+  --inference-ip 10.10.0.20
+
+# Apply
+bash infra/scripts/apply-federation-vm-network-policy.sh \
+  --primary-ip 10.10.0.11 \
+  --monetization-ip 10.10.0.12 \
+  --inference-ip 10.10.0.20 \
+  --apply
+```
+
+Secret locality enforcement and checks:
+
+```bash
+bash infra/scripts/enforce-monetization-secret-locality.sh \
+  --primary-state-dir /data/nexus \
+  --monetization-state-dir /data/nexus-monetization \
+  --apply-perms
+```
+
+### Failover + Rebind Runbook (Primary -> Standby)
+
+1. Promote standby instance:
+
+```bash
+curl -X POST http://<standby>:18789/api/activate -H 'content-type: application/json' -d '{}'
+```
+
+2. Rebind service peer endpoint to new active primary:
+
+```bash
+bash infra/scripts/federation-failover-rebind-smoke.sh \
+  --standby-url http://<standby>:18789 \
+  --service-url http://<service>:18789 \
+  --peer-id primary-peer \
+  --new-primary-endpoint https://<standby>:18789 \
+  --apply
+```
+
+3. Validate webhook continuity/drain:
+
+```bash
+bash infra/scripts/federation-webhook-continuity-smoke.sh \
+  --service-url http://<service>:18789
+```
+
+Expected behavior:
+
+- Service peer record points to new primary endpoint.
+- Pending webhook queue drains to zero.
+- No duplicate-key group growth for `eventId:endpointId` pairs.
+
+### Existing Standalone Retrofit (No Re-init)
+
+```bash
+# Dry-run validation
+bash infra/scripts/federation-retrofit-smoke.sh --state-dir /data/nexus
+
+# Apply safe config retrofit
+bash infra/scripts/federation-retrofit-smoke.sh --state-dir /data/nexus --apply
+```
+
+### Portable Workflow
+
+Build portable bundle:
+
+```bash
+bash infra/scripts/build-portable-runtime.sh --instance-mode portable
+bash infra/scripts/build-portable-runtime.sh --instance-mode portable_federated
+bash infra/scripts/build-portable-runtime.sh --instance-mode execution_node_host
+```
+
+Launcher dry-run:
+
+```bash
+PORTABLE_STATE_PASSPHRASE=... \
+NEXUS_FEDERATION_JOIN_APPROVED=1 \
+bash infra/scripts/portable-launcher.sh --manifest infra/portable/dist/portable-manifest.json --dry-run
+```
+
+Execution-node-host install path:
+
+```bash
+bash infra/scripts/install-execution-node-host.sh --dry-run
+```
+
+Portable smoke checks:
+
+```bash
+bash infra/scripts/portable-smoke.sh
+```
+
+### Infra Smokes
+
+```bash
+# host dual-VM presence
+bash infra/scripts/host-two-vm-smoke.sh
+
+# Profile bootstrap/render smoke
+bash infra/scripts/profile-bootstrap-smoke.sh
+```

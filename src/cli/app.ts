@@ -3,6 +3,17 @@ import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
 
+const RUNTIME_PROFILES = [
+  "standard",
+  "primary",
+  "standby",
+  "monetization",
+  "service_custom",
+  "portable",
+  "execution_node_host",
+] as const;
+type RuntimeProfile = (typeof RUNTIME_PROFILES)[number];
+
 function envInt(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
   if (!raw) return null;
@@ -22,14 +33,24 @@ export async function runCli(argv: string[]): Promise<void> {
     .command("gateway")
     .description("Start the always-on gateway (HTTP + Telegram)")
     .option("--port <port>", "HTTP port (overrides config)", (v) => Number(v))
+    .option("--profile <profile>", `Runtime profile (${RUNTIME_PROFILES.join("|")})`)
     .option("--standby", "Start in standby mode (health checks only, no scheduler/proactive)", false)
     .action(async (opts) => {
+      const profileRaw = typeof opts.profile === "string" ? opts.profile.trim() : "";
+      let profile: RuntimeProfile | undefined;
+      if (profileRaw) {
+        if (!RUNTIME_PROFILES.includes(profileRaw as RuntimeProfile)) {
+          throw new Error(`Invalid --profile value: ${profileRaw}`);
+        }
+        profile = profileRaw as RuntimeProfile;
+      }
       const options = program.opts<{ config: string; verbose: boolean }>();
       await startGateway({
         configPath: options.config,
         port: opts.port,
         verbose: options.verbose,
         standby: opts.standby,
+        profile,
       });
     });
 
@@ -63,6 +84,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
+      process.env.NEXUS_RUNTIME_PROFILE = config.runtime.profile;
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
       const initStatus = await getInitializationStatus(paths.stateDir);
@@ -189,10 +211,14 @@ export async function runCli(argv: string[]): Promise<void> {
         const { createInterface } = await import("node:readline/promises");
         const rl = createInterface({ input: process.stdin, output: process.stdout });
         process.stdout.write('Interactive chat. Type "/exit" to quit.\n');
-        while (true) {
+        let running = true;
+        while (running) {
           const line = (await rl.question("> ")).trim();
           if (!line) continue;
-          if (line === "/exit" || line === "/quit") break;
+          if (line === "/exit" || line === "/quit") {
+            running = false;
+            continue;
+          }
           await send(line);
         }
         rl.close();
@@ -227,6 +253,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
+      process.env.NEXUS_RUNTIME_PROFILE = config.runtime.profile;
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
       const initStatus = await getInitializationStatus(paths.stateDir);

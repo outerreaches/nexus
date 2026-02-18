@@ -46,7 +46,7 @@ npm run dev -- init --force
 Without `--force`, `init` preserves existing non-empty state markdown files and only creates missing/empty ones.
 
 4) Configure secrets in your environment (typically `.env`) and keep placeholders in config (`~/.nexus/nexus.json`):
-- Default model is `moonshot/kimi-k2.5` (override via `llm.openaiCompat.model`).
+- Default model is `moonshotai/kimi-k2.5` (override via `llm.openaiCompat.model`).
 - `OPENROUTER_API_KEY`
 - Optional local/OpenAI-compatible endpoint (for local-only routing or fallback):
   - `NEXUS_LOCAL_LLM_BASE_URL`
@@ -79,7 +79,7 @@ Example:
     "openaiCompat": {
       "baseUrl": "https://openrouter.ai/api/v1",
       "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "moonshot/kimi-k2.5"
+      "model": "moonshotai/kimi-k2.5"
     },
     "providers": {
       "local": {
@@ -95,7 +95,7 @@ Example:
       },
       "byPreset": {
         "coder": {
-          "primary": { "provider": "default", "model": "moonshot/kimi-k2.5" },
+          "primary": { "provider": "default", "model": "moonshotai/kimi-k2.5" },
           "fallback": { "provider": "local" }
         }
       },
@@ -273,6 +273,7 @@ Agent tools:
 - `permissions.allowCodeEdit` (config) controls whether `file_*` tools may target the running codebase (absolute paths under `codeDir`).
 - `permissions.allowCodeWrite` (config) or `NEXUS_ALLOW_CODE_WRITE=1` enables writes under `codeDir` (`file_write`/`file_edit`/`file_edit_lines`).
 - `NEXUS_TELEGRAM_ALLOW_ALL=1` allows any Telegram user if `channels.telegram.allowFrom` is empty (not recommended).
+- `/dashboard` and `/api/*` are operator surfaces and currently have no built-in auth/rate limiting. Keep them on trusted networks or front them with an authenticated proxy.
 
 ## CLI tool command
 
@@ -335,8 +336,8 @@ Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalM
 Nexus includes an internal **cron scheduler** (no external cron or Python scripts required).
 
 Key behavior:
-- Jobs are **owned by the agent that creates them** (important for future multi-agent swarms).
-- When a job run fails, the gateway notifies the **owning agent** (not the user) so it can self-heal and decide whether to notify you.
+- Jobs are stored with `owner_agent_id` derived from `NEXUS_SCHEDULER_AGENT_ID` (default `main`), and current job tools do not enforce per-caller ownership checks.
+- When a job run fails, the scheduler can notify the configured scheduler agent id (not the end user) so it can self-heal and decide whether to notify you.
 - Scheduler-triggered orchestrator `agent_task` runs execute in the background lane and reuse the latest Telegram thread context for the same agent.
 - Tool failures may include normalized tags like `[ERROR_CLASS=... retry=...]` to guide retry/backoff decisions.
 

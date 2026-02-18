@@ -34,8 +34,24 @@ import { NodeRegistry, NodeToolRouter, NodeWebSocketGateway } from "../nodes/ind
 import { loadOrCreateGatewayIdentity } from "../nodes/auth.js";
 import { createNodeProcessDeliveryHandler } from "../nodes/process-delivery.js";
 import { registerNodeRoutes } from "./routes/nodes.js";
+import {
+  appendFederationAudit,
+  getFederationPeerById,
+  getFederationStatusSnapshot,
+  getPreferredTransportRouteForPeer,
+} from "../storage/federation.js";
+import { startFederationOutboxWorker, type FederationOutboxWorker } from "../federation/outbox-worker.js";
+import { createFederationHttpDispatcher } from "../federation/dispatcher.js";
+import { loadOrCreateFederationSigningIdentity } from "../federation/identity.js";
+import { deriveFederationFirewallRuntimeState } from "../federation/firewall.js";
+import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from "../federation/webhook-worker.js";
+import { createFederationTransportRouter } from "../federation/transport.js";
 
-export async function startGateway(params: { configPath: string; port?: number; verbose: boolean; standby?: boolean }): Promise<void> {
+type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
+
+export async function startGateway(
+  params: { configPath: string; port?: number; verbose: boolean; standby?: boolean; profile?: RuntimeProfile },
+): Promise<void> {
   let logStream: fs.WriteStream | null = null;
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   const stderrWrite = process.stderr.write.bind(process.stderr);
@@ -53,6 +69,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   await ensureConfigExists(params.configPath);
   const config = await loadConfig(params.configPath);
+  if (params.profile && params.profile !== config.runtime.profile) {
+    config.runtime.profile = params.profile;
+  }
+  process.env.NEXUS_RUNTIME_PROFILE = config.runtime.profile;
   await bootstrapState(config);
   const paths = await resolveRuntimePaths(config);
   const initStatus = await getInitializationStatus(paths.stateDir);
@@ -91,6 +111,33 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const nodeRegistry = new NodeRegistry({ db, log });
   const nodeGatewayIdentity = await loadOrCreateGatewayIdentity(paths.stateDir);
   log(`nodes/auth: loaded gateway ed25519 identity fingerprint=${nodeGatewayIdentity.fingerprint}`);
+  let federationSigningIdentity = config.federation.enabled
+    ? await loadOrCreateFederationSigningIdentity({ db, stateDir: paths.stateDir, log })
+    : null;
+  let federationSigningIdentityLoadedAtMs = Date.now();
+  const federationSigningRefreshMs = Math.max(1_000, envInt("NEXUS_FEDERATION_SIGNING_REFRESH_MS") ?? 15_000);
+  if (federationSigningIdentity) {
+    log(`federation/auth: loaded signing identity kid=${federationSigningIdentity.kid} fingerprint=${federationSigningIdentity.fingerprint}`);
+  }
+  const refreshFederationSigningIdentity = async (): Promise<typeof federationSigningIdentity> => {
+    if (!config.federation.enabled) return null;
+    const nowMs = Date.now();
+    if (federationSigningIdentity && nowMs - federationSigningIdentityLoadedAtMs < federationSigningRefreshMs) {
+      return federationSigningIdentity;
+    }
+    const previousKid = federationSigningIdentity?.kid ?? null;
+    const nextIdentity = await loadOrCreateFederationSigningIdentity({
+      db,
+      stateDir: paths.stateDir,
+      nowMs,
+    });
+    federationSigningIdentity = nextIdentity;
+    federationSigningIdentityLoadedAtMs = nowMs;
+    if (previousKid && previousKid !== nextIdentity.kid) {
+      log(`federation/auth: hot-reloaded signing kid ${previousKid} -> ${nextIdentity.kid}`);
+    }
+    return federationSigningIdentity;
+  };
   const nodeProcessDelivery = createNodeProcessDeliveryHandler({
     db,
     stateDir: paths.stateDir,
@@ -198,9 +245,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
     scheduleProcessRestart(reason, delayMs);
   };
 
-  const allowShellExec = config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1";
-  const allowCodeEdit = config.permissions.allowCodeEdit;
-  const allowCodeWrite = config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1";
+  const monetizationProfile = config.runtime.profile === "monetization";
+  const allowShellExec = !monetizationProfile && (config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1");
+  const allowCodeEdit = monetizationProfile ? false : config.permissions.allowCodeEdit;
+  const allowCodeWrite = !monetizationProfile && (config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1");
   const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
   const proactiveEnabled = envBool("NEXUS_PROACTIVE") ?? config.proactive.enabled;
   const proactiveNotifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? config.proactive.notifyTelegram;
@@ -249,6 +297,9 @@ export async function startGateway(params: { configPath: string; port?: number; 
       `proactive=${proactiveEnabled} ` +
       `proactive_notify_telegram=${proactiveNotifyTelegram}`,
   );
+  if (monetizationProfile) {
+    log("startup: monetization profile active; shell/code mutation capabilities are force-disabled.");
+  }
   if (allowShellExec || allowCodeWrite || proactiveEnabled) {
     log(
       "startup: WARN autonomous and mutating capabilities are enabled; run only on trusted hosts/repositories and keep backups.",
@@ -297,6 +348,61 @@ export async function startGateway(params: { configPath: string; port?: number; 
 
   let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;
   const getProactiveStatus = () => proactive?.getStatus() ?? { enabled: false, lastTickAt: null, nextTickAt: null };
+  let federationOutboxWorker: FederationOutboxWorker | null = null;
+  let webhookDeliveryWorker: WebhookDeliveryWorker | null = null;
+  let federationGlobalDisabled = false;
+  const federationDispatcher = (() => {
+    if (!config.federation.enabled || !config.federation.outbox.enabled) return null;
+    if (!federationSigningIdentity) {
+      log("federation/outbox: no local federation signing identity available; worker disabled");
+      return null;
+    }
+    if (config.federation.transport.adapter !== "federation_http") {
+      log(`federation/outbox: unsupported adapter=${config.federation.transport.adapter}; worker disabled`);
+      return null;
+    }
+    const federationHttpDispatcher = createFederationHttpDispatcher({
+      localInstanceId: config.federation.localInstanceId,
+      getSigningMaterial: async () => {
+        const signingIdentity = await refreshFederationSigningIdentity();
+        if (!signingIdentity) return null;
+        return {
+          privateKey: signingIdentity.privateKey,
+          keyId: signingIdentity.kid,
+          publicKeyRaw: signingIdentity.publicKeyRaw,
+        };
+      },
+      getPeerById: (peerId) => getFederationPeerById(db, peerId),
+      getRouteForPeer: (peerId, adapter) =>
+        getPreferredTransportRouteForPeer(db, {
+          peerId,
+          adapter,
+          requireHealthy: true,
+        }),
+      requireMtls: config.federation.transport.requireMtls,
+      allowInsecureSignedOnlyDev: config.federation.transport.allowInsecureSignedOnlyDev,
+      requestTimeoutMs: config.federation.outbox.requestTimeoutMs,
+      audit: async (entry) => {
+        appendFederationAudit(db, {
+          id: randomId("FDA"),
+          peerId: entry.peerId,
+          eventType: entry.eventType,
+          decision: entry.decision,
+          actor: entry.actor,
+          traceId: entry.traceId,
+          details: entry.details,
+          nowMs: Date.now(),
+        });
+      },
+      log,
+    });
+    return createFederationTransportRouter({
+      adapterDispatchers: {
+        federation_http: federationHttpDispatcher,
+      },
+      log,
+    });
+  })();
 
   const getMode = () => (isStandby ? "standby" : "active");
   logMode = getMode;
@@ -385,54 +491,120 @@ export async function startGateway(params: { configPath: string; port?: number; 
   const http = await startHttpServer({
     port: effectivePort,
     stateDir: paths.stateDir,
-    getStatus: async () => ({
-      ok: true,
-      name: "nexus",
-      port: effectivePort,
-      stateDir: paths.stateDir,
-      workspaceDir: paths.workspaceDir,
-      codeDir: paths.codeDir,
-      dbPath: paths.dbPath,
-      telegram: {
-        enabled: config.channels.telegram.enabled,
-        mode: config.channels.telegram.mode,
-        pairingEnabled: config.channels.telegram.pairing.enabled,
-      },
-      llm: {
-        modelMode: agent.getDefaultModelMode(),
-        localProvider: config.llm.routing.localProvider,
-        localModel: llmProviderConfigs[config.llm.routing.localProvider]?.model ?? null,
-      },
-      browser: {
-        cdpPort,
-        headless: process.env.NEXUS_BROWSER_HEADLESS === "1",
-        remoteCdpUrl: process.env.NEXUS_BROWSER_REMOTE_CDP_URL ?? null,
-      },
-      permissions: {
-        allowShellExec: toolContext.allowShellExec,
-        allowCodeEdit: toolContext.allowCodeEdit,
-      },
-      scheduler: {
-        enabled: config.scheduler.enabled,
-        tickIntervalMs: config.scheduler.tickIntervalMs,
-        maxRunsPerTick: config.scheduler.maxRunsPerTick,
-        concurrency: config.scheduler.concurrency,
-        leaseTtlMs: config.scheduler.leaseTtlMs,
-        maxConsecutiveFailures: config.scheduler.maxConsecutiveFailures,
-        notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
-        notifyCooldownMs: config.scheduler.notifyCooldownMs,
-      },
-      proactive: getProactiveStatus(),
-      mode: getMode(),
-      activeLease: {
-        key: leaseKey,
-        holderId: leaseHolderId,
-        held: leaseHeld,
-        expiresAt: leaseExpiresAt,
-        ttlMs: leaseTtlMs,
-        renewMs: leaseRenewMs,
-      },
+    federationLocalInstanceId: config.federation.localInstanceId,
+    federationWebhooksFederatedOnly: config.federation.webhooks.federatedOnly,
+    federationWebhooksExternalEnabled: config.federation.webhooks.externalEnabled,
+    federationAllowInsecureTransportDev: config.federation.transport.allowInsecureSignedOnlyDev,
+    federationAllowInsecureWebhookHttpDev: config.federation.webhooks.allowInsecureHttpDev,
+    runtimeProfile: config.runtime.profile,
+    getFederationBreakglassState: () => ({
+      globalDisable: federationGlobalDisabled,
     }),
+    setFederationGlobalDisable: (disabled: boolean) => {
+      federationGlobalDisabled = disabled;
+      log(`federation/breakglass: global_disable=${disabled ? "1" : "0"}`);
+      return {
+        globalDisable: federationGlobalDisabled,
+      };
+    },
+    getStatus: async () => {
+      const nowMs = Date.now();
+      const federationFirewall = deriveFederationFirewallRuntimeState({
+        enabled: config.federation.enabled,
+        transportAdapter: config.federation.transport.adapter,
+        outboxEnabled: config.federation.outbox.enabled,
+        dispatcherReady: federationDispatcher !== null,
+        requireMtls: config.federation.transport.requireMtls,
+        allowInsecureSignedOnlyDev: config.federation.transport.allowInsecureSignedOnlyDev,
+        webhooksFederatedOnly: config.federation.webhooks.federatedOnly,
+        webhooksExternalEnabled: config.federation.webhooks.externalEnabled,
+      });
+      const federation = getFederationStatusSnapshot({
+        db,
+        enabled: config.federation.enabled,
+        firewallActive: federationFirewall.active,
+        nowMs,
+      });
+      return {
+        ok: true,
+        name: "nexus",
+        port: effectivePort,
+        stateDir: paths.stateDir,
+        workspaceDir: paths.workspaceDir,
+        codeDir: paths.codeDir,
+        dbPath: paths.dbPath,
+        runtime: {
+          profile: config.runtime.profile,
+        },
+        federation: {
+          localInstanceId: config.federation.localInstanceId,
+          signingKid: federationSigningIdentity?.kid ?? null,
+          transportAdapter: config.federation.transport.adapter,
+          webhookMode: config.federation.webhooks.externalEnabled ? "external_enabled" : "federated_only",
+          firewallSignalSource: federationFirewall.signalSource,
+          firewallReasons: federationFirewall.reasons,
+          firewallIngressReady: federationFirewall.ingressReady,
+          firewallEgressReady: federationFirewall.egressReady,
+          webhookDelivery: {
+            running: webhookDeliveryWorker !== null,
+            mode: config.federation.webhooks.externalEnabled ? "external_enabled" : "federated_only",
+          },
+          breakglass: {
+            globalDisable: federationGlobalDisabled,
+          },
+          outbox: {
+            configured: config.federation.outbox.enabled,
+            dispatcherReady: federationDispatcher !== null,
+            running: federationOutboxWorker !== null,
+            adapters: federationDispatcher?.adapters ?? [],
+            contract: federationDispatcher?.contract ?? {},
+            intervalMs: config.federation.outbox.intervalMs,
+            maxBatch: config.federation.outbox.maxBatch,
+            requestTimeoutMs: config.federation.outbox.requestTimeoutMs,
+          },
+          ...federation,
+        },
+        telegram: {
+          enabled: config.channels.telegram.enabled,
+          mode: config.channels.telegram.mode,
+          pairingEnabled: config.channels.telegram.pairing.enabled,
+        },
+        llm: {
+          modelMode: agent.getDefaultModelMode(),
+          localProvider: config.llm.routing.localProvider,
+          localModel: llmProviderConfigs[config.llm.routing.localProvider]?.model ?? null,
+        },
+        browser: {
+          cdpPort,
+          headless: process.env.NEXUS_BROWSER_HEADLESS === "1",
+          remoteCdpUrl: process.env.NEXUS_BROWSER_REMOTE_CDP_URL ?? null,
+        },
+        permissions: {
+          allowShellExec: toolContext.allowShellExec,
+          allowCodeEdit: toolContext.allowCodeEdit,
+        },
+        scheduler: {
+          enabled: config.scheduler.enabled,
+          tickIntervalMs: config.scheduler.tickIntervalMs,
+          maxRunsPerTick: config.scheduler.maxRunsPerTick,
+          concurrency: config.scheduler.concurrency,
+          leaseTtlMs: config.scheduler.leaseTtlMs,
+          maxConsecutiveFailures: config.scheduler.maxConsecutiveFailures,
+          notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
+          notifyCooldownMs: config.scheduler.notifyCooldownMs,
+        },
+        proactive: getProactiveStatus(),
+        mode: getMode(),
+        activeLease: {
+          key: leaseKey,
+          holderId: leaseHolderId,
+          held: leaseHeld,
+          expiresAt: leaseExpiresAt,
+          ttlMs: leaseTtlMs,
+          renewMs: leaseRenewMs,
+        },
+      };
+    },
     log,
     db,
     processManager,
@@ -491,6 +663,74 @@ export async function startGateway(params: { configPath: string; port?: number; 
       workspaceDir: paths.workspaceDir,
     });
     if (!scheduler) log("scheduler: disabled");
+
+    if (config.federation.enabled && config.federation.outbox.enabled) {
+      if (!federationDispatcher) {
+        log("federation/outbox: configured but dispatcher unavailable");
+      } else {
+        federationOutboxWorker?.stop();
+        federationOutboxWorker = startFederationOutboxWorker({
+          db,
+          dispatch: async (item) => {
+            if (federationGlobalDisabled) {
+              return {
+                ok: false,
+                retryAt: Date.now() + 10_000,
+                error: "federation_globally_disabled",
+              };
+            }
+            return federationDispatcher.dispatch(item);
+          },
+          log,
+          intervalMs: config.federation.outbox.intervalMs,
+          maxBatch: config.federation.outbox.maxBatch,
+        });
+        void federationOutboxWorker.tick().catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          log(`federation/outbox: initial tick failed: ${message}`);
+        });
+        log(
+          "federation/outbox: started " +
+            `intervalMs=${config.federation.outbox.intervalMs} ` +
+            `maxBatch=${config.federation.outbox.maxBatch} ` +
+            `requestTimeoutMs=${config.federation.outbox.requestTimeoutMs}`,
+        );
+      }
+    } else if (config.federation.enabled) {
+      log("federation/outbox: disabled by config");
+    }
+
+    if (config.federation.enabled) {
+      webhookDeliveryWorker?.stop();
+      webhookDeliveryWorker = startWebhookDeliveryWorker({
+        db,
+        stateDir: paths.stateDir,
+        localInstanceId: config.federation.localInstanceId,
+        getSigningMaterial: async () => {
+          const signingIdentity = await refreshFederationSigningIdentity();
+          if (!signingIdentity) return null;
+          return {
+            privateKey: signingIdentity.privateKey,
+            keyId: signingIdentity.kid,
+          };
+        },
+        webhooksFederatedOnly: config.federation.webhooks.federatedOnly,
+        webhooksExternalEnabled: config.federation.webhooks.externalEnabled,
+        isFederationEgressDisabled: () => federationGlobalDisabled,
+        allowInsecureHttp: config.federation.webhooks.allowInsecureHttpDev,
+        intervalMs: config.federation.outbox.intervalMs,
+        maxBatch: config.federation.outbox.maxBatch,
+        requestTimeoutMs: config.federation.outbox.requestTimeoutMs,
+        connectTimeoutMs: 3_000,
+        readTimeoutMs: 8_000,
+        maxResponseBytes: 32_768,
+        log,
+      });
+      void webhookDeliveryWorker.tick().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`webhook/worker: initial tick failed: ${message}`);
+      });
+    }
   };
 
   const deactivateServices = async (reason?: string) => {
@@ -502,6 +742,10 @@ export async function startGateway(params: { configPath: string; port?: number; 
     releaseActiveLease();
     isStandby = true;
     nodeWsGateway.closeNodeConnections("gateway entering standby");
+    federationOutboxWorker?.stop();
+    federationOutboxWorker = null;
+    webhookDeliveryWorker?.stop();
+    webhookDeliveryWorker = null;
     processNotifier?.stop();
     processNotifier = null;
     scheduler?.stop();
@@ -530,13 +774,24 @@ export async function startGateway(params: { configPath: string; port?: number; 
   };
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const restartPeerUrl = normalizeHttpBaseUrl(process.env.NEXUS_HA_PEER_URL ?? "");
+  const peerControlPlaneApiKey =
+    (
+      process.env.NEXUS_HTTP_API_KEY ??
+      process.env.NEXUS_HTTP_AUTH_TOKEN ??
+      process.env.NEXUS_DASHBOARD_PASSWORD ??
+      ""
+    ).trim() || null;
   let restartInProgress = false;
 
   const fetchText = async (url: string, init: RequestInit, timeoutMs: number): Promise<{ ok: boolean; status: number; text: string }> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
+      const headers = new Headers(init.headers ?? {});
+      if (peerControlPlaneApiKey && !headers.has("authorization")) {
+        headers.set("authorization", `Bearer ${peerControlPlaneApiKey}`);
+      }
+      const res = await fetch(url, { ...init, headers, signal: controller.signal });
       const text = await res.text();
       return { ok: res.ok, status: res.status, text };
     } catch (err) {

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/portable-manifest.schema.json",
+  "title": "Nexus Portable Launcher Manifest",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runtimeVersion",
+    "instanceMode",
+    "state",
+    "entrypoint"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "portable.v1"
+    },
+    "runtimeVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instanceMode": {
+      "type": "string",
+      "enum": [
+        "portable",
+        "portable_federated",
+        "execution_node_host"
+      ]
+    },
+    "profile": {
+      "type": "string",
+      "enum": [
+        "primary",
+        "standby",
+        "monetization",
+        "service_custom",
+        "portable",
+        "execution_node_host"
+      ]
+    },
+    "federation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "requiresOperatorApproval": {
+          "type": "boolean",
+          "default": true
+        },
+        "peerSetRef": {
+          "type": "string"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "encrypted",
+        "mountPath"
+      ],
+      "properties": {
+        "encrypted": {
+          "type": "boolean"
+        },
+        "mountPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cipher": {
+          "type": "string",
+          "default": "aes-256-gcm"
+        }
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runtimeSha256": {
+          "type": "string"
+        },
+        "manifestSha256": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -65,6 +65,82 @@ const MaintenanceSchema = z
   })
   .default({});
 
+const RuntimeProfileSchema = z.enum([
+  "standard",
+  "primary",
+  "standby",
+  "monetization",
+  "service_custom",
+  "portable",
+  "execution_node_host",
+]);
+
+const RuntimeSchema = z
+  .object({
+    profile: RuntimeProfileSchema.default("primary"),
+  })
+  .default({});
+
+const FederationTrustStateSchema = z.enum(["pending", "trusted", "revoked", "quarantined"]);
+
+const FederationPeerSchema = z.object({
+  id: z.string().min(1),
+  endpoint: EnvString.pipe(z.string().url()),
+  signingKey: EnvString.pipe(z.string().min(1)),
+  trustState: FederationTrustStateSchema.default("pending"),
+  mtlsRequired: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+  createdAt: z.number().int().nonnegative().optional(),
+  updatedAt: z.number().int().nonnegative().optional(),
+});
+
+const FederationTransportSchema = z
+  .object({
+    adapter: z.enum(["federation_http"]).default("federation_http"),
+    webhookFirst: z.boolean().default(true),
+    pollingFallbackEnabled: z.boolean().default(true),
+    requireMtls: z.boolean().default(true),
+    allowInsecureSignedOnlyDev: z.boolean().default(false),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.requireMtls && !value.allowInsecureSignedOnlyDev) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["requireMtls"],
+        message: "requireMtls=false requires explicit allowInsecureSignedOnlyDev=true override",
+      });
+    }
+  })
+  .default({});
+
+const FederationWebhookSchema = z
+  .object({
+    federatedOnly: z.boolean().default(true),
+    externalEnabled: z.boolean().default(false),
+    allowInsecureHttpDev: z.boolean().default(false),
+  })
+  .default({});
+
+const FederationOutboxSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    intervalMs: z.number().int().positive().default(5_000),
+    maxBatch: z.number().int().positive().default(20),
+    requestTimeoutMs: z.number().int().positive().default(10_000),
+  })
+  .default({});
+
+const FederationSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    localInstanceId: z.string().min(1).default("local"),
+    transport: FederationTransportSchema,
+    webhooks: FederationWebhookSchema,
+    outbox: FederationOutboxSchema,
+    peers: z.array(FederationPeerSchema).default([]),
+  })
+  .default({});
+
 const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
@@ -101,6 +177,8 @@ export const ConfigSchema = z.object({
   stateDir: EnvString.optional(),
   workspaceDir: EnvString.optional(),
   codeDir: EnvString.optional(),
+  runtime: RuntimeSchema,
+  federation: FederationSchema,
   llm: z
     .object({
       openaiCompat: OpenAICompatProviderSchema,

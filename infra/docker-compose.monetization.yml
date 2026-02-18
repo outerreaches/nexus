@@ -1,0 +1,7 @@
+services:
+  nexus:
+    command: ["gateway", "--verbose", "--profile", "monetization"]
+    environment:
+      NEXUS_ALLOW_SHELL_EXEC: "0"
+      NEXUS_ALLOW_CODE_WRITE: "0"
+      NEXUS_PROACTIVE: "1"

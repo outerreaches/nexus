@@ -1,4 +1,5 @@
 import type { Tool, ToolContext } from "../core/tools.js";
+import { evaluateUnifiedFirewallPolicy } from "../firewall/policy.js";
 import { NodeRegistry } from "./registry.js";
 import type { NodeDescriptor, NodeRouter } from "./types.js";
 import { NodeRoutingError } from "./types.js";
@@ -10,7 +11,10 @@ type ExecuteOnNodeParams = {
   ctx: ToolContext;
 };
 
+// eslint-disable-next-line security/detect-unsafe-regex -- token parser with bounded character classes only.
 const SYMBOL_REF_PATTERN = /\{\{[a-z]+:[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)?\}\}/g;
+// eslint-disable-next-line security/detect-unsafe-regex -- bounded by explicit template delimiters.
+const SECRET_REF_PATTERN = /\{\{secret:[^}\n\r]+\}\}/i;
 type RoutingSecurityConstraints = {
   requireNexusBackend: boolean;
   requireHermesMode: boolean;
@@ -28,9 +32,10 @@ export class NodeToolRouter implements NodeRouter {
   async routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string> {
     const remoteToolName = this.resolveRemoteToolName(tool.name);
     const requiredSymbols = this.extractRequiredSymbols(args);
+    const carriesSecretRefs = this.containsSecretReferences(args);
     const constraints = this.readRoutingSecurityConstraints(args);
-    const node = this.selectNode(remoteToolName, args, ctx, requiredSymbols, constraints);
-    this.assertNodeCanExecute(node, remoteToolName, ctx, constraints);
+    const node = this.selectNode(remoteToolName, args, ctx, requiredSymbols, constraints, carriesSecretRefs);
+    this.assertNodeCanExecute(node, remoteToolName, ctx, constraints, carriesSecretRefs);
     this.deps.log(
       `nodes: route request node=${node.id} tool=${tool.name} remote_tool=${remoteToolName} backend=${node.backend}`,
     );
@@ -63,13 +68,14 @@ export class NodeToolRouter implements NodeRouter {
     ctx: ToolContext,
     requiredSymbols: string[],
     constraints: RoutingSecurityConstraints,
+    carriesSecretRefs: boolean,
   ): NodeDescriptor {
     if (ctx.executionNode) {
       const node = this.deps.registry.get(ctx.executionNode);
       if (!node) {
         throw new NodeRoutingError("NODE_OFFLINE", `Node ${ctx.executionNode} is not registered.`);
       }
-      this.assertSecurityConstraintsSatisfied(node, constraints);
+      this.assertSecurityConstraintsSatisfied(node, constraints, carriesSecretRefs);
       this.assertRequiredSymbolsSatisfied(node, requiredSymbols);
       return node;
     }
@@ -80,7 +86,7 @@ export class NodeToolRouter implements NodeRouter {
       if (!node) {
         throw new NodeRoutingError("NODE_OFFLINE", `Node ${explicitNodeId} is not registered.`);
       }
-      this.assertSecurityConstraintsSatisfied(node, constraints);
+      this.assertSecurityConstraintsSatisfied(node, constraints, carriesSecretRefs);
       this.assertRequiredSymbolsSatisfied(node, requiredSymbols);
       return node;
     }
@@ -96,7 +102,9 @@ export class NodeToolRouter implements NodeRouter {
     const nodes = this.deps.registry.list(500);
     const capableOnline = nodes.filter(
       (node) =>
-        node.status === "online" && this.nodeHasCapability(node, toolName) && this.nodeSatisfiesSecurityConstraints(node, constraints),
+        node.status === "online" &&
+        this.nodeHasCapability(node, toolName) &&
+        this.nodeSatisfiesSecurityConstraints(node, constraints, carriesSecretRefs),
     );
     if (requiredSymbols.length > 0) {
       const cacheReady = capableOnline.filter((node) => this.getCachedSymbolSet(node) !== null);
@@ -122,6 +130,12 @@ export class NodeToolRouter implements NodeRouter {
           constraints.requireHermesMode
             ? "No online node satisfies required security constraints (backend=nexus + hermes.mode.hermes)."
             : "No online node satisfies required security constraints (backend=nexus).",
+        );
+      }
+      if (carriesSecretRefs) {
+        throw new NodeRoutingError(
+          "SECURITY_CONSTRAINT_UNSATISFIED",
+          "No online node satisfies secret-bearing routing constraints (backend=nexus + hermes.mode.hermes).",
         );
       }
       throw new NodeRoutingError(
@@ -156,6 +170,7 @@ export class NodeToolRouter implements NodeRouter {
     toolName: string,
     ctx: ToolContext,
     constraints: RoutingSecurityConstraints,
+    carriesSecretRefs: boolean,
   ): void {
     if (node.status !== "online") {
       throw new NodeRoutingError("NODE_OFFLINE", `Node ${node.id} is ${node.status}.`);
@@ -166,7 +181,7 @@ export class NodeToolRouter implements NodeRouter {
         `Node ${node.id} does not advertise tool capability ${toolName}.`,
       );
     }
-    this.assertSecurityConstraintsSatisfied(node, constraints);
+    this.assertSecurityConstraintsSatisfied(node, constraints, carriesSecretRefs);
 
     // If a firewall session is present, avoid silently downgrading to transparent mode.
     if (ctx.firewallSession && node.firewallMode === "transparent") {
@@ -185,21 +200,46 @@ export class NodeToolRouter implements NodeRouter {
     return node.capabilities.includes(capability);
   }
 
-  private nodeSatisfiesSecurityConstraints(node: NodeDescriptor, constraints: RoutingSecurityConstraints): boolean {
+  private nodeSatisfiesSecurityConstraints(
+    node: NodeDescriptor,
+    constraints: RoutingSecurityConstraints,
+    carriesSecretRefs: boolean,
+  ): boolean {
     if (constraints.requireNexusBackend && node.backend !== "nexus") return false;
-    if (!constraints.requireHermesMode) return true;
-    if (node.backend !== "nexus") return false;
-    if (this.nodeHasCapabilityFlag(node, "hermes.mode.hermes")) return true;
-    return node.firewallMode === "hermes";
+    const hasHermesCapability = this.nodeHasCapabilityFlag(node, "hermes.mode.hermes");
+    const effectiveMode = hasHermesCapability ? "hermes" : node.firewallMode;
+    const decision = evaluateUnifiedFirewallPolicy({
+      boundary: "node",
+      direction: "egress",
+      methodOrEvent: "tool.dispatch",
+      transportKind: "node_ws",
+      nodeFirewallMode: effectiveMode,
+      requiresHermesMode: constraints.requireHermesMode,
+      carriesSecretRefs,
+    });
+    return decision.allowed;
   }
 
-  private assertSecurityConstraintsSatisfied(node: NodeDescriptor, constraints: RoutingSecurityConstraints): void {
-    if (this.nodeSatisfiesSecurityConstraints(node, constraints)) return;
+  private assertSecurityConstraintsSatisfied(
+    node: NodeDescriptor,
+    constraints: RoutingSecurityConstraints,
+    carriesSecretRefs: boolean,
+  ): void {
+    if (this.nodeSatisfiesSecurityConstraints(node, constraints, carriesSecretRefs)) return;
+    const hasHermesCapability = this.nodeHasCapabilityFlag(node, "hermes.mode.hermes");
+    const effectiveMode = hasHermesCapability ? "hermes" : node.firewallMode;
+    const decision = evaluateUnifiedFirewallPolicy({
+      boundary: "node",
+      direction: "egress",
+      methodOrEvent: "tool.dispatch",
+      transportKind: "node_ws",
+      nodeFirewallMode: effectiveMode,
+      requiresHermesMode: constraints.requireHermesMode,
+      carriesSecretRefs,
+    });
     throw new NodeRoutingError(
       "SECURITY_CONSTRAINT_UNSATISFIED",
-      constraints.requireHermesMode
-        ? `Node ${node.id} does not satisfy required backend=nexus + hermes.mode.hermes constraints.`
-        : `Node ${node.id} does not satisfy required backend=nexus constraint.`,
+      `Node ${node.id} does not satisfy required security constraints (${decision.reason}).`,
     );
   }
 
@@ -246,6 +286,27 @@ export class NodeToolRouter implements NodeRouter {
     };
     visit(value);
     return [...out.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  private containsSecretReferences(value: unknown): boolean {
+    let found = false;
+    const visit = (input: unknown): void => {
+      if (found) return;
+      if (typeof input === "string") {
+        if (SECRET_REF_PATTERN.test(input)) {
+          found = true;
+        }
+        return;
+      }
+      if (Array.isArray(input)) {
+        for (const item of input) visit(item);
+        return;
+      }
+      if (!input || typeof input !== "object") return;
+      for (const nested of Object.values(input as Record<string, unknown>)) visit(nested);
+    };
+    visit(value);
+    return found;
   }
 
   private getCachedSymbolSet(node: NodeDescriptor): Set<string> | null {

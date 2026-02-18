@@ -9,12 +9,21 @@ import type { ModelRoutingMode } from "../llm/model-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
+import { registerGatewayAuth } from "./auth.js";
 
 export type GatewayHttpDeps = {
   port: number;
   stateDir: string;
   getStatus: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   log: (msg: string) => void;
+  federationLocalInstanceId?: string;
+  federationWebhooksFederatedOnly?: boolean;
+  federationWebhooksExternalEnabled?: boolean;
+  federationAllowInsecureTransportDev?: boolean;
+  federationAllowInsecureWebhookHttpDev?: boolean;
+  runtimeProfile?: string;
+  getFederationBreakglassState?: () => { globalDisable: boolean };
+  setFederationGlobalDisable?: (disabled: boolean) => { globalDisable: boolean };
   db?: NexusDatabase;
   processManager?: ProcessManager;
   agentTracker?: AgentTracker;
@@ -28,6 +37,7 @@ export async function startHttpServer(
   deps: GatewayHttpDeps,
 ): Promise<{ stop: () => Promise<void>; listen: () => ReturnType<typeof serve>; app: Hono }> {
   const app = new Hono();
+  registerGatewayAuth(app, deps);
 
   // Keep this module as pure HTTP bootstrap. Node WebSocket transport is wired
   // separately in gateway startup to keep boundaries explicit.

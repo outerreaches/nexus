@@ -10,6 +10,8 @@
 #   DEACTIVATE_TIMEOUT - Seconds to wait for graceful deactivation (default: 5)
 #   ENABLE_FAILBACK    - Enable automatic failback to original primary (default: false)
 #   FAILBACK_THRESHOLD - Consecutive healthy checks before failback (default: 3)
+#   NEXUS_HA_API_KEY   - Optional bearer token for /api/* control-plane calls
+#                        (fallback: NEXUS_HTTP_API_KEY, NEXUS_HTTP_AUTH_TOKEN, NEXUS_DASHBOARD_PASSWORD)
 
 set -e
 
@@ -21,6 +23,7 @@ RECOVERY_DELAY="${RECOVERY_DELAY:-30}"
 DEACTIVATE_TIMEOUT="${DEACTIVATE_TIMEOUT:-5}"
 ENABLE_FAILBACK="${ENABLE_FAILBACK:-false}"
 FAILBACK_THRESHOLD="${FAILBACK_THRESHOLD:-3}"
+CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
 
 consecutive_failures=0
 current_primary="$PRIMARY_URL"
@@ -32,9 +35,17 @@ log() {
   echo "[watchdog] $(date -Iseconds) $1"
 }
 
+curl_with_auth() {
+  if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+    curl -H "authorization: Bearer ${CONTROL_PLANE_API_KEY}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 check_live() {
   url="$1"
-  if curl -sf --max-time 5 "${url}/health/live" > /dev/null 2>&1; then
+  if curl_with_auth -sf --max-time 5 "${url}/health/live" > /dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -42,7 +53,7 @@ check_live() {
 
 check_traffic() {
   url="$1"
-  if curl -sf --max-time 5 "${url}/health/traffic" > /dev/null 2>&1; then
+  if curl_with_auth -sf --max-time 5 "${url}/health/traffic" > /dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -54,7 +65,7 @@ wait_for_active_mode() {
   i=0
   while [ "$i" -lt "$attempts" ]; do
     i=$((i + 1))
-    mode_response=$(curl -sf --max-time 5 "${url}/api/mode" 2>&1) || mode_response=""
+    mode_response=$(curl_with_auth -sf --max-time 5 "${url}/api/mode" 2>&1) || mode_response=""
     case "$mode_response" in
       *'"mode":"active"'*)
         return 0
@@ -68,7 +79,7 @@ wait_for_active_mode() {
 deactivate_primary() {
   url="$1"
   log "Attempting graceful deactivation of ${url}"
-  response=$(curl -sf --max-time "$DEACTIVATE_TIMEOUT" -X POST "${url}/api/deactivate" 2>&1) || {
+  response=$(curl_with_auth -sf --max-time "$DEACTIVATE_TIMEOUT" -X POST "${url}/api/deactivate" 2>&1) || {
     log "WARN: Failed to deactivate primary (may be down): $response"
     return 1
   }
@@ -79,7 +90,7 @@ deactivate_primary() {
 activate_standby() {
   url="$1"
   log "Activating standby at ${url}"
-  response=$(curl -sf --max-time 10 -X POST "${url}/api/activate" 2>&1) || {
+  response=$(curl_with_auth -sf --max-time 10 -X POST "${url}/api/activate" 2>&1) || {
     log "ERROR: Failed to activate standby: $response"
     return 1
   }
@@ -95,7 +106,7 @@ notify_ha_event() {
   reason="$5"
 
   log "Notifying HA event: $event"
-  curl -sf --max-time 5 -X POST "${url}/api/ha/event" \
+  curl_with_auth -sf --max-time 5 -X POST "${url}/api/ha/event" \
     -H "Content-Type: application/json" \
     -d "{\"event\":\"$event\",\"from\":\"$from\",\"to\":\"$to\",\"reason\":\"$reason\"}" \
     > /dev/null 2>&1 || log "WARN: Failed to notify HA event"
@@ -235,6 +246,9 @@ log "Check interval: ${CHECK_INTERVAL}s"
 log "Failure threshold: $FAILURE_THRESHOLD"
 log "Deactivate timeout: ${DEACTIVATE_TIMEOUT}s"
 log "Failback enabled: $ENABLE_FAILBACK"
+if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+  log "Control-plane auth: enabled (bearer)"
+fi
 if [ "$ENABLE_FAILBACK" = "true" ]; then
   log "Failback threshold: $FAILBACK_THRESHOLD"
 fi
