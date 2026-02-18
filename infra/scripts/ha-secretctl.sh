@@ -107,7 +107,15 @@ authenticate_operator() {
 }
 
 run_sidecar_tsx() {
-  "${COMPOSE_CMD[@]}" exec -T secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx'
+  local -a env_args
+  env_args=()
+  local var_name
+  while IFS= read -r var_name; do
+    [[ -n "$var_name" ]] || continue
+    env_args+=(-e "$var_name")
+  done < <(compgen -v | grep '^SECRETCTL_' || true)
+
+  "${COMPOSE_CMD[@]}" exec -T "${env_args[@]}" secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx'
 }
 
 print_usage() {
