@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Provision a Nexus VM on a libvirt host and optionally deploy a Nexus runtime profile.
+# Provision a Nexus VM on a libvirt host and optionally deploy Nexus HA
+# (primary + standby + sidecar + TLS).
 # Designed for iterative topology testing (service_custom, standby, monetization, etc.).
 
 set -euo pipefail
@@ -40,7 +41,7 @@ VM options:
   --force-recreate                 Destroy existing VM and recreate disk/ISO volumes
 
 Deployment options (enabled by default):
-  --no-deploy                      Only provision VM, skip git clone/profile deploy
+  --no-deploy                      Only provision VM, skip git clone/HA deploy
   --profile <profile>              standard|primary|standby|monetization|service_custom|portable
                                    (default: service_custom)
   --repo-url <url>                 Git repo URL (default: https://github.com/outerreaches/nexus.git)
@@ -48,9 +49,9 @@ Deployment options (enabled by default):
   --code-dir <path>                Guest code dir (default: /data/code)
   --state-dir <path>               Guest state dir (default: /data/nexus)
   --workspace-dir <path>           Guest workspace dir (default: /data/workspace)
-  --deploy-dir <path>              Guest deploy dir (default: ~/nexus-deploy)
+  --deploy-dir <path>              Legacy path (unused by HA deploy; default: ~/nexus-deploy)
   --port <port>                    Host port mapped by guest compose (default: 18789)
-  --compose-project <name>         Compose project name (default: nexus)
+  --compose-project <name>         Compose project name (default: infra)
   --wait-ssh-seconds <seconds>     Max wait for guest SSH (default: 360)
   --skip-init                      Skip headless nexus init (default: auto-init if missing files)
   --init-agent-name <name>         Headless init agent identity name (default: Nexus)
@@ -118,7 +119,7 @@ STATE_DIR="/data/nexus"
 WORKSPACE_DIR="/data/workspace"
 DEPLOY_DIR='~/nexus-deploy'
 PORT="18789"
-COMPOSE_PROJECT="nexus"
+COMPOSE_PROJECT="infra"
 WAIT_SSH_SECONDS="360"
 SKIP_INIT=0
 INIT_AGENT_NAME="Nexus"
@@ -515,7 +516,7 @@ if (( DO_DEPLOY == 0 )); then
   exit 0
 fi
 
-log "Bootstrapping guest repo + profile deploy (profile=${PROFILE})"
+log "Bootstrapping guest repo + HA deploy (runtime.profile=${PROFILE})"
 ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" \
   REPO_URL="$(printf '%q' "$REPO_URL")" \
   REPO_BRANCH="$(printf '%q' "$REPO_BRANCH")" \
@@ -596,24 +597,42 @@ else
   fi
 fi
 
-DEPLOY_SCRIPT="$CODE_DIR/infra/scripts/deploy-instance-profile.sh"
-if [[ ! -x "$DEPLOY_SCRIPT" ]]; then
-  chmod +x "$DEPLOY_SCRIPT"
+PULL_DEPLOY_SCRIPT="$CODE_DIR/infra/scripts/pull-deploy.sh"
+TLS_SCRIPT="$CODE_DIR/infra/scripts/ha-generate-tls-cert.sh"
+BASE_COMPOSE="$CODE_DIR/infra/docker-compose.ha.yml"
+SIDECAR_COMPOSE="$CODE_DIR/infra/docker-compose.ha.sidecar.yml"
+TLS_COMPOSE="$CODE_DIR/infra/docker-compose.ha.tls.yml"
+TLS_CERT_PEM="$CODE_DIR/infra/haproxy/certs/nexus.pem"
+
+for required in "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$BASE_COMPOSE" "$SIDECAR_COMPOSE" "$TLS_COMPOSE"; do
+  [[ -f "$required" ]] || {
+    echo "missing required HA deploy asset: $required" >&2
+    exit 1
+  }
+done
+chmod +x "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT"
+
+if [[ ! -f "$CODE_DIR/.env" ]]; then
+  if [[ -f "$CODE_DIR/.env.example" ]]; then
+    cp "$CODE_DIR/.env.example" "$CODE_DIR/.env"
+    echo "created $CODE_DIR/.env from .env.example (fill secrets before production use)"
+  else
+    : > "$CODE_DIR/.env"
+    echo "created empty $CODE_DIR/.env (fill required secrets before production use)"
+  fi
 fi
 
-# First render writes compose + baseline config if missing.
-"$DEPLOY_SCRIPT" \
-  --profile "$PROFILE" \
-  --deploy-dir "$DEPLOY_DIR" \
-  --code-dir "$CODE_DIR" \
-  --state-dir "$STATE_DIR" \
-  --workspace-dir "$WORKSPACE_DIR" \
-  --port "$PORT" \
-  --compose-project "$COMPOSE_PROJECT" \
-  --render-only
+if [[ ! -s "$TLS_CERT_PEM" ]]; then
+  "$TLS_SCRIPT" --san "$(hostname -f)" --san "$(hostname)"
+fi
+chmod 644 "$TLS_CERT_PEM" 2>/dev/null || sudo chmod 644 "$TLS_CERT_PEM" 2>/dev/null || true
+
+CONFIG_FILE="$STATE_DIR/nexus.json"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  printf '{}\n' > "$CONFIG_FILE"
+fi
 
 if [[ "$FEDERATION_ENABLE" == "1" ]]; then
-  CONFIG_FILE="$STATE_DIR/nexus.json"
   TMP_FILE="$(mktemp)"
   jq \
     --arg profile "$PROFILE" \
@@ -640,6 +659,15 @@ if [[ "$FEDERATION_ENABLE" == "1" ]]; then
       | .federation.outbox.intervalMs = (.federation.outbox.intervalMs // 5000)
       | .federation.outbox.maxBatch = (.federation.outbox.maxBatch // 20)
       | .federation.outbox.requestTimeoutMs = (.federation.outbox.requestTimeoutMs // 10000)
+    ' "$CONFIG_FILE" > "$TMP_FILE"
+  mv "$TMP_FILE" "$CONFIG_FILE"
+else
+  TMP_FILE="$(mktemp)"
+  jq \
+    --arg profile "$PROFILE" \
+    '
+      .runtime = (.runtime // {})
+      | .runtime.profile = $profile
     ' "$CONFIG_FILE" > "$TMP_FILE"
   mv "$TMP_FILE" "$CONFIG_FILE"
 fi
@@ -679,10 +707,11 @@ if [[ "$SKIP_INIT" != "1" ]]; then
         }
       }' > "$INIT_JSON"
 
-    (
-      cd "$DEPLOY_DIR"
-      docker compose -p "$COMPOSE_PROJECT" run --rm --no-deps nexus init --onboarding-json "$INIT_JSON"
-    )
+    docker compose -p "$COMPOSE_PROJECT" \
+      -f "$BASE_COMPOSE" \
+      -f "$SIDECAR_COMPOSE" \
+      -f "$TLS_COMPOSE" \
+      run --rm --no-deps nexus-primary init --onboarding-json "$INIT_JSON"
     rm -f "$INIT_JSON"
   fi
 fi
@@ -705,15 +734,8 @@ exec infra/scripts/ha-secretctl.sh "$@"
 WRAP
 chmod +x "$HOME/secretctl.sh"
 
-# Real deployment run.
-"$DEPLOY_SCRIPT" \
-  --profile "$PROFILE" \
-  --deploy-dir "$DEPLOY_DIR" \
-  --code-dir "$CODE_DIR" \
-  --state-dir "$STATE_DIR" \
-  --workspace-dir "$WORKSPACE_DIR" \
-  --port "$PORT" \
-  --compose-project "$COMPOSE_PROJECT"
+# Real deployment run (HA + sidecar + TLS only).
+CODE_DIR="$CODE_DIR" COMPOSE_PROJECT="$COMPOSE_PROJECT" "$PULL_DEPLOY_SCRIPT"
 REMOTE
 
 log "Provision + deploy complete"

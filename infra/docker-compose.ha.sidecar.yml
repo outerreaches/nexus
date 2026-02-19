@@ -1,9 +1,9 @@
-# Optional HA overlay: run Nexus secret sidecar on the existing instance
+# HA overlay: run Nexus secret sidecar on the existing instance
 # (same VM/host, process/API boundary; no additional VM required).
 #
 # Usage:
-#   COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml" \
-#   REQUIRE_TLS_OVERLAY=0 infra/scripts/ha-rollout.sh deploy HEAD
+#   COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml:/data/code/infra/docker-compose.ha.tls.yml" \
+#   infra/scripts/ha-rollout.sh deploy HEAD
 #
 # Provider profile example:
 #   kind: sidecar_http

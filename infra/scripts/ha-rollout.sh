@@ -16,10 +16,7 @@
 #
 # Environment overrides:
 #   CODE_DIR=/data/code
-#   COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.tls.yml
-#   # optional sidecar overlay:
-#   # COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml
-#   COMPOSE_FILE=/data/code/infra/docker-compose.ha.yml   # legacy single-file override (still supported)
+#   COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml:/data/code/infra/docker-compose.ha.tls.yml
 #   COMPOSE_PROJECT=infra
 #   STATE_DIR=/data/nexus
 #   STATE_FILE=/data/nexus/deploy-state.env
@@ -31,7 +28,6 @@
 #   SKIP_WS_SMOKE=0                   # set to 1 to skip websocket smoke probe
 #   WS_SMOKE_WARN_ONLY=0              # set to 1 to warn (not fail) on websocket smoke timeout
 #   WS_SMOKE_ATTEMPT_TIMEOUT_MS=8000  # per-attempt websocket probe timeout in milliseconds
-#   REQUIRE_TLS_OVERLAY=1
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
 #   ROLLBACK_RESTORE_GIT=1            # set to 0 to keep current checkout on failed deploy rollback
 #   NEXUS_HA_API_KEY=<token>            # optional bearer token for /api/* control-plane calls
@@ -43,8 +39,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 CODE_DIR="${CODE_DIR:-${DEFAULT_CODE_DIR}}"
-DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
-COMPOSE_FILES_RAW="${COMPOSE_FILES:-${COMPOSE_FILE:-${DEFAULT_COMPOSE_FILES}}}"
+DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
+COMPOSE_FILES_RAW="${COMPOSE_FILES:-${DEFAULT_COMPOSE_FILES}}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/deploy-state.env}"
@@ -59,13 +55,13 @@ WS_SMOKE_WARN_ONLY="${WS_SMOKE_WARN_ONLY:-0}"
 WS_SMOKE_ATTEMPT_TIMEOUT_MS="${WS_SMOKE_ATTEMPT_TIMEOUT_MS:-8000}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
-REQUIRE_TLS_OVERLAY="${REQUIRE_TLS_OVERLAY:-1}"
 ROLLBACK_RESTORE_GIT="${ROLLBACK_RESTORE_GIT:-1}"
 CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
 
 declare -a COMPOSE_FILES_LIST=()
 declare -a COMPOSE_BASE_CMD=()
 COMPOSE_HAS_TLS_OVERLAY=0
+COMPOSE_HAS_SIDECAR_OVERLAY=0
 
 LAST_GOOD_SHA=""
 LAST_DEPLOY_SHA=""
@@ -151,10 +147,10 @@ init_compose_files() {
   local raw="${COMPOSE_FILES_RAW}"
   local file
   local -a _raw_files=()
-  local tls_overlay_file="${CODE_DIR}/infra/docker-compose.ha.tls.yml"
   COMPOSE_FILES_LIST=()
   COMPOSE_BASE_CMD=(docker compose -p "$COMPOSE_PROJECT")
   COMPOSE_HAS_TLS_OVERLAY=0
+  COMPOSE_HAS_SIDECAR_OVERLAY=0
 
   IFS=':' read -r -a _raw_files <<< "$raw"
   for file in "${_raw_files[@]}"; do
@@ -164,6 +160,7 @@ init_compose_files() {
     COMPOSE_BASE_CMD+=(-f "$file")
     case "$file" in
       *docker-compose.ha.tls.yml) COMPOSE_HAS_TLS_OVERLAY=1 ;;
+      *docker-compose.ha.sidecar.yml) COMPOSE_HAS_SIDECAR_OVERLAY=1 ;;
     esac
   done
 
@@ -171,13 +168,12 @@ init_compose_files() {
     fail "no compose files configured (COMPOSE_FILES='${COMPOSE_FILES_RAW}')"
   fi
 
-  # Compatibility automation: if legacy config selected only the base file,
-  # auto-append TLS overlay when required and available.
-  if [ "$REQUIRE_TLS_OVERLAY" = "1" ] && [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ] && [ -f "$tls_overlay_file" ]; then
-    COMPOSE_FILES_LIST+=("$tls_overlay_file")
-    COMPOSE_BASE_CMD+=(-f "$tls_overlay_file")
-    COMPOSE_HAS_TLS_OVERLAY=1
-    warn "auto-appended TLS overlay compose file: $tls_overlay_file"
+  if [ "$COMPOSE_HAS_SIDECAR_OVERLAY" -eq 0 ]; then
+    fail "sidecar overlay not selected in COMPOSE_FILES. Include infra/docker-compose.ha.sidecar.yml."
+  fi
+
+  if [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ]; then
+    fail "TLS overlay not selected in COMPOSE_FILES. Include infra/docker-compose.ha.tls.yml."
   fi
 }
 
@@ -202,14 +198,7 @@ refresh_secret_sidecar_if_present() {
 }
 
 ensure_tls_preflight() {
-  if [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 0 ]; then
-    if [ "$REQUIRE_TLS_OVERLAY" = "1" ]; then
-      fail "TLS overlay not selected in COMPOSE_FILES (set REQUIRE_TLS_OVERLAY=0 to override for non-TLS labs)."
-    fi
-    warn "TLS overlay not selected in COMPOSE_FILES; external wss:// node connectivity on :18790 may fail."
-    warn "recommended: export COMPOSE_FILES='${DEFAULT_COMPOSE_FILES}' or keep REQUIRE_TLS_OVERLAY=1"
-    return 0
-  fi
+  [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 1 ] || fail "TLS overlay not selected in COMPOSE_FILES"
   if [ ! -f "$TLS_CERT_PEM" ]; then
     fail "TLS overlay selected but cert bundle missing: $TLS_CERT_PEM (run infra/scripts/ha-generate-tls-cert.sh)"
   fi

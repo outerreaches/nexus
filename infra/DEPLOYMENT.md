@@ -492,7 +492,7 @@ ssh nexus@<vm-ip> "/home/nexus/pull-deploy.sh"
 # Equivalent manual form (if helper is unavailable)
 cd /data/code
 git pull
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 ```
 
 `/home/nexus/pull-deploy.sh` also prints the active gateway TLS fingerprint after deploy to simplify node pin verification updates.
@@ -532,7 +532,7 @@ git log --oneline -10  # Find the good commit
 git push --force host main
 # Then on VM:
 cd /data/code && git fetch && git reset --hard host/main
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 ```
 
 ### 6.4 VM Snapshots
@@ -635,10 +635,10 @@ ln -sf ~/nexus-deploy/.env /data/code/.env
 ```bash
 # On VM - use a fixed compose project name to avoid parallel stacks
 cd /data/code
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
 
 # Verify services and HA proxy endpoints
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.tls.yml ps
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml ps
 curl -s http://localhost:18789/api/mode
 curl -s http://localhost:18789/health/live
 curl -s http://localhost:18789/health/traffic
@@ -651,16 +651,15 @@ curl -s http://localhost:9999/stats | head
 
 Notes:
 - Always use `-p infra` with the HA compose file. Omitting it can leave an old stack running and cause port conflicts.
-- Always include both compose files (`ha.yml` + `ha.tls.yml`) for HA gateway lifecycle operations so :18790 remains exposed for node `wss://` reconnects.
+- Always include all three compose files (`ha.yml` + `ha.sidecar.yml` + `ha.tls.yml`) for HA gateway lifecycle operations.
 - The HA compose file uses bind mounts (`/data/nexus`, `/data/workspace`, `/data/code`) so state survives container recreate/rebuild.
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
-- Deploys should still be performed from the VM host using `ha-rollout.sh apply-local` (now defaults to both compose files and warns/fails on TLS preflight issues).
-- `ha-rollout.sh` enforces TLS overlay by default (`REQUIRE_TLS_OVERLAY=1`). Set `REQUIRE_TLS_OVERLAY=0` only for explicit non-TLS lab runs.
-- For legacy environments still exporting only `COMPOSE_FILE=...ha.yml`, `ha-rollout.sh` auto-appends `infra/docker-compose.ha.tls.yml` when present.
+- Deploys should be performed from the VM host using `ha-rollout.sh apply-local` or `/home/nexus/pull-deploy.sh`.
+- `ha-rollout.sh` and `pull-deploy.sh` now require sidecar and TLS overlays; sidecar-less or TLS-less deploys are unsupported.
 
-### 7.3.0a Secret Sidecar On Existing Instance (No New VM)
+### 7.3.0a Sidecar Requirements On Existing Instance (No New VM)
 
-Use the sidecar overlay when you want process/API boundary secret resolution on the same VM/host as the HA stack.
+The sidecar overlay is mandatory for supported HA deployments.
 
 Overlay file:
 - `infra/docker-compose.ha.sidecar.yml`
@@ -680,13 +679,6 @@ export NEXUS_HA_API_KEY="$NEXUS_HA_API_KEY"
 infra/scripts/ha-rollout.sh deploy HEAD
 infra/scripts/ha-rollout.sh finalize HEAD
 infra/scripts/ha-rollout.sh status
-```
-
-If you intentionally run without TLS overlay in a trusted private network:
-
-```bash
-export COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml"
-export REQUIRE_TLS_OVERLAY=0
 ```
 
 Provider profile (strict + unix socket):
@@ -1197,7 +1189,7 @@ cd ~/nexus-deploy
 docker compose down
 
 # Start HA stack with explicit project name
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d
 ```
 
 ### HA: env file `/data/code/.env` not found
@@ -1247,8 +1239,8 @@ Fix:
 
 ```bash
 cd /data/code
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml up -d --build --force-recreate
-docker compose -p infra -f /data/code/infra/docker-compose.ha.yml ps
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml up -d --build --force-recreate
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml ps
 ```
 
 ### HA: State/data appears missing after switching to HA compose
@@ -1410,23 +1402,22 @@ bash infra/scripts/provision-libvirt-instance.sh \
   --federation-instance-id standby-main
 ```
 
-### Profile-based Deploy/Bootstrap
+### Profile-based Runtime Configuration
 
-Use one script for all runtime profiles:
+Single-instance deployment scripts are retired. Use HA deployment only:
 
 ```bash
-# Primary
-bash infra/scripts/deploy-instance-profile.sh --profile primary
+# VM-local pull/deploy helper
+/home/nexus/pull-deploy.sh
 
-# Standby
-bash infra/scripts/deploy-instance-profile.sh --profile standby
-
-# Service custom
-bash infra/scripts/deploy-instance-profile.sh --profile service_custom
-
-# Monetization shortcut (uses isolated state/workspace defaults)
-bash infra/scripts/deploy-monetization-mode.sh
+# Or rollout-based deploy
+cd /data/code
+infra/scripts/ha-rollout.sh deploy HEAD
+infra/scripts/ha-rollout.sh finalize HEAD
 ```
+
+Set runtime profile and federation settings via `/data/nexus/nexus.json` (or
+`infra/scripts/provision-libvirt-instance.sh --profile ...` during provisioning).
 
 Monetization compose overlay (when using shared compose stacks):
 
@@ -1538,6 +1529,6 @@ bash infra/scripts/portable-smoke.sh
 # host dual-VM presence
 bash infra/scripts/host-two-vm-smoke.sh
 
-# Profile bootstrap/render smoke
+# Legacy single-instance deploy retirement smoke
 bash infra/scripts/profile-bootstrap-smoke.sh
 ```
