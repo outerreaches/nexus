@@ -52,6 +52,10 @@ Deployment options (enabled by default):
   --deploy-dir <path>              Legacy path (unused by HA deploy; default: ~/nexus-deploy)
   --port <port>                    Host port mapped by guest compose (default: 18789)
   --compose-project <name>         Compose project name (default: infra)
+  --http-api-key <token>           Seed NEXUS_HTTP_API_KEY + NEXUS_HA_API_KEY into guest .env
+  --credentials-key <value>        Seed NEXUS_CREDENTIALS_KEY into guest .env
+  --no-generate-credentials-key    Disable automatic credential-key generation when missing
+  --require-http-api-key           Require NEXUS_HTTP_API_KEY in preflight checks
   --wait-ssh-seconds <seconds>     Max wait for guest SSH (default: 360)
   --skip-init                      Skip headless nexus init (default: auto-init if missing files)
   --init-agent-name <name>         Headless init agent identity name (default: Nexus)
@@ -120,6 +124,10 @@ WORKSPACE_DIR="/data/workspace"
 DEPLOY_DIR='~/nexus-deploy'
 PORT="18789"
 COMPOSE_PROJECT="infra"
+HTTP_API_KEY=""
+CREDENTIALS_KEY=""
+GENERATE_CREDENTIALS_KEY=1
+REQUIRE_HTTP_API_KEY=0
 WAIT_SSH_SECONDS="360"
 SKIP_INIT=0
 INIT_AGENT_NAME="Nexus"
@@ -230,6 +238,22 @@ while [[ $# -gt 0 ]]; do
     --compose-project)
       COMPOSE_PROJECT="$2"
       shift 2
+      ;;
+    --http-api-key)
+      HTTP_API_KEY="$2"
+      shift 2
+      ;;
+    --credentials-key)
+      CREDENTIALS_KEY="$2"
+      shift 2
+      ;;
+    --no-generate-credentials-key)
+      GENERATE_CREDENTIALS_KEY=0
+      shift
+      ;;
+    --require-http-api-key)
+      REQUIRE_HTTP_API_KEY=1
+      shift
       ;;
     --wait-ssh-seconds)
       WAIT_SSH_SECONDS="$2"
@@ -527,6 +551,10 @@ ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" \
   PROFILE="$(printf '%q' "$PROFILE")" \
   PORT="$(printf '%q' "$PORT")" \
   COMPOSE_PROJECT="$(printf '%q' "$COMPOSE_PROJECT")" \
+  HTTP_API_KEY="$(printf '%q' "$HTTP_API_KEY")" \
+  CREDENTIALS_KEY="$(printf '%q' "$CREDENTIALS_KEY")" \
+  GENERATE_CREDENTIALS_KEY="$(printf '%q' "$GENERATE_CREDENTIALS_KEY")" \
+  REQUIRE_HTTP_API_KEY="$(printf '%q' "$REQUIRE_HTTP_API_KEY")" \
   SKIP_INIT="$(printf '%q' "$SKIP_INIT")" \
   INIT_AGENT_NAME="$(printf '%q' "$INIT_AGENT_NAME")" \
   INIT_USER_NAME="$(printf '%q' "$INIT_USER_NAME")" \
@@ -548,6 +576,10 @@ DEPLOY_DIR="${DEPLOY_DIR}"
 PROFILE="${PROFILE}"
 PORT="${PORT}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT}"
+HTTP_API_KEY="${HTTP_API_KEY}"
+CREDENTIALS_KEY="${CREDENTIALS_KEY}"
+GENERATE_CREDENTIALS_KEY="${GENERATE_CREDENTIALS_KEY}"
+REQUIRE_HTTP_API_KEY="${REQUIRE_HTTP_API_KEY}"
 SKIP_INIT="${SKIP_INIT}"
 INIT_AGENT_NAME="${INIT_AGENT_NAME}"
 INIT_USER_NAME="${INIT_USER_NAME}"
@@ -572,6 +604,50 @@ ensure_writable_dir() {
     return 0
   fi
   return 1
+}
+
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -f "$file" ]]; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { done = 0 }
+      $0 ~ ("^" key "=") {
+        print key "=" value
+        done = 1
+        next
+      }
+      { print }
+      END {
+        if (done == 0) {
+          print key "=" value
+        }
+      }
+    ' "$file" >"$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" >"$tmp"
+  fi
+  mv "$tmp" "$file"
+}
+
+read_env_file_value() {
+  local key="$1"
+  local file="$2"
+  [[ -f "$file" ]] || return 0
+  local line
+  line="$(grep -E "^${key}=" "$file" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 0
+  local raw="${line#*=}"
+  raw="${raw%$'\r'}"
+  if [[ "${raw:0:1}" == "\"" && "${raw: -1}" == "\"" && ${#raw} -ge 2 ]]; then
+    raw="${raw:1:${#raw}-2}"
+  elif [[ "${raw:0:1}" == "'" && "${raw: -1}" == "'" && ${#raw} -ge 2 ]]; then
+    raw="${raw:1:${#raw}-2}"
+  fi
+  printf '%s' "$raw"
 }
 
 for dir in "$CODE_DIR" "$STATE_DIR" "$WORKSPACE_DIR" "$DEPLOY_DIR"; do
@@ -599,18 +675,20 @@ fi
 
 PULL_DEPLOY_SCRIPT="$CODE_DIR/infra/scripts/pull-deploy.sh"
 TLS_SCRIPT="$CODE_DIR/infra/scripts/ha-generate-tls-cert.sh"
+SECRETS_PREFLIGHT_SCRIPT="$CODE_DIR/infra/scripts/ha-secrets-preflight.sh"
+SIDECAR_BOOTSTRAP_SCRIPT="$CODE_DIR/infra/scripts/ha-sidecar-bootstrap.sh"
 BASE_COMPOSE="$CODE_DIR/infra/docker-compose.ha.yml"
 SIDECAR_COMPOSE="$CODE_DIR/infra/docker-compose.ha.sidecar.yml"
 TLS_COMPOSE="$CODE_DIR/infra/docker-compose.ha.tls.yml"
 TLS_CERT_PEM="$CODE_DIR/infra/haproxy/certs/nexus.pem"
 
-for required in "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$BASE_COMPOSE" "$SIDECAR_COMPOSE" "$TLS_COMPOSE"; do
+for required in "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" "$SIDECAR_BOOTSTRAP_SCRIPT" "$BASE_COMPOSE" "$SIDECAR_COMPOSE" "$TLS_COMPOSE"; do
   [[ -f "$required" ]] || {
     echo "missing required HA deploy asset: $required" >&2
     exit 1
   }
 done
-chmod +x "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT"
+chmod +x "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" "$SIDECAR_BOOTSTRAP_SCRIPT"
 
 if [[ ! -f "$CODE_DIR/.env" ]]; then
   if [[ -f "$CODE_DIR/.env.example" ]]; then
@@ -621,6 +699,31 @@ if [[ ! -f "$CODE_DIR/.env" ]]; then
     echo "created empty $CODE_DIR/.env (fill required secrets before production use)"
   fi
 fi
+
+if [[ -n "$HTTP_API_KEY" ]]; then
+  upsert_env_value "NEXUS_HTTP_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env"
+  upsert_env_value "NEXUS_HA_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env"
+fi
+
+if [[ -n "$CREDENTIALS_KEY" ]]; then
+  upsert_env_value "NEXUS_CREDENTIALS_KEY" "$CREDENTIALS_KEY" "$CODE_DIR/.env"
+fi
+
+pref_cmd=(
+  "$SECRETS_PREFLIGHT_SCRIPT"
+  --code-dir "$CODE_DIR"
+  --env-file "$CODE_DIR/.env"
+  --state-dir "$STATE_DIR"
+  --store-dir "/data/nexus-secrets"
+  --auto-fix
+)
+if [[ "$GENERATE_CREDENTIALS_KEY" == "1" ]]; then
+  pref_cmd+=(--auto-generate-credentials-key)
+fi
+if [[ "$REQUIRE_HTTP_API_KEY" == "1" ]]; then
+  pref_cmd+=(--require-http-api-key)
+fi
+"${pref_cmd[@]}"
 
 if [[ ! -s "$TLS_CERT_PEM" ]]; then
   "$TLS_SCRIPT" --san "$(hostname -f)" --san "$(hostname)"
@@ -734,8 +837,24 @@ exec infra/scripts/ha-secretctl.sh "$@"
 WRAP
 chmod +x "$HOME/secretctl.sh"
 
+cat > "$HOME/sidecar-bootstrap.sh" <<'WRAP'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /data/code
+exec infra/scripts/ha-sidecar-bootstrap.sh "$@"
+WRAP
+chmod +x "$HOME/sidecar-bootstrap.sh"
+
 # Real deployment run (HA + sidecar + TLS only).
 CODE_DIR="$CODE_DIR" COMPOSE_PROJECT="$COMPOSE_PROJECT" "$PULL_DEPLOY_SCRIPT"
+
+# Ensure sidecar provider profile is present and reachable.
+bootstrap_http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$CODE_DIR/.env")"
+if [[ -n "$bootstrap_http_api_key" ]]; then
+  NEXUS_HTTP_API_KEY="$bootstrap_http_api_key" "$SIDECAR_BOOTSTRAP_SCRIPT"
+else
+  "$SIDECAR_BOOTSTRAP_SCRIPT"
+fi
 REMOTE
 
 log "Provision + deploy complete"
@@ -743,6 +862,7 @@ echo "vm_name=${VM_NAME}"
 echo "vm_ip=${VM_IP}"
 echo "profile=${PROFILE}"
 echo "endpoint=http://${VM_IP}:${PORT}"
+echo "sidecar_bootstrap_cmd=ssh ${VM_USER}@${VM_IP} ~/sidecar-bootstrap.sh"
 echo "secrets_onboard_cmd=ssh ${VM_USER}@${VM_IP} ~/secrets-onboard.sh"
 echo "secretctl_cmd=ssh ${VM_USER}@${VM_IP} ~/secretctl.sh list"
 if (( FEDERATION_ENABLE )); then

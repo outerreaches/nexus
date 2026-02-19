@@ -656,6 +656,9 @@ Notes:
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
 - Deploys should be performed from the VM host using `ha-rollout.sh apply-local` or `/home/nexus/pull-deploy.sh`.
 - `ha-rollout.sh` and `pull-deploy.sh` now require sidecar and TLS overlays; sidecar-less or TLS-less deploys are unsupported.
+- `ha-rollout.sh` runs `infra/scripts/ha-secrets-preflight.sh` before deploy.
+- `pull-deploy.sh` is update-focused and does not run secrets preflight.
+- Secrets preflight enforces strict sidecar mode (`NEXUS_SECRETS_STRICT=1`, `NEXUS_SECRETS_SIDECAR_ONLY=1`) and requires `NEXUS_CREDENTIALS_KEY`.
 
 ### 7.3.0a Sidecar Requirements On Existing Instance (No New VM)
 
@@ -1357,7 +1360,10 @@ Initialization note:
 
 - On fresh state dirs, the script now runs a headless `nexus init` automatically before gateway deploy (unless `--skip-init` is set).
 - You can tune onboarding defaults with `--init-agent-name`, `--init-user-name`, and `--init-timezone`.
+- The script runs `ha-secrets-preflight.sh --auto-fix` in-guest before deploy, and auto-generates `NEXUS_CREDENTIALS_KEY` only when missing and no credential store exists.
+- Use `--http-api-key` to seed control-plane auth keys and `--require-http-api-key` to enforce presence.
 - Guest helper wrappers are installed automatically:
+  - `~/sidecar-bootstrap.sh` -> `/data/code/infra/scripts/ha-sidecar-bootstrap.sh`
   - `~/secrets-onboard.sh` -> `/data/code/infra/scripts/ha-secrets-onboard.sh`
   - `~/secretctl.sh` -> `/data/code/infra/scripts/ha-secretctl.sh`
 
@@ -1388,6 +1394,8 @@ bash infra/scripts/provision-libvirt-instance.sh \
   --ssh-private-key-path /home/user/.ssh/id_ed25519 \
   --repo-url ssh://user@192.168.122.1/~/git/nexus.git \
   --profile service_custom \
+  --http-api-key '<strong-random-token>' \
+  --require-http-api-key \
   --federation-enable \
   --federation-instance-id service-main \
   --federation-allow-insecure-dev
