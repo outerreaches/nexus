@@ -40,6 +40,8 @@ const ProactiveSchema = z
     maxIntervalMs: z.number().int().positive().default(60 * 60_000),
     jitterMs: z.number().int().min(0).default(5_000),
     notifyTelegram: z.boolean().default(true),
+    pauseOnActiveTelegram: z.boolean().default(true),
+    activeTelegramQuietMs: z.number().int().min(0).default(2 * 60_000),
   })
   .default({});
 
@@ -53,6 +55,7 @@ const SchedulerSchema = z
     maxConsecutiveFailures: z.number().int().positive().default(5),
     notifyAgentOnFailure: z.boolean().default(true),
     notifyCooldownMs: z.number().int().min(0).default(5 * 60_000),
+    contextMode: z.enum(["full", "delta", "none"]).default("delta"),
   })
   .default({});
 
@@ -289,6 +292,8 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           maxIntervalMs: 3600000,
           jitterMs: 5000,
           notifyTelegram: true,
+          pauseOnActiveTelegram: true,
+          activeTelegramQuietMs: 120000,
         },
         scheduler: {
           enabled: true,
@@ -299,6 +304,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           maxConsecutiveFailures: 5,
           notifyAgentOnFailure: true,
           notifyCooldownMs: 300000,
+          contextMode: "delta",
         },
         maintenance: {
           enabled: true,

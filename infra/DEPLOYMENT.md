@@ -313,11 +313,14 @@ cat > /data/nexus/nexus.json << 'EOF'
     }
   },
   "scheduler": {
-    "enabled": true
+    "enabled": true,
+    "contextMode": "delta"
   },
   "proactive": {
     "enabled": true,
-    "intervalMs": 3600000
+    "intervalMs": 3600000,
+    "pauseOnActiveTelegram": true,
+    "activeTelegramQuietMs": 120000
   }
 }
 EOF

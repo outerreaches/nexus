@@ -63,7 +63,17 @@ export const writeToBlackboard = defineTool({
     const id = crypto.randomUUID();
     const nowMs = ctx.nowMs();
     const expiresAt = typeof args.ttlMs === "number" ? nowMs + args.ttlMs : null;
-    const metadata = { ...(args.metadata ?? {}), ...(args.ttlMs ? { ttlMs: args.ttlMs } : {}) };
+    const metadata = {
+      ...(args.metadata ?? {}),
+      ...(args.ttlMs ? { ttlMs: args.ttlMs } : {}),
+      origin: {
+        sessionId: ctx.request?.sessionId ?? null,
+        channel: ctx.request?.channel ?? null,
+        channelKey: ctx.request?.channelKey ?? null,
+        runId: ctx.request?.runId ?? null,
+        agentId: ctx.request?.agentId ?? null,
+      },
+    };
 
     try {
       db.db
@@ -73,7 +83,7 @@ export const writeToBlackboard = defineTool({
         )
         .run(
           id,
-          sessionScope(ctx),
+          "global",
           args.type,
           agentId(ctx),
           args.preset ?? "unknown",
@@ -137,7 +147,6 @@ export const readFromBlackboard = defineTool({
       await cleanupManagedBlackboardAttachments({ stateDir: ctx.stateDir, rows: expiredRows });
     }
 
-    const scope = sessionScope(ctx);
     let rows: Record<string, unknown>[];
 
     // If specific IDs requested, fetch those directly (across any scope for context injection)
@@ -148,8 +157,8 @@ export const readFromBlackboard = defineTool({
         .all(...args.ids) as Record<string, unknown>[];
     } else {
       // Build filtered query
-      const conditions: string[] = ["session_scope = ?"];
-      const params: unknown[] = [scope];
+      const conditions: string[] = [];
+      const params: unknown[] = [];
 
       if (args.type) {
         conditions.push("type = ?");
@@ -198,7 +207,7 @@ export const blackboardManage = defineTool({
       scope: z
         .enum(["session", "global", "all"])
         .optional()
-        .describe("Scope for action='clear' and action='prune'. Defaults to session."),
+        .describe("Scope for action='clear' and action='prune'. Clear requires explicit scope. Prune defaults to global."),
       maxAgeMs: z
         .number()
         .int()
@@ -237,7 +246,10 @@ export const blackboardManage = defineTool({
     }
 
     if (args.action === "clear") {
-      const requestedScope = args.scope ?? "session";
+      const requestedScope = args.scope;
+      if (!requestedScope) {
+        return "ERROR: scope is required for action='clear' (use scope='global' or scope='all').";
+      }
       if (requestedScope === "all") {
         const rows = db.db.prepare("SELECT attachments_json FROM blackboard").all() as { attachments_json: string | null }[];
         const res = db.db.prepare("DELETE FROM blackboard").run();
@@ -255,7 +267,7 @@ export const blackboardManage = defineTool({
     }
 
     const nowMs = ctx.nowMs();
-    const requestedScope = args.scope ?? "session";
+    const requestedScope = args.scope ?? "global";
     const scope = requestedScope === "all" ? null : requestedScope === "global" ? "global" : sessionScope(ctx);
     const includeUnexpired = args.includeUnexpired ?? false;
 

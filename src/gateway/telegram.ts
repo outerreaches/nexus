@@ -461,6 +461,12 @@ function writeTelegramUploadBlackboardEntry(params: {
     messageId,
     fileCount: files.length,
     ttlMs,
+    origin: {
+      sessionId,
+      channel: "telegram",
+      channelKey: String(chatId),
+      agentId,
+    },
   };
 
   db.db
@@ -470,7 +476,7 @@ function writeTelegramUploadBlackboardEntry(params: {
     )
     .run(
       id,
-      sessionId,
+      "global",
       "artifact",
       agentId,
       "telegram-upload",

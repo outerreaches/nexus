@@ -513,10 +513,6 @@ function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   return (ctx.db as NexusDatabase | undefined) ?? null;
 }
 
-function sessionScope(ctx: { request?: { sessionId: string } }): string {
-  return ctx.request?.sessionId ?? "global";
-}
-
 function agentId(ctx: { request?: { agentId: string } }): string {
   return ctx.request?.agentId ?? "main";
 }
@@ -823,6 +819,16 @@ async function writeBlackboardArtifact(params: {
   const id = crypto.randomUUID();
   const nowMs = params.ctx.nowMs();
   const expiresAt = typeof params.ttlMs === "number" ? nowMs + params.ttlMs : null;
+  const metadata: Record<string, unknown> = {
+    ...(params.metadata ?? {}),
+    origin: {
+      sessionId: params.ctx.request?.sessionId ?? null,
+      channel: null,
+      channelKey: null,
+      runId: null,
+      agentId: params.ctx.request?.agentId ?? null,
+    },
+  };
   db.db
     .prepare(
       `INSERT INTO blackboard (id, session_scope, type, agent_id, agent_preset, title, content, attachments_json, metadata_json, created_at, last_accessed_at, expires_at)
@@ -830,14 +836,14 @@ async function writeBlackboardArtifact(params: {
     )
     .run(
       id,
-      sessionScope(params.ctx),
+      "global",
       "artifact",
       agentId(params.ctx),
       params.ctx.request?.preset ?? "unknown",
       params.title,
       params.content,
       JSON.stringify([{ path: params.attachmentPath, mimeType: "application/json" }]),
-      JSON.stringify(params.metadata ?? {}),
+      JSON.stringify(metadata),
       nowMs,
       nowMs,
       expiresAt,

@@ -81,6 +81,10 @@ export const jobCreate = defineTool({
       enabled: z.boolean().default(true),
       mode: z.enum(["agent_task", "script", "tool_call"]).default("agent_task").describe("Execution mode"),
       task: z.string().max(4000).optional().describe("For agent_task mode: instructions for the agent"),
+      contextMode: z
+        .enum(["full", "delta", "none"])
+        .optional()
+        .describe("For agent_task mode: context strategy (full=latest telegram history, delta=bounded telegram deltas, none=job-local only)"),
       command: z.string().optional().describe("For script mode: shell command to run"),
       tool: z.string().optional().describe("For tool_call mode: tool name"),
       args: z.record(z.any()).optional().describe("For tool_call mode: tool arguments"),
@@ -126,6 +130,7 @@ export const jobCreate = defineTool({
     if (args.mode === "agent_task") {
       if (!args.task) return "ERROR: 'task' is required for agent_task mode";
       spec = { mode: "agent_task", task: args.task };
+      if (args.contextMode) spec.contextMode = args.contextMode;
     } else if (args.mode === "script") {
       if (!args.command) return "ERROR: 'command' is required for script mode";
       spec = { mode: "script", command: args.command };
@@ -191,7 +196,6 @@ export const jobGet = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
-    const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
     return JSON.stringify(row, null, 2);
@@ -216,6 +220,10 @@ export const jobUpdate = defineTool({
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
+    contextMode: z
+      .enum(["full", "delta", "none"])
+      .optional()
+      .describe("For agent_task mode: context strategy (full=latest telegram history, delta=bounded telegram deltas, none=job-local only)"),
     nextRunAtMs: z.number().int().min(0).optional().describe("Manually set the next run time (epoch ms). Useful for staggering jobs."),
   }),
   execute: async (args, ctx) => {
@@ -251,6 +259,7 @@ export const jobUpdate = defineTool({
     if (args.command !== undefined) spec.command = args.command;
     if (args.tool !== undefined) spec.tool = args.tool;
     if (args.args !== undefined) spec.args = args.args;
+    if (args.contextMode !== undefined) spec.contextMode = args.contextMode;
 
     // Ensure mode defaults if missing
     if (!spec.mode) spec.mode = "agent_task";
@@ -280,6 +289,7 @@ export const jobUpdate = defineTool({
     if (spec.mode === "agent_task" && !spec.task) return "ERROR: 'task' is required for agent_task mode";
     if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
     if (spec.mode === "tool_call" && !spec.tool) return "ERROR: 'tool' is required for tool_call mode";
+    if (spec.mode !== "agent_task") delete spec.contextMode;
 
     const specJson = JSON.stringify(spec ?? {});
 

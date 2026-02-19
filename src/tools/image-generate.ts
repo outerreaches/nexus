@@ -626,6 +626,13 @@ export const imageGenerate = defineTool({
         count: savedFiles.length,
         size: args.size,
         aspectRatio: args.aspectRatio,
+        origin: {
+          sessionId: ctx.request?.sessionId ?? null,
+          channel: ctx.request?.channel ?? null,
+          channelKey: ctx.request?.channelKey ?? null,
+          runId: ctx.request?.runId ?? null,
+          agentId: ctx.request?.agentId ?? null,
+        },
       };
       if (typeof args.blackboardTtlMs === "number") metadata.ttlMs = args.blackboardTtlMs;
 
@@ -636,7 +643,7 @@ export const imageGenerate = defineTool({
         )
         .run(
           blackboardId,
-          ctx.request?.sessionId ?? "global",
+          "global",
           "artifact",
           ctx.request?.agentId ?? "main",
           "unknown",

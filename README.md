@@ -134,7 +134,7 @@ Recommended flow:
 1. Orchestrator calls `mcp_overview`.
 2. Orchestrator spawns `mcp-manager` for setup/delegation.
 3. `mcp-manager` uses `mcp_delegate` to run a scoped worker on MCP tools.
-4. Results are exchanged via blackboard IDs between workers.
+4. Results are exchanged via blackboard IDs between workers (blackboard visibility is global by default).
 
 ## Safety warning
 
@@ -228,7 +228,7 @@ Delivery modes:
 - `channels.telegram.mode="webhook"`: requires `channels.telegram.webhookUrl` or `channels.telegram.webhookPublicUrl` and exposes `channels.telegram.webhookPath` on the gateway HTTP server.
 
 Telegram file I/O:
-- Inbound attachments auto-trigger analysis. Files are stored under `state/telegram-files/...` and indexed in blackboard entries.
+- Inbound attachments auto-trigger analysis. Files are stored under `state/telegram-files/...` and indexed in global blackboard entries (with origin metadata for traceability).
 - Supported image attachments are also forwarded to the LLM as multimodal `image_url` parts (inline data URLs), with size/count caps.
   - Inline MIME allowlist: `image/png`, `image/jpeg`, `image/webp`, `image/gif` (OpenRouter-compatible).
   - Use a vision-capable model on your OpenRouter route; non-vision models may ignore image parts.
@@ -321,19 +321,20 @@ Nexus uses a state-based personalization system inspired by [OpenClaw](https://g
 
 ### Proactive Heartbeat (Always-On)
 
-When enabled, the gateway runs periodic **proactive heartbeat ticks** that prompt the agent to review `HEARTBEAT.md` and take small, high-value actions. If there is nothing to do, the agent should respond `IDLE` and the scheduler will back off automatically.
+When enabled, the gateway runs periodic **proactive heartbeat ticks** that prompt the agent to review `HEARTBEAT.md` and take small, high-value actions. If there is nothing to do, the agent should respond `IDLE` and the heartbeat loop will back off automatically.
 
 Execution behavior:
 - Heartbeat runs use a background execution lane (separate from interactive Telegram/CLI requests).
 - Heartbeat orchestrator runs reuse the latest Telegram thread context for the same agent to maintain continuity.
+- Heartbeat can auto-skip ticks while Telegram is active (either a running Telegram agent run or a recent Telegram user message within a configurable quiet window).
 
 Enable via env (simplest in Docker):
 - `NEXUS_PROACTIVE=1`
-- Optional tuning: `NEXUS_PROACTIVE_INTERVAL_MS`, `NEXUS_PROACTIVE_MAX_INTERVAL_MS`, `NEXUS_PROACTIVE_JITTER_MS`
+- Optional tuning: `NEXUS_PROACTIVE_INTERVAL_MS`, `NEXUS_PROACTIVE_MAX_INTERVAL_MS`, `NEXUS_PROACTIVE_JITTER_MS`, `NEXUS_PROACTIVE_PAUSE_ON_ACTIVE_TELEGRAM`, `NEXUS_PROACTIVE_ACTIVE_TELEGRAM_QUIET_MS`
 - `NEXUS_PROACTIVE_NOTIFY_TELEGRAM=1` sends non-idle outputs to allowlisted Telegram user ids
 - `NEXUS_SPAWN_BUDGET_MIN_RATIO` (default `0.75`) sets a floor for explicit spawn budget overrides as a fraction of preset budget (helps prevent accidental ultra-low worker budgets).
 
-Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalMs`, etc.
+Or via config (`stateDir/nexus.json`): `proactive.enabled`, `proactive.intervalMs`, `proactive.pauseOnActiveTelegram`, `proactive.activeTelegramQuietMs`, etc.
 
 ### Internal Scheduler (Cron Jobs)
 
@@ -342,7 +343,7 @@ Nexus includes an internal **cron scheduler** (no external cron or Python script
 Key behavior:
 - Jobs are stored with `owner_agent_id` derived from `NEXUS_SCHEDULER_AGENT_ID` (default `main`), and current job tools do not enforce per-caller ownership checks.
 - When a job run fails, the scheduler can notify the configured scheduler agent id (not the end user) so it can self-heal and decide whether to notify you.
-- Scheduler-triggered orchestrator `agent_task` runs execute in the background lane and reuse the latest Telegram thread context for the same agent.
+- Scheduler-triggered orchestrator `agent_task` runs execute in the background lane and support `contextMode`: `delta` (default, bounded Telegram delta injection), `full` (latest Telegram history scope), or `none` (job-local context only).
 - Tool failures may include normalized tags like `[ERROR_CLASS=... retry=...]` to guide retry/backoff decisions.
 
 Tools:
@@ -351,8 +352,8 @@ Tools:
 - `telegram_send` can proactively message the allowlisted user from scheduled jobs
 
 Config/env:
-- Config: `scheduler.*` (enabled, tick interval, failure policy)
-- Env override: `NEXUS_SCHEDULER=0` disables the scheduler
+- Config: `scheduler.*` (enabled, tick interval, failure policy, `contextMode`)
+- Env overrides: `NEXUS_SCHEDULER=0`, `NEXUS_SCHEDULER_CONTEXT_MODE`, `NEXUS_SCHEDULER_DELTA_MAX_MESSAGES`, `NEXUS_SCHEDULER_DELTA_MAX_CHARS`, `NEXUS_SCHEDULER_DELTA_BOOTSTRAP_MESSAGES`
 
 ### First-Time Setup (Onboarding)
 

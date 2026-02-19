@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { NexusDatabase } from "./database.js";
+import { deleteContextCursorsByFlow } from "./context-cursors.js";
 
 function randomId(prefix: string): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -134,6 +135,7 @@ export function archiveAndDeleteJobInTx(params: ArchiveDeleteJobParams): Archive
   params.db.db.prepare("DELETE FROM job_runs WHERE job_id = ?").run(params.jobId);
   params.db.db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(params.jobId);
   params.db.db.prepare("DELETE FROM jobs WHERE id = ?").run(params.jobId);
+  deleteContextCursorsByFlow(params.db, { flowType: "job", flowKey: params.jobId });
 
   return { found: true, jobArchiveId, archivedRuns, archivedEvents };
 }

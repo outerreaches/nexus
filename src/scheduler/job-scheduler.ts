@@ -6,7 +6,9 @@ import { z } from "zod";
 
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
+import { buildTelegramDelta } from "../core/telegram-delta.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { getContextCursor, upsertContextCursor } from "../storage/context-cursors.js";
 import { archiveAndDeleteJob } from "../storage/job-archive.js";
 import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
@@ -31,6 +33,8 @@ const ToolCallSpec = z.object({
   tool: z.string(),
   args: z.record(z.any()),
 });
+
+type ContextMode = "full" | "delta" | "none";
 
 function envBool(name: string): boolean | null {
   const v = (process.env[name] ?? "").trim().toLowerCase();
@@ -74,6 +78,13 @@ function parseJobStatusMarker(output: string): "ok" | "error" | null {
   if (matches.length === 0) return null;
   const marker = matches[matches.length - 1]?.[1]?.toLowerCase();
   return marker === "ok" || marker === "error" ? marker : null;
+}
+
+function normalizeContextMode(value: unknown, fallback: ContextMode): ContextMode {
+  if (typeof value !== "string") return fallback;
+  const mode = value.trim().toLowerCase();
+  if (mode === "full" || mode === "delta" || mode === "none") return mode;
+  return fallback;
 }
 
 function computeFailureBackoffMs(consecutiveFailures: number): number {
@@ -133,6 +144,10 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const notifyAgentOnFailure = envBool("NEXUS_SCHEDULER_NOTIFY_AGENT_ON_FAILURE") ?? deps.config.scheduler.notifyAgentOnFailure;
   const notifyCooldownMs = Math.max(0, envInt("NEXUS_SCHEDULER_NOTIFY_COOLDOWN_MS") ?? deps.config.scheduler.notifyCooldownMs);
   const schedulerAgentId = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim() || "main";
+  const schedulerContextMode = normalizeContextMode(process.env.NEXUS_SCHEDULER_CONTEXT_MODE, deps.config.scheduler.contextMode);
+  const deltaMaxMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_MAX_MESSAGES") ?? 20);
+  const deltaMaxChars = Math.max(800, envInt("NEXUS_SCHEDULER_DELTA_MAX_CHARS") ?? 12_000);
+  const deltaBootstrapMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_BOOTSTRAP_MESSAGES") ?? deltaMaxMessages);
 
   const leaseId = `${process.pid}:${randomId("L")}`;
   const scheduleCache = new Map<string, { schedule: ReturnType<typeof parseCron>; timeZone: string }>();
@@ -268,8 +283,42 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     const mode = raw?.mode || "agent_task";
 
     if (mode === "agent_task") {
-      const task = (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
-      const userText = [
+      const parsed = AgentTaskSpec.safeParse(raw);
+      const task = parsed.success
+        ? parsed.data.task.trim()
+        : (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
+      const contextMode = normalizeContextMode(raw?.contextMode, schedulerContextMode);
+      let deltaBlock: string | null = null;
+      let deltaCursorUpdate: { telegramSessionId: string | null; lastMessageId: number | null } | null = null;
+
+      if (contextMode === "delta") {
+        const cursor = getContextCursor(deps.db, {
+          flowType: "job",
+          flowKey: job.id,
+          agentId: schedulerAgentId,
+        });
+        const delta = buildTelegramDelta(deps.db, {
+          agentId: schedulerAgentId,
+          cursor: cursor
+            ? {
+                telegramSessionId: cursor.telegramSessionId,
+                lastMessageId: cursor.lastMessageId,
+              }
+            : null,
+          options: {
+            maxMessages: deltaMaxMessages,
+            maxChars: deltaMaxChars,
+            bootstrapMessages: deltaBootstrapMessages,
+          },
+        });
+        deltaBlock = delta.block;
+        deltaCursorUpdate = delta.nextCursor;
+        deps.log(
+          `scheduler: context_delta job=${job.id} source=${delta.stats.source} included=${delta.stats.includedMessages} omitted=${delta.stats.omittedMessages} hasMore=${delta.stats.hasMore} bytes=${delta.stats.bytes}`,
+        );
+      }
+
+      const userTextParts = [
         "SCHEDULED JOB RUN",
         `job_id=${job.id}`,
         `job_name=${job.name}`,
@@ -277,15 +326,22 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         `scheduled_for=${new Date(scheduledFor).toISOString()}`,
         `cron=${job.cron}`,
         `timezone=${job.timezone}`,
+        `context_mode=${contextMode}`,
         "",
         "Task:",
         task || "(no task specified)",
+      ];
+      if (deltaBlock) {
+        userTextParts.push("", deltaBlock);
+      }
+      userTextParts.push(
         "",
         "When you finish, end your response with exactly one line:",
         "JOB_STATUS: ok",
         "or",
         "JOB_STATUS: error",
-      ].join("\n");
+      );
+      const userText = userTextParts.join("\n");
 
       const res = await deps.agent.handleUserMessage({
         channel: "job",
@@ -294,8 +350,19 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         preset: "orchestrator",
         text: userText,
         executionLane: "background",
-        historyScope: { mode: "latest_telegram_for_agent" },
+        ...(contextMode === "full" ? { historyScope: { mode: "latest_telegram_for_agent" as const } } : {}),
       });
+
+      if (contextMode === "delta" && deltaCursorUpdate) {
+        upsertContextCursor(deps.db, {
+          flowType: "job",
+          flowKey: job.id,
+          agentId: schedulerAgentId,
+          telegramSessionId: deltaCursorUpdate.telegramSessionId,
+          lastMessageId: deltaCursorUpdate.lastMessageId,
+          updatedAt: Date.now(),
+        });
+      }
 
       const marker = parseJobStatusMarker(res.output);
       const ok = marker ? marker === "ok" : res.status === "complete";
@@ -591,7 +658,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       let nextIndex = 0;
       const workerCount = Math.min(runConcurrency, due.length);
       const workers = Array.from({ length: workerCount }, async () => {
-        while (true) {
+        for (;;) {
           const idx = nextIndex;
           nextIndex += 1;
           if (idx >= due.length) return;
@@ -619,7 +686,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} schedulerAgentId=${schedulerAgentId}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars}`,
   );
 
   // Start shortly after boot.

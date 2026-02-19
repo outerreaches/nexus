@@ -23,7 +23,7 @@ export type ProactiveStatus = {
   jitterMs?: number;
   notifyTelegram?: boolean;
   lastTickAt?: number | null;
-  lastStatus?: "idle" | "ran" | "error" | "no_heartbeat" | "skipped";
+  lastStatus?: "idle" | "ran" | "error" | "no_heartbeat" | "skipped" | "skipped_active_telegram";
   nextTickAt?: number | null;
 };
 
@@ -72,6 +72,37 @@ async function listTelegramRecipients(db: NexusDatabase, config: NexusConfig): P
   return [...set];
 }
 
+function detectActiveTelegramContext(
+  db: NexusDatabase,
+  params: { agentId: string; nowMs: number; quietMs: number },
+): { active: boolean; hasRunning: boolean; lastUserMessageAt: number | null } {
+  const running = db.db
+    .prepare(
+      `SELECT 1 AS running
+       FROM agent_runs
+       WHERE agent_id = ? AND channel = 'telegram' AND status = 'running'
+       LIMIT 1`,
+    )
+    .get(params.agentId) as { running: number } | undefined;
+  if (running) {
+    return { active: true, hasRunning: true, lastUserMessageAt: null };
+  }
+
+  const row = db.db
+    .prepare(
+      `SELECT MAX(m.created_at) AS last_user_message_at
+       FROM sessions s
+       JOIN messages m ON m.session_id = s.id
+       WHERE s.channel = 'telegram' AND s.agent_id = ? AND m.role = 'user'`,
+    )
+    .get(params.agentId) as { last_user_message_at: number | null } | undefined;
+  const lastUserMessageAt = typeof row?.last_user_message_at === "number" && Number.isFinite(row.last_user_message_at)
+    ? Math.floor(row.last_user_message_at)
+    : null;
+  const active = Boolean(lastUserMessageAt && params.quietMs > 0 && params.nowMs - lastUserMessageAt < params.quietMs);
+  return { active, hasRunning: false, lastUserMessageAt };
+}
+
 export function startProactiveHeartbeat(
   deps: ProactiveDeps,
 ): { stop: () => void; pause: () => void; resume: () => void; getStatus: () => ProactiveStatus } | null {
@@ -90,6 +121,12 @@ export function startProactiveHeartbeat(
   const maxIntervalMs = Math.max(intervalMs, envInt("NEXUS_PROACTIVE_MAX_INTERVAL_MS") ?? deps.config.proactive.maxIntervalMs);
   const jitterMs = Math.max(0, envInt("NEXUS_PROACTIVE_JITTER_MS") ?? deps.config.proactive.jitterMs);
   const notifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? deps.config.proactive.notifyTelegram;
+  const pauseOnActiveTelegram = envBool("NEXUS_PROACTIVE_PAUSE_ON_ACTIVE_TELEGRAM")
+    ?? deps.config.proactive.pauseOnActiveTelegram;
+  const activeTelegramQuietMs = Math.max(
+    0,
+    envInt("NEXUS_PROACTIVE_ACTIVE_TELEGRAM_QUIET_MS") ?? deps.config.proactive.activeTelegramQuietMs,
+  );
 
   let stopped = false;
   let paused = false;
@@ -126,6 +163,20 @@ export function startProactiveHeartbeat(
     const tickId = startMs.toString(36);
     deps.log(`proactive: tick_start id=${tickId} agent=${agentId} lane=background`);
     try {
+      if (pauseOnActiveTelegram) {
+        const activity = detectActiveTelegramContext(deps.db, { agentId, nowMs: startMs, quietMs: activeTelegramQuietMs });
+        if (activity.active) {
+          nextDelayMs = intervalMs;
+          const ageMs = activity.lastUserMessageAt ? Math.max(0, startMs - activity.lastUserMessageAt) : null;
+          deps.log(
+            `proactive: tick_skip id=${tickId} reason=active_telegram hasRunning=${activity.hasRunning} lastUserAgeMs=${ageMs ?? "n/a"} next=${Math.round(nextDelayMs / 1000)}s`,
+          );
+          lastTickAt = startMs;
+          lastStatus = "skipped_active_telegram";
+          return;
+        }
+      }
+
       const hb = await readPersonalizationFile(deps.stateDir, HEARTBEAT_FILENAME, agentId);
       const hasHeartbeat = Boolean(hb && hb.trim().length > 50);
       deps.log(
@@ -155,7 +206,7 @@ export function startProactiveHeartbeat(
         "- If you do ask, use `human_request` with a short, specific prompt and then stop.",
         "- Do NOT write to the blackboard during heartbeat ticks unless you discovered a new issue, made a change, or created a durable artifact that must persist. Never write \"reviewed\" or confirmation-only notes; if nothing substantive, respond with IDLE.",
         `- When given new standing instructions about heartbeat behavior, append them to \`${deps.stateDir}/HEARTBEAT.md\` using absolute paths.`,
-        `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: \"${deps.stateDir}/NOTES.md\", limit: 200 })\`.`,
+        `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: "${deps.stateDir}/NOTES.md", limit: 200 })\`.`,
       ].join("\n");
 
       deps.log(`proactive: dispatch id=${tickId} channel=heartbeat key=gateway agent=${agentId}`);
@@ -209,7 +260,7 @@ export function startProactiveHeartbeat(
   };
 
   deps.log(
-    `proactive: enabled agent=${agentId} intervalMs=${intervalMs} maxIntervalMs=${maxIntervalMs} notifyTelegram=${notifyTelegram}`,
+    `proactive: enabled agent=${agentId} intervalMs=${intervalMs} maxIntervalMs=${maxIntervalMs} notifyTelegram=${notifyTelegram} pauseOnActiveTelegram=${pauseOnActiveTelegram} activeTelegramQuietMs=${activeTelegramQuietMs}`,
   );
 
   // Start shortly after boot.

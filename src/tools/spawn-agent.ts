@@ -872,7 +872,7 @@ function attachBlackboardReference(
     .prepare(
       `SELECT id, type, created_at
        FROM blackboard
-       WHERE session_scope = ?
+       WHERE (session_scope = ? OR session_scope = 'global')
          AND title = ?
          AND created_at >= ?
          AND (expires_at IS NULL OR expires_at > ?)

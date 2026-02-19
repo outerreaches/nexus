@@ -489,6 +489,9 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_blackboard_scope ON blackboard(session_scope, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_blackboard_created_at ON blackboard(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_blackboard_type_created_at ON blackboard(type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_blackboard_agent_preset_created_at ON blackboard(agent_preset, created_at DESC);
 
     -- ───────────────────────────────────────────────────────────────────────
     -- Agent run graph (hierarchical swarm tracking)
@@ -514,6 +517,23 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_run_id);
     CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Context cursor tracking (delta injection checkpoints)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS context_cursors (
+      flow_type TEXT NOT NULL,
+      flow_key TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      telegram_session_id TEXT,
+      last_message_id INTEGER,
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(flow_type, flow_key, agent_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_context_cursors_updated ON context_cursors(flow_type, updated_at DESC);
 
     -- ───────────────────────────────────────────────────────────────────────
     -- Database maintenance / cleanup tracking
@@ -923,6 +943,24 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_expires ON blackboard(expires_at);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_created_at ON blackboard(created_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_type_created_at ON blackboard(type, created_at DESC);");
+  } catch {
+    // already exists
+  }
+
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_blackboard_agent_preset_created_at ON blackboard(agent_preset, created_at DESC);");
   } catch {
     // already exists
   }
