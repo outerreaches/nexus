@@ -36,6 +36,7 @@ VM options:
                                    (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
   --ssh-private-key-path <path>    Private key used for SSH readiness/deploy checks
                                    (default: derive from --ssh-public-key-path by stripping .pub)
+                                   (if passphrase-protected, preload in ssh-agent)
   --force-recreate                 Destroy existing VM and recreate disk/ISO volumes
 
 Deployment options (enabled by default):
@@ -327,6 +328,21 @@ fi
 [[ -n "$SSH_PRIVATE_KEY_PATH" ]] || fail "unable to derive SSH private key path from: $SSH_PUBLIC_KEY_PATH (set --ssh-private-key-path)"
 [[ -f "$SSH_PRIVATE_KEY_PATH" ]] || fail "SSH private key not found: $SSH_PRIVATE_KEY_PATH"
 
+key_fingerprint="$(ssh-keygen -lf "$SSH_PUBLIC_KEY_PATH" 2>/dev/null | awk '{print $2}' || true)"
+agent_has_key=0
+if [[ -n "${SSH_AUTH_SOCK:-}" ]] && command -v ssh-add >/dev/null 2>&1 && [[ -n "$key_fingerprint" ]]; then
+  if ssh-add -l 2>/dev/null | awk '{print $2}' | grep -Fqx "$key_fingerprint"; then
+    agent_has_key=1
+  fi
+fi
+if ! ssh-keygen -yf "$SSH_PRIVATE_KEY_PATH" -P "" >/dev/null 2>&1; then
+  if (( agent_has_key )); then
+    warn "SSH private key appears passphrase-protected; matching key is loaded in ssh-agent, continuing"
+  else
+    fail "SSH private key appears passphrase-protected and is not loaded in ssh-agent. Run: eval \"\$(ssh-agent -s)\" && ssh-add \"$SSH_PRIVATE_KEY_PATH\""
+  fi
+fi
+
 DISK_VOL="${VM_NAME}.qcow2"
 ISO_VOL="${VM_NAME}-cloud-init.iso"
 
@@ -457,6 +473,11 @@ done
 
 log "VM IP resolved: $VM_IP"
 
+# If this VM IP was reused after a recreate, stale host keys can cause
+# "REMOTE HOST IDENTIFICATION HAS CHANGED" and make readiness checks loop.
+ssh-keygen -R "$VM_IP" >/dev/null 2>&1 || true
+ssh-keygen -R "[$VM_IP]:22" >/dev/null 2>&1 || true
+
 SSH_OPTS=(
   -o BatchMode=yes
   -o IdentitiesOnly=yes
@@ -467,14 +488,24 @@ SSH_OPTS=(
 
 log "Waiting for SSH readiness (${WAIT_SSH_SECONDS}s timeout)"
 ssh_ready=0
+last_ssh_error=""
 for _ in $(seq 1 "$WAIT_SSH_SECONDS"); do
-  if ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" "echo ok" >/dev/null 2>&1; then
+  ssh_output="$(ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" "echo ok" 2>&1 || true)"
+  if [[ "$ssh_output" == "ok" ]]; then
     ssh_ready=1
     break
   fi
+  last_ssh_error="$ssh_output"
+  if (( _ % 15 == 0 )); then
+    warn "still waiting for SSH (${_}/${WAIT_SSH_SECONDS}) for ${VM_USER}@${VM_IP}; last error: $(printf '%s' "$last_ssh_error" | tr '\n' ' ' | tr -s ' ')"
+  fi
   sleep 1
 done
-(( ssh_ready == 1 )) || fail "SSH did not become ready for ${VM_USER}@${VM_IP}"
+(( ssh_ready == 1 )) || fail "SSH did not become ready for ${VM_USER}@${VM_IP}; last error: $(printf '%s' "$last_ssh_error" | tr '\n' ' ' | tr -s ' ')"
+
+log "Waiting for cloud-init completion (best effort)"
+ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" \
+  'if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init status --wait >/dev/null 2>&1 || true; fi' || true
 
 if (( DO_DEPLOY == 0 )); then
   log "VM provisioned. Deployment skipped (--no-deploy)."
@@ -525,7 +556,29 @@ FEDERATION_INSTANCE_ID="${FEDERATION_INSTANCE_ID}"
 FEDERATION_OUTBOX_ENABLED="${FEDERATION_OUTBOX_ENABLED}"
 FEDERATION_ALLOW_INSECURE_DEV="${FEDERATION_ALLOW_INSECURE_DEV}"
 
-mkdir -p "$STATE_DIR" "$WORKSPACE_DIR" "$DEPLOY_DIR"
+if [[ "$REPO_URL" == ssh://* ]]; then
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o StrictHostKeyChecking=accept-new}"
+fi
+
+ensure_writable_dir() {
+  local path="$1"
+  if mkdir -p "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo mkdir -p "$path"
+    sudo chown -R "$(id -un):$(id -gn)" "$path"
+    return 0
+  fi
+  return 1
+}
+
+for dir in "$CODE_DIR" "$STATE_DIR" "$WORKSPACE_DIR" "$DEPLOY_DIR"; do
+  ensure_writable_dir "$dir" || {
+    echo "failed to prepare writable directory: $dir" >&2
+    exit 1
+  }
+done
 
 if [[ -d "$CODE_DIR/.git" ]]; then
   cd "$CODE_DIR"
@@ -534,7 +587,13 @@ if [[ -d "$CODE_DIR/.git" ]]; then
   git reset --hard "origin/$REPO_BRANCH"
 else
   rm -rf "$CODE_DIR"
-  git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$CODE_DIR"
+  if ! git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$CODE_DIR"; then
+    if [[ "$REPO_URL" == https://github.com/* ]]; then
+      echo "git clone failed for ${REPO_URL}. If this repo is private, use --repo-url ssh://<host-user>@192.168.122.1/~/git/nexus.git" >&2
+      echo "and ensure the VM's SSH public key is authorized in the host user's ~/.ssh/authorized_keys." >&2
+    fi
+    exit 1
+  fi
 fi
 
 DEPLOY_SCRIPT="$CODE_DIR/infra/scripts/deploy-instance-profile.sh"

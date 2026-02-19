@@ -1291,9 +1291,9 @@ export function renderDashboard(params: {
         if (!federationLogViewer) return;
         const nextLine = "[" + new Date().toISOString() + "] " + String(line ?? "");
         const existing = String(federationLogViewer.textContent ?? "").trim();
-        const lines = existing ? existing.split("\n").slice(-160) : [];
+        const lines = existing ? existing.split("\\n").slice(-160) : [];
         lines.push(nextLine);
-        federationLogViewer.textContent = lines.join("\n");
+        federationLogViewer.textContent = lines.join("\\n");
       };
 
       const setFederationCheckCell = (element, ok, label) => {

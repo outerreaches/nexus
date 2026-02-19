@@ -1366,13 +1366,32 @@ Initialization note:
   - `~/secrets-onboard.sh` -> `/data/code/infra/scripts/ha-secrets-onboard.sh`
   - `~/secretctl.sh` -> `/data/code/infra/scripts/ha-secretctl.sh`
 
+Private repo + SSH readiness note:
+
+- If your key is passphrase-protected, preload it in an agent before provisioning:
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add /home/<user>/.ssh/id_ed25519
+```
+
+- Prefer cloning from the host bare mirror for private repos:
+  - `--repo-url ssh://<host-user>@192.168.122.1/~/git/nexus.git`
+- Always pass explicit SSH key paths so cloud-init auth and readiness checks use the same key:
+  - `--ssh-public-key-path /home/<user>/.ssh/id_ed25519.pub`
+  - `--ssh-private-key-path /home/<user>/.ssh/id_ed25519`
+
 ```bash
 # Example: non-monetization federated service instance (8GB RAM, 40GB disk)
+# (private repo via host bare mirror)
 bash infra/scripts/provision-libvirt-instance.sh \
   --vm-name nexus-service-vm \
   --hostname nexus-service-vm \
   --memory-mb 8192 \
   --disk-size 40G \
+  --ssh-public-key-path /home/user/.ssh/id_ed25519.pub \
+  --ssh-private-key-path /home/user/.ssh/id_ed25519 \
+  --repo-url ssh://user@192.168.122.1/~/git/nexus.git \
   --profile service_custom \
   --federation-enable \
   --federation-instance-id service-main \
