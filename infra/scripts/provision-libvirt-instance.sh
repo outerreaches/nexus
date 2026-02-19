@@ -34,6 +34,8 @@ VM options:
   --vm-user <user>                 Guest SSH user created by cloud-init (default: nexus)
   --ssh-public-key-path <path>     Public key path for guest SSH auth
                                    (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
+  --ssh-private-key-path <path>    Private key used for SSH readiness/deploy checks
+                                   (default: derive from --ssh-public-key-path by stripping .pub)
   --force-recreate                 Destroy existing VM and recreate disk/ISO volumes
 
 Deployment options (enabled by default):
@@ -103,6 +105,7 @@ BOOT_POOL="boot"
 BASE_IMAGE_VOL="noble-server-cloudimg-amd64.img"
 VM_USER="nexus"
 SSH_PUBLIC_KEY_PATH=""
+SSH_PRIVATE_KEY_PATH=""
 FORCE_RECREATE=0
 
 DO_DEPLOY=1
@@ -176,6 +179,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ssh-public-key-path)
       SSH_PUBLIC_KEY_PATH="$2"
+      shift 2
+      ;;
+    --ssh-private-key-path)
+      SSH_PRIVATE_KEY_PATH="$2"
       shift 2
       ;;
     --force-recreate)
@@ -312,6 +319,14 @@ fi
 [[ -f "$SSH_PUBLIC_KEY_PATH" ]] || fail "SSH public key not found: $SSH_PUBLIC_KEY_PATH"
 SSH_PUBLIC_KEY="$(cat "$SSH_PUBLIC_KEY_PATH")"
 
+if [[ -z "$SSH_PRIVATE_KEY_PATH" ]]; then
+  if [[ "$SSH_PUBLIC_KEY_PATH" == *.pub ]]; then
+    SSH_PRIVATE_KEY_PATH="${SSH_PUBLIC_KEY_PATH%.pub}"
+  fi
+fi
+[[ -n "$SSH_PRIVATE_KEY_PATH" ]] || fail "unable to derive SSH private key path from: $SSH_PUBLIC_KEY_PATH (set --ssh-private-key-path)"
+[[ -f "$SSH_PRIVATE_KEY_PATH" ]] || fail "SSH private key not found: $SSH_PRIVATE_KEY_PATH"
+
 DISK_VOL="${VM_NAME}.qcow2"
 ISO_VOL="${VM_NAME}-cloud-init.iso"
 
@@ -444,8 +459,10 @@ log "VM IP resolved: $VM_IP"
 
 SSH_OPTS=(
   -o BatchMode=yes
+  -o IdentitiesOnly=yes
   -o StrictHostKeyChecking=accept-new
   -o ConnectTimeout=3
+  -i "$SSH_PRIVATE_KEY_PATH"
 )
 
 log "Waiting for SSH readiness (${WAIT_SSH_SECONDS}s timeout)"
