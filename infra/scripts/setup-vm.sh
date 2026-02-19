@@ -259,6 +259,26 @@ VMSCRIPT
 
   scp -o StrictHostKeyChecking=no "${PULL_DEPLOY_SCRIPT}" "${VM_USER}@${VM_IP}:/home/nexus/pull-deploy.sh"
   ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_IP}" "chmod +x /home/nexus/pull-deploy.sh"
+
+  log "Installing guest helper wrappers for secrets onboarding"
+  ssh -o StrictHostKeyChecking=no "${VM_USER}@${VM_IP}" "bash -s" <<'VMSCRIPT'
+set -euo pipefail
+cat > /home/nexus/secrets-onboard.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /data/code
+exec infra/scripts/ha-secrets-onboard.sh "$@"
+EOF
+chmod +x /home/nexus/secrets-onboard.sh
+
+cat > /home/nexus/secretctl.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /data/code
+exec infra/scripts/ha-secretctl.sh "$@"
+EOF
+chmod +x /home/nexus/secretctl.sh
+VMSCRIPT
 fi
 
 if [[ "${ENABLE_FORWARDING}" == "1" ]]; then

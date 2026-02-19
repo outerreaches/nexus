@@ -1350,6 +1350,44 @@ bash infra/scripts/setup-vm.sh \
   --forward-https-port 18790
 ```
 
+### Iterative Provision + Deploy (single script)
+
+For repeated profile testing loops (service/standby/monetization), use:
+
+- `infra/scripts/provision-libvirt-instance.sh`
+
+This script provisions a libvirt VM, waits for SSH, clones/pulls Nexus in-guest, and deploys a selected runtime profile. It also supports optional federation config bootstrap for test environments.
+
+Initialization note:
+
+- On fresh state dirs, the script now runs a headless `nexus init` automatically before gateway deploy (unless `--skip-init` is set).
+- You can tune onboarding defaults with `--init-agent-name`, `--init-user-name`, and `--init-timezone`.
+- Guest helper wrappers are installed automatically:
+  - `~/secrets-onboard.sh` -> `/data/code/infra/scripts/ha-secrets-onboard.sh`
+  - `~/secretctl.sh` -> `/data/code/infra/scripts/ha-secretctl.sh`
+
+```bash
+# Example: non-monetization federated service instance (8GB RAM, 40GB disk)
+bash infra/scripts/provision-libvirt-instance.sh \
+  --vm-name nexus-service-vm \
+  --hostname nexus-service-vm \
+  --memory-mb 8192 \
+  --disk-size 40G \
+  --profile service_custom \
+  --federation-enable \
+  --federation-instance-id service-main \
+  --federation-allow-insecure-dev
+
+# Example: standby iteration
+bash infra/scripts/provision-libvirt-instance.sh \
+  --vm-name nexus-standby-vm \
+  --memory-mb 8192 \
+  --disk-size 40G \
+  --profile standby \
+  --federation-enable \
+  --federation-instance-id standby-main
+```
+
 ### Profile-based Deploy/Bootstrap
 
 Use one script for all runtime profiles:
