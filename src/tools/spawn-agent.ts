@@ -323,7 +323,6 @@ async function runInProcess(params: {
 
   let llm = ctx.llm;
   let llmConfig = ctx.llmConfig;
-  let fallbackLlmConfig = ctx.fallbackLlmConfig;
   if (ctx.modelRouter) {
     const route = ctx.modelRouter.resolve({
       agentId,
@@ -331,14 +330,10 @@ async function runInProcess(params: {
       mode: modelMode,
       presetLlm: preset.llm,
     });
-    llm = ctx.modelRouter.createClient(route, { onFallback: onLog, onLog });
+    llm = ctx.modelRouter.createClient(route, { onLog });
     llmConfig = route.primary;
-    fallbackLlmConfig = route.fallback;
-    const fallbackLabel = route.fallbackProvider && route.fallback
-      ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
-      : "";
     onLog?.(
-      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}`,
     );
   }
   if (!llm) {
@@ -350,7 +345,6 @@ async function runInProcess(params: {
     ...ctx,
     llm,
     llmConfig,
-    fallbackLlmConfig,
     modelMode,
     request: ctx.request
       ? {
@@ -456,7 +450,6 @@ async function runIsolated(params: {
   const runtimeLimits = resolveRuntimeLimits(ctx);
 
   let llmConfig = ctx.llmConfig;
-  let fallbackLlmConfig = ctx.fallbackLlmConfig;
   if (ctx.modelRouter) {
     const route = ctx.modelRouter.resolve({
       agentId,
@@ -465,12 +458,8 @@ async function runIsolated(params: {
       presetLlm: preset.llm,
     });
     llmConfig = route.primary;
-    fallbackLlmConfig = route.fallback;
-    const fallbackLabel = route.fallbackProvider && route.fallback
-      ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
-      : "";
     logWorker(
-      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+      `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}`,
     );
   }
   if (!llmConfig) {
@@ -606,7 +595,6 @@ async function runIsolated(params: {
       codeDir: ctx.codeDir,
       dbPath: path.join(ctx.stateDir, "nexus.db"),
       llmConfig,
-      fallbackLlmConfig,
       allowShellExec: ctx.allowShellExec ?? false,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: ctx.allowCodeWrite ?? false,

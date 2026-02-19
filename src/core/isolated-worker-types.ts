@@ -17,12 +17,6 @@ export type WorkerConfig = {
     apiKey?: string;
     model: string;
   };
-  fallbackLlmConfig?: {
-    baseUrl: string;
-    apiKey?: string;
-    model: string;
-  };
-
   // Permissions
   allowShellExec: boolean;
   allowCodeEdit: boolean;

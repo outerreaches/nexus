@@ -13,10 +13,10 @@ export type ToolContext = {
   llm?: LLMClient;
   /** Serializable LLM config for passing to isolated workers. */
   llmConfig?: OpenAICompatConfig;
-  /** Optional fallback LLM config for passing to isolated workers. */
-  fallbackLlmConfig?: OpenAICompatConfig;
   /** Optional model router for per-agent/preset model selection. */
   modelRouter?: ModelRouter;
+  /** Optional circuit breaker for global LLM provider health tracking. */
+  circuitBreaker?: import("../llm/circuit-breaker.js").LlmCircuitBreaker;
   /** Resolved model mode for this run (default/local_only). */
   modelMode?: ModelRoutingMode;
   db?: unknown;

@@ -487,12 +487,6 @@ export const imageGenerate = defineTool({
       ...ctx.llmConfig,
       model: selectedModel,
     };
-    const fallback = ctx.fallbackLlmConfig
-      ? {
-          ...ctx.fallbackLlmConfig,
-          model: selectedModel,
-        }
-      : undefined;
 
     let generation: ImageGenerationResult;
     let routeUsed = `primary:${primary.model}`;
@@ -513,23 +507,7 @@ export const imageGenerate = defineTool({
           `${primaryErr.responseId ? ` response_id=${primaryErr.responseId}` : ""}`,
         );
       }
-      if (!fallback || !shouldFallbackFromError(primaryErr)) {
-        return `ERROR: ${formatImageToolError(primaryErr)}`;
-      }
-      ctx.log(`image_generate: primary failed, falling back (${primary.model} -> ${fallback.model})`);
-      try {
-        generation = await generateImagesWithConfig({
-          llm: fallback,
-          prompt: args.prompt,
-          model: selectedModel,
-          size: args.size,
-          aspectRatio: args.aspectRatio,
-          timeoutMs,
-        });
-        routeUsed = `fallback:${fallback.model}`;
-      } catch (fallbackErr) {
-        return `ERROR: primary and fallback image generation failed: ${formatImageToolError(fallbackErr)}`;
-      }
+      return `ERROR: ${formatImageToolError(primaryErr)}`;
     }
 
     const defaultRoot = rootDir(ctx, args.root);

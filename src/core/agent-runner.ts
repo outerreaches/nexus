@@ -1,6 +1,7 @@
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContent } from "./types.js";
 import { OpenAICompatClient, type LLMClient, type LLMUsage } from "../llm/openai-compat.js";
+import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { createHash } from "node:crypto";
 import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -363,6 +364,7 @@ export class AgentRunner {
       budget: AgentBudget;
       toolContext: ToolContext;
       onLog?: (line: string) => void;
+      circuitBreaker?: LlmCircuitBreaker;
     },
   ) {}
 
@@ -435,11 +437,13 @@ export class AgentRunner {
           messages,
           tools: this.deps.tools,
         });
+        this.deps.circuitBreaker?.recordSuccess();
         content = res.content;
         toolCalls = res.toolCalls;
         const usageLine = formatLlmUsage(res.usage);
         if (usageLine) this.deps.onLog?.(`llm_usage mode=default ${usageLine}`);
       } catch (err) {
+        this.deps.circuitBreaker?.recordFailure(err);
         const isTimeout = isLlmTimeoutError(err);
         if (!isTimeout) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -512,12 +516,14 @@ export class AgentRunner {
             tools: this.deps.tools,
             timeoutMode: "extended",
           });
+          this.deps.circuitBreaker?.recordSuccess();
           content = retry.content;
           toolCalls = retry.toolCalls;
           const usageLine = formatLlmUsage(retry.usage);
           if (usageLine) this.deps.onLog?.(`llm_usage mode=extended ${usageLine}`);
           this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
         } catch (retryErr) {
+          this.deps.circuitBreaker?.recordFailure(retryErr);
           const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
           this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
           const errorText = `LLM error: ${msg}`;

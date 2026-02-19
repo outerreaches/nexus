@@ -44,6 +44,14 @@ export type GatewayHttpDeps = {
   }>;
   getModelMode?: () => ModelRoutingMode;
   setModelMode?: (mode: ModelRoutingMode) => ModelRoutingMode;
+  getCircuitBreakerStats?: () => {
+    state: string;
+    consecutiveFailures: number;
+    lastFailureMs: number;
+    lastFailureMessage: string;
+    manualMode: ModelRoutingMode | null;
+    effectiveMode: ModelRoutingMode;
+  };
 };
 
 export async function startHttpServer(

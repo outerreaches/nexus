@@ -818,13 +818,22 @@ export async function startTelegramBot(deps: {
       deps.log(
         `telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
       );
-      const res = await deps.agent.handleUserMessage({
-        channel: "telegram",
-        channelKey: String(chatId),
-        agentId: tg.agentId,
-        text: dispatchText,
-        contentParts,
-      });
+      bot.api.sendChatAction(chatId, "typing").catch(() => {});
+      const typingInterval = setInterval(() => {
+        bot.api.sendChatAction(chatId, "typing").catch(() => {});
+      }, 4_000);
+      let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
+      try {
+        res = await deps.agent.handleUserMessage({
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+          text: dispatchText,
+          contentParts,
+        });
+      } finally {
+        clearInterval(typingInterval);
+      }
 
       await sendOutput(chatId, res.output);
       deps.agent.ackDeployIfPending({

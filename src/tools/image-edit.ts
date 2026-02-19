@@ -649,12 +649,6 @@ export const imageEdit = defineTool({
       ...ctx.llmConfig,
       model: selectedModel,
     };
-    const fallback = ctx.fallbackLlmConfig
-      ? {
-          ...ctx.fallbackLlmConfig,
-          model: selectedModel,
-        }
-      : undefined;
 
     let inputImage: ResolvedInputImage;
     try {
@@ -724,24 +718,7 @@ export const imageEdit = defineTool({
           `${primaryErr.responseId ? ` response_id=${primaryErr.responseId}` : ""}`,
         );
       }
-      if (!fallback || !shouldFallbackFromError(primaryErr)) {
-        return `ERROR: ${formatImageToolError(primaryErr)}`;
-      }
-      ctx.log(`image_edit: primary failed, falling back (${primary.model} -> ${fallback.model})`);
-      try {
-        generation = await generateEditedImagesWithConfig({
-          llm: fallback,
-          prompt: args.prompt,
-          inputImageDataUrl,
-          model: selectedModel,
-          size: args.size,
-          aspectRatio: args.aspectRatio,
-          timeoutMs,
-        });
-        routeUsed = `fallback:${fallback.model}`;
-      } catch (fallbackErr) {
-        return `ERROR: primary and fallback image edit failed: ${formatImageToolError(fallbackErr)}`;
-      }
+      return `ERROR: ${formatImageToolError(primaryErr)}`;
     }
 
     const defaultRoot = rootDir(ctx, args.root);

@@ -12,6 +12,7 @@ import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
 import type { AgentTracker } from "./agent-tracker.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
+import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 
 type ExecutionLane = "interactive" | "background";
 
@@ -37,12 +38,12 @@ function clampNonNegativeInt(value: number): number {
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
-  private defaultModelMode: ModelRoutingMode;
 
   constructor(
     private readonly deps: {
       llm: LLMClient;
       modelRouter?: ModelRouter;
+      circuitBreaker?: LlmCircuitBreaker;
       getTools: () => Tool[];
       toolContext: ToolContext;
       db: NexusDatabase;
@@ -66,18 +67,10 @@ export class AgentService {
     const backgroundMax = Math.max(1, deps.limits.maxConcurrentBackground ?? deps.limits.maxConcurrent);
     this.interactiveSemaphore = new Semaphore(interactiveMax);
     this.backgroundSemaphore = new Semaphore(backgroundMax);
-    this.defaultModelMode = deps.toolContext.modelMode === "local_only" ? "local_only" : "default";
   }
 
-  getDefaultModelMode(): ModelRoutingMode {
-    return this.defaultModelMode;
-  }
-
-  setDefaultModelMode(mode: ModelRoutingMode): ModelRoutingMode {
-    const normalized: ModelRoutingMode = mode === "local_only" ? "local_only" : "default";
-    this.defaultModelMode = normalized;
-    this.deps.toolContext.modelMode = normalized;
-    return normalized;
+  getCircuitBreaker(): LlmCircuitBreaker | undefined {
+    return this.deps.circuitBreaker;
   }
 
   private defaultLaneForChannel(channel: string): ExecutionLane {
@@ -204,7 +197,7 @@ export class AgentService {
       // Resolve preset and filter tools
       const presetName = params.preset ?? this.deps.defaultPreset;
       const preset = presetName ? getPreset(presetName) : undefined;
-      const runModelMode: ModelRoutingMode = params.modelMode ?? this.defaultModelMode ?? this.deps.toolContext.modelMode ?? "default";
+      const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.circuitBreaker?.getEffectiveMode() ?? "default";
 
       const systemPrompt = !preset || preset.name === "orchestrator"
         ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId })
@@ -229,7 +222,6 @@ export class AgentService {
 
       let llm: LLMClient = this.deps.llm;
       let llmConfig = this.deps.toolContext.llmConfig;
-      let fallbackLlmConfig = this.deps.toolContext.fallbackLlmConfig;
       if (this.deps.modelRouter) {
         const route = this.deps.modelRouter.resolve({
           agentId: params.agentId,
@@ -238,16 +230,11 @@ export class AgentService {
           presetLlm: preset?.llm,
         });
         llm = this.deps.modelRouter.createClient(route, {
-          onFallback: onRunnerLog,
           onLog: onRunnerLog,
         });
         llmConfig = route.primary;
-        fallbackLlmConfig = route.fallback;
-        const fallbackLabel = route.fallbackProvider && route.fallback
-          ? ` fallback=${route.fallbackProvider}/${route.fallback.model}`
-          : "";
         onRunnerLog?.(
-          `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}${fallbackLabel}`,
+          `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}`,
         );
       }
 
@@ -271,7 +258,6 @@ export class AgentService {
         ...this.deps.toolContext,
         llm,
         llmConfig,
-        fallbackLlmConfig,
         modelRouter: this.deps.modelRouter,
         modelMode: runModelMode,
         runtimeLimits,
@@ -293,6 +279,7 @@ export class AgentService {
         budget,
         toolContext,
         onLog: onRunnerLog,
+        circuitBreaker: this.deps.circuitBreaker,
       });
 
       let result: Awaited<ReturnType<AgentRunner["run"]>>;

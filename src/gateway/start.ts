@@ -13,6 +13,7 @@ import { ToolRegistry } from "../core/tool-registry.js";
 import { getPreset } from "../core/presets.js";
 import { McpManager } from "../mcp/manager.js";
 import { ModelRouter } from "../llm/model-router.js";
+import { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { openDatabase } from "../storage/database.js";
 import { ensureConfigExists, loadConfig } from "../state/config.js";
 import { bootstrapState } from "../state/bootstrap.js";
@@ -211,18 +212,18 @@ export async function startGateway(
     mode: "default",
     presetLlm: getPreset("orchestrator")?.llm,
   });
-  const fallbackLabel = startupRoute.fallbackProvider && startupRoute.fallback
-    ? ` fallback=${startupRoute.fallbackProvider}/${startupRoute.fallback.model}`
-    : "";
   log(
-    `startup: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model}${fallbackLabel} source=${startupRoute.source}`,
+    `startup: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model} source=${startupRoute.source}`,
   );
+  const circuitBreaker = new LlmCircuitBreaker({
+    primaryConfig: defaultLlmConfig,
+    onStateChange: (from, to, reason) => log(`circuit_breaker ${from} → ${to}: ${reason}`),
+    onLog: (line) => log(line),
+  });
   const llm = modelRouter.createClient(startupRoute, {
-    onFallback: (line) => log(line),
     onLog: (line) => log(line),
   });
   const llmConfig = startupRoute.primary;
-  const fallbackLlmConfig = startupRoute.fallback;
   const builtIns = getBuiltInTools();
   const mcp = new McpManager({ db, log, stateDir: paths.stateDir });
   await mcp.init();
@@ -267,7 +268,7 @@ export async function startGateway(
     codeDir: paths.codeDir,
     llm,
     llmConfig,
-    fallbackLlmConfig,
+    circuitBreaker,
     modelRouter,
     modelMode: startupRoute.mode,
     db,
@@ -333,6 +334,7 @@ export async function startGateway(
   const agent = new AgentService({
     llm,
     modelRouter,
+    circuitBreaker,
     getTools: () => registry.list(),
     toolContext,
     db,
@@ -666,7 +668,7 @@ export async function startGateway(
           pairingEnabled: config.channels.telegram.pairing.enabled,
         },
         llm: {
-          modelMode: agent.getDefaultModelMode(),
+          modelMode: circuitBreaker.getEffectiveMode(),
           localProvider: config.llm.routing.localProvider,
           localModel: llmProviderConfigs[config.llm.routing.localProvider]?.model ?? null,
         },
@@ -724,8 +726,16 @@ export async function startGateway(
         agentId: params.agentId,
         text: params.text,
       }),
-    getModelMode: () => agent.getDefaultModelMode(),
-    setModelMode: (mode) => agent.setDefaultModelMode(mode),
+    getModelMode: () => circuitBreaker.getEffectiveMode(),
+    setModelMode: (mode) => {
+      if (mode === "default" || mode === "local_only") {
+        circuitBreaker.setManualMode(mode);
+      } else {
+        circuitBreaker.setManualMode(null);
+      }
+      return circuitBreaker.getEffectiveMode();
+    },
+    getCircuitBreakerStats: () => circuitBreaker.getStats(),
   });
 
   registerNodeRoutes(http.app, { isStandby: () => isStandby });

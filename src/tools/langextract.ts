@@ -1002,7 +1002,6 @@ export const langextractExtract = defineTool({
       };
 
       const routedModel = ctx.llmConfig?.model?.trim();
-      const fallbackModel = ctx.fallbackLlmConfig?.model?.trim();
       const attemptsRaw: Array<{ model: string; fenceOutput: boolean; useSchemaConstraints: boolean; reason: string }> = [
         {
           model: resolvedLlm.model,
@@ -1027,14 +1026,7 @@ export const langextractExtract = defineTool({
           reason: "routed_model_fallback",
         });
       }
-      if (fallbackModel && fallbackModel !== resolvedLlm.model && fallbackModel !== routedModel) {
-        attemptsRaw.push({
-          model: fallbackModel,
-          fenceOutput: false,
-          useSchemaConstraints: args.useSchemaConstraints,
-          reason: "route_fallback_model",
-        });
-      }
+
 
       const attempts = attemptsRaw.filter((attempt, idx, arr) => {
         const key = `${attempt.model}::${attempt.fenceOutput}::${attempt.useSchemaConstraints}`;

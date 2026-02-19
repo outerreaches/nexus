@@ -15,6 +15,7 @@ export type LLMCompleteChatParams = {
   temperature?: number;
   timeoutMode?: "default" | "extended";
   allowImageFallback?: boolean;
+  onActivity?: () => void;
 };
 
 export type LLMUsage = {
@@ -273,6 +274,50 @@ function shouldRetryWithoutImages(params: { status: number; statusText: string; 
   );
 }
 
+const DEFAULT_BODY_INACTIVITY_TIMEOUT_MS = 60_000;
+
+async function readBodyWithInactivityTimeout(params: {
+  body: ReadableStream<Uint8Array> | null;
+  controller: AbortController;
+  inactivityMs: number;
+  onActivity?: () => void;
+  onLog?: (line: string) => void;
+  startMs: number;
+}): Promise<string> {
+  if (!params.body) return "";
+  const reader = params.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let lastActivityMs = Date.now();
+  let lastActivityCallMs = 0;
+
+  const inactivityCheck = setInterval(() => {
+    if (Date.now() - lastActivityMs > params.inactivityMs) {
+      params.onLog?.(`llm_fetch_body_stall elapsed=${Date.now() - params.startMs}ms inactivity=${params.inactivityMs}ms`);
+      params.controller.abort();
+    }
+  }, 5_000);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(decoder.decode(value, { stream: true }));
+      lastActivityMs = Date.now();
+      if (params.onActivity && Date.now() - lastActivityCallMs > 4_000) {
+        lastActivityCallMs = Date.now();
+        params.onActivity();
+      }
+    }
+    const final = decoder.decode();
+    if (final) chunks.push(final);
+    return chunks.join("");
+  } finally {
+    clearInterval(inactivityCheck);
+    reader.releaseLock();
+  }
+}
+
 export class OpenAICompatClient implements LLMClient {
   constructor(private readonly config: OpenAICompatConfig) {}
 
@@ -343,7 +388,21 @@ export class OpenAICompatClient implements LLMClient {
           throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
         }
 
-        const json = (await res.json()) as any;
+        // Headers arrived OK — switch from fixed timeout to inactivity-based body read
+        clearTimeout(timeout);
+        const bodyInactivityMs = Math.max(
+          1_000,
+          envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
+        );
+        const bodyText = await readBodyWithInactivityTimeout({
+          body: res.body,
+          controller,
+          inactivityMs: bodyInactivityMs,
+          onActivity: params.onActivity,
+          onLog: log,
+          startMs,
+        });
+        const json = JSON.parse(bodyText) as any;
         const totalElapsed = Date.now() - startMs;
         log?.(`llm_fetch_complete elapsed=${totalElapsed}ms headers_at=${headersElapsed}ms body_read=${totalElapsed - headersElapsed}ms`);
 
