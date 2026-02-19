@@ -337,12 +337,18 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     if (!deps.setModelMode) return c.text("LLM mode control is not available", 503);
     const body = await c.req.parseBody();
     const modeRaw = String(body.mode ?? "").trim().toLowerCase();
-    if (modeRaw !== "default" && modeRaw !== "local_only") {
-      return c.text("Invalid mode (expected default|local_only)", 400);
+    if (modeRaw !== "default" && modeRaw !== "local_only" && modeRaw !== "auto") {
+      return c.text("Invalid mode (expected default|local_only|auto)", 400);
     }
-    const mode = deps.setModelMode(modeRaw);
+    const mode = deps.setModelMode(modeRaw as any);
     deps.log(`dashboard: llm model mode set to ${mode}`);
     return c.redirect("/dashboard");
+  });
+
+  app.get("/dashboard/llm/circuit-breaker", async (c) => {
+    const stats = deps.getCircuitBreakerStats?.();
+    if (!stats) return c.text("Circuit breaker not available", 503);
+    return c.json(stats);
   });
 
   app.post("/dashboard/nodes/status", async (c) => {

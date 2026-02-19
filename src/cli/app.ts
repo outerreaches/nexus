@@ -188,7 +188,6 @@ export async function runCli(argv: string[]): Promise<void> {
         presetLlm: getPreset("orchestrator")?.llm,
       });
       const llm = modelRouter.createClient(startupRoute, {
-        onFallback: (line) => log(line),
         onLog: (line) => log(line),
       });
 
@@ -216,7 +215,6 @@ export async function runCli(argv: string[]): Promise<void> {
         codeDir: paths.codeDir,
         llm,
         llmConfig: startupRoute.primary,
-        fallbackLlmConfig: startupRoute.fallback,
         modelRouter,
         modelMode: startupRoute.mode,
         db,
@@ -360,7 +358,6 @@ export async function runCli(argv: string[]): Promise<void> {
           presetLlm: getPreset("orchestrator")?.llm,
         });
         const llm = modelRouter.createClient(startupRoute, {
-          onFallback: (line) => log(line),
           onLog: (line) => log(line),
         });
 
@@ -404,7 +401,6 @@ export async function runCli(argv: string[]): Promise<void> {
           codeDir: paths.codeDir,
           llm,
           llmConfig: startupRoute.primary,
-          fallbackLlmConfig: startupRoute.fallback,
           modelRouter,
           modelMode: startupRoute.mode,
           db,
