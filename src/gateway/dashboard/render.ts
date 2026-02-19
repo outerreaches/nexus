@@ -502,6 +502,95 @@ export function renderDashboard(params: {
       </section>
 
       <section>
+        <div class="section-header">
+          <h2>Federation Onboarding</h2>
+          <div class="inline-actions">
+            <button class="graph-btn" id="federation-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="meta">Operator onboarding controls for federation peer bootstrap, trust transitions, and health checks.</div>
+        <div class="split">
+          <div>
+            <h3>Checklist</h3>
+            <table id="federation-checklist-table">
+              <tbody>
+                <tr><td>Federation Enabled</td><td id="federation-check-enabled">-</td></tr>
+                <tr><td>Identity Material</td><td id="federation-check-identity">-</td></tr>
+                <tr><td>Firewall Baseline</td><td id="federation-check-firewall">-</td></tr>
+                <tr><td>Trusted Peers</td><td id="federation-check-trusted">-</td></tr>
+                <tr><td>Healthy Trusted Peers</td><td id="federation-check-healthy-trusted">-</td></tr>
+                <tr><td>Derived State</td><td id="federation-check-derived">-</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h3>Add Peer</h3>
+            <div class="log-controls" style="margin-bottom: 6px;">
+              <input id="federation-add-id" class="inline-input" type="text" placeholder="peer id" />
+              <input id="federation-add-label" class="inline-input" type="text" placeholder="label" />
+              <input id="federation-add-endpoint" class="inline-input" type="text" placeholder="https://peer.example/api/federation/inbox" />
+            </div>
+            <div class="log-controls" style="margin-bottom: 6px;">
+              <input id="federation-add-signing-key" class="inline-input" type="text" placeholder="peer signing key (Ed25519 PEM or raw)" style="min-width: 380px;" />
+              <input id="federation-add-signing-kid" class="inline-input" type="text" value="kid-initial" placeholder="kid-initial" />
+            </div>
+            <div class="log-controls">
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                Trust
+                <select id="federation-add-trust-state" class="inline-input">
+                  <option value="pending" selected="selected">pending</option>
+                  <option value="trusted">trusted</option>
+                  <option value="quarantined">quarantined</option>
+                  <option value="revoked">revoked</option>
+                </select>
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
+                <input id="federation-add-enabled" type="checkbox" checked="checked" /> enabled
+              </label>
+              <button class="graph-btn" id="federation-peer-add">Add/Upsert Peer</button>
+            </div>
+          </div>
+        </div>
+        <h3>Peers</h3>
+        <div class="scroll-12">
+          <table id="federation-peer-table">
+            <thead>
+              <tr>
+                <th>Peer</th>
+                <th>Endpoint</th>
+                <th>Trust</th>
+                <th>Enabled</th>
+                <th>Route</th>
+                <th>Session</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="7" class="muted">Loading federation peers…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Recent Federation Tasks</h3>
+        <div class="scroll-12">
+          <table id="federation-task-table">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Peer</th>
+                <th>Status</th>
+                <th>Method</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="5" class="muted">Loading federation tasks…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre id="federation-onboarding-log" class="log-viewer">Federation onboarding panel ready.</pre>
+      </section>
+
+      <section>
         <h2>System Status</h2>
         <pre>${statusJson}</pre>
       </section>
@@ -547,6 +636,24 @@ export function renderDashboard(params: {
       const cliMessagesLimitInput = document.getElementById("cli-messages-limit");
       const cliSessionSelect = document.getElementById("cli-session-select");
       const cliInput = document.getElementById("cli-input");
+      const federationRefreshBtn = document.getElementById("federation-refresh");
+      const federationPeerAddBtn = document.getElementById("federation-peer-add");
+      const federationAddIdInput = document.getElementById("federation-add-id");
+      const federationAddLabelInput = document.getElementById("federation-add-label");
+      const federationAddEndpointInput = document.getElementById("federation-add-endpoint");
+      const federationAddSigningKeyInput = document.getElementById("federation-add-signing-key");
+      const federationAddSigningKidInput = document.getElementById("federation-add-signing-kid");
+      const federationAddTrustStateInput = document.getElementById("federation-add-trust-state");
+      const federationAddEnabledInput = document.getElementById("federation-add-enabled");
+      const federationPeerTable = document.getElementById("federation-peer-table");
+      const federationTaskTable = document.getElementById("federation-task-table");
+      const federationLogViewer = document.getElementById("federation-onboarding-log");
+      const federationCheckEnabled = document.getElementById("federation-check-enabled");
+      const federationCheckIdentity = document.getElementById("federation-check-identity");
+      const federationCheckFirewall = document.getElementById("federation-check-firewall");
+      const federationCheckTrusted = document.getElementById("federation-check-trusted");
+      const federationCheckHealthyTrusted = document.getElementById("federation-check-healthy-trusted");
+      const federationCheckDerived = document.getElementById("federation-check-derived");
       const nodeAuditViewer = document.getElementById("node-audit-viewer");
       const nodeAuditNodeInput = document.getElementById("node-audit-node");
       const nodeAuditLimitInput = document.getElementById("node-audit-limit");
@@ -679,6 +786,12 @@ export function renderDashboard(params: {
         hasMore: false,
         nextBeforeId: null,
         sending: false,
+      };
+      const federationState = {
+        status: null,
+        peers: [],
+        tasks: [],
+        loading: false,
       };
       const nodeAuditState = {
         events: [],
@@ -1174,6 +1287,304 @@ export function renderDashboard(params: {
         }
       };
 
+      const appendFederationLog = (line) => {
+        if (!federationLogViewer) return;
+        const nextLine = "[" + new Date().toISOString() + "] " + String(line ?? "");
+        const existing = String(federationLogViewer.textContent ?? "").trim();
+        const lines = existing ? existing.split("\n").slice(-160) : [];
+        lines.push(nextLine);
+        federationLogViewer.textContent = lines.join("\n");
+      };
+
+      const setFederationCheckCell = (element, ok, label) => {
+        if (!element) return;
+        if (ok == null) {
+          element.textContent = "-";
+          return;
+        }
+        const badgeClass = ok ? "status-enabled" : "status-failed";
+        const badgeLabel = ok ? "ok" : "fail";
+        const suffix = label ? " " + escapeLogHtml(label) : "";
+        element.innerHTML = '<span class="badge ' + badgeClass + '">' + badgeLabel + "</span>" + suffix;
+      };
+
+      const renderFederationChecklist = () => {
+        const status = federationState.status;
+        if (!status || typeof status !== "object") {
+          setFederationCheckCell(federationCheckEnabled, null, "");
+          setFederationCheckCell(federationCheckIdentity, null, "");
+          setFederationCheckCell(federationCheckFirewall, null, "");
+          setFederationCheckCell(federationCheckTrusted, null, "");
+          setFederationCheckCell(federationCheckHealthyTrusted, null, "");
+          if (federationCheckDerived) federationCheckDerived.textContent = "-";
+          return;
+        }
+        const enabled = Boolean(status.enabled);
+        const identityValid = Boolean(status.identityValid);
+        const firewallActive = Boolean(status.firewallActive);
+        const trustedPeerCount = Number(status.trustedPeerCount ?? 0);
+        const healthyTrustedPeerCount = Number(status.healthyTrustedPeerCount ?? 0);
+        const derivedState = String(status.derivedState ?? "unknown");
+
+        setFederationCheckCell(federationCheckEnabled, enabled, enabled ? "federation enabled" : "federation disabled");
+        setFederationCheckCell(federationCheckIdentity, identityValid, identityValid ? "identity key available" : "identity missing");
+        setFederationCheckCell(federationCheckFirewall, firewallActive, firewallActive ? "firewall active" : "firewall inactive");
+        setFederationCheckCell(
+          federationCheckTrusted,
+          trustedPeerCount > 0,
+          trustedPeerCount + " trusted peer" + (trustedPeerCount === 1 ? "" : "s"),
+        );
+        setFederationCheckCell(
+          federationCheckHealthyTrusted,
+          healthyTrustedPeerCount > 0,
+          healthyTrustedPeerCount + " healthy trusted peer" + (healthyTrustedPeerCount === 1 ? "" : "s"),
+        );
+        if (federationCheckDerived) {
+          const derivedClass = derivedState === "active_federated" ? "status-enabled" : "status-budget_exhausted";
+          federationCheckDerived.innerHTML =
+            '<span class="badge ' + derivedClass + '">' + escapeLogHtml(derivedState) + "</span>";
+        }
+      };
+
+      const renderFederationPeerTable = () => {
+        if (!federationPeerTable) return;
+        const tbody = federationPeerTable.querySelector("tbody");
+        if (!tbody) return;
+        const peers = Array.isArray(federationState.peers) ? federationState.peers : [];
+        const statusPeers = Array.isArray(federationState.status?.peers) ? federationState.status.peers : [];
+        const healthById = new Map();
+        statusPeers.forEach((peer) => {
+          const id = String(peer?.id ?? "").trim();
+          if (!id) return;
+          healthById.set(id, {
+            routeHealthy: Boolean(peer?.routeHealthy),
+            sessionHealthy: Boolean(peer?.sessionHealthy),
+          });
+        });
+
+        if (peers.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="muted">No federation peers found.</td></tr>';
+          return;
+        }
+
+        const trustStates = ["pending", "trusted", "quarantined", "revoked"];
+        tbody.innerHTML = peers
+          .map((peer) => {
+            const peerId = String(peer?.id ?? "");
+            const health = healthById.get(peerId) ?? { routeHealthy: false, sessionHealthy: false };
+            const trustOptions = trustStates
+              .map((state) => {
+                const selected = String(peer?.trustState ?? "") === state ? ' selected="selected"' : "";
+                return '<option value="' + state + '"' + selected + ">" + state + "</option>";
+              })
+              .join("");
+            const routeBadge = health.routeHealthy
+              ? '<span class="badge status-enabled">healthy</span>'
+              : '<span class="badge status-failed">down</span>';
+            const sessionBadge = health.sessionHealthy
+              ? '<span class="badge status-enabled">active</span>'
+              : '<span class="badge status-failed">stale</span>';
+            return (
+              "<tr>" +
+              "<td>" +
+              "<div>" + escapeLogHtml(peerId) + "</div>" +
+              '<div class="muted">' + escapeLogHtml(String(peer?.label ?? "")) + "</div>" +
+              "</td>" +
+              "<td>" + escapeLogHtml(String(peer?.endpoint ?? "")) + "</td>" +
+              '<td><select class="inline-input federation-peer-trust" data-peer-id="' + escapeLogHtml(peerId) + '">' + trustOptions + "</select></td>" +
+              '<td><label style="display:flex; align-items:center; gap:6px;"><input class="federation-peer-enabled" data-peer-id="' +
+              escapeLogHtml(peerId) +
+              '" type="checkbox"' +
+              (peer?.enabled ? ' checked="checked"' : "") +
+              " />enabled</label></td>" +
+              "<td>" + routeBadge + "</td>" +
+              "<td>" + sessionBadge + "</td>" +
+              '<td class="inline-actions">' +
+              '<button class="graph-btn" data-peer-action="apply" data-peer-id="' + escapeLogHtml(peerId) + '">Apply</button>' +
+              '<button class="graph-btn" data-peer-action="probe" data-peer-id="' + escapeLogHtml(peerId) + '">Queue Probe</button>' +
+              "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+      };
+
+      const renderFederationTaskTable = () => {
+        if (!federationTaskTable) return;
+        const tbody = federationTaskTable.querySelector("tbody");
+        if (!tbody) return;
+        const tasks = Array.isArray(federationState.tasks) ? federationState.tasks : [];
+        if (tasks.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="muted">No federation tasks found.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = tasks
+          .slice(0, 30)
+          .map((task) => {
+            const status = String(task?.status ?? "unknown");
+            const statusClass =
+              status === "completed"
+                ? "status-enabled"
+                : status === "running" || status === "pending"
+                  ? "status-running"
+                  : "status-failed";
+            return (
+              "<tr>" +
+              "<td>" + escapeLogHtml(String(task?.id ?? "").slice(0, 12)) + "</td>" +
+              "<td>" + escapeLogHtml(String(task?.peerId ?? "")) + "</td>" +
+              '<td><span class="badge ' + statusClass + '">' + escapeLogHtml(status) + "</span></td>" +
+              "<td>" + escapeLogHtml(String(task?.method ?? "")) + "</td>" +
+              "<td>" + escapeLogHtml(formatIso(task?.updatedAt ?? null)) + "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+      };
+
+      const renderFederationOnboarding = () => {
+        renderFederationChecklist();
+        renderFederationPeerTable();
+        renderFederationTaskTable();
+      };
+
+      const fetchFederationOnboarding = async () => {
+        if (federationState.loading) return;
+        federationState.loading = true;
+        if (federationRefreshBtn) federationRefreshBtn.disabled = true;
+        try {
+          const [statusRes, peersRes, tasksRes] = await Promise.all([
+            fetchWithAuth("/api/federation/status"),
+            fetchWithAuth("/api/federation/peers?limit=200"),
+            fetchWithAuth("/api/federation/tasks?limit=50"),
+          ]);
+          if (!statusRes.ok) {
+            const text = await statusRes.text();
+            appendFederationLog("status fetch failed: " + statusRes.status + " " + text);
+            return;
+          }
+          if (!peersRes.ok) {
+            const text = await peersRes.text();
+            appendFederationLog("peer fetch failed: " + peersRes.status + " " + text);
+            return;
+          }
+          if (!tasksRes.ok) {
+            const text = await tasksRes.text();
+            appendFederationLog("task fetch failed: " + tasksRes.status + " " + text);
+            return;
+          }
+          const statusPayload = await statusRes.json();
+          const peersPayload = await peersRes.json();
+          const tasksPayload = await tasksRes.json();
+          federationState.status = statusPayload;
+          federationState.peers = Array.isArray(peersPayload?.peers) ? peersPayload.peers : [];
+          federationState.tasks = Array.isArray(tasksPayload?.tasks) ? tasksPayload.tasks : [];
+          renderFederationOnboarding();
+        } catch (err) {
+          appendFederationLog("refresh failed: " + (err instanceof Error ? err.message : String(err)));
+        } finally {
+          federationState.loading = false;
+          if (federationRefreshBtn) federationRefreshBtn.disabled = false;
+        }
+      };
+
+      const upsertFederationPeerFromForm = async () => {
+        const id = String(federationAddIdInput?.value ?? "").trim();
+        const label = String(federationAddLabelInput?.value ?? "").trim();
+        const endpoint = String(federationAddEndpointInput?.value ?? "").trim();
+        const signingKey = String(federationAddSigningKeyInput?.value ?? "").trim();
+        const signingKeyKid = String(federationAddSigningKidInput?.value ?? "").trim() || "kid-initial";
+        const trustState = String(federationAddTrustStateInput?.value ?? "pending").trim() || "pending";
+        const enabled = Boolean(federationAddEnabledInput?.checked);
+        if (!id || !label || !endpoint || !signingKey) {
+          appendFederationLog("add peer blocked: id, label, endpoint, signing key are required");
+          return;
+        }
+        if (federationPeerAddBtn) federationPeerAddBtn.disabled = true;
+        try {
+          const res = await fetchWithAuth("/api/federation/peers", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              id,
+              label,
+              endpoint,
+              signingKey,
+              signingKeyKid,
+              trustState,
+              enabled,
+            }),
+          });
+          const payload = await res.json();
+          if (!res.ok) {
+            appendFederationLog("peer upsert failed: " + String(payload?.error ?? res.status));
+            return;
+          }
+          appendFederationLog("peer upserted: " + id + " trust=" + trustState + " enabled=" + (enabled ? "1" : "0"));
+          await fetchFederationOnboarding();
+        } catch (err) {
+          appendFederationLog("peer upsert error: " + (err instanceof Error ? err.message : String(err)));
+        } finally {
+          if (federationPeerAddBtn) federationPeerAddBtn.disabled = false;
+        }
+      };
+
+      const applyFederationPeerTrustFromRow = async (peerId, row) => {
+        const trustInput = row?.querySelector(".federation-peer-trust");
+        const enabledInput = row?.querySelector(".federation-peer-enabled");
+        const trustState = String(trustInput?.value ?? "").trim();
+        const enabled = Boolean(enabledInput?.checked);
+        if (!trustState) {
+          appendFederationLog("peer trust apply blocked: missing trust state for peer " + peerId);
+          return;
+        }
+        try {
+          const res = await fetchWithAuth("/api/federation/peers/" + encodeURIComponent(peerId) + "/trust", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              trustState,
+              enabled,
+            }),
+          });
+          const payload = await res.json();
+          if (!res.ok) {
+            appendFederationLog("peer trust update failed for " + peerId + ": " + String(payload?.error ?? res.status));
+            return;
+          }
+          appendFederationLog("peer trust updated: " + peerId + " trust=" + trustState + " enabled=" + (enabled ? "1" : "0"));
+          await fetchFederationOnboarding();
+        } catch (err) {
+          appendFederationLog("peer trust update error for " + peerId + ": " + (err instanceof Error ? err.message : String(err)));
+        }
+      };
+
+      const queueFederationPeerProbe = async (peerId) => {
+        try {
+          const res = await fetchWithAuth("/api/federation/tasks", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              peerId,
+              method: "submit_task",
+              request: {
+                kind: "onboarding.probe",
+                source: "dashboard",
+                issuedAt: Date.now(),
+              },
+            }),
+          });
+          const payload = await res.json();
+          if (!res.ok) {
+            appendFederationLog("probe enqueue failed for " + peerId + ": " + String(payload?.error ?? res.status));
+            return;
+          }
+          appendFederationLog("probe task enqueued for " + peerId + " task=" + String(payload?.task?.id ?? "unknown"));
+          await fetchFederationOnboarding();
+        } catch (err) {
+          appendFederationLog("probe enqueue error for " + peerId + ": " + (err instanceof Error ? err.message : String(err)));
+        }
+      };
+
       const setActiveTab = (name) => {
         tabButtons.forEach((btn) => {
           const isActive = btn.getAttribute("data-tab") === name;
@@ -1254,6 +1665,35 @@ export function renderDashboard(params: {
           }
         });
       }
+      if (federationRefreshBtn) {
+        federationRefreshBtn.addEventListener("click", () => {
+          fetchFederationOnboarding();
+        });
+      }
+      if (federationPeerAddBtn) {
+        federationPeerAddBtn.addEventListener("click", () => {
+          upsertFederationPeerFromForm();
+        });
+      }
+      if (federationPeerTable) {
+        federationPeerTable.addEventListener("click", (event) => {
+          const target = event.target;
+          const button =
+            target instanceof Element ? target.closest("button[data-peer-action][data-peer-id]") : null;
+          if (!button) return;
+          const action = String(button.getAttribute("data-peer-action") ?? "").trim();
+          const peerId = String(button.getAttribute("data-peer-id") ?? "").trim();
+          if (!action || !peerId) return;
+          const row = button.closest("tr");
+          if (action === "apply") {
+            void applyFederationPeerTrustFromRow(peerId, row);
+            return;
+          }
+          if (action === "probe") {
+            void queueFederationPeerProbe(peerId);
+          }
+        });
+      }
       if (nodeAuditFetchBtn) {
         nodeAuditFetchBtn.addEventListener("click", () => {
           fetchNodeAudit({ older: false });
@@ -1289,6 +1729,7 @@ export function renderDashboard(params: {
       } else {
         renderNodeAuditRows();
       }
+      fetchFederationOnboarding();
       updateCliComposerState();
 
       // Update stats display
@@ -1413,6 +1854,7 @@ export function renderDashboard(params: {
 
       // Live data refresh countdown display
       let refreshCountdown = 5;
+      let federationRefreshCountdown = 30;
       const updateRefreshIndicator = () => {
         if (refreshIndicator) {
           refreshIndicator.textContent = \`Update in \${refreshCountdown}s\`;
@@ -1453,6 +1895,7 @@ export function renderDashboard(params: {
 
       setInterval(() => {
         refreshCountdown--;
+        federationRefreshCountdown--;
         updateRefreshIndicator();
         if (refreshCountdown <= 0) {
           refreshCountdown = 5;
@@ -1460,6 +1903,10 @@ export function renderDashboard(params: {
           if (logsAutoToggle?.checked && logsPanel?.classList.contains("active")) {
             fetchLogs();
           }
+        }
+        if (federationRefreshCountdown <= 0) {
+          federationRefreshCountdown = 30;
+          fetchFederationOnboarding();
         }
       }, 1000);
 
