@@ -429,6 +429,7 @@ export class AgentRunner {
 
       let content: string | null;
       let toolCalls: import("./types.js").ToolCall[];
+      this.deps.onLog?.(`llm_call iteration=${iteration} messages=${messages.length} tool_calls_used=${toolCallsUsed}`);
       try {
         const res = await this.deps.llm.completeChat({
           messages,
@@ -504,6 +505,7 @@ export class AgentRunner {
           ].join("\n"),
         };
 
+        this.deps.onLog?.(`llm_call_retry iteration=${iteration} messages=${retryMessages.length + 1} mode=extended`);
         try {
           const retry = await this.deps.llm.completeChat({
             messages: [...retryMessages, retryInstruction],

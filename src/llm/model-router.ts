@@ -110,11 +110,12 @@ export class ModelRouter {
     route: ResolvedModelRoute,
     opts?: {
       onFallback?: (line: string) => void;
+      onLog?: (line: string) => void;
     },
   ): LLMClient {
     return createRoutedClientFromConfigs({
-      primary: route.primary,
-      fallback: route.fallback,
+      primary: { ...route.primary, onLog: opts?.onLog },
+      fallback: route.fallback ? { ...route.fallback, onLog: opts?.onLog } : undefined,
       primaryLabel: `${route.primaryProvider}/${route.primary.model}`,
       fallbackLabel:
         route.fallback && route.fallbackProvider

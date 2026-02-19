@@ -189,6 +189,7 @@ export async function runCli(argv: string[]): Promise<void> {
       });
       const llm = modelRouter.createClient(startupRoute, {
         onFallback: (line) => log(line),
+        onLog: (line) => log(line),
       });
 
       const browserPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? config.port + 2);
@@ -360,6 +361,7 @@ export async function runCli(argv: string[]): Promise<void> {
         });
         const llm = modelRouter.createClient(startupRoute, {
           onFallback: (line) => log(line),
+          onLog: (line) => log(line),
         });
 
         const builtIns = getBuiltInTools();

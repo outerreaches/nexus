@@ -6,6 +6,7 @@ export type OpenAICompatConfig = {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  onLog?: (line: string) => void;
 };
 
 export type LLMCompleteChatParams = {
@@ -277,6 +278,7 @@ export class OpenAICompatClient implements LLMClient {
 
   async completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");
+    const log = this.config.onLog;
     const tools = params.tools.map((t) => ({
       type: "function",
       function: {
@@ -296,8 +298,18 @@ export class OpenAICompatClient implements LLMClient {
         messages: activeMessages,
         tools: params.tools,
       });
+      const estimatedTokens = estimateRequestTokens(activeMessages, params.tools);
+      const startMs = Date.now();
+
+      log?.(`llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens}`);
+
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let abortFired = false;
+      const timeout = setTimeout(() => {
+        abortFired = true;
+        log?.(`llm_fetch_abort_fired elapsed=${Date.now() - startMs}ms timeout=${timeoutMs}ms`);
+        controller.abort();
+      }, timeoutMs);
       try {
         const res = await fetch(url, {
           method: "POST",
@@ -314,6 +326,9 @@ export class OpenAICompatClient implements LLMClient {
           }),
           signal: controller.signal,
         });
+        const headersElapsed = Date.now() - startMs;
+        log?.(`llm_fetch_headers status=${res.status} elapsed=${headersElapsed}ms`);
+
         if (!res.ok) {
           const body = await res.text().catch(() => "");
           if (!fallbackAttempted && hasImages && allowImageFallback && shouldRetryWithoutImages({
@@ -329,6 +344,9 @@ export class OpenAICompatClient implements LLMClient {
         }
 
         const json = (await res.json()) as any;
+        const totalElapsed = Date.now() - startMs;
+        log?.(`llm_fetch_complete elapsed=${totalElapsed}ms headers_at=${headersElapsed}ms body_read=${totalElapsed - headersElapsed}ms`);
+
         const message = json?.choices?.[0]?.message as any;
         const content = normalizeAssistantContent(message?.content);
         const toolCalls = normalizeToolCalls(message?.tool_calls);
@@ -336,9 +354,12 @@ export class OpenAICompatClient implements LLMClient {
         // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
         return { content, toolCalls, usage };
       } catch (err) {
+        const elapsed = Date.now() - startMs;
         if (err instanceof Error && err.name === "AbortError") {
+          log?.(`llm_fetch_timeout elapsed=${elapsed}ms timeout=${timeoutMs}ms abort_fired=${abortFired}`);
           throw new Error(`LLM request timed out after ${timeoutMs}ms`);
         }
+        log?.(`llm_fetch_error elapsed=${elapsed}ms err=${err instanceof Error ? err.message : String(err)}`);
         throw err;
       } finally {
         clearTimeout(timeout);

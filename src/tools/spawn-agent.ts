@@ -331,7 +331,7 @@ async function runInProcess(params: {
       mode: modelMode,
       presetLlm: preset.llm,
     });
-    llm = ctx.modelRouter.createClient(route, { onFallback: onLog });
+    llm = ctx.modelRouter.createClient(route, { onFallback: onLog, onLog });
     llmConfig = route.primary;
     fallbackLlmConfig = route.fallback;
     const fallbackLabel = route.fallbackProvider && route.fallback

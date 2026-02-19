@@ -219,6 +219,7 @@ export async function startGateway(
   );
   const llm = modelRouter.createClient(startupRoute, {
     onFallback: (line) => log(line),
+    onLog: (line) => log(line),
   });
   const llmConfig = startupRoute.primary;
   const fallbackLlmConfig = startupRoute.fallback;

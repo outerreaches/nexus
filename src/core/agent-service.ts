@@ -239,6 +239,7 @@ export class AgentService {
         });
         llm = this.deps.modelRouter.createClient(route, {
           onFallback: onRunnerLog,
+          onLog: onRunnerLog,
         });
         llmConfig = route.primary;
         fallbackLlmConfig = route.fallback;
