@@ -57,4 +57,6 @@ test("dashboard renders federation runtime status fields", () => {
   assert.ok(html.includes("Federation State"));
   assert.ok(html.includes("active_federated"));
   assert.ok(html.includes("Trusted Peers"));
+  assert.ok(html.includes('data-tab="cli-chat"'));
+  assert.ok(html.includes('id="tab-cli-chat"'));
 });

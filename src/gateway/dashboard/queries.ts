@@ -273,6 +273,30 @@ export function listLlmSessions(
     .all(...args, params.limit) as LlmSessionRow[];
 }
 
+export function getLlmSessionById(db: NexusDatabase | undefined, sessionId: string): LlmSessionRow | null {
+  if (!db) return null;
+  const id = sessionId.trim();
+  if (!id) return null;
+  const row = db.db
+    .prepare(
+      `SELECT
+         s.id,
+         s.channel,
+         s.channel_key,
+         s.agent_id,
+         s.created_at,
+         COALESCE(MAX(m.created_at), s.created_at) AS last_message_at,
+         COUNT(m.id) AS message_count
+       FROM sessions s
+       LEFT JOIN messages m ON m.session_id = s.id
+       WHERE s.id = ?
+       GROUP BY s.id
+       LIMIT 1`,
+    )
+    .get(id) as LlmSessionRow | undefined;
+  return row ?? null;
+}
+
 export function listLlmMessages(
   db: NexusDatabase | undefined,
   params: {

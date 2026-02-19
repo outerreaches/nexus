@@ -10,17 +10,21 @@ import { parseNodePublicKey, signProtocolEnvelope } from "../nodes/auth.js";
 import { buildWebhookCanonicalSigningInput, signWebhookCanonicalInput } from "../federation/webhook.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { upsertSecretProviderProfile } from "../storage/secrets.js";
+import { getOrCreateSessionId } from "../storage/sessions.js";
 import { upsertCredential } from "../secrets/credentials.js";
 import type { GatewayHttpDeps } from "./http.js";
 import { registerApiRoutes } from "./routes/api.js";
 
-async function withDb(fn: (db: NexusDatabase, app: Hono, stateDir: string) => Promise<void> | void): Promise<void> {
+async function withDb(
+  fn: (db: NexusDatabase, app: Hono, stateDir: string) => Promise<void> | void,
+  overrides: Partial<GatewayHttpDeps> = {},
+): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-federation-api-test-"));
   const dbPath = path.join(dir, "nexus.db");
   const db = await openDatabase(dbPath);
   const app = new Hono();
   let globalDisable = false;
-  const deps: GatewayHttpDeps = {
+  const baseDeps: GatewayHttpDeps = {
     port: 0,
     stateDir: dir,
     federationLocalInstanceId: "local",
@@ -41,6 +45,10 @@ async function withDb(fn: (db: NexusDatabase, app: Hono, stateDir: string) => Pr
       },
     }),
     log: () => {},
+  };
+  const deps: GatewayHttpDeps = {
+    ...baseDeps,
+    ...overrides,
   };
   registerApiRoutes(app, deps);
   try {
@@ -85,6 +93,78 @@ test("federation status route returns status payload", async () => {
     assert.equal(body.derivedState, "federated_degraded");
     assert.ok(typeof body.timestamp === "number");
   });
+});
+
+test("cli chat routes create writable sessions and block read-only sessions", async () => {
+  const dispatchCalls: Array<{ channel: string; channelKey: string; agentId: string; text: string }> = [];
+  await withDb(
+    async (db, app) => {
+      const createRes = await app.request("http://localhost/api/cli/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId: "main" }),
+      });
+      assert.equal(createRes.status, 200);
+      const createBody = await createRes.json() as {
+        session: { id: string; channel: string; channel_key: string; agent_id: string };
+      };
+      assert.equal(createBody.session.channel, "cli");
+      assert.equal(createBody.session.agent_id, "main");
+      const writableSessionId = createBody.session.id;
+      assert.ok(writableSessionId.length > 0);
+
+      const sendRes = await app.request("http://localhost/api/cli/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId: writableSessionId,
+          text: "hello from dashboard",
+        }),
+      });
+      assert.equal(sendRes.status, 200);
+      const sendBody = await sendRes.json() as {
+        ok: boolean;
+        result: { output: string; sessionId: string };
+      };
+      assert.equal(sendBody.ok, true);
+      assert.equal(sendBody.result.output, "cli:hello from dashboard");
+      assert.equal(sendBody.result.sessionId, "session-cli-test");
+      assert.equal(dispatchCalls.length, 1);
+      assert.equal(dispatchCalls[0]?.channel, "cli");
+
+      const readOnlySessionId = getOrCreateSessionId({
+        db,
+        channel: "telegram",
+        channelKey: "1000000001",
+        agentId: "main",
+        nowMs: Date.now(),
+      });
+      const readOnlySendRes = await app.request("http://localhost/api/cli/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId: readOnlySessionId,
+          text: "should fail",
+        }),
+      });
+      assert.equal(readOnlySendRes.status, 409);
+      const readOnlyBody = await readOnlySendRes.json() as { error?: string };
+      assert.match(readOnlyBody.error ?? "", /read-only/i);
+    },
+    {
+      dispatchCliMessage: async (params) => {
+        dispatchCalls.push(params);
+        return {
+          runId: "run-cli-test",
+          sessionId: "session-cli-test",
+          output: `cli:${params.text}`,
+          status: "complete",
+          toolCallsUsed: 0,
+          iterationsUsed: 1,
+        };
+      },
+    },
+  );
 });
 
 test("breakglass controls toggle global disable and support pause/revoke actions", async () => {

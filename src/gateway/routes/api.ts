@@ -15,6 +15,7 @@ import {
   getNodeById as getNodeRowById,
   listJobRuns,
   listLlmSessions,
+  getLlmSessionById,
   listLlmMessages,
 } from "../dashboard/queries.js";
 import { listMcpGrants, listMcpProfiles, listMcpServers } from "../../mcp/store.js";
@@ -81,6 +82,7 @@ import {
   type SecretProviderKind,
   upsertSecretProviderProfile,
 } from "../../storage/secrets.js";
+import { getOrCreateSessionId } from "../../storage/sessions.js";
 import { parseNodePublicKey, verifyProtocolEnvelope } from "../../nodes/auth.js";
 import type { FederationSignedEnvelope } from "../../federation/types.js";
 import { evaluateFederationFirewall } from "../../federation/firewall.js";
@@ -2131,6 +2133,100 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       nextBeforeId: result.nextBeforeId,
       timestamp: Date.now(),
     });
+  });
+
+  app.post("/api/cli/sessions", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const payload = asObject(body);
+    const agentId = parseUnknownText(payload.agentId, 120) ?? "main";
+    const requestedChannelKey = parseUnknownText(payload.channelKey, 200);
+    const channelKey = requestedChannelKey ?? `dashboard:${crypto.randomUUID()}`;
+    const nowMs = Date.now();
+    const sessionId = getOrCreateSessionId({
+      db: deps.db,
+      channel: "cli",
+      channelKey,
+      agentId,
+      nowMs,
+    });
+    const session = getLlmSessionById(deps.db, sessionId);
+    return c.json({
+      ok: true,
+      session:
+        session ?? {
+          id: sessionId,
+          channel: "cli",
+          channel_key: channelKey,
+          agent_id: agentId,
+          created_at: nowMs,
+          last_message_at: nowMs,
+          message_count: 0,
+        },
+      writable: true,
+      timestamp: nowMs,
+    });
+  });
+
+  app.post("/api/cli/messages", async (c) => {
+    if (!deps.db) return c.json({ error: "database is not available" }, 503);
+    if (!deps.dispatchCliMessage) return c.json({ error: "cli chat dispatch is not available" }, 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const payload = asObject(body);
+    const sessionId = parseUnknownText(payload.sessionId, 200);
+    const text = parseUnknownText(payload.text, 24_000);
+    if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
+    if (!text) return c.json({ error: "text is required" }, 400);
+
+    const session = getLlmSessionById(deps.db, sessionId);
+    if (!session) return c.json({ error: "session not found" }, 404);
+    if (session.channel !== "cli") {
+      return c.json(
+        {
+          error: "selected session is read-only; create/select a cli session to send messages",
+          session: {
+            id: session.id,
+            channel: session.channel,
+            channelKey: session.channel_key,
+            agentId: session.agent_id,
+          },
+        },
+        409,
+      );
+    }
+
+    try {
+      const result = await deps.dispatchCliMessage({
+        channel: session.channel,
+        channelKey: session.channel_key,
+        agentId: session.agent_id,
+        text,
+      });
+      return c.json({
+        ok: true,
+        session: {
+          id: session.id,
+          channel: session.channel,
+          channelKey: session.channel_key,
+          agentId: session.agent_id,
+        },
+        result,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 502);
+    }
   });
 
   app.get("/api/job-runs/export.csv", async (c) => {

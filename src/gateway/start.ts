@@ -716,6 +716,13 @@ export async function startGateway(
     agentTracker,
     nodeGateway: nodeWsGateway,
     mcp,
+    dispatchCliMessage: (params) =>
+      agent.handleUserMessage({
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+        text: params.text,
+      }),
     getModelMode: () => agent.getDefaultModelMode(),
     setModelMode: (mode) => agent.setDefaultModelMode(mode),
   });

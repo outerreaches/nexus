@@ -29,6 +29,19 @@ export type GatewayHttpDeps = {
   agentTracker?: AgentTracker;
   nodeGateway?: NodeWebSocketGateway;
   mcp?: McpManager;
+  dispatchCliMessage?: (params: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    text: string;
+  }) => Promise<{
+    runId: string | null;
+    sessionId: string;
+    output: string;
+    status: "complete" | "failed" | "budget_exhausted";
+    toolCallsUsed: number;
+    iterationsUsed: number;
+  }>;
   getModelMode?: () => ModelRoutingMode;
   setModelMode?: (mode: ModelRoutingMode) => ModelRoutingMode;
 };
