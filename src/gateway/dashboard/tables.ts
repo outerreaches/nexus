@@ -749,7 +749,9 @@ export function safeJsonForScript(value: unknown): string {
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")
     .replace(/\u2028/g, "\\\\u2028")
-    .replace(/\u2029/g, "\\\\u2029");
+    .replace(/\u2029/g, "\\\\u2029")
+    .replace(/`/g, "\\u0060")
+    .replace(/\$\{/g, "\\u0024{");
 }
 
 export function escapeClass(value: string): string {
