@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "researcher",
   description: "Web research, document analysis, knowledge synthesis",
   llm: {
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "z-ai/glm-5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
