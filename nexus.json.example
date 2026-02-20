@@ -1,0 +1,129 @@
+{
+  // Nexus configuration (JSON5 — comments are ok)
+  // Copy to your config path (default: ~/.nexus/nexus.json) and customize.
+
+  "port": 18789,
+
+  // ── Secrets ──────────────────────────────────────────────────────────────
+  // Map env-var names to {{secret:provider/path#field}} references.
+  // These are resolved through the sidecar/broker/provider stack at startup.
+  // Plain string values are also supported for non-sensitive config.
+  "secrets": {
+    "env": {
+      "OPENROUTER_API_KEY": "{{secret:sidecar-main/llm.openrouter.api#password}}",
+      "BRAVE_API_KEY": "{{secret:sidecar-main/search.brave.api#password}}",
+      "PERPLEXITY_API_KEY": "{{secret:sidecar-main/search.perplexity.api#password}}",
+      "TELEGRAM_BOT_TOKEN": "{{secret:sidecar-main/telegram.bot.token#password}}",
+      "GOOGLE_CLIENT_ID": "{{secret:sidecar-main/google.oauth#client_id}}",
+      "GOOGLE_CLIENT_SECRET": "{{secret:sidecar-main/google.oauth#client_secret}}",
+      "ALPHAVANTAGE_API_KEY": "{{secret:sidecar-main/data.alphavantage.api#password}}",
+      "MARKETSTACK_API_KEY": "{{secret:sidecar-main/data.marketstack.api#password}}",
+      "TWELVEDATA_API_KEY": "{{secret:sidecar-main/data.twelvedata.api#password}}",
+      "COINLAYER_API_KEY": "{{secret:sidecar-main/data.coinlayer.api#password}}",
+      "CRYPTOCOMPARE_API_KEY": "{{secret:sidecar-main/data.cryptocompare.api#password}}",
+      "OPEN_METALS_API_KEY": "{{secret:sidecar-main/data.openmetals.api#password}}",
+      "AUTH_TOKEN": "{{secret:sidecar-main/twitter.auth.auth_token#password}}",
+      "CT0": "{{secret:sidecar-main/twitter.auth.ct0#password}}"
+    }
+  },
+
+  // ── Runtime ──────────────────────────────────────────────────────────────
+  "runtime": {
+    "profile": "primary"
+  },
+
+  // ── LLM ──────────────────────────────────────────────────────────────────
+  "llm": {
+    "openaiCompat": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "model": "moonshotai/kimi-k2.5"
+    },
+    "providers": {
+      "local": {
+        "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
+        "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}",
+        "model": "${NEXUS_LOCAL_LLM_MODEL}"
+      }
+    },
+    "routing": {
+      "default": {
+        "primary": { "provider": "default" }
+      },
+      "byPreset": {},
+      "byAgent": {},
+      "localProvider": "local"
+    }
+  },
+
+  // ── Channels ─────────────────────────────────────────────────────────────
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "token": "${TELEGRAM_BOT_TOKEN}",
+      "mode": "polling",
+      "allowFrom": [],
+      "requireMentionInGroups": true,
+      "agentId": "main",
+      "pairing": {
+        "enabled": true,
+        "codeTtlMs": 3600000,
+        "maxPending": 3
+      }
+    }
+  },
+
+  // ── Proactive ────────────────────────────────────────────────────────────
+  "proactive": {
+    "enabled": false,
+    "agentId": "main",
+    "intervalMs": 900000,
+    "maxIntervalMs": 3600000,
+    "jitterMs": 5000,
+    "notifyTelegram": true,
+    "pauseOnActiveTelegram": true,
+    "activeTelegramQuietMs": 120000
+  },
+
+  // ── Scheduler ────────────────────────────────────────────────────────────
+  "scheduler": {
+    "enabled": true,
+    "tickIntervalMs": 15000,
+    "maxRunsPerTick": 5,
+    "concurrency": 5,
+    "leaseTtlMs": 600000,
+    "maxConsecutiveFailures": 5,
+    "notifyAgentOnFailure": true,
+    "notifyCooldownMs": 300000,
+    "contextMode": "delta"
+  },
+
+  // ── Maintenance ──────────────────────────────────────────────────────────
+  "maintenance": {
+    "enabled": true,
+    "archiveRetentionDays": 180,
+    "jobRunRetentionDays": 60,
+    "ttlCleanupEnabled": true
+  },
+
+  // ── Permissions ──────────────────────────────────────────────────────────
+  "permissions": {
+    "allowShellExec": false,
+    "allowCodeEdit": true,
+    "allowCodeWrite": false
+  },
+
+  // ── Limits ───────────────────────────────────────────────────────────────
+  "limits": {
+    "maxConcurrentAgents": 5,
+    "maxToolCallsPerRun": 140,
+    "maxIterationsPerRun": 60,
+    "maxContextTokens": 128000
+  },
+
+  // ── Federation ───────────────────────────────────────────────────────────
+  "federation": {
+    "enabled": false,
+    "localInstanceId": "local"
+  }
+}

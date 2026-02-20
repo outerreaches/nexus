@@ -3,6 +3,7 @@ import { z } from "zod";
 import { TwitterClient, resolveCredentials, type SearchResult, type TweetData } from "@steipete/bird";
 
 import type { DataSource, NormalizedRecord, DataIntakeContext } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 /**
  * Usage Example:
@@ -42,10 +43,10 @@ const BirdBatchParams = z
   })
   .superRefine((val, ctx) => {
     if (!val.handles || val.handles.length === 0) {
-      ctx.addIssue({ 
-        code: z.ZodIssueCode.custom, 
-        message: "handles array is required (at least one handle)", 
-        path: ["handles"] 
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "handles array is required (at least one handle)",
+        path: ["handles"]
       });
     }
   });
@@ -94,12 +95,12 @@ async function fetchUserTweets(
 ): Promise<UserTweetsResult> {
   const sanitizedHandle = sanitizeHandle(handle);
   const formattedHandle = formatHandle(handle);
-  
+
   if (!sanitizedHandle) {
-    return { 
-      handle: formattedHandle, 
-      userId: "", 
-      success: false, 
+    return {
+      handle: formattedHandle,
+      userId: "",
+      success: false,
       error: "Invalid handle",
       result: { tweets: [], success: false, error: "Invalid handle" },
     };
@@ -107,10 +108,10 @@ async function fetchUserTweets(
 
   const lookup = await client.getUserIdByUsername(sanitizedHandle);
   if (!lookup.success || !lookup.userId) {
-    return { 
-      handle: formattedHandle, 
-      userId: "", 
-      success: false, 
+    return {
+      handle: formattedHandle,
+      userId: "",
+      success: false,
       error: lookup.error ?? "User lookup failed",
       result: { tweets: [], success: false, error: lookup.error ?? "User lookup failed" },
     };
@@ -141,11 +142,11 @@ export const birdBatchSource: DataSource = {
   schemaVersion: 1,
   defaultTtlMs: 5 * 60_000,
   paramsSchema: BirdBatchParams,
-  
+
   fetch: async (params): Promise<BatchFetchResult> => {
     const parsed = BirdBatchParams.parse(params);
-    const authToken = process.env.AUTH_TOKEN ?? process.env.TWITTER_AUTH_TOKEN ?? undefined;
-    const ct0 = process.env.CT0 ?? process.env.TWITTER_CT0 ?? undefined;
+    const authToken = getSecret("AUTH_TOKEN") ?? getSecret("TWITTER_AUTH_TOKEN") ?? undefined;
+    const ct0 = getSecret("CT0") ?? getSecret("TWITTER_CT0") ?? undefined;
     const { cookies, warnings } = await resolveCredentials({ authToken, ct0, cookieSource: [] });
 
     if (!cookies.authToken || !cookies.ct0) {
@@ -189,13 +190,13 @@ export const birdBatchSource: DataSource = {
       }
     }
 
-    return { 
-      results, 
+    return {
+      results,
       allHandles,
-      warnings 
+      warnings
     };
   },
-  
+
   normalize: (raw, params, ctx): NormalizedRecord[] => {
     const parsed = BirdBatchParams.parse(params);
     const payload = raw as BatchFetchResult;
@@ -205,7 +206,7 @@ export const birdBatchSource: DataSource = {
     for (const userResult of payload.results) {
       const tweets = userResult.result?.tweets ?? [];
       const filtered = filterTweets(tweets, parsed.includeReplies, parsed.includeRetweets);
-      
+
       const items = filtered.map((tweet) => ({
         id: tweet.id,
         text: tweet.text,
@@ -250,7 +251,7 @@ export const birdBatchSource: DataSource = {
 
     return records;
   },
-  
+
   summarize: (records) => {
     const summary = {
       totalHandles: records.length,
@@ -263,8 +264,8 @@ export const birdBatchSource: DataSource = {
     };
 
     for (const r of records) {
-      const v = r.value as { 
-        handle?: string; 
+      const v = r.value as {
+        handle?: string;
         count?: number;
         tweets?: Array<{ id: string; text: string; author?: { username?: string } }>;
       } | null;
@@ -272,7 +273,7 @@ export const birdBatchSource: DataSource = {
       const handle = v?.handle ?? r.subject;
       const count = v?.count ?? 0;
       const tweets = v?.tweets ?? [];
-      
+
       summary.totalTweets += count;
       summary.handles.push({
         handle,

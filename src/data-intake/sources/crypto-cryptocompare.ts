@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type CryptoCompareResponse = {
   Response?: string;
@@ -25,7 +26,7 @@ export const cryptoCompareSource: DataSource = {
   paramsSchema: CryptoCompareParams,
   fetch: async (params) => {
     const parsed = CryptoCompareParams.parse(params);
-    const apiKey = process.env.CRYPTOCOMPARE_API_KEY;
+    const apiKey = getSecret("CRYPTOCOMPARE_API_KEY");
     if (!apiKey) throw new Error("CRYPTOCOMPARE_API_KEY not configured");
 
     const symbols = parsed.symbols.map((s) => s.trim().toUpperCase()).filter(Boolean);

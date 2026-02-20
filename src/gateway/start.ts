@@ -51,6 +51,8 @@ import { deriveFederationFirewallRuntimeState } from "../federation/firewall.js"
 import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from "../federation/webhook-worker.js";
 import { createFederationTransportRouter } from "../federation/transport.js";
 import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
+import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
+import { resolveEnvSecrets } from "../secrets/resolve-env.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
 
@@ -174,6 +176,13 @@ export async function startGateway(
   initDataIntake();
   ensureSystemJobs({ db, nowMs: Date.now(), stateDir: paths.stateDir, log });
 
+  // Resolve env-var secrets from config.secrets.env through the sidecar/broker/provider stack.
+  // Must happen after DB is ready and before consumer modules read secrets.
+  const envSecretKeys = Object.keys(config.secrets?.env ?? {});
+  if (envSecretKeys.length > 0) {
+    await resolveEnvSecrets({ db, stateDir: paths.stateDir, env: config.secrets.env, log });
+  }
+
   const effectivePort = params.port ?? config.port;
   const cdpPort = Number(process.env.NEXUS_BROWSER_CDP_PORT ?? effectivePort + 2);
   const browser = new BrowserManager({
@@ -188,16 +197,69 @@ export async function startGateway(
     if (!value) return value;
     return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
   };
+  const resolveConfigSecretValue = async (params: {
+    value?: string;
+    fieldPath: string;
+  }): Promise<string | undefined> => {
+    const value = params.value;
+    if (!value) return value;
+    if (/^\$\{[A-Z0-9_]+\}$/.test(value)) return undefined;
+    if (parseSecretReference(value) === null) return value;
+    const nowMs = Date.now();
+    try {
+      const resolved = await resolveSecretReference({
+        db,
+        stateDir: paths.stateDir,
+        reference: value,
+        traceId: `gateway-config:${params.fieldPath}:${nowMs}`,
+        actor: `gateway:start:config:${params.fieldPath}`,
+        nowMs,
+      });
+      if (resolved.leaseId) {
+        revokeSecretLease({
+          db,
+          leaseId: resolved.leaseId,
+          nowMs: nowMs + 1,
+        });
+      }
+      return resolved.value;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`gateway_config_secret_resolution_failed:${params.fieldPath}:${message}`);
+    }
+  };
+  const resolvedDefaultApiKey = await resolveConfigSecretValue({
+    value: config.llm.openaiCompat.apiKey,
+    fieldPath: "llm.openaiCompat.apiKey",
+  });
+  const resolvedProviderApiKeys = await Promise.all(
+    Object.entries(config.llm.providers).map(async ([providerName, provider]) => {
+      const resolvedApiKey = await resolveConfigSecretValue({
+        value: provider.apiKey,
+        fieldPath: `llm.providers.${providerName}.apiKey`,
+      });
+      return [providerName, resolvedApiKey] as const;
+    }),
+  );
+  const providerApiKeyByName = new Map<string, string | undefined>(resolvedProviderApiKeys);
+  config.channels.telegram.token = await resolveConfigSecretValue({
+    value: config.channels.telegram.token,
+    fieldPath: "channels.telegram.token",
+  });
+  config.channels.telegram.webhookSecretToken = await resolveConfigSecretValue({
+    value: config.channels.telegram.webhookSecretToken,
+    fieldPath: "channels.telegram.webhookSecretToken",
+  });
   const defaultLlmConfig = {
     ...config.llm.openaiCompat,
-    apiKey: resolveApiKey(config.llm.openaiCompat.apiKey),
+    apiKey: resolveApiKey(resolvedDefaultApiKey),
   };
   const llmProviderConfigs = Object.fromEntries(
     Object.entries(config.llm.providers).map(([name, provider]) => [
       name,
       {
         ...provider,
-        apiKey: resolveApiKey(provider.apiKey),
+        apiKey: resolveApiKey(providerApiKeyByName.get(name)),
       },
     ]),
   );
@@ -297,11 +359,11 @@ export async function startGateway(
 
   log(
     "startup: capabilities " +
-      `shell_exec=${allowShellExec} ` +
-      `code_edit=${allowCodeEdit} ` +
-      `code_write=${allowCodeWrite} ` +
-      `proactive=${proactiveEnabled} ` +
-      `proactive_notify_telegram=${proactiveNotifyTelegram}`,
+    `shell_exec=${allowShellExec} ` +
+    `code_edit=${allowCodeEdit} ` +
+    `code_write=${allowCodeWrite} ` +
+    `proactive=${proactiveEnabled} ` +
+    `proactive_notify_telegram=${proactiveNotifyTelegram}`,
   );
   if (monetizationProfile) {
     log("startup: monetization profile active; shell/code mutation capabilities are force-disabled.");
@@ -314,9 +376,9 @@ export async function startGateway(
   if (config.channels.telegram.enabled) {
     log(
       "startup: telegram " +
-        `allow_all=${telegramAllowAll} ` +
-        `allow_from_count=${telegramAllowFromCount} ` +
-        `pairing_enabled=${telegramPairingEnabled}`,
+      `allow_all=${telegramAllowAll} ` +
+      `allow_from_count=${telegramAllowFromCount} ` +
+      `pairing_enabled=${telegramPairingEnabled}`,
     );
     if (telegramAllowAll) {
       log("startup: WARN NEXUS_TELEGRAM_ALLOW_ALL=1 allows any Telegram user to message this bot.");
@@ -814,9 +876,9 @@ export async function startGateway(
         });
         log(
           "federation/outbox: started " +
-            `intervalMs=${config.federation.outbox.intervalMs} ` +
-            `maxBatch=${config.federation.outbox.maxBatch} ` +
-            `requestTimeoutMs=${config.federation.outbox.requestTimeoutMs}`,
+          `intervalMs=${config.federation.outbox.intervalMs} ` +
+          `maxBatch=${config.federation.outbox.maxBatch} ` +
+          `requestTimeoutMs=${config.federation.outbox.requestTimeoutMs}`,
         );
       }
     } else if (config.federation.enabled) {

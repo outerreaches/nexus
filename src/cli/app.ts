@@ -3,6 +3,7 @@ import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
 import { startSecretSidecar } from "../secrets/sidecar.js";
+import { getSecret, resolveEnvSecrets } from "../secrets/resolve-env.js";
 
 const RUNTIME_PROFILES = [
   "standard",
@@ -541,10 +542,18 @@ export async function runCli(argv: string[]): Promise<void> {
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
 
-      const clientId = (process.env.GOOGLE_CLIENT_ID ?? "").trim();
-      const clientSecret = (process.env.GOOGLE_CLIENT_SECRET ?? "").trim();
+      const { openDatabase } = await import("../storage/database.js");
+      const db = await openDatabase(paths.dbPath);
+      const envSecretKeys = Object.keys(config.secrets?.env ?? {});
+      if (envSecretKeys.length > 0) {
+        await resolveEnvSecrets({ db, stateDir: paths.stateDir, env: config.secrets.env, log: () => { } });
+      }
+
+      const clientId = (getSecret("GOOGLE_CLIENT_ID") ?? "").trim();
+      const clientSecret = (getSecret("GOOGLE_CLIENT_SECRET") ?? "").trim();
       if (!clientId || !clientSecret) {
-        process.stderr.write("ERROR: missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET\n");
+        db.close();
+        process.stderr.write("ERROR: missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in config.secrets.env\n");
         process.exitCode = 1;
         return;
       }

@@ -5,6 +5,7 @@ import type { Hono } from "hono";
 import { Bot, Context, InputFile } from "grammy";
 
 import type { NexusConfig } from "../state/config.js";
+import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { ChatUserContentPart } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -506,7 +507,7 @@ export async function startTelegramBot(deps: {
 } | null> {
   const tg = deps.config.channels.telegram;
   if (!tg.enabled) return null;
-  const token = tg.token && !isEnvPlaceholder(tg.token) ? tg.token : process.env.TELEGRAM_BOT_TOKEN;
+  const token = tg.token && !isEnvPlaceholder(tg.token) ? tg.token : getSecret("TELEGRAM_BOT_TOKEN");
   if (!token) {
     throw new Error("Telegram is enabled but no token is configured (set TELEGRAM_BOT_TOKEN).");
   }
@@ -818,9 +819,9 @@ export async function startTelegramBot(deps: {
       deps.log(
         `telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
       );
-      bot.api.sendChatAction(chatId, "typing").catch(() => {});
+      bot.api.sendChatAction(chatId, "typing").catch(() => { });
       const typingInterval = setInterval(() => {
-        bot.api.sendChatAction(chatId, "typing").catch(() => {});
+        bot.api.sendChatAction(chatId, "typing").catch(() => { });
       }, 4_000);
       let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
       try {
@@ -878,14 +879,14 @@ export async function startTelegramBot(deps: {
 
     return {
       stop: async () => {
-        await bot.api.deleteWebhook({ drop_pending_updates: false } as any).catch(() => {});
+        await bot.api.deleteWebhook({ drop_pending_updates: false } as any).catch(() => { });
       },
       sendOutput,
       sendFile,
     };
   }
 
-  await bot.api.deleteWebhook({ drop_pending_updates: true } as any).catch(() => {});
+  await bot.api.deleteWebhook({ drop_pending_updates: true } as any).catch(() => { });
   bot.start({ onStart: () => deps.log("telegram: polling") });
 
   return {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type MarketstackItem = {
   symbol?: string;
@@ -53,7 +54,7 @@ export const marketstackSource: DataSource = {
   paramsSchema: MarketstackParams,
   fetch: async (params) => {
     const parsed = MarketstackParams.parse(params);
-    const apiKey = process.env.MARKETSTACK_API_KEY;
+    const apiKey = getSecret("MARKETSTACK_API_KEY");
     if (!apiKey) throw new Error("MARKETSTACK_API_KEY not configured");
 
     const symbols = parsed.symbols.map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -89,28 +90,28 @@ export const marketstackSource: DataSource = {
         subject: sym,
         value: item
           ? {
-              symbol: sym,
-              date: item.date ?? null,
-              price,
-              open: toNumber(item.open),
-              high: toNumber(item.high),
-              low: toNumber(item.low),
-              close: toNumber(item.close),
-              volume: toNumber(item.volume),
-              adjOpen: toNumber(item.adj_open),
-              adjHigh: toNumber(item.adj_high),
-              adjLow: toNumber(item.adj_low),
-              adjClose: toNumber(item.adj_close),
-              adjVolume: toNumber(item.adj_volume),
-              exchange: item.exchange ?? null,
-              dataType: payload.dataType,
-            }
+            symbol: sym,
+            date: item.date ?? null,
+            price,
+            open: toNumber(item.open),
+            high: toNumber(item.high),
+            low: toNumber(item.low),
+            close: toNumber(item.close),
+            volume: toNumber(item.volume),
+            adjOpen: toNumber(item.adj_open),
+            adjHigh: toNumber(item.adj_high),
+            adjLow: toNumber(item.adj_low),
+            adjClose: toNumber(item.adj_close),
+            adjVolume: toNumber(item.adj_volume),
+            exchange: item.exchange ?? null,
+            dataType: payload.dataType,
+          }
           : {
-              symbol: sym,
-              price: null,
-              error: "No data available",
-              dataType: payload.dataType,
-            },
+            symbol: sym,
+            price: null,
+            error: "No data available",
+            dataType: payload.dataType,
+          },
         collectedAtMs: ctx.nowMs(),
         metadata: { provider: "marketstack", dataType: payload.dataType },
       };

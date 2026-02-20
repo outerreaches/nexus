@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type CoinlayerResponse = {
   success?: boolean;
@@ -28,7 +29,7 @@ export const coinlayerSource: DataSource = {
   paramsSchema: CoinlayerParams,
   fetch: async (params) => {
     const parsed = CoinlayerParams.parse(params);
-    const apiKey = process.env.COINLAYER_API_KEY;
+    const apiKey = getSecret("COINLAYER_API_KEY");
     if (!apiKey) throw new Error("COINLAYER_API_KEY not configured");
 
     const symbols = parsed.symbols.map((s) => s.trim().toUpperCase()).filter(Boolean);

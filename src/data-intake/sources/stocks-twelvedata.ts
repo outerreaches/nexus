@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type TwelveDataPriceResponse = {
   price?: string;
@@ -36,7 +37,7 @@ export const twelveDataSource: DataSource = {
   paramsSchema: TwelveDataParams,
   fetch: async (params) => {
     const parsed = TwelveDataParams.parse(params);
-    const apiKey = process.env.TWELVEDATA_API_KEY;
+    const apiKey = getSecret("TWELVEDATA_API_KEY");
     if (!apiKey) throw new Error("TWELVEDATA_API_KEY not configured");
 
     const results: Record<string, TwelveDataPriceResponse> = {};
@@ -64,14 +65,14 @@ export const twelveDataSource: DataSource = {
         subject: symbol.toUpperCase(),
         value: isError
           ? {
-              symbol: symbol.toUpperCase(),
-              price: null,
-              error: response.message ?? "Unknown error",
-            }
+            symbol: symbol.toUpperCase(),
+            price: null,
+            error: response.message ?? "Unknown error",
+          }
           : {
-              symbol: symbol.toUpperCase(),
-              price,
-            },
+            symbol: symbol.toUpperCase(),
+            price,
+          },
         collectedAtMs: ctx.nowMs(),
         metadata: { provider: "twelvedata" },
       };

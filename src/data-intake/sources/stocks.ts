@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type AlphaVantageResponse = {
   "Global Quote"?: {
@@ -25,7 +26,7 @@ export const stocksSource: DataSource = {
   paramsSchema: StocksParams,
   fetch: async (params) => {
     const parsed = StocksParams.parse(params);
-    const apiKey = process.env.ALPHAVANTAGE_API_KEY;
+    const apiKey = getSecret("ALPHAVANTAGE_API_KEY");
     if (!apiKey) throw new Error("ALPHAVANTAGE_API_KEY not configured");
     const results: Record<string, AlphaVantageResponse> = {};
     for (const symbol of parsed.symbols) {

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { TwitterClient, resolveCredentials, type SearchResult, type TweetData } from "@steipete/bird";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 const BirdParams = z
   .object({
@@ -129,8 +130,8 @@ export const birdSource: DataSource = {
   paramsSchema: BirdParams,
   fetch: async (params) => {
     const parsed = BirdParams.parse(params);
-    const authToken = process.env.AUTH_TOKEN ?? process.env.TWITTER_AUTH_TOKEN ?? undefined;
-    const ct0 = process.env.CT0 ?? process.env.TWITTER_CT0 ?? undefined;
+    const authToken = getSecret("AUTH_TOKEN") ?? getSecret("TWITTER_AUTH_TOKEN") ?? undefined;
+    const ct0 = getSecret("CT0") ?? getSecret("TWITTER_CT0") ?? undefined;
     const { cookies, warnings } = await resolveCredentials({ authToken, ct0, cookieSource: [] });
 
     if (!cookies.authToken || !cookies.ct0) {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
+import { getSecret } from "../../secrets/resolve-env.js";
 
 type MetalResponse = {
   rates?: Record<string, number>;
@@ -24,7 +25,7 @@ export const metalsSource: DataSource = {
   paramsSchema: MetalsParams,
   fetch: async (params, ctx) => {
     const parsed = MetalsParams.parse(params);
-    const apiKey = process.env.OPEN_METALS_API_KEY;
+    const apiKey = getSecret("OPEN_METALS_API_KEY");
     if (!apiKey) throw new Error("OPEN_METALS_API_KEY not configured");
     const symbols = parsed.symbols.map((s) => s.toUpperCase()).join(",");
     const url = `https://api.openmetalsapi.com/v1/latest?base=${encodeURIComponent(parsed.base)}&symbols=${encodeURIComponent(symbols)}`;

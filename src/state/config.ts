@@ -175,6 +175,13 @@ const LlmRoutingSchema = z
   })
   .default({});
 
+const SecretsSchema = z
+  .object({
+    /** Map env var names to {{secret:provider/path#field}} references or plain values. */
+    env: z.record(z.string()).default({}),
+  })
+  .default({});
+
 export const ConfigSchema = z.object({
   port: z.number().int().positive().default(18789),
   stateDir: EnvString.optional(),
@@ -182,6 +189,7 @@ export const ConfigSchema = z.object({
   codeDir: EnvString.optional(),
   runtime: RuntimeSchema,
   federation: FederationSchema,
+  secrets: SecretsSchema,
   llm: z
     .object({
       openaiCompat: OpenAICompatProviderSchema,

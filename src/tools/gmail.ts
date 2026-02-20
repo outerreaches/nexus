@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { getSecret } from "../secrets/resolve-env.js";
 import type { GmailOauthConfig } from "../gmail/auth.js";
 import { gmailRequest } from "../gmail/api.js";
 import { buildRawEmail } from "../gmail/mime.js";
@@ -9,8 +10,8 @@ import { truncateText } from "./web-shared.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function getGmailOauthFromEnv(): { ok: true; oauth: GmailOauthConfig } | { ok: false; error: string } {
-  const clientId = (process.env.GOOGLE_CLIENT_ID ?? "").trim();
-  const clientSecret = (process.env.GOOGLE_CLIENT_SECRET ?? "").trim();
+  const clientId = (getSecret("GOOGLE_CLIENT_ID") ?? "").trim();
+  const clientSecret = (getSecret("GOOGLE_CLIENT_SECRET") ?? "").trim();
   if (!clientId || !clientSecret) {
     return {
       ok: false,

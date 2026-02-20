@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { getSecret } from "../secrets/resolve-env.js";
 import type { CacheEntry } from "./web-shared.js";
 import { normalizeCacheKey, readCache, readResponseText, truncateText, withTimeout, writeCache } from "./web-shared.js";
 
@@ -16,8 +17,8 @@ const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 function resolveProvider(preferred: "auto" | "brave" | "perplexity"): "brave" | "perplexity" | null {
   if (preferred === "brave") return "brave";
   if (preferred === "perplexity") return "perplexity";
-  const hasBrave = Boolean((process.env.BRAVE_API_KEY ?? "").trim());
-  const hasPerplexityKey = Boolean((process.env.PERPLEXITY_API_KEY ?? "").trim());
+  const hasBrave = Boolean((getSecret("BRAVE_API_KEY") ?? "").trim());
+  const hasPerplexityKey = Boolean((getSecret("PERPLEXITY_API_KEY") ?? "").trim());
   // OpenClaw-style default: prefer Brave; if key is missing, ask the operator to configure,
   // rather than silently falling back to a paid LLM search provider.
   if (hasBrave) return "brave";
@@ -39,11 +40,11 @@ function isOpenRouterKey(key: string): boolean {
 }
 
 function resolvePerplexityAuth(): { apiKey: string | null; baseUrl: string } {
-  const pplx = (process.env.PERPLEXITY_API_KEY ?? "").trim();
+  const pplx = (getSecret("PERPLEXITY_API_KEY") ?? "").trim();
   if (pplx) {
     return { apiKey: pplx, baseUrl: isPplxKey(pplx) ? PERPLEXITY_DIRECT_BASE_URL : OPENROUTER_BASE_URL };
   }
-  const or = (process.env.OPENROUTER_API_KEY ?? "").trim();
+  const or = (getSecret("OPENROUTER_API_KEY") ?? "").trim();
   if (or) {
     return { apiKey: or, baseUrl: isOpenRouterKey(or) ? OPENROUTER_BASE_URL : OPENROUTER_BASE_URL };
   }
@@ -82,7 +83,7 @@ async function braveSearch(params: {
   freshness?: string;
   timeoutMs: number;
 }): Promise<Record<string, unknown>> {
-  const apiKey = (process.env.BRAVE_API_KEY ?? "").trim();
+  const apiKey = (getSecret("BRAVE_API_KEY") ?? "").trim();
   if (!apiKey) {
     throw new Error("Missing BRAVE_API_KEY (required for web_search provider=brave).");
   }
@@ -197,19 +198,19 @@ export const webSearch = defineTool({
     const result =
       provider === "brave"
         ? await braveSearch({
-            query: args.query,
-            count,
-            country: args.country,
-            search_lang: args.search_lang,
-            ui_lang: args.ui_lang,
-            freshness: args.freshness,
-            timeoutMs: args.timeoutMs,
-          })
+          query: args.query,
+          count,
+          country: args.country,
+          search_lang: args.search_lang,
+          ui_lang: args.ui_lang,
+          freshness: args.freshness,
+          timeoutMs: args.timeoutMs,
+        })
         : await perplexitySearch({
-            query: args.query,
-            model: args.model,
-            timeoutMs: args.timeoutMs,
-          });
+          query: args.query,
+          model: args.model,
+          timeoutMs: args.timeoutMs,
+        });
 
     const payload = truncateText(JSON.stringify(result, null, 2), args.maxChars);
     writeCache(SEARCH_CACHE, cacheKey, { provider, payload }, args.cacheTtlMs);
