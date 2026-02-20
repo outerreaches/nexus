@@ -205,7 +205,10 @@ export async function startGateway(
   }): Promise<string | undefined> => {
     const value = params.value;
     if (!value) return value;
-    if (/^\$\{[A-Z0-9_]+\}$/.test(value)) return undefined;
+    if (/^\$\{[A-Z0-9_]+\}$/.test(value)) {
+      const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+      return envMatch ? getSecret(envMatch[1]) ?? undefined : undefined;
+    }
     if (parseSecretReference(value) === null) return value;
     const nowMs = Date.now();
     try {
