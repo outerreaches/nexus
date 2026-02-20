@@ -41,7 +41,7 @@ export type BackupStatus = {
   nextScheduledBackup: number | null;
 };
 
-const PERSONALIZATION_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "CODEGUIDE.md", "HEARTBEAT.md", "NOTES.md"] as const;
+const PERSONALIZATION_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "CODEGUIDE.md", "HEARTBEAT.md", "NOTES.md", "nexus.json"] as const;
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -121,7 +121,7 @@ export async function runBackup(params: {
   nowMs: number;
   log?: (msg: string) => void;
 }): Promise<BackupResult> {
-  const { db, stateDir, backupType, nowMs, log = () => {} } = params;
+  const { db, stateDir, backupType, nowMs, log = () => { } } = params;
   const startMs = Date.now();
   const backupId = randomId("BK");
 
@@ -213,7 +213,7 @@ export async function cleanupOldBackups(params: {
   nowMs: number;
   log?: (msg: string) => void;
 }): Promise<number> {
-  const { db, stateDir, config, nowMs, log = () => {} } = params;
+  const { db, stateDir, config, nowMs, log = () => { } } = params;
 
   const cutoffMs = nowMs - config.retentionDays * 24 * 60 * 60 * 1000;
 
