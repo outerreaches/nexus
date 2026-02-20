@@ -75,7 +75,7 @@
 
   // ── Proactive ────────────────────────────────────────────────────────────
   "proactive": {
-    "enabled": false,
+    "enabled": true,
     "agentId": "main",
     "intervalMs": 900000,
     "maxIntervalMs": 3600000,
@@ -108,9 +108,9 @@
 
   // ── Permissions ──────────────────────────────────────────────────────────
   "permissions": {
-    "allowShellExec": false,
+    "allowShellExec": true,
     "allowCodeEdit": true,
-    "allowCodeWrite": false
+    "allowCodeWrite": true
   },
 
   // ── Limits ───────────────────────────────────────────────────────────────
