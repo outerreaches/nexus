@@ -52,7 +52,7 @@ import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from "../feder
 import { createFederationTransportRouter } from "../federation/transport.js";
 import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
-import { resolveEnvSecrets } from "../secrets/resolve-env.js";
+import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
 
@@ -195,7 +195,9 @@ export async function startGateway(
 
   const resolveApiKey = (value?: string): string | undefined => {
     if (!value) return value;
-    return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
+    const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+    if (envMatch) return getSecret(envMatch[1]) ?? undefined;
+    return value;
   };
   const resolveConfigSecretValue = async (params: {
     value?: string;

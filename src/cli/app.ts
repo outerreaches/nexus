@@ -162,7 +162,9 @@ export async function runCli(argv: string[]): Promise<void> {
 
       const resolveApiKey = (value?: string): string | undefined => {
         if (!value) return value;
-        return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
+        const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+        if (envMatch) return getSecret(envMatch[1]) ?? undefined;
+        return value;
       };
       const defaultLlmConfig = {
         ...config.llm.openaiCompat,
@@ -332,7 +334,9 @@ export async function runCli(argv: string[]): Promise<void> {
       try {
         const resolveApiKey = (value?: string): string | undefined => {
           if (!value) return value;
-          return /^\$\{[A-Z0-9_]+\}$/.test(value) ? undefined : value;
+          const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+          if (envMatch) return getSecret(envMatch[1]) ?? undefined;
+          return value;
         };
         const defaultLlmConfig = {
           ...config.llm.openaiCompat,
