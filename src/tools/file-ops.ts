@@ -6,8 +6,8 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import { resolveWithinRoots } from "./path-utils.js";
 
-const MAX_READ_LINES = 200;
-const MAX_READ_BYTES = 24 * 1024;
+const MAX_READ_LINES = 500;
+const MAX_READ_BYTES = 64 * 1024;
 const DIFF_CONTEXT_LINES = 3;
 const ABSOLUTE_PATH_ERROR = "ERROR: full absolute `path` is required.";
 
