@@ -25,16 +25,17 @@ export async function resolveEnvSecrets(params: {
     env: Record<string, string>;
     log: (msg: string) => void;
     nowMs?: number;
-}): Promise<{ resolved: number; fromProvider: number; plain: number; keys: string[] }> {
+}): Promise<{ resolved: number; fromProvider: number; plain: number; skipped: number; keys: string[] }> {
     const entries = Object.entries(params.env ?? {});
     if (entries.length === 0) {
         params.log("secrets/env: no env secrets configured in config.secrets.env");
-        return { resolved: 0, fromProvider: 0, plain: 0, keys: [] };
+        return { resolved: 0, fromProvider: 0, plain: 0, skipped: 0, keys: [] };
     }
 
     const nowMs = params.nowMs ?? Date.now();
     let fromProvider = 0;
     let plain = 0;
+    let skipped = 0;
     const keys: string[] = [];
 
     for (const [envKey, value] of entries) {
@@ -60,22 +61,24 @@ export async function resolveEnvSecrets(params: {
                     });
                 }
                 fromProvider += 1;
+                keys.push(envKey);
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
-                throw new Error(`env_secret_resolution_failed:${envKey}:${message}`);
+                params.log(`secrets/env: WARN ${envKey} not resolved (${message}) — key will be unavailable`);
+                skipped += 1;
             }
         } else {
             // Plain value — store as-is
             resolvedSecrets.set(envKey, value);
             plain += 1;
+            keys.push(envKey);
         }
-        keys.push(envKey);
     }
 
     params.log(
-        `secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain)`,
+        `secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain${skipped > 0 ? `, ${skipped} skipped` : ""})`,
     );
-    return { resolved: keys.length, fromProvider, plain, keys };
+    return { resolved: keys.length, fromProvider, plain, skipped, keys };
 }
 
 /** Get a resolved secret value. Returns undefined if not in registry. */
