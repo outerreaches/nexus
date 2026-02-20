@@ -13,10 +13,16 @@
 
 services:
   nexus-primary:
+    depends_on:
+      secret-sidecar:
+        condition: service_healthy
     volumes:
       - secret-sidecar-run:/run/nexus
 
   nexus-standby:
+    depends_on:
+      secret-sidecar:
+        condition: service_healthy
     volumes:
       - secret-sidecar-run:/run/nexus
 
