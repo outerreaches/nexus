@@ -6,7 +6,7 @@ export const preset: AgentPreset = {
   imageModel: "google/gemini-3-pro-image-preview",
   llm: {
     // The agent runtime needs tool-calling support; use the default routed model.
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "moonshotai/kimi-k2.5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
@@ -22,6 +22,7 @@ export const preset: AgentPreset = {
   tools: [
     "image_generate",
     "image_edit",
+    "image_analyze",
     "read_from_blackboard",
     "write_to_blackboard",
   ],
