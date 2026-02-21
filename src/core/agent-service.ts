@@ -233,12 +233,16 @@ export class AgentService {
       let memoryHint: string | null = null;
       if (preset?.name === "orchestrator" || !preset) {
         const messageText = params.text;
+        onRunnerLog?.(`memory_hint_check text_len=${messageText?.length ?? 0}`);
         if (messageText && !hasRecentMemorySearch(history)) {
           const keywords = extractKeywords(messageText);
+          onRunnerLog?.(`memory_hint_keywords [${keywords.join(", ")}]`);
           if (keywords.length > 0) {
             if (!this.memoryHintsSeen.has(sessionId)) {
               this.memoryHintsSeen.set(sessionId, new Set());
             }
+            const seenItems = Array.from(this.memoryHintsSeen.get(sessionId)!);
+            onRunnerLog?.(`memory_hint_seen [${seenItems.join(", ")}]`);
             memoryHint = generateMemoryHints({
               db: this.deps.db,
               agentId: params.agentId,
@@ -246,7 +250,10 @@ export class AgentService {
               seenKeywords: this.memoryHintsSeen.get(sessionId)!,
               messageText,
             });
+            onRunnerLog?.(`memory_hint_generated ${memoryHint ? 'YES' : 'NO'}`);
           }
+        } else {
+          onRunnerLog?.(`memory_hint_skipped hasRecentSearch=${hasRecentMemorySearch(history)}`);
         }
       }
 
