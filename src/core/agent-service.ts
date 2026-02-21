@@ -213,6 +213,14 @@ export class AgentService {
           includePresets: true,
         });
 
+      const onRunnerLog = this.deps.onRunnerLog
+        ? (line: string) => {
+          this.deps.onRunnerLog?.(
+            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} ${line}`,
+          );
+        }
+        : undefined;
+
       // ── Memory hints: nudge agent about potentially relevant memories ──
       let memoryHint: string | null = null;
       if (preset?.name === "orchestrator" || !preset) {
@@ -237,6 +245,7 @@ export class AgentService {
       // Instead of changing the system prompt (which breaks the prefix cache),
       // append the memory hint to the end of the history stack right before the user message.
       if (memoryHint) {
+        onRunnerLog?.(`memory_hint_injected length=${memoryHint.length}`);
         history.push({
           role: "system",
           content: memoryHint,
@@ -245,13 +254,6 @@ export class AgentService {
 
       const finalSystemPrompt = systemPrompt;
 
-      const onRunnerLog = this.deps.onRunnerLog
-        ? (line: string) => {
-          this.deps.onRunnerLog?.(
-            `channel=${params.channel} key=${params.channelKey} agent=${params.agentId} ${line}`,
-          );
-        }
-        : undefined;
       onRunnerLog?.(
         `history_scope source=${historyScope.source} channel=${historyScope.channel} key=${historyScope.channelKey} lane=${lane} messages=${history.length}`,
       );
