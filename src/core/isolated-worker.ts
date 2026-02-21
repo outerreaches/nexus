@@ -11,6 +11,7 @@ import path from "node:path";
 
 import { openDatabase } from "../storage/database.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
+import { ModelRouter } from "../llm/model-router.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { AgentTracker } from "./agent-tracker.js";
 import { AgentRunner } from "./agent-runner.js";
@@ -48,6 +49,7 @@ process.on("message", async (msg: ParentMessage) => {
     db.db.pragma("busy_timeout = 10000");
 
     const llm = new OpenAICompatClient(cfg.llmConfig);
+    const modelRouter = cfg.modelRouterConfig ? new ModelRouter(cfg.modelRouterConfig) : undefined;
     const builtIns = getBuiltInTools();
     const preset = getPreset(cfg.presetName);
     if (!preset) {
@@ -100,6 +102,7 @@ process.on("message", async (msg: ParentMessage) => {
       codeDir: cfg.codeDir,
       llm,
       llmConfig: cfg.llmConfig,
+      modelRouter,
       modelMode: cfg.modelMode,
       db,
       browser: undefined, // Workers do NOT get a browser instance

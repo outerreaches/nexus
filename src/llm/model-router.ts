@@ -8,6 +8,14 @@ import {
 
 export type ModelRoutingMode = "default" | "local_only";
 
+export type SerializableOpenAICompatConfig = {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  maxTokens?: number;
+  stripCacheControl?: boolean;
+};
+
 type LlmRouteTarget = {
   provider: string;
   model?: string;
@@ -25,16 +33,16 @@ export type ResolvedModelRoute = {
   primary: OpenAICompatConfig;
 };
 
-type RouterOptions = {
-  defaultProvider: OpenAICompatConfig;
-  providers?: Record<string, OpenAICompatConfig>;
+export type ModelRouterConfig = {
+  defaultProvider: SerializableOpenAICompatConfig;
+  providers?: Record<string, SerializableOpenAICompatConfig>;
   routing: NexusConfig["llm"]["routing"];
 };
 
 export class ModelRouter {
   private readonly providers: Record<string, OpenAICompatConfig>;
 
-  constructor(private readonly opts: RouterOptions) {
+  constructor(private readonly opts: ModelRouterConfig) {
     this.providers = {
       default: opts.defaultProvider,
       ...(opts.providers ?? {}),
@@ -101,6 +109,19 @@ export class ModelRouter {
     return new OpenAICompatClient({ ...route.primary, onLog: opts?.onLog });
   }
 
+  exportConfig(): ModelRouterConfig {
+    const providers: Record<string, SerializableOpenAICompatConfig> = {};
+    for (const [name, cfg] of Object.entries(this.providers)) {
+      if (name === "default") continue;
+      providers[name] = sanitizeConfig(cfg);
+    }
+    return {
+      defaultProvider: sanitizeConfig(this.providers.default),
+      providers,
+      routing: JSON.parse(JSON.stringify(this.opts.routing)) as NexusConfig["llm"]["routing"],
+    };
+  }
+
   private resolveTarget(target: LlmRouteTarget): { provider: string; config: OpenAICompatConfig } {
     const provider = target.provider;
     const base = this.providers[provider];
@@ -116,6 +137,16 @@ export class ModelRouter {
       },
     };
   }
+}
+
+function sanitizeConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig {
+  return {
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    maxTokens: cfg.maxTokens,
+    stripCacheControl: cfg.stripCacheControl,
+  };
 }
 
 function applyPresetLlmOverride(base: LlmRouteDefinition, preset: AgentPreset["llm"]): LlmRouteDefinition {

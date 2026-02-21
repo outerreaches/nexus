@@ -1,3 +1,5 @@
+import type { ModelRouterConfig, SerializableOpenAICompatConfig } from "../llm/model-router.js";
+
 // IPC message types for process-isolated worker agents
 
 /**
@@ -12,13 +14,10 @@ export type WorkerConfig = {
   dbPath: string;
 
   // LLM configuration (serializable subset of OpenAICompatConfig)
-  llmConfig: {
-    baseUrl: string;
-    apiKey?: string;
-    model: string;
-    maxTokens?: number;
-    stripCacheControl?: boolean;
-  };
+  llmConfig: SerializableOpenAICompatConfig;
+  // Optional serialized model-router config so isolated workers can route
+  // provider-specific tool calls (e.g., imageProvider overrides).
+  modelRouterConfig?: ModelRouterConfig;
   // Permissions
   allowShellExec: boolean;
   allowCodeEdit: boolean;
