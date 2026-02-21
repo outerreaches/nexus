@@ -184,14 +184,20 @@ export function generateMemoryHints(opts: {
 const RECENT_TURNS_THRESHOLD = 3;
 
 /**
- * Check if memory_search was called in the last N assistant turns of history.
+ * Check if memory_search was called in recent user→assistant exchanges,
+ * excluding heartbeat ticks (which share the same session via
+ * latest_telegram_for_agent and frequently call memory_search).
  */
 export function hasRecentMemorySearch(history: ChatMessage[], lookback = RECENT_TURNS_THRESHOLD): boolean {
-  let assistantTurnsSeen = 0;
-  for (let i = history.length - 1; i >= 0 && assistantTurnsSeen < lookback; i--) {
+  let userExchangesSeen = 0;
+  for (let i = history.length - 1; i >= 0 && userExchangesSeen < lookback; i--) {
     const msg = history[i];
-    if (msg.role === "assistant") {
-      assistantTurnsSeen++;
+    if (msg.role === "user") {
+      const text = typeof msg.content === "string" ? msg.content : "";
+      // Skip heartbeat tick messages — they're not real user interactions
+      if (text.startsWith("HEARTBEAT TICK")) continue;
+      userExchangesSeen++;
+    } else if (msg.role === "assistant" && userExchangesSeen > 0) {
       if (msg.toolCalls?.some((tc) => tc.name === "memory_search")) {
         return true;
       }
