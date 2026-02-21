@@ -8,6 +8,7 @@ This file is loaded into the **coder** prompt. Keep it short and operational.
 3. Apply minimal edits (`file_edit`, `file_edit_lines`, `file_write`) using absolute paths.
 4. Validate (`npm run typecheck`, `npm run build`).
 5. Deploy in the same coder run using `ha_deploy` with `action="apply"`.
+6. After `ha_deploy action="apply"` succeeds, stop runtime/schema verification in that same run; do follow-up validation in a fresh run.
 
 ## Hard Boundaries
 - Coder may edit files under `codeDir`.
@@ -15,6 +16,7 @@ This file is loaded into the **coder** prompt. Keep it short and operational.
 - Do not use `gateway_restart` for code rollout.
 - Do not run mutating git commands from coder runs (`git add/commit/push/reset`).
 - Use `ha_deploy` for host-side git + Docker rollout.
+- Treat auto-deploy fallback as a safety net only; still call `ha_deploy action="apply"` explicitly.
 - For secret-related changes, preserve fail-closed/sidecar-only behavior (`NEXUS_SECRETS_SIDECAR_ONLY=1` in production) and update `infra/internal-doc` when operator workflows change.
 
 ## Runtime Paths
@@ -68,4 +70,5 @@ Use `file_write mode="append"` for additions and `file_write mode="overwrite"` o
 - Read-only edit failures: verify writable `/data/code` and `NEXUS_ALLOW_CODE_WRITE=1`.
 - Missing files: verify `file_list path="/data/code"` shows `package.json`.
 - No behavior change after deploy: verify `ha_deploy` completed successfully.
+- Deploy failures from host rollout: verify HA compose overlays include `ha.yml` + `ha.sidecar.yml` + `ha.tls.yml`, and TLS cert exists at `/data/code/infra/haproxy/certs/nexus.pem`.
 - HA issues: verify only one active node via dashboard HA status.

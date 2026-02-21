@@ -1000,6 +1000,25 @@ sudo journalctl -u ha-deployer -f
 - If both slots report standby, rollout attempts bootstrap activation before failing slot detection.
 - Deploy lock (`/data/nexus/ha-rollout.lock`) prevents the watchdog from triggering failover during a deploy.
 
+### 7.3.3 CODEGUIDE Migration Semantics
+
+`CODEGUIDE.md` has two sources:
+- Repo template: `/data/code/CODEGUIDE.md` (operator-maintained reference for migration).
+- Live prompt file: `/data/nexus/CODEGUIDE.md` (loaded by coder at runtime).
+
+Important behavior:
+- New instances get the generated default from `src/state/personalization.ts` during `init`.
+- Existing instances keep their current `/data/nexus/CODEGUIDE.md`; deploy scripts do not overwrite it.
+
+Recommended migration flow after CODEGUIDE updates:
+
+```bash
+# on VM
+cp -a /data/nexus/CODEGUIDE.md /data/nexus/CODEGUIDE.md.bak.$(date +%F-%H%M%S)
+diff -u /data/nexus/CODEGUIDE.md /data/code/CODEGUIDE.md || true
+# then merge/apply the desired changes into /data/nexus/CODEGUIDE.md
+```
+
 ### 7.4 Testing Failover
 
 ```bash
