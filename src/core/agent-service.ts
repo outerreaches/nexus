@@ -19,14 +19,14 @@ type ExecutionLane = "interactive" | "background";
 
 type HistoryScope =
   | {
-      mode: "exact";
-      channel: string;
-      channelKey: string;
-      agentId?: string;
-    }
+    mode: "exact";
+    channel: string;
+    channelKey: string;
+    agentId?: string;
+  }
   | {
-      mode: "latest_telegram_for_agent";
-    };
+    mode: "latest_telegram_for_agent";
+  };
 
 function clampPositiveInt(value: number): number {
   return Math.max(1, Math.floor(value));
@@ -161,6 +161,8 @@ export class AgentService {
     executionLane?: ExecutionLane;
     /** Optional history scope override for session continuity across channels. */
     historyScope?: HistoryScope;
+    /** If true, the session state and the result messages will NOT be saved to the DB, unless the agent takes an action. */
+    ephemeralSessionSave?: "unless_action" | "always_skip";
   }): Promise<{
     runId: string | null;
     sessionId: string;
@@ -232,9 +234,16 @@ export class AgentService {
         }
       }
 
-      const finalSystemPrompt = memoryHint
-        ? `${systemPrompt}\n\n${memoryHint}`
-        : systemPrompt;
+      // Instead of changing the system prompt (which breaks the prefix cache),
+      // append the memory hint to the end of the history stack right before the user message.
+      if (memoryHint) {
+        history.push({
+          role: "system",
+          content: memoryHint,
+        });
+      }
+
+      const finalSystemPrompt = systemPrompt;
 
       const onRunnerLog = this.deps.onRunnerLog
         ? (line: string) => {
@@ -327,8 +336,25 @@ export class AgentService {
         throw err;
       }
 
-      for (const msg of result.newMessages) {
-        appendMessage({ db: this.deps.db, sessionId, message: msg as ChatMessage, nowMs: this.deps.toolContext.nowMs() });
+      let shouldPersistHistory = true;
+      if (params.ephemeralSessionSave === "unless_action") {
+        const t = result.output.trim().toUpperCase();
+        if (t === "IDLE" || t === "NOOP" || t === "NO-OP") {
+          shouldPersistHistory = false;
+        }
+      } else if (params.ephemeralSessionSave === "always_skip") {
+        shouldPersistHistory = false;
+      }
+
+      const runNowMs = this.deps.toolContext.nowMs();
+      if (shouldPersistHistory) {
+        // Also persist the initial user message if we skipped doing it in proactive.ts
+        if (historyScope.source === "latest_telegram_for_agent" && params.channel === "heartbeat") {
+          appendMessage({ db: this.deps.db, sessionId, message: { role: "user", content: params.text }, nowMs: runNowMs });
+        }
+        for (const msg of result.newMessages) {
+          appendMessage({ db: this.deps.db, sessionId, message: msg as ChatMessage, nowMs: runNowMs });
+        }
       }
 
       if (runId && this.deps.agentTracker) {

@@ -109,9 +109,9 @@ export function startProactiveHeartbeat(
   const enabled = envBool("NEXUS_PROACTIVE") ?? deps.config.proactive.enabled;
   if (!enabled) {
     return {
-      stop: () => {},
-      pause: () => {},
-      resume: () => {},
+      stop: () => { },
+      pause: () => { },
+      resume: () => { },
       getStatus: () => ({ enabled: false, lastTickAt: null, nextTickAt: null }),
     };
   }
@@ -217,6 +217,7 @@ export function startProactiveHeartbeat(
         text,
         executionLane: "background",
         historyScope: { mode: "latest_telegram_for_agent" },
+        ephemeralSessionSave: "unless_action",
       });
 
       const idle = isIdleOutput(res.output);
