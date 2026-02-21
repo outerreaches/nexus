@@ -4,26 +4,52 @@ import type { ChatMessage } from "./types.js";
 // ── Keyword extraction ──────────────────────────────────────────────
 
 const STOPWORDS = new Set([
+  // Determiners, conjunctions, prepositions
   "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-  "of", "with", "by", "from", "is", "it", "that", "this", "was", "are",
-  "be", "has", "had", "have", "do", "does", "did", "will", "would", "can",
-  "could", "should", "may", "might", "not", "no", "so", "if", "then",
-  "than", "too", "very", "just", "about", "up", "out", "all", "also",
-  "how", "what", "when", "where", "who", "which", "why", "been", "being",
-  "each", "other", "some", "such", "into", "over", "after", "before",
-  "between", "under", "again", "here", "there", "any", "both", "more",
-  "most", "own", "same", "few", "those", "these", "my", "your", "his",
-  "her", "its", "our", "their", "me", "him", "them", "we", "you", "i",
-  "he", "she", "they", "us", "as", "like", "get", "got", "go", "going",
-  "make", "made", "know", "think", "want", "need", "use", "using", "used",
-  "let", "say", "said", "see", "look", "come", "take", "give", "tell",
-  "new", "old", "good", "bad", "right", "still", "way", "back", "well",
-  "even", "now", "because", "please", "thanks", "okay", "yeah", "yes",
-  "hey", "hello", "hi", "sure", "maybe", "really", "actually", "already",
-  "much", "many", "only", "one", "two", "first", "last", "next", "thing",
-  "something", "anything", "everything", "nothing", "time", "work",
+  "of", "with", "by", "from", "as", "like", "into", "over", "after",
+  "before", "between", "under", "about", "than",
+  // Pronouns
+  "my", "your", "his", "her", "its", "our", "their", "me", "him", "them",
+  "we", "you", "i", "he", "she", "they", "us", "it", "that", "this",
+  "those", "these", "which", "who", "what", "each", "other", "some",
+  "such", "any", "both", "few", "own", "same",
+  // Common verbs
+  "is", "was", "are", "be", "has", "had", "have", "do", "does", "did",
+  "been", "being", "will", "would", "can", "could", "should", "may",
+  "might", "get", "got", "go", "going", "make", "made", "know", "think",
+  "want", "need", "use", "using", "used", "let", "say", "said", "see",
+  "look", "come", "take", "give", "tell", "keep", "put", "turn", "move",
+  "start", "stop", "show", "open", "close", "read", "write", "pull",
+  "push", "call", "send", "left", "leave", "find", "found", "feel",
+  "seem", "become", "bring", "hold", "carry", "pass", "pick", "end",
+  // Adverbs & modifiers
+  "not", "no", "so", "if", "then", "too", "very", "just", "also", "how",
+  "when", "where", "why", "more", "most", "here", "there", "again",
+  "even", "now", "still", "well", "back", "up", "out", "all",
+  "really", "actually", "already", "much", "many", "only",
+  // Conversational fillers
+  "please", "thanks", "okay", "yeah", "yes", "hey", "hello", "hi",
+  "sure", "maybe", "because", "right",
+  // Numbers & ordinals
+  "one", "two", "three", "four", "five", "first", "last", "next",
+  // Generic nouns (appear in nearly every conversation)
+  "thing", "something", "anything", "everything", "nothing", "time",
+  "work", "way", "part", "point", "place", "case", "kind", "sort",
+  "type", "lot", "bit", "stuff", "issue", "problem", "question",
+  "answer", "result", "output", "input", "value", "data", "info",
+  "information", "example", "list", "name", "number", "line", "step",
+  "state", "status", "error", "message", "request", "response",
+  // Generic action words (too common to be meaningful hints)
   "try", "help", "check", "run", "set", "add", "update", "change",
-  "file", "code", "done", "able",
+  "file", "code", "done", "able", "create", "delete", "remove",
+  "move", "copy", "save", "load", "handle", "manage", "process",
+  "build", "test", "fix", "debug", "deploy", "install", "configure",
+  "enable", "disable", "connect", "disconnect",
+  // Generic adjectives
+  "new", "old", "good", "bad", "different", "same", "current",
+  "recent", "latest", "previous", "specific", "general", "relevant",
+  "important", "available", "possible", "successful", "complete",
+  "simple", "basic", "main", "full", "local", "remote",
 ]);
 
 const MIN_KEYWORD_LENGTH = 3;
@@ -89,6 +115,7 @@ export function extractKeywords(text: string): string[] {
 // ── Memory hint generation ──────────────────────────────────────────
 
 const MAX_HINTS_PER_MESSAGE = 3;
+const MAX_MATCH_THRESHOLD = 10; // Skip keywords matching too many memories (too generic to be useful)
 
 // Cache memory keys for a short period to avoid repeated DB queries within a burst of messages.
 let _memoryKeysCache: Map<string, { keys: string[]; ts: number }> | null = null;
@@ -167,7 +194,7 @@ export function generateMemoryHints(opts: {
     const escapedKeyword = keyword.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
     const pattern = `%${escapedKeyword}%`;
     const row = countStmt.get(agentId, pattern, pattern, pattern) as { cnt: number } | undefined;
-    if (row && row.cnt > 0) {
+    if (row && row.cnt > 0 && row.cnt <= MAX_MATCH_THRESHOLD) {
       matches.push({ keyword, count: row.cnt });
     }
   }
