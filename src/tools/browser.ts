@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import type { BrowserManager } from "../browser/manager.js";
-import { getCredentialField } from "../secrets/credentials.js";
+import { resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getHumanActionResponseForTyping } from "../storage/human-actions.js";
 
@@ -46,6 +46,7 @@ const BrowserArgsSchema = z
     kind: z.enum(["click", "type", "press", "scroll"]).optional(),
     credentialId: z.string().max(64).optional(),
     credentialField: z.enum(["username", "password"]).optional(),
+    secretProviderId: z.string().min(1).max(200).optional(),
     actionId: z.string().max(32).optional(),
     timeoutMs: z.number().int().positive().default(15_000),
     waitKind: z.enum(["domcontentloaded", "networkidle", "selector", "text", "url_includes", "title_includes"]).optional(),
@@ -161,12 +162,36 @@ export const browserTool = defineTool({
       case "type":
         return await mgr.type(args.ref!, args.text!, args.submit, args.timeoutMs);
       case "type_secret": {
-        const value = await getCredentialField({
-          stateDir: ctx.stateDir,
-          id: args.credentialId!,
-          field: args.credentialField!,
-        });
-        return await mgr.type(args.ref!, value, args.submit, args.timeoutMs);
+        const db = ctx.db as NexusDatabase | undefined;
+        if (!db) return "ERROR: database is not available";
+
+        const providerId =
+          args.secretProviderId?.trim() ||
+          (process.env.NEXUS_SECRET_PROVIDER_ID ?? "").trim() ||
+          "sidecar-main";
+
+        const reference = `{{secret:${providerId}/${args.credentialId}#${args.credentialField}}}`;
+        const nowMs = ctx.nowMs();
+        let resolution;
+        try {
+          resolution = await resolveSecretReference({
+            db,
+            stateDir: ctx.stateDir,
+            reference,
+            actor: "tool:browser",
+            traceId: ctx.request?.runId ?? `browser.type_secret:${nowMs}`,
+            nowMs,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return `ERROR: type_secret failed to resolve credential: ${message}`;
+        }
+
+        if (resolution.leaseId) {
+          revokeSecretLease({ db, leaseId: resolution.leaseId, nowMs: nowMs + 1 });
+        }
+
+        return await mgr.type(args.ref!, resolution.value, args.submit, args.timeoutMs);
       }
       case "type_action": {
         const db = ctx.db as NexusDatabase | undefined;

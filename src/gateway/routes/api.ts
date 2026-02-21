@@ -95,6 +95,7 @@ import {
 import { applySharedEventProjection } from "../../federation/sharing.js";
 import { validateSecretBrokerProfile } from "../../secrets/broker.js";
 import { deleteCredential } from "../../secrets/credentials.js";
+import { containsRawSecretMaterial } from "../../secrets/policy.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../../secrets/provider.js";
 
 type McpEventApiRow = {
@@ -655,6 +656,23 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     });
     if (!firewallDecision.allowed) {
       return c.json({ error: `federation ingress blocked by firewall: ${firewallDecision.reason}` }, 403);
+    }
+
+    if (containsRawSecretMaterial(envelope.payload)) {
+      writeFederationAudit({
+        peerId: peer.id,
+        eventType: "firewall.ingress",
+        decision: "deny",
+        actor: `peer:${envelope.source}`,
+        traceId: envelope.traceId,
+        details: {
+          reason: "secret_payload_import_blocked",
+          methodOrEvent: envelope.methodOrEvent,
+          envelopeId: envelope.envelopeId,
+        },
+        nowMs,
+      });
+      return c.json({ error: "secret_payload_import_blocked" }, 403);
     }
 
     const peerKeyScope = federationPeerIdentityScope(peer.id);
@@ -2020,30 +2038,30 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     const overview = deps.mcp
       ? deps.mcp.getOverview()
       : {
-          servers: listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
-            id: server.id,
-            label: server.label,
-            enabled: server.enabled,
-            active: server.active,
-            connected: false,
-            trustLevel: server.trustLevel,
-            capabilityTags: server.capabilityTags,
-            discoveredTools: server.lastDiscoveredTools.length,
-            lastError: server.lastError,
-            lastErrorAt: server.lastErrorAt,
-            lastUsedAt: server.lastUsedAt,
-          })),
-          profiles: listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
-            id: profile.id,
-            name: profile.name,
-            serverId: profile.serverId,
-            enabled: profile.enabled,
-            hidden: profile.hidden,
-            ephemeral: profile.ephemeral,
-            toolCount: profile.toolNames.length,
-            updatedAt: profile.updatedAt,
-          })),
-        };
+        servers: listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
+          id: server.id,
+          label: server.label,
+          enabled: server.enabled,
+          active: server.active,
+          connected: false,
+          trustLevel: server.trustLevel,
+          capabilityTags: server.capabilityTags,
+          discoveredTools: server.lastDiscoveredTools.length,
+          lastError: server.lastError,
+          lastErrorAt: server.lastErrorAt,
+          lastUsedAt: server.lastUsedAt,
+        })),
+        profiles: listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
+          id: profile.id,
+          name: profile.name,
+          serverId: profile.serverId,
+          enabled: profile.enabled,
+          hidden: profile.hidden,
+          ephemeral: profile.ephemeral,
+          toolCount: profile.toolNames.length,
+          updatedAt: profile.updatedAt,
+        })),
+      };
     const profileNameById = new Map(overview.profiles.map((profile) => [profile.id, profile.name]));
     const grants = listMcpGrants(deps.db, { includeExpired: false, includeRevoked: false })
       .filter((grant) => grant.status === "active")
@@ -2692,7 +2710,7 @@ async function readRequestBodyTextLimited(
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
-    for (;;) {
+    for (; ;) {
       const next = await reader.read();
       if (next.done) break;
       const value = next.value;

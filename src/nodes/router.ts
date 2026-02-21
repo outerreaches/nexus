@@ -3,6 +3,7 @@ import { evaluateUnifiedFirewallPolicy } from "../firewall/policy.js";
 import { NodeRegistry } from "./registry.js";
 import type { NodeDescriptor, NodeRouter } from "./types.js";
 import { NodeRoutingError } from "./types.js";
+import { containsRawSecretMaterial } from "../secrets/policy.js";
 
 type ExecuteOnNodeParams = {
   nodeId: string;
@@ -27,12 +28,12 @@ export class NodeToolRouter implements NodeRouter {
       log: (line: string) => void;
       executeOnNode?: (params: ExecuteOnNodeParams) => Promise<string>;
     },
-  ) {}
+  ) { }
 
   async routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string> {
     const remoteToolName = this.resolveRemoteToolName(tool.name);
     const requiredSymbols = this.extractRequiredSymbols(args);
-    const carriesSecretRefs = this.containsSecretReferences(args);
+    const carriesSecretRefs = this.containsSecretReferences(args) || containsRawSecretMaterial(args);
     const constraints = this.readRoutingSecurityConstraints(args);
     const node = this.selectNode(remoteToolName, args, ctx, requiredSymbols, constraints, carriesSecretRefs);
     this.assertNodeCanExecute(node, remoteToolName, ctx, constraints, carriesSecretRefs);
@@ -206,14 +207,12 @@ export class NodeToolRouter implements NodeRouter {
     carriesSecretRefs: boolean,
   ): boolean {
     if (constraints.requireNexusBackend && node.backend !== "nexus") return false;
-    const hasHermesCapability = this.nodeHasCapabilityFlag(node, "hermes.mode.hermes");
-    const effectiveMode = hasHermesCapability ? "hermes" : node.firewallMode;
     const decision = evaluateUnifiedFirewallPolicy({
       boundary: "node",
       direction: "egress",
       methodOrEvent: "tool.dispatch",
       transportKind: "node_ws",
-      nodeFirewallMode: effectiveMode,
+      nodeFirewallMode: node.firewallMode,
       requiresHermesMode: constraints.requireHermesMode,
       carriesSecretRefs,
     });
@@ -226,14 +225,12 @@ export class NodeToolRouter implements NodeRouter {
     carriesSecretRefs: boolean,
   ): void {
     if (this.nodeSatisfiesSecurityConstraints(node, constraints, carriesSecretRefs)) return;
-    const hasHermesCapability = this.nodeHasCapabilityFlag(node, "hermes.mode.hermes");
-    const effectiveMode = hasHermesCapability ? "hermes" : node.firewallMode;
     const decision = evaluateUnifiedFirewallPolicy({
       boundary: "node",
       direction: "egress",
       methodOrEvent: "tool.dispatch",
       transportKind: "node_ws",
-      nodeFirewallMode: effectiveMode,
+      nodeFirewallMode: node.firewallMode,
       requiresHermesMode: constraints.requireHermesMode,
       carriesSecretRefs,
     });
