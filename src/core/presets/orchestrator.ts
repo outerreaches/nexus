@@ -79,5 +79,5 @@ export const preset: AgentPreset = {
     "human_request",
     "human_status",
   ],
-  budget: { maxIterations: 50, maxToolCalls: 140 },
+  budget: { maxIterations: 100, maxToolCalls: 200 },
 };
