@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "credential-manager",
   description: "Manages credential vault entries and authentication material",
   llm: {
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "minimax/minimax-m2.5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [

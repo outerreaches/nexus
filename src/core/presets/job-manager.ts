@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "job-manager",
   description: "Manages scheduler jobs and execution policies",
   llm: {
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "minimax/minimax-m2.5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [

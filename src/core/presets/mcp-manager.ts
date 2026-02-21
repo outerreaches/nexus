@@ -4,7 +4,7 @@ export const preset: AgentPreset = {
   name: "mcp-manager",
   description: "Manages MCP servers/profiles and delegates scoped MCP worker runs",
   llm: {
-    primary: { provider: "default" },
+    primary: { provider: "default", model: "minimax/minimax-m2.5" },
     fallback: { provider: "local" },
   },
   systemPrompt: [
