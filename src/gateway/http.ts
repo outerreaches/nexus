@@ -29,6 +29,7 @@ export type GatewayHttpDeps = {
   agentTracker?: AgentTracker;
   nodeGateway?: NodeWebSocketGateway;
   mcp?: McpManager;
+  getMemoryHintsSeen?: () => Record<string, string[]>;
   dispatchCliMessage?: (params: {
     channel: string;
     channelKey: string;

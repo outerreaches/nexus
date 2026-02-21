@@ -50,6 +50,7 @@ test("dashboard renders federation runtime status fields", () => {
     blackboard: [],
     blackboardScope: "all",
     blackboardScopes: [],
+    memoryHints: {},
     db: undefined,
   });
 

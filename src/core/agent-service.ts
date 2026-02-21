@@ -71,6 +71,14 @@ export class AgentService {
     this.backgroundSemaphore = new Semaphore(backgroundMax);
   }
 
+  public getMemoryHintsSeen(): Record<string, string[]> {
+    const result: Record<string, string[]> = {};
+    for (const [sessionId, keywords] of this.memoryHintsSeen.entries()) {
+      result[sessionId] = Array.from(keywords);
+    }
+    return result;
+  }
+
   getCircuitBreaker(): LlmCircuitBreaker | undefined {
     return this.deps.circuitBreaker;
   }

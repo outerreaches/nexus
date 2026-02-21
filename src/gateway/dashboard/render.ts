@@ -58,6 +58,7 @@ export function renderDashboard(params: {
   blackboard: BlackboardRow[];
   blackboardScope: string;
   blackboardScopes: string[];
+  memoryHints: Record<string, string[]>;
   csrfToken?: string | null;
   db?: NexusDatabase;
 }): string {
@@ -362,10 +363,10 @@ export function renderDashboard(params: {
           <button class="graph-btn" id="node-audit-older" disabled>Older</button>
         </div>
         <pre id="node-audit-viewer" class="log-viewer">${escapeHtml(
-          auditCapableNodes.length > 0
-            ? "Select a node and click Fetch to load node audit events."
-            : "No Nexus nodes are registered.",
-        )}</pre>
+    auditCapableNodes.length > 0
+      ? "Select a node and click Fetch to load node audit events."
+      : "No Nexus nodes are registered.",
+  )}</pre>
       </section>
 
       <section>
@@ -588,6 +589,38 @@ export function renderDashboard(params: {
           </table>
         </div>
         <pre id="federation-onboarding-log" class="log-viewer">Federation onboarding panel ready.</pre>
+      </section>
+
+      <section>
+        <h2>Memory Hints (Seen Keywords)</h2>
+        <div class="meta">Keywords currently suppressed from re-triggering memory database lookups. Resets on service restart.</div>
+        <div class="scroll-12">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 200px;">Session ID</th>
+                <th>Seen Keywords Cache</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${Object.keys(params.memoryHints).length === 0 ? `<tr><td colspan="2" class="muted">No memory hints cached yet.</td></tr>` : ""}
+              ${Object.entries(params.memoryHints)
+      .map(
+        ([sessionId, keywords]) => `
+                <tr>
+                  <td><code>${escapeHtml(sessionId)}</code></td>
+                  <td>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                      ${keywords.length === 0 ? '<span class="muted">None</span>' : keywords.map((k) => `<span class="badge" style="background: #334155;">${escapeHtml(k)}</span>`).join("")}
+                    </div>
+                  </td>
+                </tr>
+              `,
+      )
+      .join("")}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section>

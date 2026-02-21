@@ -125,64 +125,64 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const mcpOverview = deps.mcp
       ? deps.mcp.getOverview()
       : {
-          servers: deps.db
-            ? listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
-                id: server.id,
-                label: server.label,
-                enabled: server.enabled,
-                active: server.active,
-                connected: false,
-                trustLevel: server.trustLevel,
-                capabilityTags: server.capabilityTags,
-                discoveredTools: server.lastDiscoveredTools.length,
-                lastError: server.lastError,
-                lastErrorAt: server.lastErrorAt,
-                lastUsedAt: server.lastUsedAt,
-              }))
-            : [],
-          profiles: deps.db
-            ? listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
-                id: profile.id,
-                name: profile.name,
-                serverId: profile.serverId,
-                enabled: profile.enabled,
-                hidden: profile.hidden,
-                ephemeral: profile.ephemeral,
-                toolCount: profile.toolNames.length,
-                updatedAt: profile.updatedAt,
-              }))
-            : [],
-        };
+        servers: deps.db
+          ? listMcpServers(deps.db, { includeDisabled: true }).map((server) => ({
+            id: server.id,
+            label: server.label,
+            enabled: server.enabled,
+            active: server.active,
+            connected: false,
+            trustLevel: server.trustLevel,
+            capabilityTags: server.capabilityTags,
+            discoveredTools: server.lastDiscoveredTools.length,
+            lastError: server.lastError,
+            lastErrorAt: server.lastErrorAt,
+            lastUsedAt: server.lastUsedAt,
+          }))
+          : [],
+        profiles: deps.db
+          ? listMcpProfiles(deps.db, { includeDisabled: true }).map((profile) => ({
+            id: profile.id,
+            name: profile.name,
+            serverId: profile.serverId,
+            enabled: profile.enabled,
+            hidden: profile.hidden,
+            ephemeral: profile.ephemeral,
+            toolCount: profile.toolNames.length,
+            updatedAt: profile.updatedAt,
+          }))
+          : [],
+      };
     const profileNameById = new Map(mcpOverview.profiles.map((profile) => [profile.id, profile.name]));
     const mcpGrants = deps.db
       ? listMcpGrants(deps.db, { includeExpired: false, includeRevoked: false })
-          .filter((grant) => grant.status === "active")
-          .slice(0, 100)
-          .map((grant) => ({
-            id: grant.id,
-            profileId: grant.profileId,
-            profileName: profileNameById.get(grant.profileId) ?? grant.profileId,
-            serverId: grant.serverId,
-            targetPreset: grant.targetPreset,
-            runId: grant.runId,
-            parentRunId: grant.parentRunId,
-            maxCalls: grant.maxCalls,
-            callCount: grant.callCount,
-            expiresAt: grant.expiresAt,
-            status: grant.status,
-            createdAt: grant.createdAt,
-            updatedAt: grant.updatedAt,
-          }))
+        .filter((grant) => grant.status === "active")
+        .slice(0, 100)
+        .map((grant) => ({
+          id: grant.id,
+          profileId: grant.profileId,
+          profileName: profileNameById.get(grant.profileId) ?? grant.profileId,
+          serverId: grant.serverId,
+          targetPreset: grant.targetPreset,
+          runId: grant.runId,
+          parentRunId: grant.parentRunId,
+          maxCalls: grant.maxCalls,
+          callCount: grant.callCount,
+          expiresAt: grant.expiresAt,
+          status: grant.status,
+          createdAt: grant.createdAt,
+          updatedAt: grant.updatedAt,
+        }))
       : [];
     const mcpEvents = deps.db
       ? listRecentMcpEvents(deps.db, 50).map((row) => ({
-          id: row.id,
-          serverId: row.server_id,
-          profileId: row.profile_id,
-          kind: row.kind,
-          payloadJson: row.payload_json,
-          createdAt: row.created_at,
-        }))
+        id: row.id,
+        serverId: row.server_id,
+        profileId: row.profile_id,
+        kind: row.kind,
+        payloadJson: row.payload_json,
+        createdAt: row.created_at,
+      }))
       : [];
 
     return c.html(
@@ -217,6 +217,7 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
         runLimit,
         dataIntakeLimit,
         hideOrphanData,
+        memoryHints: deps.getMemoryHintsSeen?.() ?? {},
         db: deps.db,
       }),
     );
