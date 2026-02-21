@@ -152,6 +152,18 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const leaseId = `${process.pid}:${randomId("L")}`;
   const scheduleCache = new Map<string, { schedule: ReturnType<typeof parseCron>; timeZone: string }>();
 
+  // On-boot sweep: mark any job_runs left as 'running' from a previous instance as failed.
+  // These are orphans from a crash/restart that will never complete.
+  {
+    const nowMs = Date.now();
+    const swept = deps.db.db
+      .prepare("UPDATE job_runs SET status = 'failed', ended_at = ?, error = 'orphaned: gateway restarted' WHERE status = 'running'")
+      .run(nowMs);
+    if (swept.changes > 0) {
+      deps.log(`scheduler: swept ${swept.changes} orphaned job_run(s) from previous instance`);
+    }
+  }
+
   let stopped = false;
   let running = false;
   let timer: NodeJS.Timeout | null = null;

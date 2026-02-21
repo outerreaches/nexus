@@ -833,6 +833,12 @@ export async function startGateway(
       log,
     });
 
+    // On-boot: immediately reconcile stale process_runs from previous instance
+    // instead of waiting for the first notifier tick (15s).
+    processManager.reconcileDetachedRunning({ limit: 80 }).then((r) => {
+      if (r.updated > 0) log(`process: reconciled ${r.updated} stale process_run(s) from previous instance`);
+    }).catch(() => {});
+
     proactive = startProactiveHeartbeat({
       config,
       stateDir: paths.stateDir,
