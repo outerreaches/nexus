@@ -12,12 +12,17 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
 }
 
+function previewString(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit)}…(+${value.length - limit} chars)`;
+}
+
 function redactForLog(value: unknown, depth: number = 0): unknown {
   if (depth > 6) return "[max_depth]";
   if (value === null || value === undefined) return value;
 
   if (typeof value === "string") {
-    return value.length > 160 ? `[omitted ${value.length} chars]` : value;
+    return previewString(value, 160);
   }
   if (typeof value === "number" || typeof value === "boolean") return value;
 
@@ -31,7 +36,7 @@ function redactForLog(value: unknown, depth: number = 0): unknown {
         continue;
       }
       if (/(content|body|replace|text)/i.test(k) && typeof v === "string") {
-        out[k] = `[omitted ${v.length} chars]`;
+        out[k] = previewString(v, 80);
         continue;
       }
       out[k] = redactForLog(v, depth + 1);
@@ -579,8 +584,9 @@ export class AgentRunner {
           status === "error" && errorClass
             ? ` class=${errorClass}${retryPolicy ? ` retry=${retryPolicy}` : ""}`
             : "";
+        const okPreview = status === "ok" && result.length > 0 ? ` preview=${safeJson(truncate(result, 120))}` : "";
         this.deps.onLog?.(
-          `tool_result name=${call.name} id=${call.id} status=${status}${errMeta} chars=${result.length}${errPreview}`,
+          `tool_result name=${call.name} id=${call.id} status=${status}${errMeta} chars=${result.length}${errPreview}${okPreview}`,
         );
 
         const toolResultMsg: ChatMessage = {
