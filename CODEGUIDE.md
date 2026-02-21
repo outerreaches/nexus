@@ -1,76 +1,133 @@
 # CODEGUIDE
 
-This file is loaded into the **coder** prompt. Keep it short and operational.
+Architecture and implementation guide for the **coder** preset.
 
-## Core Workflow
-1. Locate the repo root under `codeDir` (must include `package.json` and `src/`).
-2. Read before editing (`file_read` with line ranges).
-3. Apply minimal edits (`file_edit`, `file_edit_lines`, `file_write`) using absolute paths.
-4. Validate (`npm run typecheck`, `npm run build`).
-5. Deploy in the same coder run using `ha_deploy` with `action="apply"`.
-6. If `ha_deploy action="apply"` returns `ERROR`, stop the run and report recovery using the Deploy Recovery Ladder below.
-7. After `ha_deploy action="apply"` succeeds, stop runtime/schema verification in that same run; do follow-up validation in a fresh run.
+## Mission
+- Make focused code changes in the Nexus codebase.
+- Preserve existing architecture and behavior unless the task explicitly requires redesign.
+- Finish end-to-end: edit, validate, deploy (`ha_deploy`), then hand off.
 
-## Hard Boundaries
-- Coder may edit files under `codeDir`.
-- Use absolute paths under `workspaceDir` for scratch files.
-- Do not use `gateway_restart` for code rollout.
-- Do not run mutating git commands from coder runs (`git add/commit/push/reset`).
-- Use `ha_deploy` for host-side git + Docker rollout.
-- Treat auto-deploy fallback as a safety net only; still call `ha_deploy action="apply"` explicitly.
-- Default code edits to `/data/code` in production unless the operator explicitly overrides `codeDir`.
+## Absolute Paths
+- Use absolute file paths only.
+- Primary source root: `/data/code`
+- Runtime state root: `/data/nexus`
+- Scratch root: `/data/workspace`
+- Runtime prompt source of truth is `/data/nexus/CODEGUIDE.md`.
 
-## Runtime Paths
-- `stateDir`: persistent state/config (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`)
-- `codeDir`: source tree for code edits
-- `workspaceDir`: scratch area
-- Runtime prompt source of truth: `${stateDir}/CODEGUIDE.md`; `${codeDir}/CODEGUIDE.md` is the template/migration reference.
+## System Architecture
 
-Production recommendation:
-```json
-{
-  "codeDir": "${NEXUS_CODE_DIR}",
-  "workspaceDir": "${NEXUS_WORKSPACE_DIR}"
-}
-```
+### Startup and Wiring
+- `src/gateway/start.ts`: main composition root.
+  - Loads `nexus.json` via `src/state/config.ts`.
+  - Resolves runtime paths and bootstrap/init state.
+  - Opens DB and initializes service managers.
+  - Resolves secret-backed config values before consumers start.
+  - Starts HTTP server, scheduler, telegram, proactive, federation workers, node gateway.
 
-Expected mounts:
-- `/data/code` -> `NEXUS_CODE_DIR`
-- `/data/workspace` -> `NEXUS_WORKSPACE_DIR`
+### Agent Runtime
+- `src/core/agent-service.ts`: sessioning, preset resolution, tool filtering, prompt assembly.
+- `src/core/agent-runner.ts`: LLM/tool loop, retry policy enforcement, deploy handoff guard.
+- `src/core/isolated-worker.ts`: isolated worker execution for presets like coder; includes auto-deploy safeguard when coder edits+builds but skips deploy.
 
-Sanity check:
-```text
-file_list path="/data/code"
-```
+### Presets and Prompts
+- `src/core/presets/*.ts`: tool allowlists, budgets, role behavior, model defaults.
+- `src/core/presets/coder.ts`: coder-specific hard rules.
+- Prompt/state markdown files live in `/data/nexus` (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`).
 
-## Preset Routing Rule
-When adding/updating presets:
-- `llm.primary.provider` must match a configured provider key (usually `default` or `local`).
-- For OpenRouter models, keep `provider: "default"` and set `model` explicitly (examples: `anthropic/claude-opus-4.6`, `openai/gpt-5.2-codex`).
+### Tooling Layer
+- `src/tools/*.ts`: tool implementations.
+- `src/tools/file-ops.ts`: absolute-path file tools with root restrictions and write guards.
+- `src/tools/system.ts`: `shell_exec` plus mutating-git block on code repo.
+- `src/tools/ha-deploy.ts`: deploy trigger/status tool.
 
-## Retry Policy (Enforced)
-Tool errors may include normalized tags like `[ERROR_CLASS=... retry=...]`. This policy is now **enforced** by the runner:
-- `retry=no`: do not repeat the same tool call with identical args; it will be blocked for the rest of the run.
-- `retry=yes`: at most one identical retry is allowed; further identical calls are blocked.
-- `retry=after_backoff`: same as `retry=yes`, but wait/back off first.
+### Storage and Config
+- `src/state/config.ts`: schema/defaults for `nexus.json`.
+- `src/storage/database.ts`: SQLite schema and migrations.
+- `src/state/personalization.ts`: default templates for state markdown files.
 
-## Shell Probes (Avoid False Failures)
-For exploratory `shell_exec` probes (grep/head/curl checks), treat “no match” as an expected outcome:
-- Make probes non-fatal: append `|| true`, or emit explicit `YES/NO` output.
-- Prefer small single-purpose commands over long pipelines so failures are easier to interpret.
+### Domain Areas
+- Federation: `src/federation/*`, `src/gateway/routes/federation.ts`, federation storage modules.
+- Nodes: `src/nodes/*`, node routes in `src/gateway/routes/nodes.ts`.
+- Secrets: `src/secrets/*`, secret provider/storage modules, startup resolution in `start.ts`.
 
-## State File Edits
-Use absolute paths under `stateDir`, for example:
-```text
-file_edit path="/data/nexus/CODEGUIDE.md"
-```
+## Extensible Systems
 
-For existing files, prefer `file_edit`/`file_edit_lines`.
-Use `file_write mode="append"` for additions and `file_write mode="overwrite"` only for full replacement.
+### Secret Reference Pattern
+- Secret refs must use: `{{secret:<provider-id>/<path>#<field>}}`.
+- Standard field is `#password` unless a provider explicitly uses another field (for example `username`).
+- Preferred provider in production is sidecar-backed (`sidecar-main`).
+- Main resolution paths:
+  - startup env-secret registry: `config.secrets.env` -> `src/secrets/resolve-env.ts` -> `getSecret(...)`.
+  - direct runtime resolution: `parseSecretReference` / `resolveSecretReference` in `src/secrets/provider.ts`.
+- When adding new config secrets:
+  1. Add key to `config.secrets.env` usage.
+  2. Resolve through existing startup/runtime secret helpers (do not add plaintext-only bypasses).
+  3. Add/update tests in `src/secrets/*.test.ts` or consumer tests.
+
+### New Agent Preset Pattern
+1. Create/update preset file in `src/core/presets/<name>.ts` with:
+   - clear role boundary,
+   - tool allowlist,
+   - budget (`maxIterations`, `maxToolCalls`),
+   - optional `toolCallCaps`,
+   - optional `spawnAllowlist`.
+2. Register in `src/core/presets.ts` (import + map wiring).
+3. Keep orchestrator delegation logic coherent in `src/core/presets/orchestrator.ts`.
+4. If preset depends on prompt files, ensure those files are stable in runtime state.
+5. Add tests for critical routing/behavior changes.
+
+### Data Intake Extension Pattern
+1. Add source implementation under `src/data-intake/sources/`.
+2. Register source in `src/data-intake/sources/index.ts`.
+3. Define clear params + `usageNote` + normalization output shape.
+4. Ensure scheduling compatibility (source store + `data_intake_run` paths).
+5. Expose only through existing intake tools (`data_intake_source_add/update/delete`, `data_intake_run`, `data_intake_query`).
+6. Add tests for params, normalization, and persistence behavior.
+
+### Node Architecture Extension Pattern
+- Node runtime path is capability-routed, not direct local execution:
+  - registry/session state: `src/nodes/registry.ts`
+  - tool-to-method routing: `src/nodes/router.ts`
+  - websocket protocol handling: `src/nodes/ws-gateway.ts`
+  - gateway-facing node tools: `src/tools/nodes.ts`
+- For new node-exposed operations:
+  1. Define protocol method + payload validation.
+  2. Add router mapping and gateway execution path.
+  3. Enforce allowlist/firewall constraints (Hermes/transparent/audit mode behavior).
+  4. Add integration tests in node router/ws areas.
+
+### Tool Surface Extension Pattern
+1. Implement tool with `defineTool(...)` in `src/tools/*`.
+2. Keep zod schema strict and error messages actionable.
+3. Register tool in `src/tools/index.ts`.
+4. Add tool to preset allowlists intentionally (never blanket-add to orchestrator/coder).
+5. Add focused tests for success + failure paths.
+
+### Config/Schema Extension Pattern
+1. Add schema/default in `src/state/config.ts`.
+2. Wire consumers in startup/runtime modules.
+3. Preserve backward compatibility for existing `nexus.json` where possible.
+4. Update operator docs/examples when behavior changes.
+
+## Editing and Validation Workflow
+1. Read relevant files first (`file_read` with line numbers when needed).
+2. Make minimal edits (`file_edit_lines` preferred for precise changes).
+3. Validate:
+   - `npm run typecheck`
+   - `npm run build`
+   - targeted tests for touched behavior when available
+4. Deploy in the same coder run:
+   - `ha_deploy` with `action="apply"`
+5. If deploy returns `ERROR`, stop and report recovery steps from `infra/DEPLOYMENT.md`.
+6. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
+
+## Guardrails
+- Do not run git commands in `/data/code` (Nexus repo). This repository is managed externally by host-side deploy tooling.
+- For other repositories under `/data/workspace`, git usage is allowed when relevant to the task.
+- Treat auto-deploy fallback as a safety net only; always call `ha_deploy action="apply"` explicitly.
+- Keep probes non-fatal (`|| true`) when checking existence/grep-style conditions.
 
 ## Troubleshooting
-- Read-only edit failures: verify writable `/data/code` and `NEXUS_ALLOW_CODE_WRITE=1`.
-- Missing files: verify `file_list path="/data/code"` shows `package.json`.
-- No behavior change after deploy: verify `ha_deploy` completed successfully.
-- Infra runbooks (deploy validation, rollout recovery, TLS/compose issues) live in `infra/DEPLOYMENT.md`.
-- HA issues: verify only one active node via dashboard HA status.
+- `ERROR: full absolute path is required`: retry with full absolute path.
+- Code root read-only errors: confirm writable code mount and `NEXUS_ALLOW_CODE_WRITE=1`.
+- `ha_deploy` timeout/pending: check deploy status/logs via infra runbook in `infra/DEPLOYMENT.md`.
