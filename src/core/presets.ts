@@ -24,6 +24,9 @@ export interface AgentPreset {
   hidden?: boolean;
   /** Optional default image model for image tools used by this preset. */
   imageModel?: string;
+  /** Optional provider name for image tools (resolved from llm.providers). When set, image
+   *  generation uses this provider's base URL and API key instead of the agent's LLM route. */
+  imageProvider?: string;
   /** Optional LLM routing override for this preset. Omit to use global default route. */
   llm?: {
     primary?: {

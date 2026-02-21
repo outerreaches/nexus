@@ -7,6 +7,7 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import { getPreset } from "../core/presets.js";
 import type { OpenAICompatConfig } from "../llm/openai-compat.js";
+import type { ModelRouter } from "../llm/model-router.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import { resolveWithinRoots } from "./path-utils.js";
@@ -86,16 +87,16 @@ function resolveTimeoutMs(override?: number): number {
   return Math.max(10_000, envInt("NEXUS_LLM_IMAGE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
 }
 
-function resolveDefaultImageModel(ctx: { request?: { preset?: string } }, llm: OpenAICompatConfig): string {
+function resolveDefaultImageModel(ctx: { request?: { preset?: string } }, llm: OpenAICompatConfig): { model: string; imageProvider?: string } {
   const presetName = ctx.request?.preset?.trim();
   if (presetName) {
     const preset = getPreset(presetName);
     const presetModel = preset?.imageModel?.trim();
-    if (presetModel) return presetModel;
+    if (presetModel) return { model: presetModel, imageProvider: preset?.imageProvider?.trim() || undefined };
   }
   const envModel = (process.env.NEXUS_IMAGE_MODEL ?? "").trim();
-  if (envModel) return envModel;
-  return llm.model;
+  if (envModel) return { model: envModel };
+  return { model: llm.model };
 }
 
 function shouldFallbackFromError(err: unknown): boolean {
@@ -482,9 +483,30 @@ export const imageGenerate = defineTool({
     if (!ctx.llmConfig) return "ERROR: llmConfig is not available";
 
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
-    const selectedModel = (args.model ?? resolveDefaultImageModel(ctx, ctx.llmConfig)).trim();
+    const resolved = args.model
+      ? { model: args.model.trim() }
+      : resolveDefaultImageModel(ctx, ctx.llmConfig);
+    const selectedModel = resolved.model;
+
+    let baseLlmConfig = ctx.llmConfig;
+    if (resolved.imageProvider) {
+      const router = ctx.modelRouter as ModelRouter | undefined;
+      if (router) {
+        try {
+          const imageRoute = router.resolve({
+            agentId: ctx.request?.agentId ?? "image_generate",
+            mode: "default",
+            presetLlm: { primary: { provider: resolved.imageProvider } },
+          });
+          baseLlmConfig = imageRoute.primary;
+        } catch {
+          // fall back to agent's llmConfig if provider not found
+        }
+      }
+    }
+
     const primary = {
-      ...ctx.llmConfig,
+      ...baseLlmConfig,
       model: selectedModel,
     };
 
