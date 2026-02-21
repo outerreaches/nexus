@@ -1000,6 +1000,33 @@ sudo journalctl -u ha-deployer -f
 - If both slots report standby, rollout attempts bootstrap activation before failing slot detection.
 - Deploy lock (`/data/nexus/ha-rollout.lock`) prevents the watchdog from triggering failover during a deploy.
 
+### 7.3.2a Post-Deploy Validation + Failure Ladder
+
+Run validation in a fresh request cycle after deploy success:
+
+```bash
+curl -s http://localhost:18789/health/live
+curl -s http://localhost:18789/health/traffic
+curl -s http://localhost:18789/api/mode
+curl -s -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  http://localhost:18789/api/secrets/providers
+```
+
+If deploy fails or a slot does not come up:
+
+```bash
+infra/scripts/ha-rollout.sh status
+
+# inspect failing slot logs
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml logs nexus-primary --tail=200
+docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/infra/docker-compose.ha.sidecar.yml -f /data/code/infra/docker-compose.ha.tls.yml logs nexus-standby --tail=200
+
+# recover
+infra/scripts/ha-rollout.sh rollback
+# or: infra/scripts/ha-rollout.sh rollback <known-good-sha>
+infra/scripts/ha-rollout.sh finalize HEAD
+```
+
 ### 7.3.3 CODEGUIDE Migration Semantics
 
 `CODEGUIDE.md` has two sources:

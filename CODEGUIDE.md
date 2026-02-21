@@ -19,7 +19,6 @@ This file is loaded into the **coder** prompt. Keep it short and operational.
 - Use `ha_deploy` for host-side git + Docker rollout.
 - Treat auto-deploy fallback as a safety net only; still call `ha_deploy action="apply"` explicitly.
 - Default code edits to `/data/code` in production unless the operator explicitly overrides `codeDir`.
-- For secret-related changes, preserve fail-closed/sidecar-only behavior (`NEXUS_SECRETS_SIDECAR_ONLY=1` in production) and update `infra/internal-doc` when operator workflows change.
 
 ## Runtime Paths
 - `stateDir`: persistent state/config (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`)
@@ -69,23 +68,9 @@ file_edit path="/data/nexus/CODEGUIDE.md"
 For existing files, prefer `file_edit`/`file_edit_lines`.
 Use `file_write mode="append"` for additions and `file_write mode="overwrite"` only for full replacement.
 
-## Fresh-Run Validation (Post-Deploy)
-After a successful deploy, run validation in a fresh request cycle:
-- `curl -s http://localhost:18789/health/live`
-- `curl -s http://localhost:18789/health/traffic`
-- `curl -s http://localhost:18789/api/mode`
-- `curl -s -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" http://localhost:18789/api/secrets/providers`
-
-## Deploy Recovery Ladder
-If deploy fails or a slot does not come up, follow this order:
-1. `infra/scripts/ha-rollout.sh status`
-2. `docker compose ... logs nexus-primary --tail=200` and `docker compose ... logs nexus-standby --tail=200`
-3. `infra/scripts/ha-rollout.sh rollback` (or `rollback <known-good-sha>`)
-4. `infra/scripts/ha-rollout.sh finalize HEAD`
-
 ## Troubleshooting
 - Read-only edit failures: verify writable `/data/code` and `NEXUS_ALLOW_CODE_WRITE=1`.
 - Missing files: verify `file_list path="/data/code"` shows `package.json`.
 - No behavior change after deploy: verify `ha_deploy` completed successfully.
-- Deploy failures from host rollout: verify HA compose overlays include `ha.yml` + `ha.sidecar.yml` + `ha.tls.yml`, and TLS cert exists at `/data/code/infra/haproxy/certs/nexus.pem`.
+- Infra runbooks (deploy validation, rollout recovery, TLS/compose issues) live in `infra/DEPLOYMENT.md`.
 - HA issues: verify only one active node via dashboard HA status.
