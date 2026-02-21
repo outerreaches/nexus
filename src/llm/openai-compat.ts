@@ -7,6 +7,7 @@ export type OpenAICompatConfig = {
   apiKey?: string;
   model: string;
   maxTokens?: number;
+  stripCacheControl?: boolean;
   onLog?: (line: string) => void;
 };
 
@@ -65,13 +66,13 @@ type OpenAIChatMessage =
   | { role: "assistant"; content: string | null; tool_calls?: unknown[]; cache_control?: { type: "ephemeral" } }
   | { role: "tool"; content: string; tool_call_id: string; name: string; cache_control?: { type: "ephemeral" } };
 
-function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
+function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatMessage[] {
   return messages.map((m) => {
     if (m.role === "user") {
       return {
         role: "user",
         content: m.content,
-        ...(m.cacheControl ? { cache_control: m.cacheControl } : {}),
+        ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
       };
     }
     if (m.role === "assistant") {
@@ -84,17 +85,17 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
             type: "function",
             function: { name: tc.name, arguments: tc.arguments },
           })),
-          ...(m.cacheControl ? { cache_control: m.cacheControl } : {}),
+          ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
         };
       }
-      return { role: "assistant", content: m.content, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "assistant", content: m.content, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     if (m.role === "tool") {
-      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     // Handle system messages explicitly to appease TS
     if (m.role === "system") {
-      return { role: "system", content: m.content, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "system", content: m.content, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     return m as unknown as OpenAIChatMessage;
   });
@@ -376,7 +377,7 @@ export class OpenAICompatClient implements LLMClient {
             tool_choice: "auto",
             temperature: params.temperature ?? 0.2,
             max_tokens: this.config.maxTokens ?? 16384,
-            messages: toOpenAIMessages(activeMessages),
+            messages: toOpenAIMessages(activeMessages, this.config.stripCacheControl),
           }),
           signal: controller.signal,
         });
