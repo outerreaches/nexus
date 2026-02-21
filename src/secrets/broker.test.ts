@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 
 import type { SecretProviderProfileRecord } from "../storage/secrets.js";
-import { upsertCredential } from "./credentials.js";
 import { resolveSecretThroughBroker, setSecretBrokerRequestInvokerForTests, validateSecretBrokerProfile } from "./broker.js";
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
@@ -57,22 +56,11 @@ function makeProfile(overrides: Partial<SecretProviderProfileRecord> = {}): Secr
   };
 }
 
-test("secret broker local_file resolves credential field", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_STRICT: "1",
-      NEXUS_CREDENTIALS_KEY: "broker-test-key",
-    },
-    async () => {
-      await withTempStateDir(async (stateDir) => {
-        await upsertCredential({
-          stateDir,
-          id: "cred-1",
-          username: "alice",
-          password: "p@ss",
-        });
-
-        const resolved = await resolveSecretThroughBroker({
+test("secret broker blocks local_file provider", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await assert.rejects(
+      () =>
+        resolveSecretThroughBroker({
           profile: makeProfile({
             id: "local-main",
             kind: "local_file",
@@ -81,42 +69,10 @@ test("secret broker local_file resolves credential field", async () => {
           }),
           stateDir,
           secretPath: "cred-1",
-          field: "username",
+          field: "password",
           strictMode: true,
-        });
-
-        assert.equal(resolved.value, "alice");
-        assert.equal(resolved.secretClass, "credential");
-      });
-    },
-  );
-});
-
-test("secret broker sidecar-only mode blocks local_file provider", async () => {
-  await withTempStateDir(async (stateDir) => {
-    await assert.rejects(
-      async () => {
-        await withEnv(
-          {
-            NEXUS_SECRETS_SIDECAR_ONLY: "1",
-          },
-          async () => {
-            await resolveSecretThroughBroker({
-              profile: makeProfile({
-                id: "local-main",
-                kind: "local_file",
-                endpointRef: null,
-                authMode: "none",
-              }),
-              stateDir,
-              secretPath: "cred-1",
-              field: "password",
-              strictMode: true,
-            });
-          },
-        );
-      },
-      /secret_provider_local_file_disabled_in_sidecar_only_mode/,
+        }),
+      /secret_provider_local_file_disabled:sidecar_required/,
     );
   });
 });
@@ -235,18 +191,20 @@ test("secret broker strict mode requires https for workload identity", async () 
   });
 });
 
-test("secret broker profile validation reports local provider metadata", async () => {
-  const result = await validateSecretBrokerProfile({
-    profile: makeProfile({
-      id: "local-main",
-      kind: "local_file",
-      endpointRef: null,
-      authMode: "none",
-    }),
-    strictMode: true,
-  });
-  assert.equal(result.endpointKind, "local");
-  assert.equal(result.endpointScheme, "local");
+test("secret broker profile validation blocks local provider", async () => {
+  await assert.rejects(
+    () =>
+      validateSecretBrokerProfile({
+        profile: makeProfile({
+          id: "local-main",
+          kind: "local_file",
+          endpointRef: null,
+          authMode: "none",
+        }),
+        strictMode: true,
+      }),
+    /secret_provider_local_file_disabled:sidecar_required/,
+  );
 });
 
 test("secret broker mtls mode forwards client certificate material", async () => {

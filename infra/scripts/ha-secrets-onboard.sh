@@ -9,7 +9,7 @@
 #   - twitter.auth.ct0
 #
 # Behavior:
-#   - Prompts once for dashboard credentials (same auth gate as ha-secretctl.sh).
+#   - Prompts once for secretctl operator credentials (same auth gate as ha-secretctl.sh).
 #   - Can seed values from env/.env when present, or prompt hidden input.
 #   - Never prints secret values.
 #   - Prints generated secret refs at the end.
@@ -65,23 +65,31 @@ read_env_file_value() {
   printf '%s' "$raw"
 }
 
-load_dashboard_auth_material() {
+load_auth_material() {
   local expected_user expected_pass
-  expected_user="${NEXUS_DASHBOARD_USERNAME:-}"
-  expected_pass="${NEXUS_DASHBOARD_PASSWORD:-}"
+  expected_user="${NEXUS_SECRETCTL_USERNAME:-}"
+  expected_pass="${NEXUS_SECRETCTL_PASSWORD:-}"
 
   if [[ -z "$expected_user" ]]; then
-    expected_user="$(read_env_file_value "NEXUS_DASHBOARD_USERNAME" "$ENV_FILE")"
+    expected_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$ENV_FILE")"
   fi
   if [[ -z "$expected_pass" ]]; then
-    expected_pass="$(read_env_file_value "NEXUS_DASHBOARD_PASSWORD" "$ENV_FILE")"
+    expected_pass="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$ENV_FILE")"
   fi
 
   expected_user="${expected_user:-admin}"
-  [[ -n "$expected_pass" ]] || die "NEXUS_DASHBOARD_PASSWORD is required (set env or ${ENV_FILE})"
+  [[ -n "$expected_pass" ]] || die "NEXUS_SECRETCTL_PASSWORD is required (set env or ${ENV_FILE})"
 
-  EXPECTED_DASHBOARD_USER="$expected_user"
-  EXPECTED_DASHBOARD_PASS="$expected_pass"
+  EXPECTED_SECRETCTL_USER="$expected_user"
+  EXPECTED_SECRETCTL_PASS="$expected_pass"
+}
+
+require_http_api_key() {
+  local api_key="${NEXUS_HTTP_API_KEY:-}"
+  if [[ -z "$api_key" ]]; then
+    api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$ENV_FILE")"
+  fi
+  [[ -n "$api_key" ]] || die "NEXUS_HTTP_API_KEY is required (set env or ${ENV_FILE})"
 }
 
 authenticate_operator() {
@@ -90,24 +98,32 @@ authenticate_operator() {
     return
   fi
 
-  load_dashboard_auth_material
+  require_http_api_key
+  load_auth_material
 
   local entered_user entered_pass
-  read -r -p "Dashboard username [${EXPECTED_DASHBOARD_USER}]: " entered_user
-  entered_user="${entered_user:-$EXPECTED_DASHBOARD_USER}"
-  read -r -s -p "Dashboard password: " entered_pass
+  read -r -p "Secretctl username [${EXPECTED_SECRETCTL_USER}]: " entered_user
+  entered_user="${entered_user:-$EXPECTED_SECRETCTL_USER}"
+  read -r -s -p "Secretctl password: " entered_pass
   printf '\n'
 
-  if [[ "$entered_user" != "$EXPECTED_DASHBOARD_USER" || "$entered_pass" != "$EXPECTED_DASHBOARD_PASS" ]]; then
-    unset entered_user entered_pass EXPECTED_DASHBOARD_PASS
+  if [[ "$entered_user" != "$EXPECTED_SECRETCTL_USER" || "$entered_pass" != "$EXPECTED_SECRETCTL_PASS" ]]; then
+    unset entered_user entered_pass EXPECTED_SECRETCTL_PASS
     die "authentication failed"
   fi
 
-  unset entered_user entered_pass EXPECTED_DASHBOARD_PASS
+  unset entered_user entered_pass EXPECTED_SECRETCTL_PASS
   log "authentication successful"
 }
 
 run_sidecar_tsx() {
+  local -a extra_env
+  extra_env=()
+  while [[ "${1:-}" == "-e" ]]; do
+    [[ $# -ge 2 ]] || die "run_sidecar_tsx -e requires NAME=VALUE"
+    extra_env+=(-e "$2")
+    shift 2
+  done
   local -a env_args
   env_args=()
   local var_name
@@ -116,7 +132,7 @@ run_sidecar_tsx() {
     env_args+=(-e "$var_name")
   done < <(compgen -v | grep '^ONBOARD_' || true)
 
-  "${COMPOSE_CMD[@]}" exec -T "${env_args[@]}" secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx'
+  "${COMPOSE_CMD[@]}" exec -T "${extra_env[@]}" "${env_args[@]}" secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx'
 }
 
 confirm() {
@@ -187,20 +203,21 @@ upsert_secret() {
   local cred_id="$1"
   local secret_value="$2"
   local note="$3"
+  local b64_val=""
   [[ -n "$cred_id" ]] || die "missing credential id"
   [[ -n "$secret_value" ]] || die "missing secret value for $cred_id"
+  b64_val="$(printf '%s' "$secret_value" | base64 | tr -d '\n')"
 
   ONBOARD_PROVIDER_ID="$SECRET_PROVIDER_ID" \
   ONBOARD_CRED_ID="$cred_id" \
-  ONBOARD_CRED_VALUE="$secret_value" \
   ONBOARD_CRED_NOTE="$note" \
-  run_sidecar_tsx <<'TS'
+  run_sidecar_tsx -e "_B64_SECRET=${b64_val}" <<'TS'
 import { upsertCredential } from "./src/secrets/credentials.ts";
 
 const stateDir = process.env.NEXUS_STATE_DIR || "/data/nexus";
 const providerId = (process.env.ONBOARD_PROVIDER_ID || "sidecar-main").trim();
 const id = (process.env.ONBOARD_CRED_ID || "").trim();
-const password = process.env.ONBOARD_CRED_VALUE || "";
+const password = Buffer.from(process.env._B64_SECRET || "", "base64").toString("utf8");
 const note = (process.env.ONBOARD_CRED_NOTE || "").trim();
 if (!id) throw new Error("missing credential id");
 if (!password) throw new Error(`missing value for ${id}`);
@@ -225,6 +242,7 @@ console.log(JSON.stringify({
   },
 }, null, 2));
 TS
+  unset b64_val
 }
 
 configure_secret() {
@@ -275,6 +293,8 @@ Environment:
   COMPOSE_FILES=${COMPOSE_FILES}
   SECRET_PROVIDER_ID=${SECRET_PROVIDER_ID}
   ENV_FILE=${ENV_FILE}
+  NEXUS_SECRETCTL_USERNAME/NEXUS_SECRETCTL_PASSWORD required for auth gate
+  NEXUS_HTTP_API_KEY required
   AUTH_REQUIRED=1 (set 0 to disable auth gate)
   ADD_CUSTOM=1    (set 0 to skip custom secret prompt loop)
 
@@ -294,6 +314,7 @@ main() {
   fi
 
   require_cmd docker
+  require_cmd base64
 
   authenticate_operator
 

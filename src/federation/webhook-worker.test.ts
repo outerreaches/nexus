@@ -17,6 +17,7 @@ import {
   upsertWebhookEndpoint,
 } from "../storage/federation.js";
 import { upsertSecretProviderProfile } from "../storage/secrets.js";
+import { setSecretBrokerRequestInvokerForTests } from "../secrets/broker.js";
 import { upsertCredential } from "../secrets/credentials.js";
 import { startWebhookDeliveryWorker } from "./webhook-worker.js";
 
@@ -394,8 +395,9 @@ test("webhook worker blocks deliveries that contain raw secret payloads", async 
 test("webhook worker supports hmac endpoint signing with secret references", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
       NEXUS_CREDENTIALS_KEY: "webhook-hmac-test-key",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      NEXUS_SECRET_BROKER_BEARER_TOKEN: "sidecar-token",
       NEXUS_RUNTIME_PROFILE: "monetization",
     },
     async () => await withDb(async ({ db, stateDir }) => {
@@ -403,12 +405,15 @@ test("webhook worker supports hmac endpoint signing with secret references", asy
       const signing = generateKeyPairSync("ed25519");
 
       upsertSecretProviderProfile(db, {
-        id: "local-main",
-        kind: "local_file",
+        id: "sidecar-main",
+        kind: "sidecar_http",
+        endpointRef: "https://127.0.0.1:7777/resolve",
+        authMode: "workload_identity",
         strictMode: true,
         enabled: true,
         config: {
           leaseTtlMs: 30_000,
+          resolvePath: "/resolve",
         },
         nowMs,
       });
@@ -424,7 +429,7 @@ test("webhook worker supports hmac endpoint signing with secret references", asy
         url: "https://hooks.internal/ingest",
         eventFilter: ["federation.task.*"],
         signingMode: "hmac",
-        secretRef: "{{secret:local-main/webhook.shared#password}}",
+        secretRef: "{{secret:sidecar-main/webhook.shared#password}}",
         enabled: true,
         status: "active",
         nowMs,
@@ -448,6 +453,13 @@ test("webhook worker supports hmac endpoint signing with secret references", asy
       });
 
       const seenHeaders: Record<string, string> = {};
+      setSecretBrokerRequestInvokerForTests(async () => ({
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          value: "hmac-secret",
+          secretClass: "credential",
+        }),
+      }));
       const worker = startWebhookDeliveryWorker({
         db,
         stateDir,
@@ -476,11 +488,12 @@ test("webhook worker supports hmac endpoint signing with secret references", asy
         const processed = await worker.tick();
         assert.equal(processed, 1);
       } finally {
+        setSecretBrokerRequestInvokerForTests(null);
         worker.stop();
       }
 
       assert.match(seenHeaders["x-nexus-signature"] ?? "", /^hmac-sha256:/);
-      assert.equal(seenHeaders["x-nexus-key-id"], "hmac:local-main");
+      assert.equal(seenHeaders["x-nexus-key-id"], "hmac:sidecar-main");
       const row = getWebhookDeliveryById(db, "wdel-hmac-1");
       assert.equal(row?.status, "acked");
     }),

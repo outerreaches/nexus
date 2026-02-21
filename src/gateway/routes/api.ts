@@ -254,10 +254,24 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     const id = parseUnknownText(payload.id, 200);
     if (!id) return c.json({ error: "id is required" }, 400);
     const nowMs = Date.now();
-    const revoked = await deleteCredential({
-      stateDir: deps.stateDir,
-      id,
-    });
+    let revoked = false;
+    try {
+      revoked = await deleteCredential({
+        stateDir: deps.stateDir,
+        id,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("secret_sidecar_only_direct_credential_access_blocked")) {
+        return c.json(
+          {
+            error: "direct credential revoke is blocked on gateway; use infra/scripts/ha-secretctl.sh delete <id>",
+          },
+          409,
+        );
+      }
+      throw err;
+    }
     if (!revoked) return c.json({ error: "credential not found" }, 404);
     writeFederationAudit({
       eventType: "control.breakglass.revoke_credential",
@@ -312,11 +326,15 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       return c.json({ error: "authMode must be one of none|unix_peer|mtls|workload_identity" }, 400);
     }
     const endpointRef = parseUnknownText(payload.endpointRef, 4096);
-    const strictMode = parseOptionalBoolean(payload.strictMode) ?? true;
+    const strictModeRaw = parseOptionalBoolean(payload.strictMode);
+    if (strictModeRaw === false) {
+      return c.json({ error: "strictMode=false is not supported; strict mode is always enabled" }, 409);
+    }
+    const strictMode = true;
     const enabled = parseOptionalBoolean(payload.enabled) ?? true;
     const config = parseOptionalRecord(payload.config) ?? {};
-    if (isSecretSidecarOnlyMode() && kind === "local_file" && enabled) {
-      return c.json({ error: "local_file providers are disabled when NEXUS_SECRETS_SIDECAR_ONLY=1" }, 409);
+    if (kind === "local_file") {
+      return c.json({ error: "local_file providers are not supported; use sidecar_http" }, 409);
     }
     const validationError = validateSecretProviderProfileDefinition({
       kind,
@@ -373,8 +391,8 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
     }
     const existing = getSecretProviderProfileById(deps.db, id);
     if (!existing) return c.json({ error: "provider profile not found" }, 404);
-    if (isSecretSidecarOnlyMode() && existing.kind === "local_file" && enabled) {
-      return c.json({ error: "local_file providers are disabled when NEXUS_SECRETS_SIDECAR_ONLY=1" }, 409);
+    if (existing.kind === "local_file" && enabled) {
+      return c.json({ error: "local_file providers are not supported; use sidecar_http" }, 409);
     }
 
     const nowMs = Date.now();
@@ -429,7 +447,11 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
         return c.json({ error: "reference providerId must match route provider id" }, 400);
       }
     }
-    const strictMode = parseOptionalBoolean(payload.strictMode) ?? profile.strictMode;
+    const strictModeRaw = parseOptionalBoolean(payload.strictMode);
+    if (strictModeRaw === false) {
+      return c.json({ error: "strictMode=false is not supported; strict mode is always enabled" }, 409);
+    }
+    const strictMode = true;
     const revokeLease = parseOptionalBoolean(payload.revokeLease) ?? true;
     const traceId = parseUnknownText(payload.traceId, 200) ?? crypto.randomUUID();
     const nowMs = Date.now();
@@ -2343,12 +2365,16 @@ function validateSecretProviderProfileDefinition(params: {
   strictMode: boolean;
   config: Record<string, unknown>;
 }): string | null {
-  if (params.strictMode && containsStaticSecretMaterial(params.config)) {
+  if (params.kind === "local_file") {
+    return "local_file providers are not supported; use sidecar_http";
+  }
+  if (containsStaticSecretMaterial(params.config)) {
     return "config contains static secret/auth material; use env/identity-bound auth instead";
   }
+  void params.strictMode;
 
   const endpoint = params.endpointRef?.trim() ?? "";
-  if (params.kind !== "local_file" && endpoint.length === 0) {
+  if (endpoint.length === 0) {
     return `endpointRef is required for provider kind ${params.kind}`;
   }
   if (endpoint.length > 0) {
@@ -2399,15 +2425,15 @@ function validateSecretProviderProfileDefinition(params: {
       if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         return "authMode workload_identity requires an http or https endpointRef";
       }
-      if (params.strictMode && parsed.protocol !== "https:") {
-        return "strictMode requires https endpointRef for workload_identity auth";
+      if (parsed.protocol !== "https:") {
+        return "workload_identity requires https endpointRef";
       }
     } catch {
       return "authMode workload_identity requires an http or https endpointRef";
     }
   }
-  if (params.authMode === "none" && params.strictMode && params.kind !== "local_file") {
-    return "strictMode requires hardened authMode for non-local providers";
+  if (params.authMode === "none") {
+    return "authMode none is not supported; use unix_peer, mtls, or workload_identity";
   }
   return null;
 }
@@ -2416,7 +2442,7 @@ function mapSecretProviderTestErrorStatus(message: string): 400 | 409 | 502 | 50
   if (message.includes("secret_broker_timeout")) return 504;
   if (message.startsWith("secret_broker_http_")) return 502;
   if (
-    message.includes("local_file_disabled_in_sidecar_only_mode") ||
+    message.includes("local_file_disabled:sidecar_required") ||
     message.includes("missing_or_disabled") ||
     message.includes("auth_mode_not_hardened") ||
     message.includes("requires_https") ||
@@ -2447,11 +2473,6 @@ function parseOptionalBoolean(value: unknown): boolean | null {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
   return null;
-}
-
-function isSecretSidecarOnlyMode(): boolean {
-  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
 function parseOptionalRecord(value: unknown): Record<string, unknown> | null {

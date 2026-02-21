@@ -26,11 +26,6 @@ export type ResolvedSecretValue = {
   expiresAt: number | null;
 };
 
-function isStrictSecretsMode(): boolean {
-  const raw = (process.env.NEXUS_SECRETS_STRICT ?? "1").trim().toLowerCase();
-  return !(raw === "0" || raw === "false" || raw === "no");
-}
-
 function hashSecretPath(value: string): string {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -106,7 +101,7 @@ export async function resolveSecretReference(params: {
   actor?: string | null;
   nowMs?: number;
 }): Promise<ResolvedSecretValue> {
-  const strictMode = isStrictSecretsMode();
+  const strictMode = true;
   const parsed = parseSecretReference(params.reference);
   const nowMs = params.nowMs ?? Date.now();
   if (!parsed) {
@@ -117,8 +112,8 @@ export async function resolveSecretReference(params: {
     operation: "resolve",
   });
   const db = params.db ?? null;
-  if (!db && strictMode) {
-    throw new Error("secret_resolution_requires_database_in_strict_mode");
+  if (!db) {
+    throw new Error("secret_resolution_requires_database");
   }
 
   const profile = db ? getSecretProviderProfileById(db, parsed.providerId) : null;
@@ -131,14 +126,11 @@ export async function resolveSecretReference(params: {
       actor: params.actor,
       secretPath: `${parsed.providerId}/${parsed.secretPath}`,
       secretClass: null,
-      decision: strictMode ? "deny" : "error",
+      decision: "deny",
       reason: `provider_missing_or_disabled:${parsed.providerId}`,
       nowMs,
     });
-    if (strictMode) {
-      throw new Error(`secret_provider_missing_or_disabled:${parsed.providerId}`);
-    }
-    throw new Error(`secret_provider_unavailable:${parsed.providerId}`);
+    throw new Error(`secret_provider_missing_or_disabled:${parsed.providerId}`);
   }
 
   const field = parsed.field?.toLowerCase() === "username" ? "username" : "password";
@@ -172,7 +164,7 @@ export async function resolveSecretReference(params: {
       actor: params.actor,
       secretPath: `${profile.id}/${parsed.secretPath}`,
       secretClass: profile.kind === "local_file" ? "credential" : "external",
-      decision: strictMode ? "deny" : "error",
+      decision: "deny",
       reason: err instanceof Error ? err.message : String(err),
       nowMs,
     });

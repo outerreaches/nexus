@@ -10,8 +10,8 @@
 #   DEACTIVATE_TIMEOUT - Seconds to wait for graceful deactivation (default: 5)
 #   ENABLE_FAILBACK    - Enable automatic failback to original primary (default: false)
 #   FAILBACK_THRESHOLD - Consecutive healthy checks before failback (default: 3)
-#   NEXUS_HA_API_KEY   - Optional bearer token for /api/* control-plane calls
-#                        (fallback: NEXUS_HTTP_API_KEY, NEXUS_HTTP_AUTH_TOKEN, NEXUS_DASHBOARD_PASSWORD)
+#   NEXUS_HA_API_KEY   - Bearer token for /api/* control-plane calls
+#                        (defaults to NEXUS_HTTP_API_KEY)
 
 set -e
 
@@ -23,7 +23,7 @@ RECOVERY_DELAY="${RECOVERY_DELAY:-30}"
 DEACTIVATE_TIMEOUT="${DEACTIVATE_TIMEOUT:-5}"
 ENABLE_FAILBACK="${ENABLE_FAILBACK:-false}"
 FAILBACK_THRESHOLD="${FAILBACK_THRESHOLD:-3}"
-CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
+CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-}}"
 
 consecutive_failures=0
 current_primary="$PRIMARY_URL"

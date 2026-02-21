@@ -43,7 +43,7 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => Promis
 test("credential writes fail closed in strict mode without vault key", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
       NEXUS_CREDENTIALS_KEY: undefined,
     },
     async () => {
@@ -55,32 +55,45 @@ test("credential writes fail closed in strict mode without vault key", async () 
               id: "cred-1",
               password: "top-secret",
             }),
-          /Plaintext credential writes are blocked in strict mode/,
+          /Credential writes require NEXUS_CREDENTIALS_KEY to be set/,
         );
       });
     },
   );
 });
 
-test("credential plaintext writes are allowed when strict mode is disabled", async () => {
+test("credential plaintext entries are rejected on read", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "0",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
       NEXUS_CREDENTIALS_KEY: undefined,
     },
     async () => {
       await withTempStateDir(async (stateDir) => {
-        await upsertCredential({
-          stateDir,
-          id: "cred-plain",
-          password: "plain-secret",
-        });
-        const password = await getCredentialField({
-          stateDir,
-          id: "cred-plain",
-          field: "password",
-        });
-        assert.equal(password, "plain-secret");
+        const storePath = getCredentialStorePath(stateDir);
+        const payload = {
+          version: 1,
+          updatedAt: Date.now(),
+          credentials: [
+            {
+              id: "cred-plain",
+              password: { format: "plain", value: "plain-secret" },
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ],
+        };
+        await fs.mkdir(path.dirname(storePath), { recursive: true });
+        await fs.writeFile(storePath, JSON.stringify(payload, null, 2));
+        await assert.rejects(
+          () =>
+            getCredentialField({
+              stateDir,
+              id: "cred-plain",
+              field: "password",
+            }),
+          /Plaintext credentials are blocked/,
+        );
       });
     },
   );
@@ -89,7 +102,7 @@ test("credential plaintext writes are allowed when strict mode is disabled", asy
 test("credential writes are encrypted when vault key is configured", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
       NEXUS_CREDENTIALS_KEY: "super-secret-master-key",
     },
     async () => {
@@ -112,12 +125,10 @@ test("credential writes are encrypted when vault key is configured", async () =>
   );
 });
 
-test("sidecar-only mode blocks direct credential access outside sidecar role", async () => {
+test("direct credential access is blocked outside sidecar role", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
       NEXUS_CREDENTIALS_KEY: "sidecar-only-key",
-      NEXUS_SECRETS_SIDECAR_ONLY: "1",
       NEXUS_SECRETS_PROCESS_ROLE: "gateway",
     },
     async () => {
@@ -136,12 +147,10 @@ test("sidecar-only mode blocks direct credential access outside sidecar role", a
   );
 });
 
-test("sidecar-only mode allows direct credential access for sidecar role", async () => {
+test("direct credential access is allowed for sidecar role", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
       NEXUS_CREDENTIALS_KEY: "sidecar-only-key",
-      NEXUS_SECRETS_SIDECAR_ONLY: "1",
       NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
     },
     async () => {
@@ -165,7 +174,7 @@ test("sidecar-only mode allows direct credential access for sidecar role", async
 test("monetization-local credential ids are blocked outside monetization profile", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
       NEXUS_CREDENTIALS_KEY: "wallet-key",
       NEXUS_RUNTIME_PROFILE: "primary",
     },
@@ -188,7 +197,7 @@ test("monetization-local credential ids are blocked outside monetization profile
 test("monetization-local credential ids are allowed in monetization profile", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
       NEXUS_CREDENTIALS_KEY: "wallet-key",
       NEXUS_RUNTIME_PROFILE: "monetization",
     },

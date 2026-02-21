@@ -3,10 +3,10 @@
 This guide sets up Nexus on a host workstation with:
 - Linux VM for isolation (QEMU/KVM)
 - Local Git remote on the host host
-- Fault-tolerant deployment (optional HA mode)
+- Fault-tolerant HA deployment (required)
 - Self-editing capability for the agent
 
-For gateway API/dashboard auth rollout, use `infra/internal-doc` before enabling `NEXUS_HTTP_AUTH_ENABLED=1`.
+For gateway API/dashboard auth rollout, use `infra/internal-doc` before rotating credentials.
 
 ## Prerequisites
 
@@ -658,7 +658,7 @@ Notes:
 - `ha-rollout.sh` and `pull-deploy.sh` now require sidecar and TLS overlays; sidecar-less or TLS-less deploys are unsupported.
 - `ha-rollout.sh` runs `infra/scripts/ha-secrets-preflight.sh` before deploy.
 - `pull-deploy.sh` is update-focused and does not run secrets preflight.
-- Secrets preflight enforces strict sidecar mode (`NEXUS_SECRETS_STRICT=1`, `NEXUS_SECRETS_SIDECAR_ONLY=1`) and requires `NEXUS_CREDENTIALS_KEY`.
+- Secrets preflight enforces hardened defaults (sidecar-only resolution, API key + dashboard + secretctl auth, encrypted credentials key).
 
 ### 7.3.0a Sidecar Requirements On Existing Instance (No New VM)
 
@@ -731,14 +731,9 @@ Optional overrides for non-default profile wiring:
 - `PROVIDER_AUTH_MODE` (default `unix_peer`)
 - `PROVIDER_STRICT_MODE` / `PROVIDER_ENABLED` (`true|false`, `1|0`)
 
-Sidecar-only enforcement toggle (recommended after migration validation):
+Sidecar-only enforcement is always active.
 
-```bash
-# in /data/code/.env
-NEXUS_SECRETS_SIDECAR_ONLY=1
-```
-
-When enabled:
+Behavior:
 - `local_file` provider enablement is blocked by the API.
 - non-sidecar processes are blocked from direct credential-file access.
 - `nexus secret-sidecar` auto-sets `NEXUS_SECRETS_PROCESS_ROLE=sidecar` so sidecar resolution still works.
@@ -756,7 +751,6 @@ infra/scripts/ha-sidecar-secrets-isolation.sh --status
 # 2) Enable isolated store + sidecar-only enforcement
 #    (in /data/code/.env)
 # NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
-# NEXUS_SECRETS_SIDECAR_ONLY=1
 
 # 3) Recreate stack with sidecar overlay so only secret-sidecar mounts /data/nexus-secrets
 docker compose -p infra \
@@ -820,7 +814,6 @@ Audit interpretation note:
 - Treat only post-cutover events as regression signals (for example, any new `local-main` allow event after sidecar-only + isolated-store cutover).
 
 Post-cutover baseline:
-- Keep `NEXUS_SECRETS_SIDECAR_ONLY=1`.
 - Keep `local-main` disabled.
 - Do not reintroduce `/data/nexus/secrets/credentials.json`.
 - Use `infra/internal-doc` for day-2 operations (create/rotate/revoke/audit/outage-drill).
@@ -838,10 +831,8 @@ sudo chown root:root /data/nexus-secrets
 sudo chmod 700 /data/nexus-secrets
 
 # 2) Configure /data/code/.env (minimum secrets settings)
-# NEXUS_SECRETS_STRICT=1
 # NEXUS_CREDENTIALS_KEY=<strong random secret>
 # NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
-# NEXUS_SECRETS_SIDECAR_ONLY=1
 # NEXUS_HTTP_API_KEY=<token>
 # NEXUS_HA_API_KEY=<token>
 

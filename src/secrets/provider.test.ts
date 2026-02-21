@@ -7,7 +7,6 @@ import test from "node:test";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { listSecretAccessEvents, upsertSecretProviderProfile } from "../storage/secrets.js";
 import { setSecretBrokerRequestInvokerForTests } from "./broker.js";
-import { upsertCredential } from "./credentials.js";
 import { isSecretLeaseActive, parseSecretReference, resolveSecretReference, revokeSecretLease } from "./provider.js";
 
 async function withStateAndDb(
@@ -58,150 +57,123 @@ test("parseSecretReference parses provider/path and optional field", () => {
   });
 });
 
-test("strict mode rejects missing provider profiles", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_STRICT: "1",
-      NEXUS_CREDENTIALS_KEY: "master-key",
-    },
-    async () => {
-      await withStateAndDb(async ({ stateDir, db }) => {
-        await upsertCredential({
+test("missing provider profiles are denied", async () => {
+  await withStateAndDb(async ({ stateDir, db }) => {
+    await assert.rejects(
+      () =>
+        resolveSecretReference({
+          db,
           stateDir,
-          id: "cred-1",
-          password: "pw-1",
-        });
-        await assert.rejects(
-          () =>
-            resolveSecretReference({
-              db,
-              stateDir,
-              reference: "{{secret:missing/cred-1#password}}",
-            }),
-          /secret_provider_missing_or_disabled/,
-        );
-        const access = listSecretAccessEvents(db, { limit: 10 });
-        assert.equal(access.length, 1);
-        assert.equal(access[0]?.decision, "deny");
-      });
-    },
-  );
+          reference: "{{secret:missing/cred-1#password}}",
+        }),
+      /secret_provider_missing_or_disabled/,
+    );
+    const access = listSecretAccessEvents(db, { limit: 10 });
+    assert.equal(access.length, 1);
+    assert.equal(access[0]?.decision, "deny");
+  });
 });
 
-test("local_file provider resolves credential and emits lease/audit records", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_STRICT: "1",
-      NEXUS_CREDENTIALS_KEY: "master-key",
-    },
-    async () => {
-      await withStateAndDb(async ({ stateDir, db }) => {
-        upsertSecretProviderProfile(db, {
-          id: "local-main",
-          kind: "local_file",
-          strictMode: true,
-          enabled: true,
-          config: {
-            leaseTtlMs: 5_000,
-          },
-        });
-        await upsertCredential({
-          stateDir,
-          id: "cred-1",
-          password: "pw-1",
-        });
-
-        const resolved = await resolveSecretReference({
+test("local_file provider is blocked", async () => {
+  await withStateAndDb(async ({ stateDir, db }) => {
+    upsertSecretProviderProfile(db, {
+      id: "local-main",
+      kind: "local_file",
+      strictMode: true,
+      enabled: true,
+      config: {
+        leaseTtlMs: 5_000,
+      },
+    });
+    await assert.rejects(
+      () =>
+        resolveSecretReference({
           db,
           stateDir,
           reference: "{{secret:local-main/cred-1#password}}",
           traceId: "trace-1",
           actor: "node:test",
-        });
-        assert.equal(resolved.value, "pw-1");
-        assert.ok(resolved.leaseId);
-        assert.ok(resolved.expiresAt);
+        }),
+      /secret_provider_local_file_disabled:sidecar_required/,
+    );
 
-        const access = listSecretAccessEvents(db, { traceId: "trace-1", limit: 10 });
-        assert.equal(access.length, 1);
-        assert.equal(access[0]?.decision, "allow");
-        assert.equal(access[0]?.leaseId, resolved.leaseId);
-      });
-    },
-  );
+    const access = listSecretAccessEvents(db, { traceId: "trace-1", limit: 10 });
+    assert.equal(access.length, 1);
+    assert.equal(access[0]?.decision, "deny");
+  });
 });
 
 test("secret lease can be revoked and no longer active", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
-      NEXUS_CREDENTIALS_KEY: "master-key",
+      NEXUS_SECRET_BROKER_BEARER_TOKEN: "sidecar-token",
     },
     async () => {
       await withStateAndDb(async ({ stateDir, db }) => {
         upsertSecretProviderProfile(db, {
-          id: "local-main",
-          kind: "local_file",
+          id: "sidecar-revoke",
+          kind: "sidecar_http",
+          endpointRef: "https://127.0.0.1:7777/resolve",
+          authMode: "workload_identity",
           strictMode: true,
           enabled: true,
           config: {
             leaseTtlMs: 5_000,
+            resolvePath: "/resolve",
           },
         });
-        await upsertCredential({
-          stateDir,
-          id: "cred-1",
-          password: "pw-1",
-        });
+        setSecretBrokerRequestInvokerForTests(async () => ({
+          statusCode: 200,
+          bodyText: JSON.stringify({
+            value: "wallet-secret",
+            secretClass: "wallet",
+            leaseId: "remote-sidecar-lease",
+          }),
+        }));
 
-        const resolved = await resolveSecretReference({
-          db,
-          stateDir,
-          reference: "{{secret:local-main/cred-1#password}}",
-        });
-        assert.ok(resolved.leaseId);
-        assert.equal(isSecretLeaseActive({ db, leaseId: resolved.leaseId! }), true);
-        assert.equal(revokeSecretLease({ db, leaseId: resolved.leaseId! }), true);
-        assert.equal(isSecretLeaseActive({ db, leaseId: resolved.leaseId! }), false);
+        try {
+          const resolved = await resolveSecretReference({
+            db,
+            stateDir,
+            reference: "{{secret:sidecar-revoke/cred.sidecar#password}}",
+          });
+          assert.ok(resolved.leaseId);
+          assert.equal(isSecretLeaseActive({ db, leaseId: resolved.leaseId! }), true);
+          assert.equal(revokeSecretLease({ db, leaseId: resolved.leaseId! }), true);
+          assert.equal(isSecretLeaseActive({ db, leaseId: resolved.leaseId! }), false);
+        } finally {
+          setSecretBrokerRequestInvokerForTests(null);
+        }
       });
     },
   );
 });
 
 test("strict mode rejects unhardened sidecar auth modes", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_STRICT: "1",
-      NEXUS_CREDENTIALS_KEY: "master-key",
-    },
-    async () => {
-      await withStateAndDb(async ({ stateDir, db }) => {
-        upsertSecretProviderProfile(db, {
-          id: "sidecar-1",
-          kind: "sidecar_http",
-          endpointRef: "http://127.0.0.1:7777",
-          authMode: "none",
-          strictMode: true,
-          enabled: true,
-        });
-        await assert.rejects(
-          () =>
-            resolveSecretReference({
-              db,
-              stateDir,
-              reference: "{{secret:sidecar-1/cred.sidecar#password}}",
-            }),
-          /secret_provider_auth_mode_not_hardened/,
-        );
-      });
-    },
-  );
+  await withStateAndDb(async ({ stateDir, db }) => {
+    upsertSecretProviderProfile(db, {
+      id: "sidecar-1",
+      kind: "sidecar_http",
+      endpointRef: "http://127.0.0.1:7777",
+      authMode: "none",
+      strictMode: true,
+      enabled: true,
+    });
+    await assert.rejects(
+      () =>
+        resolveSecretReference({
+          db,
+          stateDir,
+          reference: "{{secret:sidecar-1/cred.sidecar#password}}",
+        }),
+      /secret_provider_auth_mode_not_hardened/,
+    );
+  });
 });
 
 test("sidecar provider resolves secret and emits auditable allow decision", async () => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
       NEXUS_SECRET_BROKER_BEARER_TOKEN: "sidecar-token",
     },
     async () => {

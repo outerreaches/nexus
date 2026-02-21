@@ -49,7 +49,10 @@ export function getGatewayRequestAuth(c: Context): GatewayRequestAuth | null {
 
 export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled: boolean } {
   const settings = resolveGatewayHttpAuthSettings();
-  if (!settings.enabled) return { enabled: false };
+  if (!settings.enabled) {
+    deps.log("WARNING: HTTP auth disabled - missing required credentials (set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD)");
+    return { enabled: false };
+  }
 
   let lastSessionCleanupAt = 0;
   const maybePurgeSessions = (nowMs: number): void => {
@@ -225,14 +228,11 @@ function parseBearerToken(raw: string | undefined): string | null {
 }
 
 function resolveGatewayHttpAuthSettings(): GatewayHttpAuthSettings {
-  const authEnabled = envBool("NEXUS_HTTP_AUTH_ENABLED");
-  const shared = readEnvTrimmed("NEXUS_HTTP_AUTH_TOKEN");
-  const dashboardExplicit = readEnvTrimmed("NEXUS_DASHBOARD_PASSWORD");
-  const apiKey = readEnvTrimmed("NEXUS_HTTP_API_KEY") ?? shared ?? dashboardExplicit;
-  const dashboardPassword = dashboardExplicit ?? shared ?? apiKey;
+  const apiKey = readEnvTrimmed("NEXUS_HTTP_API_KEY");
+  const dashboardPassword = readEnvTrimmed("NEXUS_DASHBOARD_PASSWORD");
   const dashboardUsername = readEnvTrimmed("NEXUS_DASHBOARD_USERNAME") ?? "admin";
-  const enabledBySecrets = Boolean(apiKey || dashboardPassword);
-  const enabled = authEnabled === true && enabledBySecrets;
+  const enabledBySecrets = Boolean(apiKey && dashboardPassword);
+  const enabled = enabledBySecrets;
   return {
     enabled,
     apiKey: apiKey ?? null,

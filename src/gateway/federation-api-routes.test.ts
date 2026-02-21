@@ -11,6 +11,7 @@ import { buildWebhookCanonicalSigningInput, signWebhookCanonicalInput } from "..
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { upsertSecretProviderProfile } from "../storage/secrets.js";
 import { getOrCreateSessionId } from "../storage/sessions.js";
+import { setSecretBrokerRequestInvokerForTests } from "../secrets/broker.js";
 import { upsertCredential } from "../secrets/credentials.js";
 import type { GatewayHttpDeps } from "./http.js";
 import { registerApiRoutes } from "./routes/api.js";
@@ -220,11 +221,19 @@ test("breakglass controls toggle global disable and support pause/revoke actions
     });
     assert.equal(submitRes.status, 503);
 
-    await upsertCredential({
-      stateDir,
-      id: "cred-revoke-1",
-      note: "revoke-me",
-    });
+    await withEnv(
+      {
+        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+        NEXUS_CREDENTIALS_KEY: "federation-api-breakglass-key",
+      },
+      async () => {
+        await upsertCredential({
+          stateDir,
+          id: "cred-revoke-1",
+          note: "revoke-me",
+        });
+      },
+    );
     const revokeRes = await app.request("http://localhost/api/federation/breakglass/revoke_credential", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -232,15 +241,14 @@ test("breakglass controls toggle global disable and support pause/revoke actions
         id: "cred-revoke-1",
       }),
     });
-    assert.equal(revokeRes.status, 200);
+    assert.equal(revokeRes.status, 409);
   });
 });
 
-test("secret provider profile lifecycle routes support upsert/state/test and emit access events", async () => {
+test("secret provider profile lifecycle routes support sidecar upsert/state/test and emit access events", async () => {
   await withEnv(
     {
-      NEXUS_CREDENTIALS_KEY: "federation-api-secret-provider-test-key",
-      NEXUS_SECRETS_STRICT: "1",
+      NEXUS_SECRET_BROKER_BEARER_TOKEN: "sidecar-token",
     },
     async () => {
       await withDb(async (_db, app, stateDir) => {
@@ -248,53 +256,65 @@ test("secret provider profile lifecycle routes support upsert/state/test and emi
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            id: "local-main",
-            kind: "local_file",
+            id: "sidecar-main",
+            kind: "sidecar_http",
+            endpointRef: "https://127.0.0.1:7777/resolve",
+            authMode: "workload_identity",
             strictMode: true,
             enabled: true,
             config: {
               leaseTtlMs: 10_000,
+              resolvePath: "/resolve",
             },
           }),
         });
         assert.equal(createRes.status, 200);
         const createBody = await createRes.json() as { provider: { id: string; kind: string; enabled: boolean } };
-        assert.equal(createBody.provider.id, "local-main");
-        assert.equal(createBody.provider.kind, "local_file");
+        assert.equal(createBody.provider.id, "sidecar-main");
+        assert.equal(createBody.provider.kind, "sidecar_http");
         assert.equal(createBody.provider.enabled, true);
 
-        await upsertCredential({
-          stateDir,
-          id: "cred-secret-test",
-          password: "pw-test",
-        });
-
-        const testRes = await app.request("http://localhost/api/secrets/providers/local-main/test", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            reference: "{{secret:local-main/cred-secret-test#password}}",
-          }),
-        });
-        assert.equal(testRes.status, 200);
-        const testBody = await testRes.json() as {
-          test: {
-            validated: boolean;
-            resolution: { secretClass: string; leaseId: string | null; leaseRevoked: boolean } | null;
+        setSecretBrokerRequestInvokerForTests(async (request) => {
+          assert.equal(request.headers.authorization, "Bearer sidecar-token");
+          return {
+            statusCode: 200,
+            bodyText: JSON.stringify({
+              value: "pw-test",
+              secretClass: "credential",
+              leaseId: "remote-lease-1",
+            }),
           };
-        };
-        assert.equal(testBody.test.validated, true);
-        assert.equal(testBody.test.resolution?.secretClass, "credential");
-        assert.equal(testBody.test.resolution?.leaseRevoked, true);
+        });
+        try {
+          const testRes = await app.request("http://localhost/api/secrets/providers/sidecar-main/test", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              reference: "{{secret:sidecar-main/cred-secret-test#password}}",
+            }),
+          });
+          assert.equal(testRes.status, 200);
+          const testBody = await testRes.json() as {
+            test: {
+              validated: boolean;
+              resolution: { secretClass: string; leaseId: string | null; leaseRevoked: boolean } | null;
+            };
+          };
+          assert.equal(testBody.test.validated, true);
+          assert.equal(testBody.test.resolution?.secretClass, "credential");
+          assert.equal(testBody.test.resolution?.leaseRevoked, true);
 
-        const eventsRes = await app.request("http://localhost/api/secrets/access-events?limit=20");
-        assert.equal(eventsRes.status, 200);
-        const eventsBody = await eventsRes.json() as {
-          events: Array<{ providerProfileId: string | null; decision: string }>;
-        };
-        assert.ok(eventsBody.events.some((event) => event.providerProfileId === "local-main" && event.decision === "allow"));
+          const eventsRes = await app.request("http://localhost/api/secrets/access-events?limit=20");
+          assert.equal(eventsRes.status, 200);
+          const eventsBody = await eventsRes.json() as {
+            events: Array<{ providerProfileId: string | null; decision: string }>;
+          };
+          assert.ok(eventsBody.events.some((event) => event.providerProfileId === "sidecar-main" && event.decision === "allow"));
+        } finally {
+          setSecretBrokerRequestInvokerForTests(null);
+        }
 
-        const stateRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+        const stateRes = await app.request("http://localhost/api/secrets/providers/sidecar-main/state", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -305,7 +325,7 @@ test("secret provider profile lifecycle routes support upsert/state/test and emi
         const stateBody = await stateRes.json() as { provider: { enabled: boolean } };
         assert.equal(stateBody.provider.enabled, false);
 
-        const getRes = await app.request("http://localhost/api/secrets/providers/local-main");
+        const getRes = await app.request("http://localhost/api/secrets/providers/sidecar-main");
         assert.equal(getRes.status, 200);
         const getBody = await getRes.json() as { provider: { enabled: boolean } };
         assert.equal(getBody.provider.enabled, false);
@@ -336,53 +356,46 @@ test("secret provider profile validation blocks static secret material in strict
   });
 });
 
-test("sidecar-only mode blocks local_file provider enablement", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_SIDECAR_ONLY: "1",
-    },
-    async () => {
-      await withDb(async (db, app) => {
-        const createRes = await app.request("http://localhost/api/secrets/providers", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            id: "local-main",
-            kind: "local_file",
-            strictMode: true,
-            enabled: true,
-          }),
-        });
-        assert.equal(createRes.status, 409);
+test("local_file providers are always blocked", async () => {
+  await withDb(async (db, app) => {
+    const createRes = await app.request("http://localhost/api/secrets/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "local-main",
+        kind: "local_file",
+        strictMode: true,
+        enabled: true,
+      }),
+    });
+    assert.equal(createRes.status, 409);
 
-        upsertSecretProviderProfile(db, {
-          id: "local-main",
-          kind: "local_file",
-          authMode: "none",
-          strictMode: true,
-          enabled: false,
-        });
+    upsertSecretProviderProfile(db, {
+      id: "local-main",
+      kind: "local_file",
+      authMode: "none",
+      strictMode: true,
+      enabled: false,
+    });
 
-        const enableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            enabled: true,
-          }),
-        });
-        assert.equal(enableRes.status, 409);
+    const enableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+      }),
+    });
+    assert.equal(enableRes.status, 409);
 
-        const disableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            enabled: false,
-          }),
-        });
-        assert.equal(disableRes.status, 200);
-      });
-    },
-  );
+    const disableRes = await app.request("http://localhost/api/secrets/providers/local-main/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: false,
+      }),
+    });
+    assert.equal(disableRes.status, 200);
+  });
 });
 
 test("federation peers/tasks/outbox routes support basic flow", async () => {

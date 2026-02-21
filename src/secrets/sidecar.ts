@@ -32,11 +32,6 @@ const DEFAULT_MAX_BODY_BYTES = 32 * 1024;
 const RESOLVE_PATHS = new Set(["/v1/secrets/resolve", "/resolve"]);
 const HEALTH_PATH = "/health";
 
-function parseStrictMode(raw: string | undefined): boolean {
-  const normalized = (raw ?? "1").trim().toLowerCase();
-  return !(normalized === "0" || normalized === "false" || normalized === "no");
-}
-
 function safeTokenEquals(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
   const right = Buffer.from(b, "utf8");
@@ -112,7 +107,7 @@ function mapResolveErrorStatus(errorMessage: string): 400 | 404 | 409 | 500 {
 
 export async function startSecretSidecar(options: SecretSidecarOptions): Promise<SecretSidecarHandle> {
   const log = options.log ?? (() => {});
-  const strictMode = options.strictMode ?? parseStrictMode(process.env.NEXUS_SECRETS_STRICT);
+  const strictMode = true;
   const socketPath = options.socketPath?.trim() ? options.socketPath.trim() : null;
   const bindHost = (options.bindHost ?? "127.0.0.1").trim();
   const requestedPortRaw = options.port ?? 7788;

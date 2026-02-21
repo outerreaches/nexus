@@ -75,33 +75,26 @@ async function requestViaUnixSocket(params: {
 }
 
 test("sidecar strict mode requires bearer token for TCP endpoint", async () => {
-  await withEnv(
-    {
-      NEXUS_SECRETS_STRICT: "1",
-    },
-    async () => {
-      await withTempStateDir(async (stateDir) => {
-        await assert.rejects(
-          () =>
-            startSecretSidecar({
-              stateDir,
-              bindHost: "127.0.0.1",
-              port: 0,
-              bearerToken: null,
-              strictMode: true,
-            }),
-          /secret_sidecar_strict_mode_requires_bearer_token_for_tcp/,
-        );
-      });
-    },
-  );
+  await withTempStateDir(async (stateDir) => {
+    await assert.rejects(
+      () =>
+        startSecretSidecar({
+          stateDir,
+          bindHost: "127.0.0.1",
+          port: 0,
+          bearerToken: null,
+          strictMode: true,
+        }),
+      /secret_sidecar_strict_mode_requires_bearer_token_for_tcp/,
+    );
+  });
 });
 
 test("sidecar resolves local credential over unix socket without bearer auth", async (t) => {
   await withEnv(
     {
-      NEXUS_SECRETS_STRICT: "1",
       NEXUS_CREDENTIALS_KEY: "secret-sidecar-test-key",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
     },
     async () => {
       await withTempStateDir(async (stateDir) => {

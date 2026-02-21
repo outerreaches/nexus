@@ -23,23 +23,11 @@ type CredentialStoreFileV1 = {
   credentials: StoredCredential[];
 };
 
-function isSecretsStrictMode(): boolean {
-  const raw = (process.env.NEXUS_SECRETS_STRICT ?? "1").trim().toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "no") return false;
-  return true;
-}
-
-function isSecretsSidecarOnlyMode(): boolean {
-  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
 function getSecretsProcessRole(): string {
   return (process.env.NEXUS_SECRETS_PROCESS_ROLE ?? "gateway").trim().toLowerCase();
 }
 
 function assertDirectCredentialAccessAllowed(operation: string): void {
-  if (!isSecretsSidecarOnlyMode()) return;
   if (getSecretsProcessRole() === "sidecar") return;
   throw new Error(`secret_sidecar_only_direct_credential_access_blocked:${operation}`);
 }
@@ -85,10 +73,7 @@ function encryptSecret(value: string, key: Buffer): StoredSecret {
 
 function decryptSecret(secret: StoredSecret, key: Buffer | null): string {
   if (secret.format === "plain") {
-    if (isSecretsStrictMode()) {
-      throw new Error("Plaintext credentials are blocked in strict mode. Set NEXUS_CREDENTIALS_KEY and rotate this entry.");
-    }
-    return secret.value;
+    throw new Error("Plaintext credentials are blocked. Set NEXUS_CREDENTIALS_KEY and rotate this entry.");
   }
   if (!key) {
     throw new Error("Credential is encrypted but NEXUS_CREDENTIALS_KEY is not set.");
@@ -145,12 +130,12 @@ export async function upsertCredential(params: {
   const existing = store.credentials.find((c) => c.id === params.id) ?? null;
 
   const vaultKey = getVaultKey();
-  if (params.password !== undefined && !vaultKey && isSecretsStrictMode()) {
-    throw new Error("Plaintext credential writes are blocked in strict mode. Set NEXUS_CREDENTIALS_KEY or disable strict mode.");
+  if (params.password !== undefined && !vaultKey) {
+    throw new Error("Credential writes require NEXUS_CREDENTIALS_KEY to be set.");
   }
-  const passwordEncrypted = Boolean(params.password && vaultKey);
+  const passwordEncrypted = Boolean(params.password !== undefined && vaultKey);
   const passwordStored: StoredSecret | undefined =
-    params.password === undefined ? undefined : vaultKey ? encryptSecret(params.password, vaultKey) : { format: "plain", value: params.password };
+    params.password === undefined ? undefined : encryptSecret(params.password, vaultKey!);
 
   const next: StoredCredential = params.overwrite
     ? {

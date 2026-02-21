@@ -2,14 +2,14 @@
 # Validate HA + sidecar secrets prerequisites.
 #
 # Checks:
-# - NEXUS_SECRETS_STRICT=1
-# - NEXUS_SECRETS_SIDECAR_ONLY=1
+# - NEXUS_HTTP_API_KEY is set
+# - NEXUS_HA_API_KEY is set and matches NEXUS_HTTP_API_KEY
+# - NEXUS_DASHBOARD_PASSWORD is set
+# - NEXUS_SECRETCTL_PASSWORD is set
 # - NEXUS_CREDENTIALS_KEY is set
-# - If HTTP auth is enabled (or --require-http-api-key), NEXUS_HTTP_API_KEY is set
-# - If NEXUS_HTTP_API_KEY is set, NEXUS_HA_API_KEY is set and matches
 #
 # Optional autofix:
-# - --auto-fix: set strict/sidecar-only to 1 and align HA/API key values
+# - --auto-fix: align HA/API key values and fill default usernames
 # - --auto-generate-credentials-key: generate key only when store file does not yet exist
 
 set -euo pipefail
@@ -23,7 +23,6 @@ STORE_PATH_EXPLICIT=0
 
 AUTO_FIX=0
 AUTO_GENERATE_CREDENTIALS_KEY=0
-REQUIRE_HTTP_API_KEY=0
 
 usage() {
   cat <<EOF
@@ -35,9 +34,8 @@ Options:
   --state-dir <path>                     State directory (default: ${STATE_DIR})
   --store-dir <path>                     Credential store directory (default: ${STORE_DIR})
   --store-path <path>                    Credential store file path (default: ${STORE_PATH})
-  --auto-fix                             Apply safe env fixes (strict/sidecar-only/HA key alignment)
+  --auto-fix                             Apply safe env fixes (HA key alignment/default usernames)
   --auto-generate-credentials-key        Generate NEXUS_CREDENTIALS_KEY when missing and store is absent
-  --require-http-api-key                 Require NEXUS_HTTP_API_KEY even when auth flag is unset
   -h, --help                             Show this help
 EOF
 }
@@ -53,18 +51,6 @@ fail() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
-}
-
-normalize_bool() {
-  local raw
-  raw="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | xargs)"
-  case "$raw" in
-    1|true|yes|on) printf '1' ;;
-    0|false|no|off|'') printf '0' ;;
-    *)
-      fail "invalid boolean value: $1"
-      ;;
-  esac
 }
 
 read_env_file_value() {
@@ -151,10 +137,6 @@ while [[ $# -gt 0 ]]; do
       AUTO_GENERATE_CREDENTIALS_KEY=1
       shift
       ;;
-    --require-http-api-key)
-      REQUIRE_HTTP_API_KEY=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -187,55 +169,32 @@ if (( AUTO_FIX )); then
   chmod 700 "$STORE_DIR" 2>/dev/null || true
 fi
 
-strict_raw="$(read_env_file_value "NEXUS_SECRETS_STRICT" "$ENV_FILE")"
-strict_bool="$(normalize_bool "${strict_raw:-0}")"
-if [[ "$strict_bool" != "1" ]]; then
-  if (( AUTO_FIX )); then
-    upsert_env_value "NEXUS_SECRETS_STRICT" "1" "$ENV_FILE"
-    strict_bool="1"
-    log "set NEXUS_SECRETS_STRICT=1"
-  else
-    fail "NEXUS_SECRETS_STRICT must be enabled (set to 1)"
-  fi
-fi
-
-sidecar_only_raw="$(read_env_file_value "NEXUS_SECRETS_SIDECAR_ONLY" "$ENV_FILE")"
-sidecar_only_bool="$(normalize_bool "${sidecar_only_raw:-0}")"
-if [[ "$sidecar_only_bool" != "1" ]]; then
-  if (( AUTO_FIX )); then
-    upsert_env_value "NEXUS_SECRETS_SIDECAR_ONLY" "1" "$ENV_FILE"
-    sidecar_only_bool="1"
-    log "set NEXUS_SECRETS_SIDECAR_ONLY=1"
-  else
-    fail "NEXUS_SECRETS_SIDECAR_ONLY must be enabled (set to 1)"
-  fi
-fi
-
-auth_enabled_raw="$(read_env_file_value "NEXUS_HTTP_AUTH_ENABLED" "$ENV_FILE")"
-auth_enabled_bool="$(normalize_bool "${auth_enabled_raw:-0}")"
 http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$ENV_FILE")"
 ha_api_key="$(read_env_file_value "NEXUS_HA_API_KEY" "$ENV_FILE")"
-shared_auth_token="$(read_env_file_value "NEXUS_HTTP_AUTH_TOKEN" "$ENV_FILE")"
+dashboard_user="$(read_env_file_value "NEXUS_DASHBOARD_USERNAME" "$ENV_FILE")"
+dashboard_password="$(read_env_file_value "NEXUS_DASHBOARD_PASSWORD" "$ENV_FILE")"
+secretctl_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$ENV_FILE")"
+secretctl_password="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$ENV_FILE")"
 
-if [[ -z "$http_api_key" && -n "$ha_api_key" ]]; then
-  if (( AUTO_FIX )); then
-    upsert_env_value "NEXUS_HTTP_API_KEY" "$ha_api_key" "$ENV_FILE"
-    http_api_key="$ha_api_key"
-    log "set NEXUS_HTTP_API_KEY from NEXUS_HA_API_KEY"
-  fi
+if [[ -z "$dashboard_user" ]] && (( AUTO_FIX )); then
+  upsert_env_value "NEXUS_DASHBOARD_USERNAME" "admin" "$ENV_FILE"
+  dashboard_user="admin"
+  log "set NEXUS_DASHBOARD_USERNAME=admin"
+fi
+if [[ -z "$secretctl_user" ]] && (( AUTO_FIX )); then
+  upsert_env_value "NEXUS_SECRETCTL_USERNAME" "admin" "$ENV_FILE"
+  secretctl_user="admin"
+  log "set NEXUS_SECRETCTL_USERNAME=admin"
+fi
+if [[ -z "$secretctl_password" && -n "$dashboard_password" ]] && (( AUTO_FIX )); then
+  upsert_env_value "NEXUS_SECRETCTL_PASSWORD" "$dashboard_password" "$ENV_FILE"
+  secretctl_password="$dashboard_password"
+  log "set NEXUS_SECRETCTL_PASSWORD from NEXUS_DASHBOARD_PASSWORD"
 fi
 
-if [[ -z "$http_api_key" && -n "$shared_auth_token" && ( "$auth_enabled_bool" == "1" || "$REQUIRE_HTTP_API_KEY" == "1" ) ]]; then
-  if (( AUTO_FIX )); then
-    upsert_env_value "NEXUS_HTTP_API_KEY" "$shared_auth_token" "$ENV_FILE"
-    http_api_key="$shared_auth_token"
-    log "set NEXUS_HTTP_API_KEY from NEXUS_HTTP_AUTH_TOKEN"
-  fi
-fi
-
-if [[ "$auth_enabled_bool" == "1" || "$REQUIRE_HTTP_API_KEY" == "1" ]]; then
-  [[ -n "$http_api_key" ]] || fail "NEXUS_HTTP_API_KEY is required"
-fi
+[[ -n "$http_api_key" ]] || fail "NEXUS_HTTP_API_KEY is required"
+[[ -n "$dashboard_password" ]] || fail "NEXUS_DASHBOARD_PASSWORD is required"
+[[ -n "$secretctl_password" ]] || fail "NEXUS_SECRETCTL_PASSWORD is required"
 
 if [[ -n "$http_api_key" ]]; then
   if [[ -z "$ha_api_key" ]]; then
@@ -276,4 +235,4 @@ if [[ ${#credentials_key} -lt 32 ]]; then
   fail "NEXUS_CREDENTIALS_KEY appears too short (len=${#credentials_key}); expected >= 32 chars"
 fi
 
-log "ok strict=1 sidecar_only=1 http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") credentials_key_len=${#credentials_key} env_file=${ENV_FILE} store_path=${STORE_PATH}"
+log "ok http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") dashboard_password=$(mask_len "$dashboard_password") secretctl_password=$(mask_len "$secretctl_password") credentials_key_len=${#credentials_key} env_file=${ENV_FILE} store_path=${STORE_PATH}"

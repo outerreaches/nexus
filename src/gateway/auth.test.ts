@@ -102,7 +102,6 @@ function extractCsrfToken(html: string): string | null {
 test("gateway HTTP auth enforces API key, dashboard session login, and CSRF", async () => {
   await withEnv(
     {
-      NEXUS_HTTP_AUTH_ENABLED: "1",
       NEXUS_HTTP_API_KEY: "api-test-key",
       NEXUS_DASHBOARD_USERNAME: "admin",
       NEXUS_DASHBOARD_PASSWORD: "dashboard-test-pass",

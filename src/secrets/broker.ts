@@ -4,7 +4,6 @@ import https from "node:https";
 import net from "node:net";
 
 import type { SecretProviderProfileRecord } from "../storage/secrets.js";
-import { getCredentialField } from "./credentials.js";
 
 export type SecretBrokerResolveInput = {
   profile: SecretProviderProfileRecord;
@@ -35,11 +34,6 @@ export type SecretBrokerProfileValidationResult = {
 
 const SECRETISH_CONFIG_KEY_PATTERN = /(token|secret|password|api[_-]?key|client[_-]?secret|access[_-]?key)/i;
 const DEFAULT_RESOLVE_PATH = "/v1/secrets/resolve";
-
-function isSecretsSidecarOnlyMode(): boolean {
-  const raw = (process.env.NEXUS_SECRETS_SIDECAR_ONLY ?? "0").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
 
 type ParsedBrokerEndpoint =
   | {
@@ -196,29 +190,22 @@ function resolveBearerToken(): string {
 async function validateBrokerPolicy(params: {
   profile: SecretProviderProfileRecord;
   endpoint: ParsedBrokerEndpoint;
-  strictMode: boolean;
 }): Promise<{ authorizationHeader: string | null; tlsClientMaterial: BrokerTlsClientMaterial | null }> {
   const authMode = params.profile.authMode.trim().toLowerCase();
-  if (params.strictMode && walkConfigForStaticSecrets(params.profile.config)) {
+  if (walkConfigForStaticSecrets(params.profile.config)) {
     throw new Error("secret_provider_static_auth_material_in_config_blocked");
   }
 
   if (params.endpoint.kind === "url") {
     const host = params.endpoint.url.hostname;
     const isPrivate = isHostPrivateOnly(host);
-    if (params.strictMode && !isPrivate) {
+    if (!isPrivate) {
       throw new Error(`secret_broker_non_private_endpoint_blocked:${host}`);
     }
   }
 
   const effectiveAuthMode = authMode || "none";
   if (effectiveAuthMode === "none") {
-    if (!params.strictMode) {
-      return {
-        authorizationHeader: null,
-        tlsClientMaterial: null,
-      };
-    }
     throw new Error("secret_provider_auth_mode_not_hardened");
   }
 
@@ -247,7 +234,7 @@ async function validateBrokerPolicy(params: {
     if (params.endpoint.kind !== "url") {
       throw new Error("secret_provider_auth_mode_workload_identity_requires_http_endpoint");
     }
-    if (params.strictMode && params.endpoint.url.protocol !== "https:") {
+    if (params.endpoint.url.protocol !== "https:") {
       throw new Error("secret_provider_auth_mode_workload_identity_requires_https_in_strict_mode");
     }
     return {
@@ -346,7 +333,6 @@ async function resolveViaSidecar(params: {
   profile: SecretProviderProfileRecord;
   secretPath: string;
   field: "username" | "password";
-  strictMode: boolean;
   traceId?: string | null;
   firewallSession?: string | null;
   actor?: string | null;
@@ -356,7 +342,6 @@ async function resolveViaSidecar(params: {
   const policy = await validateBrokerPolicy({
     profile: params.profile,
     endpoint,
-    strictMode: params.strictMode,
   });
 
   const bodyJson = JSON.stringify({
@@ -420,28 +405,13 @@ async function resolveViaSidecar(params: {
 
 export async function resolveSecretThroughBroker(params: SecretBrokerResolveInput): Promise<SecretBrokerResolveResult> {
   if (params.profile.kind === "local_file") {
-    if (isSecretsSidecarOnlyMode()) {
-      throw new Error("secret_provider_local_file_disabled_in_sidecar_only_mode");
-    }
-    const value = await getCredentialField({
-      stateDir: params.stateDir,
-      id: params.secretPath,
-      field: params.field,
-    });
-    return {
-      value,
-      secretClass: "credential",
-      leaseId: null,
-      expiresAt: null,
-      reason: "resolved_local_file",
-    };
+    throw new Error("secret_provider_local_file_disabled:sidecar_required");
   }
 
   return await resolveViaSidecar({
     profile: params.profile,
     secretPath: params.secretPath,
     field: params.field,
-    strictMode: params.strictMode,
     traceId: params.traceId,
     firewallSession: params.firewallSession,
     actor: params.actor,
@@ -453,31 +423,21 @@ export async function validateSecretBrokerProfile(params: {
   profile: SecretProviderProfileRecord;
   strictMode?: boolean;
 }): Promise<SecretBrokerProfileValidationResult> {
-  const strictMode = params.strictMode ?? params.profile.strictMode;
   if (params.profile.kind === "local_file") {
-    if (isSecretsSidecarOnlyMode()) {
-      throw new Error("secret_provider_local_file_disabled_in_sidecar_only_mode");
-    }
-    return {
-      endpointKind: "local",
-      endpointScheme: "local",
-      authMode: params.profile.authMode,
-      strictMode,
-    };
+    throw new Error("secret_provider_local_file_disabled:sidecar_required");
   }
 
   const endpoint = parseBrokerEndpoint(params.profile);
   await validateBrokerPolicy({
     profile: params.profile,
     endpoint,
-    strictMode,
   });
   if (endpoint.kind === "unix") {
     return {
       endpointKind: "unix",
       endpointScheme: "unix",
       authMode: params.profile.authMode,
-      strictMode,
+      strictMode: true,
     };
   }
   const endpointScheme = endpoint.url.protocol === "https:" ? "https" : "http";
@@ -485,6 +445,6 @@ export async function validateSecretBrokerProfile(params: {
     endpointKind: "url",
     endpointScheme,
     authMode: params.profile.authMode,
-    strictMode,
+    strictMode: true,
   };
 }

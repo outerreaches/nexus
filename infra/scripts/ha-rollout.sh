@@ -29,10 +29,9 @@
 #   WS_SMOKE_WARN_ONLY=0              # set to 1 to warn (not fail) on websocket smoke timeout
 #   WS_SMOKE_ATTEMPT_TIMEOUT_MS=8000  # per-attempt websocket probe timeout in milliseconds
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
-#   SECRETS_PREFLIGHT_REQUIRE_HTTP_API_KEY=0  # set to 1 to require NEXUS_HTTP_API_KEY
 #   ROLLBACK_RESTORE_GIT=1            # set to 0 to keep current checkout on failed deploy rollback
-#   NEXUS_HA_API_KEY=<token>            # optional bearer token for /api/* control-plane calls
-#                                        # fallback: NEXUS_HTTP_API_KEY, NEXUS_HTTP_AUTH_TOKEN, NEXUS_DASHBOARD_PASSWORD
+#   NEXUS_HA_API_KEY=<token>            # bearer token for /api/* control-plane calls
+#                                        # defaults to NEXUS_HTTP_API_KEY when unset
 
 set -euo pipefail
 
@@ -57,9 +56,8 @@ WS_SMOKE_ATTEMPT_TIMEOUT_MS="${WS_SMOKE_ATTEMPT_TIMEOUT_MS:-8000}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 SECRETS_PREFLIGHT_SCRIPT="${SECRETS_PREFLIGHT_SCRIPT:-${CODE_DIR}/infra/scripts/ha-secrets-preflight.sh}"
-SECRETS_PREFLIGHT_REQUIRE_HTTP_API_KEY="${SECRETS_PREFLIGHT_REQUIRE_HTTP_API_KEY:-0}"
 ROLLBACK_RESTORE_GIT="${ROLLBACK_RESTORE_GIT:-1}"
-CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-${NEXUS_HTTP_AUTH_TOKEN:-${NEXUS_DASHBOARD_PASSWORD:-}}}}"
+CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-}}"
 
 declare -a COMPOSE_FILES_LIST=()
 declare -a COMPOSE_BASE_CMD=()
@@ -216,9 +214,6 @@ ensure_secrets_preflight() {
     --state-dir "$STATE_DIR"
     --store-dir "/data/nexus-secrets"
   )
-  if [ "$SECRETS_PREFLIGHT_REQUIRE_HTTP_API_KEY" = "1" ]; then
-    cmd+=(--require-http-api-key)
-  fi
   "${cmd[@]}"
 }
 

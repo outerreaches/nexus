@@ -661,7 +661,7 @@ export async function startGateway(
     },
     getStatus: async () => {
       const nowMs = Date.now();
-      const secretsStrictMode = parseStrictModeRaw(process.env.NEXUS_SECRETS_STRICT);
+      const secretsStrictMode = true;
       const secretProviders = listSecretProviderProfiles(db, {
         includeDisabled: true,
         limit: 500,
@@ -966,9 +966,8 @@ export async function startGateway(
   const restartPeerUrl = normalizeHttpBaseUrl(process.env.NEXUS_HA_PEER_URL ?? "");
   const peerControlPlaneApiKey =
     (
+      process.env.NEXUS_HA_API_KEY ??
       process.env.NEXUS_HTTP_API_KEY ??
-      process.env.NEXUS_HTTP_AUTH_TOKEN ??
-      process.env.NEXUS_DASHBOARD_PASSWORD ??
       ""
     ).trim() || null;
   let restartInProgress = false;
@@ -1315,11 +1314,6 @@ function envBool(key: string): boolean | null {
   if (raw === "1" || raw === "true" || raw === "yes" || raw === "y") return true;
   if (raw === "0" || raw === "false" || raw === "no" || raw === "n") return false;
   return null;
-}
-
-function parseStrictModeRaw(value: string | undefined): boolean {
-  const normalized = (value ?? "1").trim().toLowerCase();
-  return !(normalized === "0" || normalized === "false" || normalized === "no");
 }
 
 function normalizeHttpBaseUrl(raw: string): string | null {
