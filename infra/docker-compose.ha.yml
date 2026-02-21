@@ -60,7 +60,7 @@ services:
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-standby:18789
     env_file:
-      - ../.env
+      - ../.env.gateway
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
       interval: 10s
@@ -91,7 +91,7 @@ services:
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-primary:18789
     env_file:
-      - ../.env
+      - ../.env.gateway
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
       interval: 10s
@@ -117,8 +117,8 @@ services:
       - FAILURE_THRESHOLD=3
       - RECOVERY_DELAY=30
       - DEPLOY_LOCK_DIR=/data/nexus/ha-rollout.lock
-      # Optional control-plane auth for /api/* calls when gateway HTTP auth is enabled.
-      - NEXUS_HA_API_KEY=${NEXUS_HA_API_KEY}
+    env_file:
+      - ../.env.watchdog
     depends_on:
       - nexus-primary
       - nexus-standby

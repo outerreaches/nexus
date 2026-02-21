@@ -17,9 +17,11 @@ Requirements:
 npm install
 ```
 
-2) Create a local env file:
+2) (HA deployment) Create split env files:
 ```bash
-cp .env.example .env
+cp .env.gateway.example .env.gateway
+cp .env.sidecar.example .env.sidecar
+cp .env.watchdog.example .env.watchdog
 ```
 
 3) Create config + workspace with interactive onboarding:
@@ -45,7 +47,7 @@ npm run dev -- init --force
 ```
 Without `--force`, `init` preserves existing non-empty state markdown files and only creates missing/empty ones.
 
-4) Configure secrets in your environment (typically `.env`) and keep placeholders in config (`~/.nexus/nexus.json`):
+4) Configure secrets in your environment and keep placeholders in config (`~/.nexus/nexus.json`):
 - Default model is `moonshotai/kimi-k2.5` (override via `llm.openaiCompat.model`).
 - `OPENROUTER_API_KEY`
 - Optional local/OpenAI-compatible endpoint (for local-only routing or fallback):

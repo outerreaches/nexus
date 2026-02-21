@@ -42,7 +42,7 @@ services:
       - NEXUS_SECRET_SIDECAR_SOCKET_PATH=/run/nexus/secret-sidecar.sock
       - NEXUS_SECRET_SIDECAR_MAX_BODY_BYTES=32768
     env_file:
-      - ../.env
+      - ../.env.sidecar
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --unix-socket /run/nexus/secret-sidecar.sock http://localhost/health >/dev/null"]
       interval: 10s

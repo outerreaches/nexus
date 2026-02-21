@@ -11,7 +11,7 @@
 # Auth gate:
 #   Prompts for secretctl operator credentials and validates against
 #   NEXUS_SECRETCTL_USERNAME / NEXUS_SECRETCTL_PASSWORD.
-#   Values are read from environment first, then CODE_DIR/.env if present.
+#   Values are read from environment first, then split env files if present.
 
 set -euo pipefail
 
@@ -22,7 +22,8 @@ CODE_DIR="${CODE_DIR:-$REPO_ROOT}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 COMPOSE_FILES="${COMPOSE_FILES:-${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
 SECRET_PROVIDER_ID="${SECRET_PROVIDER_ID:-sidecar-main}"
-ENV_FILE="${ENV_FILE:-${CODE_DIR}/.env}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CODE_DIR}/.env.gateway}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CODE_DIR}/.env.sidecar}"
 
 AUTH_REQUIRED="${AUTH_REQUIRED:-1}"
 
@@ -70,14 +71,14 @@ load_auth_material() {
   expected_pass="${NEXUS_SECRETCTL_PASSWORD:-}"
 
   if [[ -z "$expected_user" ]]; then
-    expected_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$ENV_FILE")"
+    expected_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$SIDECAR_ENV_FILE")"
   fi
   if [[ -z "$expected_pass" ]]; then
-    expected_pass="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$ENV_FILE")"
+    expected_pass="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$SIDECAR_ENV_FILE")"
   fi
 
   expected_user="${expected_user:-admin}"
-  [[ -n "$expected_pass" ]] || die "NEXUS_SECRETCTL_PASSWORD is required (set env or ${ENV_FILE})"
+  [[ -n "$expected_pass" ]] || die "NEXUS_SECRETCTL_PASSWORD is required (set env or ${SIDECAR_ENV_FILE})"
 
   EXPECTED_SECRETCTL_USER="$expected_user"
   EXPECTED_SECRETCTL_PASS="$expected_pass"
@@ -86,9 +87,9 @@ load_auth_material() {
 require_http_api_key() {
   local api_key="${NEXUS_HTTP_API_KEY:-}"
   if [[ -z "$api_key" ]]; then
-    api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$ENV_FILE")"
+    api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$GATEWAY_ENV_FILE")"
   fi
-  [[ -n "$api_key" ]] || die "NEXUS_HTTP_API_KEY is required (set env or ${ENV_FILE})"
+  [[ -n "$api_key" ]] || die "NEXUS_HTTP_API_KEY is required (set env or ${GATEWAY_ENV_FILE})"
 }
 
 authenticate_operator() {
@@ -160,7 +161,8 @@ Environment:
   COMPOSE_PROJECT=${COMPOSE_PROJECT}
   COMPOSE_FILES=${COMPOSE_FILES}
   SECRET_PROVIDER_ID=${SECRET_PROVIDER_ID}
-  ENV_FILE=${ENV_FILE}
+  GATEWAY_ENV_FILE=${GATEWAY_ENV_FILE}
+  SIDECAR_ENV_FILE=${SIDECAR_ENV_FILE}
   NEXUS_SECRETCTL_USERNAME/NEXUS_SECRETCTL_PASSWORD required for auth gate
   NEXUS_HTTP_API_KEY required
   AUTH_REQUIRED=1 (default; set 0 to disable local auth gate)

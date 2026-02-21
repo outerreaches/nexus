@@ -15,7 +15,9 @@
 set -euo pipefail
 
 CODE_DIR="${CODE_DIR:-/data/code}"
-ENV_FILE="${ENV_FILE:-${CODE_DIR}/.env}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CODE_DIR}/.env.gateway}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CODE_DIR}/.env.sidecar}"
+WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CODE_DIR}/.env.watchdog}"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 STORE_DIR="${STORE_DIR:-/data/nexus-secrets}"
 STORE_PATH="${STORE_PATH:-${STORE_DIR}/credentials.json}"
@@ -23,6 +25,7 @@ STORE_PATH_EXPLICIT=0
 
 AUTO_FIX=0
 AUTO_GENERATE_CREDENTIALS_KEY=0
+REQUIRE_HTTP_API_KEY=0
 
 usage() {
   cat <<EOF
@@ -30,12 +33,16 @@ Usage: $(basename "$0") [options]
 
 Options:
   --code-dir <path>                      Code directory (default: ${CODE_DIR})
-  --env-file <path>                      Env file path (default: ${ENV_FILE})
+  --gateway-env-file <path>              Gateway env file (default: ${GATEWAY_ENV_FILE})
+  --sidecar-env-file <path>              Sidecar env file (default: ${SIDECAR_ENV_FILE})
+  --watchdog-env-file <path>             Watchdog env file (default: ${WATCHDOG_ENV_FILE})
+  --env-file <path>                      Legacy alias; sets all env files to this path
   --state-dir <path>                     State directory (default: ${STATE_DIR})
   --store-dir <path>                     Credential store directory (default: ${STORE_DIR})
   --store-path <path>                    Credential store file path (default: ${STORE_PATH})
   --auto-fix                             Apply safe env fixes (HA key alignment/default usernames)
   --auto-generate-credentials-key        Generate NEXUS_CREDENTIALS_KEY when missing and store is absent
+  --require-http-api-key                 Require NEXUS_HTTP_API_KEY to be present
   -h, --help                             Show this help
 EOF
 }
@@ -113,7 +120,21 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --env-file)
-      ENV_FILE="$2"
+      GATEWAY_ENV_FILE="$2"
+      SIDECAR_ENV_FILE="$2"
+      WATCHDOG_ENV_FILE="$2"
+      shift 2
+      ;;
+    --gateway-env-file)
+      GATEWAY_ENV_FILE="$2"
+      shift 2
+      ;;
+    --sidecar-env-file)
+      SIDECAR_ENV_FILE="$2"
+      shift 2
+      ;;
+    --watchdog-env-file)
+      WATCHDOG_ENV_FILE="$2"
       shift 2
       ;;
     --state-dir)
@@ -137,6 +158,10 @@ while [[ $# -gt 0 ]]; do
       AUTO_GENERATE_CREDENTIALS_KEY=1
       shift
       ;;
+    --require-http-api-key)
+      REQUIRE_HTTP_API_KEY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -147,15 +172,38 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -f "$ENV_FILE" ]] || fail "env file not found: ${ENV_FILE}"
+if [[ ! -f "$GATEWAY_ENV_FILE" ]]; then
+  if (( AUTO_FIX )); then
+    : >"$GATEWAY_ENV_FILE"
+    log "created gateway env file: ${GATEWAY_ENV_FILE}"
+  else
+    fail "gateway env file not found: ${GATEWAY_ENV_FILE}"
+  fi
+fi
+if [[ ! -f "$SIDECAR_ENV_FILE" ]]; then
+  if (( AUTO_FIX )); then
+    : >"$SIDECAR_ENV_FILE"
+    log "created sidecar env file: ${SIDECAR_ENV_FILE}"
+  else
+    fail "sidecar env file not found: ${SIDECAR_ENV_FILE}"
+  fi
+fi
+if [[ ! -f "$WATCHDOG_ENV_FILE" ]]; then
+  if (( AUTO_FIX )); then
+    : >"$WATCHDOG_ENV_FILE"
+    log "created watchdog env file: ${WATCHDOG_ENV_FILE}"
+  else
+    fail "watchdog env file not found: ${WATCHDOG_ENV_FILE}"
+  fi
+fi
 
 if [[ "$STORE_PATH_EXPLICIT" != "1" ]]; then
   STORE_PATH="${STORE_DIR%/}/credentials.json"
 fi
 
 # Honor env overrides when present.
-env_store_path="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_PATH" "$ENV_FILE")"
-env_store_dir="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_DIR" "$ENV_FILE")"
+env_store_path="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_PATH" "$SIDECAR_ENV_FILE")"
+env_store_dir="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_DIR" "$SIDECAR_ENV_FILE")"
 if [[ -n "$env_store_path" ]]; then
   STORE_PATH="$env_store_path"
   STORE_DIR="$(dirname "$STORE_PATH")"
@@ -169,37 +217,39 @@ if (( AUTO_FIX )); then
   chmod 700 "$STORE_DIR" 2>/dev/null || true
 fi
 
-http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$ENV_FILE")"
-ha_api_key="$(read_env_file_value "NEXUS_HA_API_KEY" "$ENV_FILE")"
-dashboard_user="$(read_env_file_value "NEXUS_DASHBOARD_USERNAME" "$ENV_FILE")"
-dashboard_password="$(read_env_file_value "NEXUS_DASHBOARD_PASSWORD" "$ENV_FILE")"
-secretctl_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$ENV_FILE")"
-secretctl_password="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$ENV_FILE")"
+http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$GATEWAY_ENV_FILE")"
+ha_api_key="$(read_env_file_value "NEXUS_HA_API_KEY" "$WATCHDOG_ENV_FILE")"
+dashboard_user="$(read_env_file_value "NEXUS_DASHBOARD_USERNAME" "$GATEWAY_ENV_FILE")"
+dashboard_password="$(read_env_file_value "NEXUS_DASHBOARD_PASSWORD" "$GATEWAY_ENV_FILE")"
+secretctl_user="$(read_env_file_value "NEXUS_SECRETCTL_USERNAME" "$SIDECAR_ENV_FILE")"
+secretctl_password="$(read_env_file_value "NEXUS_SECRETCTL_PASSWORD" "$SIDECAR_ENV_FILE")"
 
 if [[ -z "$dashboard_user" ]] && (( AUTO_FIX )); then
-  upsert_env_value "NEXUS_DASHBOARD_USERNAME" "admin" "$ENV_FILE"
+  upsert_env_value "NEXUS_DASHBOARD_USERNAME" "admin" "$GATEWAY_ENV_FILE"
   dashboard_user="admin"
   log "set NEXUS_DASHBOARD_USERNAME=admin"
 fi
 if [[ -z "$secretctl_user" ]] && (( AUTO_FIX )); then
-  upsert_env_value "NEXUS_SECRETCTL_USERNAME" "admin" "$ENV_FILE"
+  upsert_env_value "NEXUS_SECRETCTL_USERNAME" "admin" "$SIDECAR_ENV_FILE"
   secretctl_user="admin"
   log "set NEXUS_SECRETCTL_USERNAME=admin"
 fi
 if [[ -z "$secretctl_password" && -n "$dashboard_password" ]] && (( AUTO_FIX )); then
-  upsert_env_value "NEXUS_SECRETCTL_PASSWORD" "$dashboard_password" "$ENV_FILE"
+  upsert_env_value "NEXUS_SECRETCTL_PASSWORD" "$dashboard_password" "$SIDECAR_ENV_FILE"
   secretctl_password="$dashboard_password"
   log "set NEXUS_SECRETCTL_PASSWORD from NEXUS_DASHBOARD_PASSWORD"
 fi
 
-[[ -n "$http_api_key" ]] || fail "NEXUS_HTTP_API_KEY is required"
+if (( REQUIRE_HTTP_API_KEY )); then
+  [[ -n "$http_api_key" ]] || fail "NEXUS_HTTP_API_KEY is required"
+fi
 [[ -n "$dashboard_password" ]] || fail "NEXUS_DASHBOARD_PASSWORD is required"
 [[ -n "$secretctl_password" ]] || fail "NEXUS_SECRETCTL_PASSWORD is required"
 
 if [[ -n "$http_api_key" ]]; then
   if [[ -z "$ha_api_key" ]]; then
     if (( AUTO_FIX )); then
-      upsert_env_value "NEXUS_HA_API_KEY" "$http_api_key" "$ENV_FILE"
+      upsert_env_value "NEXUS_HA_API_KEY" "$http_api_key" "$WATCHDOG_ENV_FILE"
       ha_api_key="$http_api_key"
       log "set NEXUS_HA_API_KEY to match NEXUS_HTTP_API_KEY"
     else
@@ -207,7 +257,7 @@ if [[ -n "$http_api_key" ]]; then
     fi
   elif [[ "$ha_api_key" != "$http_api_key" ]]; then
     if (( AUTO_FIX )); then
-      upsert_env_value "NEXUS_HA_API_KEY" "$http_api_key" "$ENV_FILE"
+      upsert_env_value "NEXUS_HA_API_KEY" "$http_api_key" "$WATCHDOG_ENV_FILE"
       ha_api_key="$http_api_key"
       log "aligned NEXUS_HA_API_KEY with NEXUS_HTTP_API_KEY"
     else
@@ -216,7 +266,7 @@ if [[ -n "$http_api_key" ]]; then
   fi
 fi
 
-credentials_key="$(read_env_file_value "NEXUS_CREDENTIALS_KEY" "$ENV_FILE")"
+credentials_key="$(read_env_file_value "NEXUS_CREDENTIALS_KEY" "$SIDECAR_ENV_FILE")"
 if [[ -z "$credentials_key" ]]; then
   if (( AUTO_GENERATE_CREDENTIALS_KEY )); then
     if [[ -s "$STORE_PATH" ]]; then
@@ -224,7 +274,7 @@ if [[ -z "$credentials_key" ]]; then
     fi
     require_cmd openssl
     credentials_key="$(openssl rand -hex 32)"
-    upsert_env_value "NEXUS_CREDENTIALS_KEY" "$credentials_key" "$ENV_FILE"
+    upsert_env_value "NEXUS_CREDENTIALS_KEY" "$credentials_key" "$SIDECAR_ENV_FILE"
     log "generated NEXUS_CREDENTIALS_KEY"
   else
     fail "NEXUS_CREDENTIALS_KEY is required"
@@ -235,4 +285,4 @@ if [[ ${#credentials_key} -lt 32 ]]; then
   fail "NEXUS_CREDENTIALS_KEY appears too short (len=${#credentials_key}); expected >= 32 chars"
 fi
 
-log "ok http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") dashboard_password=$(mask_len "$dashboard_password") secretctl_password=$(mask_len "$secretctl_password") credentials_key_len=${#credentials_key} env_file=${ENV_FILE} store_path=${STORE_PATH}"
+log "ok http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") dashboard_password=$(mask_len "$dashboard_password") secretctl_password=$(mask_len "$secretctl_password") credentials_key_len=${#credentials_key} gateway_env=${GATEWAY_ENV_FILE} sidecar_env=${SIDECAR_ENV_FILE} watchdog_env=${WATCHDOG_ENV_FILE} store_path=${STORE_PATH}"

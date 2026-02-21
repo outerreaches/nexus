@@ -52,8 +52,8 @@ Deployment options (enabled by default):
   --deploy-dir <path>              Legacy path (unused by HA deploy; default: ~/nexus-deploy)
   --port <port>                    Host port mapped by guest compose (default: 18789)
   --compose-project <name>         Compose project name (default: infra)
-  --http-api-key <token>           Seed NEXUS_HTTP_API_KEY + NEXUS_HA_API_KEY into guest .env
-  --credentials-key <value>        Seed NEXUS_CREDENTIALS_KEY into guest .env
+  --http-api-key <token>           Seed NEXUS_HTTP_API_KEY (gateway) + NEXUS_HA_API_KEY (watchdog)
+  --credentials-key <value>        Seed NEXUS_CREDENTIALS_KEY into guest .env.sidecar
   --no-generate-credentials-key    Disable automatic credential-key generation when missing
   --require-http-api-key           Require NEXUS_HTTP_API_KEY in preflight checks
   --wait-ssh-seconds <seconds>     Max wait for guest SSH (default: 360)
@@ -690,29 +690,51 @@ for required in "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" 
 done
 chmod +x "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" "$SIDECAR_BOOTSTRAP_SCRIPT"
 
-if [[ ! -f "$CODE_DIR/.env" ]]; then
-  if [[ -f "$CODE_DIR/.env.example" ]]; then
-    cp "$CODE_DIR/.env.example" "$CODE_DIR/.env"
-    echo "created $CODE_DIR/.env from .env.example (fill secrets before production use)"
+if [[ ! -f "$CODE_DIR/.env.gateway" ]]; then
+  if [[ -f "$CODE_DIR/.env.gateway.example" ]]; then
+    cp "$CODE_DIR/.env.gateway.example" "$CODE_DIR/.env.gateway"
+    echo "created $CODE_DIR/.env.gateway from .env.gateway.example (fill secrets before production use)"
   else
-    : > "$CODE_DIR/.env"
-    echo "created empty $CODE_DIR/.env (fill required secrets before production use)"
+    : > "$CODE_DIR/.env.gateway"
+    echo "created empty $CODE_DIR/.env.gateway (fill required secrets before production use)"
+  fi
+fi
+
+if [[ ! -f "$CODE_DIR/.env.sidecar" ]]; then
+  if [[ -f "$CODE_DIR/.env.sidecar.example" ]]; then
+    cp "$CODE_DIR/.env.sidecar.example" "$CODE_DIR/.env.sidecar"
+    echo "created $CODE_DIR/.env.sidecar from .env.sidecar.example (fill secrets before production use)"
+  else
+    : > "$CODE_DIR/.env.sidecar"
+    echo "created empty $CODE_DIR/.env.sidecar (fill required secrets before production use)"
+  fi
+fi
+
+if [[ ! -f "$CODE_DIR/.env.watchdog" ]]; then
+  if [[ -f "$CODE_DIR/.env.watchdog.example" ]]; then
+    cp "$CODE_DIR/.env.watchdog.example" "$CODE_DIR/.env.watchdog"
+    echo "created $CODE_DIR/.env.watchdog from .env.watchdog.example (fill secrets before production use)"
+  else
+    : > "$CODE_DIR/.env.watchdog"
+    echo "created empty $CODE_DIR/.env.watchdog (fill required secrets before production use)"
   fi
 fi
 
 if [[ -n "$HTTP_API_KEY" ]]; then
-  upsert_env_value "NEXUS_HTTP_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env"
-  upsert_env_value "NEXUS_HA_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env"
+  upsert_env_value "NEXUS_HTTP_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env.gateway"
+  upsert_env_value "NEXUS_HA_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env.watchdog"
 fi
 
 if [[ -n "$CREDENTIALS_KEY" ]]; then
-  upsert_env_value "NEXUS_CREDENTIALS_KEY" "$CREDENTIALS_KEY" "$CODE_DIR/.env"
+  upsert_env_value "NEXUS_CREDENTIALS_KEY" "$CREDENTIALS_KEY" "$CODE_DIR/.env.sidecar"
 fi
 
 pref_cmd=(
   "$SECRETS_PREFLIGHT_SCRIPT"
   --code-dir "$CODE_DIR"
-  --env-file "$CODE_DIR/.env"
+  --gateway-env-file "$CODE_DIR/.env.gateway"
+  --sidecar-env-file "$CODE_DIR/.env.sidecar"
+  --watchdog-env-file "$CODE_DIR/.env.watchdog"
   --state-dir "$STATE_DIR"
   --store-dir "/data/nexus-secrets"
   --auto-fix
@@ -849,7 +871,7 @@ chmod +x "$HOME/sidecar-bootstrap.sh"
 CODE_DIR="$CODE_DIR" COMPOSE_PROJECT="$COMPOSE_PROJECT" "$PULL_DEPLOY_SCRIPT"
 
 # Ensure sidecar provider profile is present and reachable.
-bootstrap_http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$CODE_DIR/.env")"
+bootstrap_http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$CODE_DIR/.env.gateway")"
 if [[ -n "$bootstrap_http_api_key" ]]; then
   NEXUS_HTTP_API_KEY="$bootstrap_http_api_key" "$SIDECAR_BOOTSTRAP_SCRIPT"
 else

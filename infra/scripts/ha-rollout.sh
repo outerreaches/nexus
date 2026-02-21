@@ -210,9 +210,12 @@ ensure_secrets_preflight() {
   local -a cmd=(
     bash "$SECRETS_PREFLIGHT_SCRIPT"
     --code-dir "$CODE_DIR"
-    --env-file "${CODE_DIR}/.env"
+    --gateway-env-file "${CODE_DIR}/.env.gateway"
+    --sidecar-env-file "${CODE_DIR}/.env.sidecar"
+    --watchdog-env-file "${CODE_DIR}/.env.watchdog"
     --state-dir "$STATE_DIR"
     --store-dir "/data/nexus-secrets"
+    --require-http-api-key
   )
   "${cmd[@]}"
 }
