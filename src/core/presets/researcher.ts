@@ -66,6 +66,6 @@ export const preset: AgentPreset = {
     web_search: 12,
   },
   spawnAllowlist: ["researcher", "analyst", "coder"],
-  budget: { maxIterations: 48, maxToolCalls: 110 },
+  budget: { maxIterations: 60, maxToolCalls: 140 },
   isolated: true,
 };

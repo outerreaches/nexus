@@ -44,6 +44,6 @@ export const preset: AgentPreset = {
     spawn_agent: 4,
   },
   spawnAllowlist: ["coder", "researcher", "analyst", "graphic-designer"],
-  budget: { maxIterations: 40, maxToolCalls: 120 },
+  budget: { maxIterations: 60, maxToolCalls: 160 },
   isolated: true,
 };
