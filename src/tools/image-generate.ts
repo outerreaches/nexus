@@ -489,19 +489,23 @@ export const imageGenerate = defineTool({
     const selectedModel = resolved.model;
 
     let baseLlmConfig = ctx.llmConfig;
+    let routeProvider = "default";
     if (resolved.imageProvider) {
       const router = ctx.modelRouter as ModelRouter | undefined;
-      if (router) {
-        try {
-          const imageRoute = router.resolve({
-            agentId: ctx.request?.agentId ?? "image_generate",
-            mode: "default",
-            presetLlm: { primary: { provider: resolved.imageProvider } },
-          });
-          baseLlmConfig = imageRoute.primary;
-        } catch {
-          // fall back to agent's llmConfig if provider not found
-        }
+      if (!router) {
+        return `ERROR: image provider '${resolved.imageProvider}' requested, but model router is unavailable`;
+      }
+      try {
+        const imageRoute = router.resolve({
+          // Use a synthetic agent id so byAgent routing does not override explicit image provider selection.
+          agentId: "__image_tool__",
+          mode: "default",
+          presetLlm: { primary: { provider: resolved.imageProvider } },
+        });
+        baseLlmConfig = imageRoute.primary;
+        routeProvider = imageRoute.primaryProvider;
+      } catch (err) {
+        return `ERROR: image provider '${resolved.imageProvider}' route failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
 
@@ -511,7 +515,7 @@ export const imageGenerate = defineTool({
     };
 
     let generation: ImageGenerationResult;
-    let routeUsed = `primary:${primary.model}`;
+    let routeUsed = `${routeProvider}:${primary.model}`;
     try {
       generation = await generateImagesWithConfig({
         llm: primary,
@@ -529,7 +533,7 @@ export const imageGenerate = defineTool({
           `${primaryErr.responseId ? ` response_id=${primaryErr.responseId}` : ""}`,
         );
       }
-      return `ERROR: ${formatImageToolError(primaryErr)}`;
+      return `ERROR: image_generate route=${routeUsed} model=${selectedModel}: ${formatImageToolError(primaryErr)}`;
     }
 
     const defaultRoot = rootDir(ctx, args.root);
