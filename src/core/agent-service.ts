@@ -212,7 +212,7 @@ export class AgentService {
       const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.circuitBreaker?.getEffectiveMode() ?? "default";
 
       const systemPrompt = !preset || preset.name === "orchestrator"
-        ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId })
+        ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId, presetSystemPrompt: preset?.systemPrompt })
         : await buildPresetSystemPrompt({
           stateDir: this.deps.stateDir,
           agentId: params.agentId,

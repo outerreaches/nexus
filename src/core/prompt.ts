@@ -5,12 +5,13 @@ import { formatPresetsForPrompt } from "./presets.js";
 export async function buildSystemPrompt(params: {
   stateDir: string;
   agentId?: string;
+  presetSystemPrompt?: string;
 }): Promise<string> {
   const [ctx, skills] = await Promise.all([
     loadPersonalizationContext(params.stateDir, params.agentId),
     loadSkills(params.stateDir, params.agentId),
   ]);
-  return formatSystemPrompt(ctx, formatSkillsPromptSection(skills));
+  return formatSystemPrompt(ctx, formatSkillsPromptSection(skills), params.presetSystemPrompt);
 }
 
 export async function buildPresetSystemPrompt(params: {
@@ -41,7 +42,7 @@ export async function buildPresetSystemPrompt(params: {
   return sections.filter(Boolean).join("\n\n---\n\n");
 }
 
-function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null): string {
+function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null, presetSystemPrompt?: string): string {
   const sections: string[] = [];
   const now = new Date();
   now.setUTCMinutes(0, 0, 0);
@@ -76,11 +77,16 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
     sections.push(ctx.heartbeat.trim());
   }
 
+  // Preset-specific instructions (e.g. orchestrator.ts systemPrompt)
+  if (presetSystemPrompt?.trim()) {
+    sections.push(["## Preset Instructions", presetSystemPrompt.trim()].join("\n"));
+  }
+
   // Runtime notes (always appended)
   sections.push(
     [
       "## Runtime Notes",
-      "- You are the **orchestrator**. For simple questions, answer directly. For complex multi-step tasks, use `spawn_agent` to delegate to specialized workers (coder, researcher, trader, analyst, intake-manager, job-manager, credential-manager, mcp-manager, graphic-designer).",
+      "- You are the **orchestrator**. For simple questions, answer directly. For complex multi-step tasks, use `spawn_agent` to delegate to specialized workers (coder, researcher, trader, analyst, intake-manager, job-manager, credential-manager, mcp-manager, process-manager, graphic-designer).",
       "- **Code-related requests**: spawn a `coder` agent first. Coders have additional context about the codebase and can navigate it more reliably.",
       "- Workers share data via the **Blackboard** (`write_to_blackboard` / `read_from_blackboard`). Workers should write substantive results to the blackboard when asked or when it helps other agents; avoid trivial confirmations (especially during heartbeat ticks).",
       "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup. Avoid leaving stale entries that could confuse workers.",
