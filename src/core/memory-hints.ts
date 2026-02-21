@@ -36,8 +36,8 @@ const MAX_KEYWORDS = 8;
 export function extractKeywords(text: string): string[] {
   const keywords = new Set<string>();
 
-  // Quoted strings (single or double)
-  for (const m of text.matchAll(/["']([^"']{2,40})["']/g)) {
+  // Quoted strings (double only to avoid apostrophe issues)
+  for (const m of text.matchAll(/"([^"]{2,40})"/g)) {
     keywords.add(m[1].trim().toLowerCase());
   }
 
@@ -91,17 +91,19 @@ export function extractKeywords(text: string): string[] {
 const MAX_HINTS_PER_MESSAGE = 3;
 
 // Cache memory keys for a short period to avoid repeated DB queries within a burst of messages.
-let _memoryKeysCache: { agentId: string; keys: string[]; ts: number } | null = null;
+let _memoryKeysCache: Map<string, { keys: string[]; ts: number }> | null = null;
 const MEMORY_KEYS_CACHE_TTL_MS = 60_000;
 
 function loadMemoryKeys(db: NexusDatabase, agentId: string): string[] {
   const now = Date.now();
-  if (_memoryKeysCache && _memoryKeysCache.agentId === agentId && now - _memoryKeysCache.ts < MEMORY_KEYS_CACHE_TTL_MS) {
-    return _memoryKeysCache.keys;
+  if (!_memoryKeysCache) _memoryKeysCache = new Map();
+  const cached = _memoryKeysCache.get(agentId);
+  if (cached && now - cached.ts < MEMORY_KEYS_CACHE_TTL_MS) {
+    return cached.keys;
   }
   const rows = db.db.prepare("SELECT key FROM memories WHERE agent_id = ?").all(agentId) as { key: string }[];
   const keys = rows.map((r) => r.key.toLowerCase());
-  _memoryKeysCache = { agentId, keys, ts: now };
+  _memoryKeysCache.set(agentId, { keys, ts: now });
   return keys;
 }
 
@@ -138,7 +140,8 @@ export function generateMemoryHints(opts: {
       const words = messageText.toLowerCase().match(/\b[a-z][\w]{2,}\b/g) ?? [];
       for (const word of words) {
         if (STOPWORDS.has(word) || boosted.has(word) || seenKeywords.has(word)) continue;
-        if (memoryKeys.some((k) => k.includes(word))) {
+        const wordRegex = new RegExp(`\\b${word}\\b`, "i");
+        if (memoryKeys.some((k) => wordRegex.test(k))) {
           boosted.add(word);
         }
       }
@@ -150,14 +153,19 @@ export function generateMemoryHints(opts: {
 
   const countStmt = db.db.prepare(
     `SELECT COUNT(*) as cnt FROM memories
-     WHERE agent_id = ? AND (key LIKE ? OR value LIKE ? OR tags_json LIKE ?)`,
+     WHERE agent_id = ? AND (
+       key LIKE ? ESCAPE '\\' OR 
+       value LIKE ? ESCAPE '\\' OR 
+       tags_json LIKE ? ESCAPE '\\'
+     )`,
   );
 
   const matches: MemoryHintMatch[] = [];
 
   for (const keyword of newKeywords) {
     seenKeywords.add(keyword);
-    const pattern = `%${keyword}%`;
+    const escapedKeyword = keyword.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const pattern = `%${escapedKeyword}%`;
     const row = countStmt.get(agentId, pattern, pattern, pattern) as { cnt: number } | undefined;
     if (row && row.cnt > 0) {
       matches.push({ keyword, count: row.cnt });
@@ -189,19 +197,27 @@ const RECENT_TURNS_THRESHOLD = 3;
  * latest_telegram_for_agent and frequently call memory_search).
  */
 export function hasRecentMemorySearch(history: ChatMessage[], lookback = RECENT_TURNS_THRESHOLD): boolean {
-  let userExchangesSeen = 0;
-  for (let i = history.length - 1; i >= 0 && userExchangesSeen < lookback; i--) {
-    const msg = history[i];
+  const exchangeHasMemorySearch: boolean[] = [];
+  let activeExchangeIndex = -1;
+
+  for (const msg of history) {
     if (msg.role === "user") {
       const text = typeof msg.content === "string" ? msg.content : "";
-      // Skip heartbeat tick messages — they're not real user interactions
-      if (text.startsWith("HEARTBEAT TICK")) continue;
-      userExchangesSeen++;
-    } else if (msg.role === "assistant" && userExchangesSeen > 0) {
-      if (msg.toolCalls?.some((tc) => tc.name === "memory_search")) {
-        return true;
+      // Skip heartbeat tick exchanges entirely — they are synthetic background activity.
+      if (text.startsWith("HEARTBEAT TICK")) {
+        activeExchangeIndex = -1;
+        continue;
       }
+      exchangeHasMemorySearch.push(false);
+      activeExchangeIndex = exchangeHasMemorySearch.length - 1;
+      continue;
+    }
+
+    if (msg.role !== "assistant" || activeExchangeIndex < 0) continue;
+    if (msg.toolCalls?.some((tc) => tc.name === "memory_search")) {
+      exchangeHasMemorySearch[activeExchangeIndex] = true;
     }
   }
-  return false;
+
+  return exchangeHasMemorySearch.slice(-lookback).some(Boolean);
 }
