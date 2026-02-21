@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import type { NexusDatabase } from "../storage/database.js";
 import { cleanupManagedBlackboardAttachments } from "../storage/blackboard-attachments.js";
 import { randomId } from "../data-intake/utils.js";
+import { reapStaleSessions } from "../tools/shell-interactive.js";
 
 export type MaintenanceConfig = {
   archiveRetentionDays: number;
@@ -23,6 +24,7 @@ export type MaintenanceResult = {
   cleanup: Record<string, TableCleanupResult>;
   ttl: Record<string, TableTtlResult>;
   operational: Record<string, TableTtlResult>;
+  shellSessions?: { reaped: number; orphanLogs: number };
   errors: string[];
 };
 
@@ -241,6 +243,27 @@ export async function runMaintenance(params: {
     const msg = `operational webhook_dlq: ${e instanceof Error ? e.message : String(e)}`;
     errors.push(msg);
     log(`maintenance: ERROR ${msg}`);
+  }
+
+  // 5. Reap stale interactive shell sessions (dead tmux + orphan logs)
+  if (!dryRun) {
+    try {
+      const reapResult = await reapStaleSessions(stateDir);
+      result.shellSessions = {
+        reaped: reapResult.reaped.length,
+        orphanLogs: reapResult.orphanLogs.length,
+      };
+      if (reapResult.reaped.length > 0) {
+        log(`maintenance: reaped ${reapResult.reaped.length} stale shell session(s): ${reapResult.reaped.join(", ")}`);
+      }
+      if (reapResult.orphanLogs.length > 0) {
+        log(`maintenance: removed ${reapResult.orphanLogs.length} orphan shell log(s)`);
+      }
+    } catch (e) {
+      const msg = `shell reap: ${e instanceof Error ? e.message : String(e)}`;
+      errors.push(msg);
+      log(`maintenance: ERROR ${msg}`);
+    }
   }
 
   result.errors = errors;

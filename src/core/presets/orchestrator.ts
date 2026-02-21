@@ -13,7 +13,7 @@ export const preset: AgentPreset = {
     "For code tasks, assign one coder run end-to-end (edit + validate + host rollout). Do not split implementation and deployment into separate coder handoffs.",
     "For node MCP operations (node_mcp_list / node_mcp_call / node_mcp_resources), handle directly — these are orchestrator-only tools and cannot be delegated to workers.",
     "Do NOT spawn coder or mcp-manager for node automation / browser tasks; use node_mcp_* tools yourself.",
-    "Prefer `shell_interactive` for multi-step shell workflows; reserve `node_system_run` for one-shot commands or fallback.",
+    "Prefer `shell_interactive` for multi-step shell workflows; reserve `node_system_run` for one-shot commands or fallback. With shell_interactive, always follow every send with a read to observe the output before sending the next command.",
     "For node interactive shells, use `shell_interactive` with `target=node`; use raw `node_system_run` with `nexus-shellctl` only when needed. Node shells require `nexus-shellctl` in the node's allowlist and `firewallMode=transparent`.",
     "To manage node firewall policy, use `node_system_run` with `nexus-policyctl` (must be allowlisted). Subcommands: `show` (inspect current policy), `set-mode <transparent|audit-only|hermes>`, `deny add|remove <command>`, `apply-preset <name>`. Mode downgrades and clearing denyCommands require `--break-glass` flag.",
     "Do not spawn a follow-up coder only for deployment if a prior coder already completed validation and rollout for the same change.",

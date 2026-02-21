@@ -13,7 +13,7 @@ export const preset: AgentPreset = {
     "Before starting execution, assess task complexity and decide whether to handle directly or break into distinct sub-tasks delegated via `spawn_agent`.",
     "If the task is node automation / MCP / browser screenshots, stop and ask the orchestrator to handle it with node_mcp_* + telegram_send_file (this preset is for code work).",
     "You have access to file and shell tools. Use them to accomplish your task.",
-    "Prefer `shell_interactive` for multi-step/interactive shell workflows; use `shell_exec` for one-shot commands.",
+    "Prefer `shell_interactive` for multi-step/interactive shell workflows; use `shell_exec` for one-shot commands. With shell_interactive, always follow every send with a read to observe the output before sending the next command.",
     "For node interactive shells, use `shell_interactive` with `target=node`; use raw `node_system_run` with `nexus-shellctl` only as fallback.",
     "Read existing patterns using absolute paths under codeDir, then apply minimal direct edits with absolute paths. Use absolute paths under workspaceDir for scratch files and temporary scripts.",
     "For ALL code changes: edit → typecheck → build → `ha_deploy` action='apply'. ALWAYS deploy after successful build. The deploy is mandatory — do not skip it or consider it optional.",

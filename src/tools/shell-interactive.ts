@@ -9,6 +9,7 @@ import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getNodeById } from "../storage/nodes.js";
 import { resolveWithinRoots } from "./path-utils.js";
+import { truncateShellOutput } from "./system.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,11 +46,8 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function truncateText(value: string, maxChars: number = 400): string {
-  if (value.length <= maxChars) return value;
-  const head = Math.floor(maxChars / 2);
-  const tail = maxChars - head;
-  return `${value.slice(0, head)} ... ${value.slice(-tail)}`;
+function truncateDetail(value: string): string {
+  return truncateShellOutput(value, 400);
 }
 
 function shellEscape(value: string): string {
@@ -240,7 +238,7 @@ async function ensureTmuxAvailable(): Promise<string | null> {
     return "ERROR: tmux is not installed in this runtime.";
   }
   const detail = [probe.errorMessage, probe.stderr].filter(Boolean).join(" | ");
-  return `ERROR: tmux probe failed: ${truncateText(detail || "unknown error")}`;
+  return `ERROR: tmux probe failed: ${truncateDetail(detail || "unknown error")}`;
 }
 
 async function tmuxHasSession(tmuxSession: string): Promise<boolean> {
@@ -295,16 +293,17 @@ async function readTimedOutput(params: {
   }
 
   const bytesAvailable = Math.max(0, finalSize - startCursor);
-  const maxBytes = Math.max(256, Math.min(MAX_READ_BYTES, params.maxChars * 4));
-  const bytesToRead = Math.min(bytesAvailable, maxBytes);
+  const bytesToRead = Math.min(bytesAvailable, MAX_READ_BYTES);
   const nextCursor = startCursor + bytesToRead;
   const chunk = bytesToRead > 0 ? await readFileRange(params.logPath, startCursor, bytesToRead) : Buffer.alloc(0);
+  const decoded = chunk.toString("utf8");
+  const output = truncateShellOutput(decoded, params.maxChars);
 
   return {
-    output: chunk.toString("utf8"),
+    output,
     nextCursor,
     totalBytes: finalSize,
-    truncated: nextCursor < finalSize,
+    truncated: nextCursor < finalSize || decoded.length > params.maxChars,
     resetCursor,
   };
 }
@@ -351,7 +350,7 @@ async function openLocalSession(params: {
   const createRes = await runTmux(["new-session", "-d", "-s", tmuxSession, "-c", resolvedCwd]);
   if (!createRes.ok) {
     const detail = [createRes.errorMessage, createRes.stderr].filter(Boolean).join(" | ");
-    return `ERROR: failed to open tmux session: ${truncateText(detail || "unknown error")}`;
+    return `ERROR: failed to open tmux session: ${truncateDetail(detail || "unknown error")}`;
   }
 
   await runTmux(["set-option", "-t", tmuxSession, "history-limit", "200000"]);
@@ -360,7 +359,7 @@ async function openLocalSession(params: {
   if (!pipeRes.ok) {
     await runTmux(["kill-session", "-t", tmuxSession]);
     const detail = [pipeRes.errorMessage, pipeRes.stderr].filter(Boolean).join(" | ");
-    return `ERROR: failed to attach tmux output pipe: ${truncateText(detail || "unknown error")}`;
+    return `ERROR: failed to attach tmux output pipe: ${truncateDetail(detail || "unknown error")}`;
   }
 
   const now = Date.now();
@@ -389,7 +388,6 @@ async function sendLocalInput(params: {
   sessionId: string;
   input: string;
   enter: boolean;
-  settleMs: number;
   ctx: ToolContext;
 }): Promise<string> {
   const tmuxError = await ensureTmuxAvailable();
@@ -405,18 +403,17 @@ async function sendLocalInput(params: {
   const sendRes = await runTmux(["send-keys", "-t", target, "-l", params.input]);
   if (!sendRes.ok) {
     const detail = [sendRes.errorMessage, sendRes.stderr].filter(Boolean).join(" | ");
-    return `ERROR: failed to send tmux input: ${truncateText(detail || "unknown error")}`;
+    return `ERROR: failed to send tmux input: ${truncateDetail(detail || "unknown error")}`;
   }
 
   if (params.enter) {
     const enterRes = await runTmux(["send-keys", "-t", target, "Enter"]);
     if (!enterRes.ok) {
       const detail = [enterRes.errorMessage, enterRes.stderr].filter(Boolean).join(" | ");
-      return `ERROR: failed to send Enter key: ${truncateText(detail || "unknown error")}`;
+      return `ERROR: failed to send Enter key: ${truncateDetail(detail || "unknown error")}`;
     }
   }
 
-  await sleep(params.settleMs);
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
 
@@ -477,7 +474,7 @@ async function interruptLocalSession(params: { sessionId: string; ctx: ToolConte
   const res = await runTmux(["send-keys", "-t", `${meta.tmuxSession}:0.0`, "C-c"]);
   if (!res.ok) {
     const detail = [res.errorMessage, res.stderr].filter(Boolean).join(" | ");
-    return `ERROR: failed to interrupt session: ${truncateText(detail || "unknown error")}`;
+    return `ERROR: failed to interrupt session: ${truncateDetail(detail || "unknown error")}`;
   }
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
@@ -508,6 +505,11 @@ async function closeLocalSession(params: { sessionId: string; ctx: ToolContext }
     await runTmux(["kill-session", "-t", meta.tmuxSession]);
   }
   await deleteSessionMeta(params.ctx.stateDir, params.sessionId);
+  try {
+    await fs.rm(meta.logPath, { force: true });
+  } catch {
+    // ignore — log file may already be gone
+  }
 
   return formatJson({
     ok: true,
@@ -543,6 +545,53 @@ async function listLocalSessions(ctx: ToolContext): Promise<string> {
     count: sessions.length,
     sessions,
   });
+}
+
+export async function reapStaleSessions(stateDir: string): Promise<{ reaped: string[]; orphanLogs: string[] }> {
+  const metaDir = shellMetaDir(stateDir);
+  const logDir = shellLogDir(stateDir);
+  await fs.mkdir(metaDir, { recursive: true });
+  await fs.mkdir(logDir, { recursive: true });
+
+  const reaped: string[] = [];
+  const activeLogFiles = new Set<string>();
+
+  // Pass 1: check meta files, reap sessions where tmux is dead
+  const metaEntries = await fs.readdir(metaDir);
+  for (const entry of metaEntries) {
+    if (!entry.endsWith(".json")) continue;
+    const sessionId = entry.slice(0, -5);
+    const meta = await readSessionMeta(stateDir, sessionId);
+    if (!meta) {
+      // Corrupt meta — remove it
+      try { await fs.rm(path.join(metaDir, entry), { force: true }); } catch { /* ignore */ }
+      continue;
+    }
+    if (await tmuxHasSession(meta.tmuxSession)) {
+      // Still alive — track its log file as active
+      activeLogFiles.add(path.basename(meta.logPath));
+      continue;
+    }
+    // Dead tmux session — clean up meta + log
+    await deleteSessionMeta(stateDir, sessionId);
+    try { await fs.rm(meta.logPath, { force: true }); } catch { /* ignore */ }
+    reaped.push(sessionId);
+  }
+
+  // Pass 2: find orphan log files with no corresponding meta
+  const orphanLogs: string[] = [];
+  const logEntries = await fs.readdir(logDir);
+  for (const entry of logEntries) {
+    if (!entry.endsWith(".log")) continue;
+    if (activeLogFiles.has(entry)) continue;
+    const sessionId = entry.slice(0, -4);
+    const meta = await readSessionMeta(stateDir, sessionId);
+    if (meta) continue; // meta still exists (shouldn't happen after pass 1, but be safe)
+    try { await fs.rm(path.join(logDir, entry), { force: true }); } catch { /* ignore */ }
+    orphanLogs.push(entry);
+  }
+
+  return { reaped, orphanLogs };
 }
 
 function encodeBase64(value: string): string {
@@ -649,14 +698,14 @@ async function executeOnNode(params: {
     );
     const parsed = parseJsonObject(raw);
     if (!parsed) {
-      return `ERROR: node shell response is not JSON (raw=${truncateText(raw, 260)}).`;
+      return `ERROR: node shell response is not JSON (raw=${truncateShellOutput(raw, 260)}).`;
     }
     if (typeof parsed.action !== "string" || typeof parsed.ok !== "boolean") {
       const mode = typeof parsed.mode === "string" ? parsed.mode : "";
       if (mode && mode !== "transparent") {
         return "ERROR: node shell response is sanitized by firewall mode; interactive read requires transparent mode.";
       }
-      return `ERROR: unexpected node shell response shape (raw=${truncateText(raw, 260)}).`;
+      return `ERROR: unexpected node shell response shape (raw=${truncateShellOutput(raw, 260)}).`;
     }
     return formatJson(parsed);
   } catch (err) {
@@ -666,8 +715,13 @@ async function executeOnNode(params: {
 
 export const shellInteractive = defineTool({
   name: "shell_interactive",
-  description:
-    "Manage interactive tmux shell sessions on the gateway (local) with timed output reads. Use target=node to run on a remote Nexus node (requires nexus-shellctl allowlisted and firewallMode=transparent on the node).",
+  description: [
+    "Manage interactive tmux shell sessions with timed output reads.",
+    "Workflow: open → send+read cycles → close.",
+    "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
+    "read returns output since the given cursor; pass the nextCursor from the previous read/send response. Use waitMs to block until output appears.",
+    "Use target=node for remote Nexus nodes (requires nexus-shellctl allowlisted and firewallMode=transparent).",
+  ].join(" "),
   parameters: z.object({
     action: z.enum(["open", "send", "read", "list", "close", "interrupt"]),
     target: z.enum(["local", "node"]).default("local"),
@@ -680,7 +734,6 @@ export const shellInteractive = defineTool({
     waitMs: z.number().int().min(0).max(5_000).default(1_500),
     idleMs: z.number().int().min(50).max(1_000).default(200),
     maxChars: z.number().int().min(128).max(12_000).default(4_000),
-    settleMs: z.number().int().min(0).max(2_000).default(200),
     timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   }),
   execute: async (args, ctx) => {
@@ -723,7 +776,6 @@ export const shellInteractive = defineTool({
           sessionId: sessionId!,
           input: args.input ?? "",
           enter: args.enter,
-          settleMs: args.settleMs,
           ctx,
         });
       case "read":
