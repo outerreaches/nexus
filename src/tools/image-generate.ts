@@ -484,7 +484,7 @@ export const imageGenerate = defineTool({
 
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
     const resolved = args.model
-      ? { model: args.model.trim() }
+      ? { model: args.model.trim(), imageProvider: resolveDefaultImageModel(ctx, ctx.llmConfig).imageProvider }
       : resolveDefaultImageModel(ctx, ctx.llmConfig);
     const selectedModel = resolved.model;
 
