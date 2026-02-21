@@ -223,134 +223,47 @@ git clone ssh://user@host/~/git/nexus.git /data/code
 
 ## Phase 4: Deploy Nexus
 
-### 4.1 Create Docker Compose File
+### 4.1 Prepare HA Config Paths
 
 ```bash
 # On VM
-mkdir -p ~/nexus-deploy
-cd ~/nexus-deploy
+sudo mkdir -p /data/nexus-config/{gateway,sidecar,watchdog}
+sudo chown -R nexus:nexus /data/nexus-config
 
-cat > docker-compose.yml << 'EOF'
-version: "3.8"
-
-services:
-  nexus:
-    build:
-      context: /data/code
-      dockerfile: Dockerfile
-    command: gateway --verbose
-    volumes:
-      # Code directory (read-write for self-editing)
-      - /data/code:/data/code:rw
-      # State directory (database, config)
-      - /data/nexus:/data/nexus
-      # Agent workspace
-      - /data/workspace:/data/workspace
-    environment:
-      - NEXUS_STATE_DIR=/data/nexus
-      - NEXUS_CODE_DIR=/data/code
-      - NEXUS_WORKSPACE_DIR=/data/workspace
-      - NEXUS_BROWSER_HEADLESS=1
-      - NEXUS_BROWSER_NO_SANDBOX=1
-      # WARNING: enables shell command execution from agent runs
-      - NEXUS_ALLOW_SHELL_EXEC=1
-      # WARNING: enables direct code writes under root="code"
-      - NEXUS_ALLOW_CODE_WRITE=1
-    env_file:
-      - .env
-    ports:
-      - "18789:18789"
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.5'
-          memory: 3G
-EOF
+cp /data/code/.env.gateway.example /data/nexus-config/gateway/nexus.env
+cp /data/code/.env.sidecar.example /data/nexus-config/sidecar/nexus.env
+cp /data/code/.env.watchdog.example /data/nexus-config/watchdog/nexus.env
+chmod 600 /data/nexus-config/gateway/nexus.env /data/nexus-config/sidecar/nexus.env /data/nexus-config/watchdog/nexus.env
 ```
 
-### 4.2 Create Environment File
+### 4.2 Populate Required Values
 
 ```bash
-# On VM
-cat > ~/nexus-deploy/.env << 'EOF'
-# LLM Configuration
-OPENROUTER_API_KEY=your_api_key_here
-
-# Telegram (optional)
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-
-# Other settings
-TZ=America/New_York
-EOF
-
-# Edit with your actual keys
-nano ~/nexus-deploy/.env
+# Edit these files and set real values:
+#   /data/nexus-config/gateway/nexus.env:
+#     NEXUS_HTTP_API_KEY
+#     NEXUS_DASHBOARD_PASSWORD
+#   /data/nexus-config/sidecar/nexus.env:
+#     NEXUS_CREDENTIALS_KEY
+#     NEXUS_SECRETCTL_PASSWORD
+#   /data/nexus-config/watchdog/nexus.env:
+#     NEXUS_HA_API_KEY (must match NEXUS_HTTP_API_KEY)
 ```
 
-### 4.3 Initialize Nexus Config
+### 4.3 Run Preflight + Deploy
 
 ```bash
-# On VM - create initial config
-mkdir -p /data/nexus
-cat > /data/nexus/nexus.json << 'EOF'
-{
-  "port": 18789,
-  "llm": {
-    "openaiCompat": {
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "moonshotai/kimi-k2.5"
-    }
-  },
-  "permissions": {
-    "allowShellExec": true,
-    "allowCodeEdit": true
-  },
-  "channels": {
-    "telegram": {
-      "enabled": false
-    }
-  },
-  "scheduler": {
-    "enabled": true,
-    "contextMode": "delta"
-  },
-  "proactive": {
-    "enabled": true,
-    "intervalMs": 3600000,
-    "pauseOnActiveTelegram": true,
-    "activeTelegramQuietMs": 120000
-  }
-}
-EOF
+cd /data/code
+infra/scripts/ha-secrets-preflight.sh --auto-fix --require-http-api-key
+infra/scripts/pull-deploy.sh
 ```
 
-### 4.4 Build and Start
+### 4.4 Verify Deployment
 
 ```bash
-cd ~/nexus-deploy
-
-# Build the image
-docker compose build
-
-# Start Nexus
-docker compose up -d
-
-# Check logs
-docker compose logs -f
-```
-
-### 4.5 Verify Deployment
-
-```bash
-# On VM
+infra/scripts/ha-rollout.sh status
 curl http://localhost:18789/health/live
-# Should return: {"ok":true,"timestamp":...}
-
-curl http://localhost:18789/health/ready
-# Should return: {"ok":true,"checks":{"database":{"ok":true},"agents":{"ok":true}},...}
-
+curl http://localhost:18789/health/traffic
 curl http://localhost:18789/status | jq .
 ```
 
@@ -630,6 +543,7 @@ The HA stack in `infra/docker-compose.ha.yml` assumes:
 If your env files are still in `~/nexus-deploy`, create one-time links:
 
 ```bash
+mkdir -p /data/nexus-config/{gateway,sidecar,watchdog}
 ln -sf ~/nexus-deploy/.env.gateway /data/nexus-config/gateway/nexus.env
 ln -sf ~/nexus-deploy/.env.sidecar /data/nexus-config/sidecar/nexus.env
 ln -sf ~/nexus-deploy/.env.watchdog /data/nexus-config/watchdog/nexus.env
@@ -1255,6 +1169,7 @@ Cause:
 Fix:
 
 ```bash
+mkdir -p /data/nexus-config/{gateway,sidecar,watchdog}
 ln -sf ~/nexus-deploy/.env.gateway /data/nexus-config/gateway/nexus.env
 ln -sf ~/nexus-deploy/.env.sidecar /data/nexus-config/sidecar/nexus.env
 ln -sf ~/nexus-deploy/.env.watchdog /data/nexus-config/watchdog/nexus.env
