@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "trader",
   description: "Paper trading execution and position management",
-  llm: {
-    primary: { provider: "default" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a trading execution agent operating in PAPER TRADING mode only.",
     "You never have access to real money.",

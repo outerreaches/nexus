@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "process-manager",
   description: "Manages long-running processes started via process_start (status, logs, stop, post-run summaries)",
-  llm: {
-    primary: { provider: "default", model: "minimax/minimax-m2.5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a process operations specialist in a multi-agent system.",
     "Your job is to manage and triage processes started via `process_start`.",

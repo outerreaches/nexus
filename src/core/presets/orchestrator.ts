@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
-  llm: {
-    primary: { provider: "default" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     // Node operations (orchestrator-only)
     "For node MCP operations (node_mcp_list / node_mcp_call / node_mcp_resources), handle directly — these are orchestrator-only tools and cannot be delegated to workers.",

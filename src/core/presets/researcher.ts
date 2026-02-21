@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "researcher",
   description: "Web research, document analysis, knowledge synthesis",
-  llm: {
-    primary: { provider: "default", model: "z-ai/glm-5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a research specialist working as part of a multi-agent system.",
     "Citations may be required depending on task instructions.",

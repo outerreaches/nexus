@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "mcp-manager",
   description: "Manages MCP servers/profiles and delegates scoped MCP worker runs",
-  llm: {
-    primary: { provider: "default", model: "minimax/minimax-m2.5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You manage MCP server lifecycle and MCP profile delegation.",
     "For MCP-backed tasks, prefer `mcp_delegate` so activation, profile selection, worker spawn, and cleanup stay consistent.",

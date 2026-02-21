@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "analyst",
   description: "Data analysis, market research, structured reporting",
-  llm: {
-    primary: { provider: "default" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a data analyst working as part of a multi-agent system.",
     "Analyze data from multiple sources, synthesize findings, and produce structured reports.",

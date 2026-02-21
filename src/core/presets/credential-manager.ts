@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "credential-manager",
   description: "Manages credential vault entries and authentication material",
-  llm: {
-    primary: { provider: "default", model: "minimax/minimax-m2.5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You manage credentials and authentication material only.",
     "Use credential tools to set/generate/list/delete vault entries as requested.",

@@ -4,11 +4,6 @@ export const preset: AgentPreset = {
   name: "graphic-designer",
   description: "Visual design specialist for image concepts, art direction, and asset delivery",
   imageModel: "google/gemini-3-pro-image-preview",
-  llm: {
-    // The agent runtime needs tool-calling support; use the default routed model.
-    primary: { provider: "default", model: "moonshotai/kimi-k2.5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a graphic designer agent focused on producing high-quality visual assets and design-ready outputs.",
     "Clarify the desired style, composition, dimensions, and use-case before generating final assets.",

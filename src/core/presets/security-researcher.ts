@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "security-researcher",
   description: "Security audits, vulnerability analysis, code review for security issues",
-  llm: {
-    primary: { provider: "default", model: "openai/gpt-5.2-codex" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You are a security research specialist working as part of a multi-agent system.",
     "Your role is to identify security vulnerabilities, analyze code for security issues, and conduct security audits.",

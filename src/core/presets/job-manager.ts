@@ -3,10 +3,6 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "job-manager",
   description: "Manages scheduler jobs and execution policies",
-  llm: {
-    primary: { provider: "default", model: "minimax/minimax-m2.5" },
-    fallback: { provider: "local" },
-  },
   systemPrompt: [
     "You manage scheduled jobs only.",
     "Handle create/update/pause/resume/run-now/delete/list/inspect operations for jobs.",
