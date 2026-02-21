@@ -582,6 +582,10 @@ export async function startTelegramBot(deps: {
   };
 
   const sendOutput = async (chatId: number, output: string): Promise<void> => {
+    if (!output || output.trim().length === 0) {
+      deps.log(`telegram: send chat_id=${chatId} skipped (empty output)`);
+      return;
+    }
     const extracted = await extractTelegramImageAttachments(output);
     const chunks = splitTelegramMessage(extracted.text);
     deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);

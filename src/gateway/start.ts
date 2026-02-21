@@ -418,6 +418,7 @@ export async function startGateway(
       maxConcurrentBackground: Math.max(1, config.scheduler.concurrency),
       maxContextTokens,
     },
+    transientRetries: config.llm.transientRetries,
   });
 
   let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;

@@ -63,6 +63,8 @@ export class AgentService {
       onRunnerLog?: (line: string) => void;
       /** Default preset name for agents (e.g. "orchestrator"). If unset, all tools are used. */
       defaultPreset?: string;
+      /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
+      transientRetries?: number;
     },
   ) {
     const interactiveMax = Math.max(1, deps.limits.maxConcurrentInteractive ?? deps.limits.maxConcurrent);
@@ -333,6 +335,7 @@ export class AgentService {
         toolContext,
         onLog: onRunnerLog,
         circuitBreaker: this.deps.circuitBreaker,
+        transientRetries: this.deps.transientRetries ?? 5,
       });
 
       let result: Awaited<ReturnType<AgentRunner["run"]>>;

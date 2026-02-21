@@ -197,6 +197,8 @@ export const ConfigSchema = z.object({
       openaiCompat: OpenAICompatProviderSchema,
       providers: z.record(OpenAICompatProviderSchema).default({}),
       routing: LlmRoutingSchema,
+      /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
+      transientRetries: z.number().int().min(0).max(20).default(5),
     })
     .default({ openaiCompat: {}, providers: {}, routing: {} }),
   channels: z
