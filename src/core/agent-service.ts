@@ -10,6 +10,7 @@ import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
+import { extractKeywords, generateMemoryHints, hasRecentMemorySearch } from "./memory-hints.js";
 import type { AgentTracker } from "./agent-tracker.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
@@ -38,6 +39,7 @@ function clampNonNegativeInt(value: number): number {
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
+  private readonly memoryHintsSeen: Map<string, Set<string>> = new Map();
 
   constructor(
     private readonly deps: {
@@ -209,6 +211,31 @@ export class AgentService {
           includePresets: true,
         });
 
+      // ── Memory hints: nudge agent about potentially relevant memories ──
+      let memoryHint: string | null = null;
+      if (preset?.name === "orchestrator" || !preset) {
+        const messageText = params.text;
+        if (messageText && !hasRecentMemorySearch(history)) {
+          const keywords = extractKeywords(messageText);
+          if (keywords.length > 0) {
+            if (!this.memoryHintsSeen.has(sessionId)) {
+              this.memoryHintsSeen.set(sessionId, new Set());
+            }
+            memoryHint = generateMemoryHints({
+              db: this.deps.db,
+              agentId: params.agentId,
+              keywords,
+              seenKeywords: this.memoryHintsSeen.get(sessionId)!,
+              messageText,
+            });
+          }
+        }
+      }
+
+      const finalSystemPrompt = memoryHint
+        ? `${systemPrompt}\n\n${memoryHint}`
+        : systemPrompt;
+
       const onRunnerLog = this.deps.onRunnerLog
         ? (line: string) => {
           this.deps.onRunnerLog?.(
@@ -285,7 +312,7 @@ export class AgentService {
       let result: Awaited<ReturnType<AgentRunner["run"]>>;
       try {
         result = await runner.run({
-          systemPrompt,
+          systemPrompt: finalSystemPrompt,
           history: history.filter((m) => m.role !== "system"),
           userMessage: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
         });
