@@ -14,6 +14,7 @@ import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
+import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
 import type { McpManager } from "../mcp/manager.js";
@@ -348,13 +349,13 @@ async function runInProcess(params: {
     modelMode,
     request: ctx.request
       ? {
-          ...ctx.request,
-          agentId: `${ctx.request.agentId}:${preset.name}`,
-          preset: preset.name,
-          runId: runId ?? undefined,
-          parentRunId: parentRunId ?? undefined,
-          modelMode,
-        }
+        ...ctx.request,
+        agentId: `${ctx.request.agentId}:${preset.name}`,
+        preset: preset.name,
+        runId: runId ?? undefined,
+        parentRunId: parentRunId ?? undefined,
+        modelMode,
+      }
       : undefined,
   };
 
@@ -474,13 +475,13 @@ async function runIsolated(params: {
   try {
     workerPath = resolveIsolatedWorkerPath();
   } catch (err) {
-      return JSON.stringify({
-        status: "failed",
-        output: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
-        toolCallsUsed: 0,
-        iterationsUsed: 0,
-        deployApplied: false,
-      }, null, 2);
+    return JSON.stringify({
+      status: "failed",
+      output: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+      toolCallsUsed: 0,
+      iterationsUsed: 0,
+      deployApplied: false,
+    }, null, 2);
   }
 
   return new Promise<string>((resolve) => {
@@ -613,6 +614,7 @@ async function runIsolated(params: {
       currentDepth: workerDepth,
       maxDepth,
       mcpGrantIds,
+      resolvedSecrets: getResolvedSecretsSnapshot(),
     };
 
     const taskMsg: ParentMessage = { type: "task", config };

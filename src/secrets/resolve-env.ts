@@ -107,3 +107,19 @@ export function listResolvedSecretKeys(): string[] {
 export function clearResolvedSecretsForTests(): void {
     resolvedSecrets.clear();
 }
+
+/** Return a plain object snapshot of all resolved secrets (for IPC forwarding to isolated workers). */
+export function getResolvedSecretsSnapshot(): Record<string, string> {
+    const snapshot: Record<string, string> = {};
+    for (const [key, value] of resolvedSecrets) {
+        snapshot[key] = value;
+    }
+    return snapshot;
+}
+
+/** Hydrate the resolved secrets map from a snapshot (used by isolated workers receiving secrets via IPC). */
+export function hydrateResolvedSecrets(snapshot: Record<string, string>): void {
+    for (const [key, value] of Object.entries(snapshot)) {
+        resolvedSecrets.set(key, value);
+    }
+}

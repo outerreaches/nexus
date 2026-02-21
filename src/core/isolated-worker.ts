@@ -17,6 +17,7 @@ import { AgentRunner } from "./agent-runner.js";
 import { ProcessManager } from "../process/manager.js";
 import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
+import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
 import type { ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
@@ -36,6 +37,11 @@ process.on("message", async (msg: ParentMessage) => {
 
   try {
     // Bootstrap own resources
+    // Hydrate resolved secrets from parent so getSecret() works in this process.
+    if (cfg.resolvedSecrets) {
+      hydrateResolvedSecrets(cfg.resolvedSecrets);
+    }
+
     const dbPath = path.join(cfg.stateDir, "nexus.db");
     const db = await openDatabase(dbPath);
     // Set busy timeout for WAL mode concurrent access
@@ -54,10 +60,10 @@ process.on("message", async (msg: ParentMessage) => {
 
     const mcp = needsMcp
       ? new McpManager({
-          db,
-          log: (line) => log(line),
-          stateDir: cfg.stateDir,
-        })
+        db,
+        log: (line) => log(line),
+        stateDir: cfg.stateDir,
+      })
       : null;
     if (mcp) {
       await mcp.init();
@@ -76,10 +82,10 @@ process.on("message", async (msg: ParentMessage) => {
     const baseTools = registry.list().filter((t) => allowedNames.has(t.name));
     const grantTools = mcp
       ? mcp.listToolsForGrants({
-          grantIds: mcpGrantIds,
-          presetName: cfg.presetName,
-          runId: cfg.runId,
-        })
+        grantIds: mcpGrantIds,
+        presetName: cfg.presetName,
+        runId: cfg.runId,
+      })
       : [];
     const byName = new Map(baseTools.map((tool) => [tool.name, tool] as const));
     for (const tool of grantTools) {

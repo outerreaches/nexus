@@ -56,6 +56,10 @@ export type WorkerConfig = {
 
   // Optional run-scoped MCP grants for this worker.
   mcpGrantIds?: string[];
+
+  // Resolved secrets forwarded from parent process (populated by resolveEnvSecrets at startup).
+  // Allows isolated workers to use getSecret() for tools like web_search.
+  resolvedSecrets?: Record<string, string>;
 };
 
 /**
