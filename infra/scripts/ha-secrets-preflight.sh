@@ -15,9 +15,10 @@
 set -euo pipefail
 
 CODE_DIR="${CODE_DIR:-/data/code}"
-GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CODE_DIR}/.env.gateway}"
-SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CODE_DIR}/.env.sidecar}"
-WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CODE_DIR}/.env.watchdog}"
+CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
+WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 STORE_DIR="${STORE_DIR:-/data/nexus-secrets}"
 STORE_PATH="${STORE_PATH:-${STORE_DIR}/credentials.json}"
@@ -33,6 +34,7 @@ Usage: $(basename "$0") [options]
 
 Options:
   --code-dir <path>                      Code directory (default: ${CODE_DIR})
+  --config-root <path>                   Root dir for split env files (default: ${CONFIG_ROOT})
   --gateway-env-file <path>              Gateway env file (default: ${GATEWAY_ENV_FILE})
   --sidecar-env-file <path>              Sidecar env file (default: ${SIDECAR_ENV_FILE})
   --watchdog-env-file <path>             Watchdog env file (default: ${WATCHDOG_ENV_FILE})
@@ -125,6 +127,13 @@ while [[ $# -gt 0 ]]; do
       WATCHDOG_ENV_FILE="$2"
       shift 2
       ;;
+    --config-root)
+      CONFIG_ROOT="$2"
+      GATEWAY_ENV_FILE="${CONFIG_ROOT}/gateway/nexus.env"
+      SIDECAR_ENV_FILE="${CONFIG_ROOT}/sidecar/nexus.env"
+      WATCHDOG_ENV_FILE="${CONFIG_ROOT}/watchdog/nexus.env"
+      shift 2
+      ;;
     --gateway-env-file)
       GATEWAY_ENV_FILE="$2"
       shift 2
@@ -174,6 +183,7 @@ done
 
 if [[ ! -f "$GATEWAY_ENV_FILE" ]]; then
   if (( AUTO_FIX )); then
+    mkdir -p "$(dirname "$GATEWAY_ENV_FILE")" || fail "unable to create gateway env dir: $(dirname "$GATEWAY_ENV_FILE")"
     : >"$GATEWAY_ENV_FILE"
     log "created gateway env file: ${GATEWAY_ENV_FILE}"
   else
@@ -182,6 +192,7 @@ if [[ ! -f "$GATEWAY_ENV_FILE" ]]; then
 fi
 if [[ ! -f "$SIDECAR_ENV_FILE" ]]; then
   if (( AUTO_FIX )); then
+    mkdir -p "$(dirname "$SIDECAR_ENV_FILE")" || fail "unable to create sidecar env dir: $(dirname "$SIDECAR_ENV_FILE")"
     : >"$SIDECAR_ENV_FILE"
     log "created sidecar env file: ${SIDECAR_ENV_FILE}"
   else
@@ -190,6 +201,7 @@ if [[ ! -f "$SIDECAR_ENV_FILE" ]]; then
 fi
 if [[ ! -f "$WATCHDOG_ENV_FILE" ]]; then
   if (( AUTO_FIX )); then
+    mkdir -p "$(dirname "$WATCHDOG_ENV_FILE")" || fail "unable to create watchdog env dir: $(dirname "$WATCHDOG_ENV_FILE")"
     : >"$WATCHDOG_ENV_FILE"
     log "created watchdog env file: ${WATCHDOG_ENV_FILE}"
   else

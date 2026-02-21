@@ -60,7 +60,7 @@ services:
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-standby:18789
     env_file:
-      - ../.env.gateway
+      - ${NEXUS_GATEWAY_ENV_FILE:-/data/nexus-config/gateway/nexus.env}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
       interval: 10s
@@ -91,7 +91,7 @@ services:
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-primary:18789
     env_file:
-      - ../.env.gateway
+      - ${NEXUS_GATEWAY_ENV_FILE:-/data/nexus-config/gateway/nexus.env}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:18789/health/live"]
       interval: 10s
@@ -118,7 +118,7 @@ services:
       - RECOVERY_DELAY=30
       - DEPLOY_LOCK_DIR=/data/nexus/ha-rollout.lock
     env_file:
-      - ../.env.watchdog
+      - ${NEXUS_WATCHDOG_ENV_FILE:-/data/nexus-config/watchdog/nexus.env}
     depends_on:
       - nexus-primary
       - nexus-standby

@@ -11,14 +11,15 @@ fail() {
 }
 
 CODE_DIR="${CODE_DIR:-/data/code}"
+CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 BASE_COMPOSE="${BASE_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.yml}"
 SIDECAR_COMPOSE="${SIDECAR_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
 TLS_COMPOSE="${TLS_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.tls.yml}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
-GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CODE_DIR}/.env.gateway}"
-SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CODE_DIR}/.env.sidecar}"
-WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CODE_DIR}/.env.watchdog}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
+WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 PRUNE_OLD_ARTIFACTS="${PRUNE_OLD_ARTIFACTS:-1}"
 PRUNE_UNTIL="${PRUNE_UNTIL:-168h}"
 
@@ -30,6 +31,10 @@ PRUNE_UNTIL="${PRUNE_UNTIL:-168h}"
 [ -f "$GATEWAY_ENV_FILE" ] || fail "missing gateway env file: ${GATEWAY_ENV_FILE}"
 [ -f "$SIDECAR_ENV_FILE" ] || fail "missing sidecar env file: ${SIDECAR_ENV_FILE}"
 [ -f "$WATCHDOG_ENV_FILE" ] || fail "missing watchdog env file: ${WATCHDOG_ENV_FILE}"
+
+export NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}"
+export NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}"
+export NEXUS_WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE}"
 
 cd "$CODE_DIR"
 old_sha="$(git rev-parse HEAD)"

@@ -17,11 +17,13 @@ Requirements:
 npm install
 ```
 
-2) (HA deployment) Create split env files:
+2) (HA deployment) Create split env files in isolated host folders:
 ```bash
-cp .env.gateway.example .env.gateway
-cp .env.sidecar.example .env.sidecar
-cp .env.watchdog.example .env.watchdog
+sudo mkdir -p /data/nexus-config/{gateway,sidecar,watchdog}
+sudo cp .env.gateway.example /data/nexus-config/gateway/nexus.env
+sudo cp .env.sidecar.example /data/nexus-config/sidecar/nexus.env
+sudo cp .env.watchdog.example /data/nexus-config/watchdog/nexus.env
+sudo chmod 600 /data/nexus-config/gateway/nexus.env /data/nexus-config/sidecar/nexus.env /data/nexus-config/watchdog/nexus.env
 ```
 
 3) Create config + workspace with interactive onboarding:

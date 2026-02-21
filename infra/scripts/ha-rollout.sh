@@ -39,6 +39,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 CODE_DIR="${CODE_DIR:-${DEFAULT_CODE_DIR}}"
+CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
+WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
 COMPOSE_FILES_RAW="${COMPOSE_FILES:-${DEFAULT_COMPOSE_FILES}}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
@@ -179,6 +183,9 @@ init_compose_files() {
 }
 
 compose() {
+  NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}" \
+  NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}" \
+  NEXUS_WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE}" \
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
@@ -210,9 +217,9 @@ ensure_secrets_preflight() {
   local -a cmd=(
     bash "$SECRETS_PREFLIGHT_SCRIPT"
     --code-dir "$CODE_DIR"
-    --gateway-env-file "${CODE_DIR}/.env.gateway"
-    --sidecar-env-file "${CODE_DIR}/.env.sidecar"
-    --watchdog-env-file "${CODE_DIR}/.env.watchdog"
+    --gateway-env-file "${GATEWAY_ENV_FILE}"
+    --sidecar-env-file "${SIDECAR_ENV_FILE}"
+    --watchdog-env-file "${WATCHDOG_ENV_FILE}"
     --state-dir "$STATE_DIR"
     --store-dir "/data/nexus-secrets"
     --require-http-api-key

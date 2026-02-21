@@ -623,16 +623,16 @@ The HA stack in `infra/docker-compose.ha.yml` assumes:
 - State/DB: `/data/nexus`
 - Workspace: `/data/workspace`
 - Env files:
-  - `/data/code/.env.gateway` (nexus-primary / nexus-standby)
-  - `/data/code/.env.sidecar` (secret-sidecar)
-  - `/data/code/.env.watchdog` (watchdog)
+  - `/data/nexus-config/gateway/nexus.env` (nexus-primary / nexus-standby)
+  - `/data/nexus-config/sidecar/nexus.env` (secret-sidecar)
+  - `/data/nexus-config/watchdog/nexus.env` (watchdog)
 
 If your env files are still in `~/nexus-deploy`, create one-time links:
 
 ```bash
-ln -sf ~/nexus-deploy/.env.gateway /data/code/.env.gateway
-ln -sf ~/nexus-deploy/.env.sidecar /data/code/.env.sidecar
-ln -sf ~/nexus-deploy/.env.watchdog /data/code/.env.watchdog
+ln -sf ~/nexus-deploy/.env.gateway /data/nexus-config/gateway/nexus.env
+ln -sf ~/nexus-deploy/.env.sidecar /data/nexus-config/sidecar/nexus.env
+ln -sf ~/nexus-deploy/.env.watchdog /data/nexus-config/watchdog/nexus.env
 ```
 
 ### 7.3 Deployment
@@ -754,7 +754,7 @@ infra/scripts/ha-sidecar-secrets-isolation.sh --migrate
 infra/scripts/ha-sidecar-secrets-isolation.sh --status
 
 # 2) Enable isolated store + sidecar-only enforcement
-#    (in /data/code/.env.sidecar)
+#    (in /data/nexus-config/sidecar/nexus.env)
 # NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
 
 # 3) Recreate stack with sidecar overlay so only secret-sidecar mounts /data/nexus-secrets
@@ -836,14 +836,14 @@ sudo chown root:root /data/nexus-secrets
 sudo chmod 700 /data/nexus-secrets
 
 # 2) Configure split env files (minimum secrets settings)
-# /data/code/.env.gateway
+# /data/nexus-config/gateway/nexus.env
 #   NEXUS_HTTP_API_KEY=<token>
 #   NEXUS_DASHBOARD_PASSWORD=<strong password>
-# /data/code/.env.sidecar
+# /data/nexus-config/sidecar/nexus.env
 #   NEXUS_CREDENTIALS_KEY=<strong random secret>
 #   NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
 #   NEXUS_SECRETCTL_PASSWORD=<strong password>
-# /data/code/.env.watchdog
+# /data/nexus-config/watchdog/nexus.env
 #   NEXUS_HA_API_KEY=<same token as NEXUS_HTTP_API_KEY>
 
 # 3) Start stack with sidecar overlay (add tls overlay when available)
@@ -1245,9 +1245,9 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/
 ### HA: split env file missing
 
 Symptom:
-- `env file /data/code/.env.gateway not found ...`
-- `env file /data/code/.env.sidecar not found ...`
-- `env file /data/code/.env.watchdog not found ...`
+- `env file /data/nexus-config/gateway/nexus.env not found ...`
+- `env file /data/nexus-config/sidecar/nexus.env not found ...`
+- `env file /data/nexus-config/watchdog/nexus.env not found ...`
 
 Cause:
 - HA overlays now use split env files per service scope.
@@ -1255,10 +1255,10 @@ Cause:
 Fix:
 
 ```bash
-ln -sf ~/nexus-deploy/.env.gateway /data/code/.env.gateway
-ln -sf ~/nexus-deploy/.env.sidecar /data/code/.env.sidecar
-ln -sf ~/nexus-deploy/.env.watchdog /data/code/.env.watchdog
-# or copy each file directly into /data/code
+ln -sf ~/nexus-deploy/.env.gateway /data/nexus-config/gateway/nexus.env
+ln -sf ~/nexus-deploy/.env.sidecar /data/nexus-config/sidecar/nexus.env
+ln -sf ~/nexus-deploy/.env.watchdog /data/nexus-config/watchdog/nexus.env
+# or copy each file directly into /data/nexus-config/{gateway,sidecar,watchdog}/
 ```
 
 ### HA: `ha-rollout` cannot determine active slot

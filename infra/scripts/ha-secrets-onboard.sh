@@ -19,12 +19,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CODE_DIR="${CODE_DIR:-$REPO_ROOT}"
+CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
 
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 COMPOSE_FILES="${COMPOSE_FILES:-${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
 SECRET_PROVIDER_ID="${SECRET_PROVIDER_ID:-sidecar-main}"
-GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CODE_DIR}/.env.gateway}"
-SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CODE_DIR}/.env.sidecar}"
+GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
+SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
 AUTH_REQUIRED="${AUTH_REQUIRED:-1}"
 ADD_CUSTOM="${ADD_CUSTOM:-1}"
 

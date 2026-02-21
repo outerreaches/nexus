@@ -47,13 +47,14 @@ Deployment options (enabled by default):
   --repo-url <url>                 Git repo URL (default: https://github.com/outerreaches/nexus.git)
   --repo-branch <name>             Git branch (default: main)
   --code-dir <path>                Guest code dir (default: /data/code)
+  --config-root <path>             Guest config root for split env files (default: /data/nexus-config)
   --state-dir <path>               Guest state dir (default: /data/nexus)
   --workspace-dir <path>           Guest workspace dir (default: /data/workspace)
   --deploy-dir <path>              Legacy path (unused by HA deploy; default: ~/nexus-deploy)
   --port <port>                    Host port mapped by guest compose (default: 18789)
   --compose-project <name>         Compose project name (default: infra)
   --http-api-key <token>           Seed NEXUS_HTTP_API_KEY (gateway) + NEXUS_HA_API_KEY (watchdog)
-  --credentials-key <value>        Seed NEXUS_CREDENTIALS_KEY into guest .env.sidecar
+  --credentials-key <value>        Seed NEXUS_CREDENTIALS_KEY into sidecar env file
   --no-generate-credentials-key    Disable automatic credential-key generation when missing
   --require-http-api-key           Require NEXUS_HTTP_API_KEY in preflight checks
   --wait-ssh-seconds <seconds>     Max wait for guest SSH (default: 360)
@@ -119,6 +120,7 @@ PROFILE="service_custom"
 REPO_URL="https://github.com/outerreaches/nexus.git"
 REPO_BRANCH="main"
 CODE_DIR="/data/code"
+CONFIG_ROOT="/data/nexus-config"
 STATE_DIR="/data/nexus"
 WORKSPACE_DIR="/data/workspace"
 DEPLOY_DIR='~/nexus-deploy'
@@ -217,6 +219,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --code-dir)
       CODE_DIR="$2"
+      shift 2
+      ;;
+    --config-root)
+      CONFIG_ROOT="$2"
       shift 2
       ;;
     --state-dir)
@@ -545,6 +551,7 @@ ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" \
   REPO_URL="$(printf '%q' "$REPO_URL")" \
   REPO_BRANCH="$(printf '%q' "$REPO_BRANCH")" \
   CODE_DIR="$(printf '%q' "$CODE_DIR")" \
+  CONFIG_ROOT="$(printf '%q' "$CONFIG_ROOT")" \
   STATE_DIR="$(printf '%q' "$STATE_DIR")" \
   WORKSPACE_DIR="$(printf '%q' "$WORKSPACE_DIR")" \
   DEPLOY_DIR="$(printf '%q' "$DEPLOY_DIR")" \
@@ -570,6 +577,7 @@ set -euo pipefail
 REPO_URL="${REPO_URL}"
 REPO_BRANCH="${REPO_BRANCH}"
 CODE_DIR="${CODE_DIR}"
+CONFIG_ROOT="${CONFIG_ROOT}"
 STATE_DIR="${STATE_DIR}"
 WORKSPACE_DIR="${WORKSPACE_DIR}"
 DEPLOY_DIR="${DEPLOY_DIR}"
@@ -650,7 +658,11 @@ read_env_file_value() {
   printf '%s' "$raw"
 }
 
-for dir in "$CODE_DIR" "$STATE_DIR" "$WORKSPACE_DIR" "$DEPLOY_DIR"; do
+GATEWAY_ENV_PATH="${CONFIG_ROOT}/gateway/nexus.env"
+SIDECAR_ENV_PATH="${CONFIG_ROOT}/sidecar/nexus.env"
+WATCHDOG_ENV_PATH="${CONFIG_ROOT}/watchdog/nexus.env"
+
+for dir in "$CODE_DIR" "$STATE_DIR" "$WORKSPACE_DIR" "$DEPLOY_DIR" "$CONFIG_ROOT" "${CONFIG_ROOT}/gateway" "${CONFIG_ROOT}/sidecar" "${CONFIG_ROOT}/watchdog"; do
   ensure_writable_dir "$dir" || {
     echo "failed to prepare writable directory: $dir" >&2
     exit 1
@@ -690,51 +702,51 @@ for required in "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" 
 done
 chmod +x "$PULL_DEPLOY_SCRIPT" "$TLS_SCRIPT" "$SECRETS_PREFLIGHT_SCRIPT" "$SIDECAR_BOOTSTRAP_SCRIPT"
 
-if [[ ! -f "$CODE_DIR/.env.gateway" ]]; then
+if [[ ! -f "$GATEWAY_ENV_PATH" ]]; then
   if [[ -f "$CODE_DIR/.env.gateway.example" ]]; then
-    cp "$CODE_DIR/.env.gateway.example" "$CODE_DIR/.env.gateway"
-    echo "created $CODE_DIR/.env.gateway from .env.gateway.example (fill secrets before production use)"
+    cp "$CODE_DIR/.env.gateway.example" "$GATEWAY_ENV_PATH"
+    echo "created $GATEWAY_ENV_PATH from .env.gateway.example (fill secrets before production use)"
   else
-    : > "$CODE_DIR/.env.gateway"
-    echo "created empty $CODE_DIR/.env.gateway (fill required secrets before production use)"
+    : > "$GATEWAY_ENV_PATH"
+    echo "created empty $GATEWAY_ENV_PATH (fill required secrets before production use)"
   fi
 fi
 
-if [[ ! -f "$CODE_DIR/.env.sidecar" ]]; then
+if [[ ! -f "$SIDECAR_ENV_PATH" ]]; then
   if [[ -f "$CODE_DIR/.env.sidecar.example" ]]; then
-    cp "$CODE_DIR/.env.sidecar.example" "$CODE_DIR/.env.sidecar"
-    echo "created $CODE_DIR/.env.sidecar from .env.sidecar.example (fill secrets before production use)"
+    cp "$CODE_DIR/.env.sidecar.example" "$SIDECAR_ENV_PATH"
+    echo "created $SIDECAR_ENV_PATH from .env.sidecar.example (fill secrets before production use)"
   else
-    : > "$CODE_DIR/.env.sidecar"
-    echo "created empty $CODE_DIR/.env.sidecar (fill required secrets before production use)"
+    : > "$SIDECAR_ENV_PATH"
+    echo "created empty $SIDECAR_ENV_PATH (fill required secrets before production use)"
   fi
 fi
 
-if [[ ! -f "$CODE_DIR/.env.watchdog" ]]; then
+if [[ ! -f "$WATCHDOG_ENV_PATH" ]]; then
   if [[ -f "$CODE_DIR/.env.watchdog.example" ]]; then
-    cp "$CODE_DIR/.env.watchdog.example" "$CODE_DIR/.env.watchdog"
-    echo "created $CODE_DIR/.env.watchdog from .env.watchdog.example (fill secrets before production use)"
+    cp "$CODE_DIR/.env.watchdog.example" "$WATCHDOG_ENV_PATH"
+    echo "created $WATCHDOG_ENV_PATH from .env.watchdog.example (fill secrets before production use)"
   else
-    : > "$CODE_DIR/.env.watchdog"
-    echo "created empty $CODE_DIR/.env.watchdog (fill required secrets before production use)"
+    : > "$WATCHDOG_ENV_PATH"
+    echo "created empty $WATCHDOG_ENV_PATH (fill required secrets before production use)"
   fi
 fi
 
 if [[ -n "$HTTP_API_KEY" ]]; then
-  upsert_env_value "NEXUS_HTTP_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env.gateway"
-  upsert_env_value "NEXUS_HA_API_KEY" "$HTTP_API_KEY" "$CODE_DIR/.env.watchdog"
+  upsert_env_value "NEXUS_HTTP_API_KEY" "$HTTP_API_KEY" "$GATEWAY_ENV_PATH"
+  upsert_env_value "NEXUS_HA_API_KEY" "$HTTP_API_KEY" "$WATCHDOG_ENV_PATH"
 fi
 
 if [[ -n "$CREDENTIALS_KEY" ]]; then
-  upsert_env_value "NEXUS_CREDENTIALS_KEY" "$CREDENTIALS_KEY" "$CODE_DIR/.env.sidecar"
+  upsert_env_value "NEXUS_CREDENTIALS_KEY" "$CREDENTIALS_KEY" "$SIDECAR_ENV_PATH"
 fi
 
 pref_cmd=(
   "$SECRETS_PREFLIGHT_SCRIPT"
   --code-dir "$CODE_DIR"
-  --gateway-env-file "$CODE_DIR/.env.gateway"
-  --sidecar-env-file "$CODE_DIR/.env.sidecar"
-  --watchdog-env-file "$CODE_DIR/.env.watchdog"
+  --gateway-env-file "$GATEWAY_ENV_PATH"
+  --sidecar-env-file "$SIDECAR_ENV_PATH"
+  --watchdog-env-file "$WATCHDOG_ENV_PATH"
   --state-dir "$STATE_DIR"
   --store-dir "/data/nexus-secrets"
   --auto-fix
@@ -832,6 +844,9 @@ if [[ "$SKIP_INIT" != "1" ]]; then
         }
       }' > "$INIT_JSON"
 
+    NEXUS_GATEWAY_ENV_FILE="$GATEWAY_ENV_PATH" \
+    NEXUS_SIDECAR_ENV_FILE="$SIDECAR_ENV_PATH" \
+    NEXUS_WATCHDOG_ENV_FILE="$WATCHDOG_ENV_PATH" \
     docker compose -p "$COMPOSE_PROJECT" \
       -f "$BASE_COMPOSE" \
       -f "$SIDECAR_COMPOSE" \
@@ -868,10 +883,10 @@ WRAP
 chmod +x "$HOME/sidecar-bootstrap.sh"
 
 # Real deployment run (HA + sidecar + TLS only).
-CODE_DIR="$CODE_DIR" COMPOSE_PROJECT="$COMPOSE_PROJECT" "$PULL_DEPLOY_SCRIPT"
+CODE_DIR="$CODE_DIR" CONFIG_ROOT="$CONFIG_ROOT" COMPOSE_PROJECT="$COMPOSE_PROJECT" "$PULL_DEPLOY_SCRIPT"
 
 # Ensure sidecar provider profile is present and reachable.
-bootstrap_http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$CODE_DIR/.env.gateway")"
+bootstrap_http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$GATEWAY_ENV_PATH")"
 if [[ -n "$bootstrap_http_api_key" ]]; then
   NEXUS_HTTP_API_KEY="$bootstrap_http_api_key" "$SIDECAR_BOOTSTRAP_SCRIPT"
 else
