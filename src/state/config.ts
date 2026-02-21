@@ -149,6 +149,7 @@ const OpenAICompatProviderSchema = z
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
     apiKey: EnvString.optional(),
     model: EnvString.default("moonshotai/kimi-k2.5"),
+    maxTokens: z.number().int().positive().optional().describe("Max output tokens per LLM call. Defaults to 16384 if omitted."),
   })
   .default({});
 

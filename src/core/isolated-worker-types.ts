@@ -16,6 +16,7 @@ export type WorkerConfig = {
     baseUrl: string;
     apiKey?: string;
     model: string;
+    maxTokens?: number;
   };
   // Permissions
   allowShellExec: boolean;

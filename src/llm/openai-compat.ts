@@ -6,6 +6,7 @@ export type OpenAICompatConfig = {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  maxTokens?: number;
   onLog?: (line: string) => void;
 };
 
@@ -374,6 +375,7 @@ export class OpenAICompatClient implements LLMClient {
             tools,
             tool_choice: "auto",
             temperature: params.temperature ?? 0.2,
+            max_tokens: this.config.maxTokens ?? 16384,
             messages: toOpenAIMessages(activeMessages),
           }),
           signal: controller.signal,
