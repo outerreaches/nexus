@@ -53,15 +53,16 @@ function envBool(name: string): boolean | null {
 }
 
 type OpenAIChatMessage =
-  | { role: "system"; content: string }
+  | { role: "system"; content: string; cache_control?: { type: "ephemeral" } }
   | {
     role: "user";
     content:
-      | string
-      | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+    | string
+    | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+    cache_control?: { type: "ephemeral" };
   }
-  | { role: "assistant"; content: string | null; tool_calls?: unknown[] }
-  | { role: "tool"; content: string; tool_call_id: string; name: string };
+  | { role: "assistant"; content: string | null; tool_calls?: unknown[]; cache_control?: { type: "ephemeral" } }
+  | { role: "tool"; content: string; tool_call_id: string; name: string; cache_control?: { type: "ephemeral" } };
 
 function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
   return messages.map((m) => {
@@ -69,6 +70,7 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
       return {
         role: "user",
         content: m.content,
+        ...(m.cacheControl ? { cache_control: m.cacheControl } : {}),
       };
     }
     if (m.role === "assistant") {
@@ -81,14 +83,19 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIChatMessage[] {
             type: "function",
             function: { name: tc.name, arguments: tc.arguments },
           })),
+          ...(m.cacheControl ? { cache_control: m.cacheControl } : {}),
         };
       }
-      return { role: "assistant", content: m.content };
+      return { role: "assistant", content: m.content, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     if (m.role === "tool") {
-      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name };
+      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
-    return m;
+    // Handle system messages explicitly to appease TS
+    if (m.role === "system") {
+      return { role: "system", content: m.content, ...(m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+    }
+    return m as unknown as OpenAIChatMessage;
   });
 }
 
@@ -319,7 +326,7 @@ async function readBodyWithInactivityTimeout(params: {
 }
 
 export class OpenAICompatClient implements LLMClient {
-  constructor(private readonly config: OpenAICompatConfig) {}
+  constructor(private readonly config: OpenAICompatConfig) { }
 
   async completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }> {
     const url = joinUrl(this.config.baseUrl, "chat/completions");

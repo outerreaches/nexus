@@ -12,8 +12,10 @@ export type ChatUserContentPart =
 
 export type ChatUserContent = string | ChatUserContentPart[];
 
+export type CacheControl = { type: "ephemeral" };
+
 export type ChatMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: ChatUserContent }
-  | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
-  | { role: "tool"; content: string; toolCallId: string; name: string };
+  | { role: "system"; content: string; cacheControl?: CacheControl }
+  | { role: "user"; content: ChatUserContent; cacheControl?: CacheControl }
+  | { role: "assistant"; content: string | null; toolCalls?: ToolCall[]; cacheControl?: CacheControl }
+  | { role: "tool"; content: string; toolCallId: string; name: string; cacheControl?: CacheControl };

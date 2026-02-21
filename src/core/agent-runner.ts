@@ -366,10 +366,16 @@ export class AgentRunner {
       onLog?: (line: string) => void;
       circuitBreaker?: LlmCircuitBreaker;
     },
-  ) {}
+  ) { }
 
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     const baseMessages: ChatMessage[] = [{ role: "system", content: params.systemPrompt }, ...params.history];
+    if (baseMessages.length > 0) {
+      baseMessages[baseMessages.length - 1] = {
+        ...baseMessages[baseMessages.length - 1],
+        cacheControl: { type: "ephemeral" },
+      };
+    }
     const newMessages: ChatMessage[] = [{ role: "user", content: params.userMessage }];
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];
 
@@ -952,9 +958,9 @@ export class AgentRunner {
           const msg = err instanceof Error ? err.message : String(err);
           const code =
             err &&
-            typeof err === "object" &&
-            "code" in err &&
-            typeof (err as { code?: unknown }).code === "string"
+              typeof err === "object" &&
+              "code" in err &&
+              typeof (err as { code?: unknown }).code === "string"
               ? (err as { code: string }).code
               : null;
           result = code ? `ERROR: [${code}] ${msg}` : `ERROR: ${msg}`;
