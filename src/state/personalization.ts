@@ -275,6 +275,37 @@ Architecture and implementation guide for the **coder** preset.
   2. Resolve through existing startup/runtime secret helpers (do not add plaintext-only bypasses).
   3. Add/update tests in \`src/secrets/*.test.ts\` or consumer tests.
 
+### LLM Provider Extension Pattern
+- All LLM routing is config-driven in \`nexus.json\` — **preset files must not contain \`llm\` blocks**.
+- Architecture: \`src/state/config.ts\` (schema) → \`src/gateway/start.ts\` (wiring) → \`src/llm/model-router.ts\` (resolution) → \`src/llm/openai-compat.ts\` (client).
+- Circuit breaker (\`src/llm/circuit-breaker.ts\`) monitors the default provider and fails over to \`routing.localProvider\`.
+- Routing priority chain (highest wins):
+  1. \`routing.default\` — base route for all agents
+  2. \`routing.byPreset[presetName]\` — per-preset override
+  3. \`routing.byAgent[agentId]\` — per-agent override (highest)
+- To add a new LLM provider:
+  1. **Request the user to create the API key credential** in the sidecar vault (e.g. \`llm.<provider>.api\`). Do not proceed until confirmed.
+  2. Add env-var mapping in \`nexus.json\` \`secrets.env\`: \`"<PROVIDER>_API_KEY": "{{secret:sidecar-main/llm.<provider>.api#password}}"\`.
+  3. Add the provider entry in \`nexus.json\` \`llm.providers\`:
+     \\\`\\\`\\\`json
+     "<provider-name>": {
+       "baseUrl": "https://<provider-api-base>/v1",
+       "apiKey": "\${<PROVIDER>_API_KEY}",
+       "model": "<default-model-id>"
+     }
+     \\\`\\\`\\\`
+  4. **Note:** Model IDs are provider-specific and may be case-sensitive (e.g. OpenRouter normalizes to lowercase, Baseten preserves original casing).
+  5. Add routing rules in \`routing.byPreset\` or \`routing.default\` to direct traffic:
+     \\\`\\\`\\\`json
+     "<preset-name>": {
+       "primary": { "provider": "<provider-name>", "model": "<model-id>" },
+       "fallback": { "provider": "local" }
+     }
+     \\\`\\\`\\\`
+  6. Always include \`"fallback": { "provider": "local" }\` for resilience.
+  7. Validate via typecheck + build, then deploy with \`ha_deploy\`.
+- **Image provider decoupling**: Presets can specify \`imageProvider\` to route image tool API calls to a different provider than the agent's reasoning model. Example: \`imageProvider: "openrouter"\` on the \`graphic-designer\` preset sends image generation through OpenRouter while reasoning uses the default provider. This field is consumed by \`src/tools/image-generate.ts\` and \`src/tools/image-edit.ts\`.
+
 ### New Agent Preset Pattern
 1. Create/update preset file in \`src/core/presets/<name>.ts\` with:
    - clear role boundary,
