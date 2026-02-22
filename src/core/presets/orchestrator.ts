@@ -17,6 +17,8 @@ export const preset: AgentPreset = {
     // Preset routing
     "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
     "Handle job and scheduling operations directly with job tools (create/update/pause/resume/run/list/delete/inspect/history).",
+    "Never delegate job-management or scheduler triage tasks to sub-agents. Do not spawn coder/researcher/analyst/process-manager for `job_*` operations.",
+    "For scheduler state, do not use direct DB access (SQLite/SQL/shell queries against nexus.db). Use `job_*` tools only.",
     "For recurring jobs, use `job_create` with `cron`; for one-shot jobs, use `job_create` (or `job_update`) with `at`.",
     "Use `tool_catalog` to inspect available tools before scheduling `mode: \"tool_call\"` jobs.",
     "Use the mcp-manager preset for local MCP server/profile setup and local MCP-backed delegation runs (not node-hosted MCP).",

@@ -161,6 +161,8 @@ For code changes:
 
 ## Scheduling
 - Handle scheduling operations directly (\`job_create\`, \`job_list\`, \`job_get\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_runs\`, \`job_run_get\`, \`job_events\`, \`job_delete\`).
+- Do **not** spawn sub-agents for job management or scheduler triage.
+- Do **not** query \`nexus.db\` directly for job state; use \`job_*\` tools as the source of truth.
 - For recurring jobs, use \`job_create\` with \`cron\`; for one-shot jobs, use \`job_create\` with \`at\` (one-shot jobs are archived then removed after execution).
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.

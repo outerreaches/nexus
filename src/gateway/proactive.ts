@@ -55,7 +55,10 @@ function isIdleOutput(output: string): boolean {
   const t = output.trim();
   if (!t) return true;
   const upper = t.toUpperCase();
-  return upper === "IDLE" || upper === "NOOP" || upper === "NO-OP";
+  if (upper === "IDLE" || upper === "NOOP" || upper === "NO-OP") return true;
+  const lines = t.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines.length > 0 ? lines[lines.length - 1]!.toUpperCase() : "";
+  return last === "IDLE" || last === "NOOP" || last === "NO-OP";
 }
 
 function detectActiveTelegramContext(
@@ -305,12 +308,13 @@ export function startProactiveHeartbeat(
       }
 
       const idle = isIdleOutput(res.output);
+      const hadToolActivity = (res.toolCallsUsed ?? 0) > 0;
       const tookMs = Date.now() - startMs;
 
-      if (idle) {
+      if (idle || !hadToolActivity) {
         nextDelayMs = Math.min(maxIntervalMs, Math.floor(nextDelayMs * 1.4 + 1_000));
         deps.log(
-          `proactive: tick_result id=${tickId} status=idle tookMs=${tookMs} outputChars=${res.output.length} next=${Math.round(nextDelayMs / 1000)}s`,
+          `proactive: tick_result id=${tickId} status=idle tookMs=${tookMs} outputChars=${res.output.length} toolCallsUsed=${res.toolCallsUsed} next=${Math.round(nextDelayMs / 1000)}s`,
         );
         lastTickAt = startMs;
         lastExecutedAt = startMs;
