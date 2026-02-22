@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import type { ChatMessage } from "../core/types.js";
+import type { ChatMessage, ToolCall } from "../core/types.js";
 import { renderUserContentForStorage } from "../core/message-content.js";
 import type { NexusDatabase } from "./database.js";
 
@@ -19,6 +19,58 @@ type MessageRow = {
   tool_call_id: string | null;
   tool_calls_json: string | null;
 };
+
+function normalizeToolCallArguments(raw: unknown): string {
+  const toObjectString = (value: unknown): string | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  };
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return "{}";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return "{}";
+    }
+    if (typeof parsed === "string") {
+      const nested = parsed.trim();
+      if (!nested) return "{}";
+      try {
+        parsed = JSON.parse(nested);
+      } catch {
+        return "{}";
+      }
+    }
+    return toObjectString(parsed) ?? "{}";
+  }
+
+  return toObjectString(raw) ?? "{}";
+}
+
+function normalizeToolCalls(raw: unknown): ToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: ToolCall[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const id = typeof e.id === "string" ? e.id.trim() : "";
+    const fn = typeof e.function === "object" && e.function ? (e.function as Record<string, unknown>) : null;
+    const name = typeof e.name === "string"
+      ? e.name.trim()
+      : (fn && typeof fn.name === "string" ? fn.name.trim() : "");
+    const argsRaw = e.arguments ?? (fn ? fn.arguments : undefined);
+    if (!id || !name) continue;
+    out.push({ id, name, arguments: normalizeToolCallArguments(argsRaw) });
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 function sanitizeHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
   const out: HistoryEntry[] = [];
@@ -58,12 +110,13 @@ function rowToHistoryEntry(row: MessageRow): HistoryEntry {
     if (row.tool_calls_json) {
       try {
         const toolCalls = JSON.parse(row.tool_calls_json) as unknown;
+        const normalizedToolCalls = normalizeToolCalls(toolCalls);
         return {
           id: row.id,
           message: {
             role: "assistant",
             content: row.content,
-            toolCalls: Array.isArray(toolCalls) ? (toolCalls as any) : undefined,
+            toolCalls: normalizedToolCalls,
           },
         };
       } catch {
@@ -120,7 +173,8 @@ export function appendMessage(params: {
 }): void {
   if (params.message.role === "assistant") {
     // Persist assistant content even when it’s a tool-calling message (content may be null).
-    const toolCallsJson = params.message.toolCalls ? JSON.stringify(params.message.toolCalls) : null;
+    const normalizedToolCalls = normalizeToolCalls(params.message.toolCalls ?? null);
+    const toolCallsJson = normalizedToolCalls ? JSON.stringify(normalizedToolCalls) : null;
     params.db.db
       .prepare(
         "INSERT INTO messages (session_id, role, content, name, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

@@ -66,6 +66,40 @@ type OpenAIChatMessage =
   | { role: "assistant"; content: string | null; tool_calls?: unknown[]; cache_control?: { type: "ephemeral" } }
   | { role: "tool"; content: string; tool_call_id: string; name: string; cache_control?: { type: "ephemeral" } };
 
+function normalizeToolCallArgumentsForRequest(raw: unknown): string {
+  const toObjectString = (value: unknown): string | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return null;
+    }
+  };
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return "{}";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return "{}";
+    }
+    if (typeof parsed === "string") {
+      const nested = parsed.trim();
+      if (!nested) return "{}";
+      try {
+        parsed = JSON.parse(nested);
+      } catch {
+        return "{}";
+      }
+    }
+    return toObjectString(parsed) ?? "{}";
+  }
+
+  return toObjectString(raw) ?? "{}";
+}
+
 function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatMessage[] {
   return messages.map((m) => {
     if (m.role === "user") {
@@ -83,7 +117,7 @@ function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatM
           tool_calls: m.toolCalls.map((tc) => ({
             id: tc.id,
             type: "function",
-            function: { name: tc.name, arguments: tc.arguments },
+            function: { name: tc.name, arguments: normalizeToolCallArgumentsForRequest(tc.arguments) },
           })),
           ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
         };
