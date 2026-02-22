@@ -530,6 +530,8 @@ export function dashboardStyles(): string {
         top: 12px;
         right: 12px;
         display: flex;
+        flex-direction: column;
+        align-items: stretch;
         gap: 8px;
         z-index: 50;
       }

@@ -133,12 +133,15 @@ export function renderDashboard(params: {
     )
     .join("");
 
-  // Compute stats from agent graph
+  const isOrchestratorPreset = (preset: string | null | undefined) => String(preset ?? "").trim().toLowerCase() === "orchestrator";
+
+  // Compute stats from displayed sub-agent graph (hide orchestrator runs from orb counts).
+  const visibleSubAgentGraph = params.agentGraph.filter((row) => !isOrchestratorPreset(row.preset));
   const agentStats = {
-    running: params.agentGraph.filter((a) => a.status === "running").length,
-    complete: params.agentGraph.filter((a) => a.status === "complete").length,
-    failed: params.agentGraph.filter((a) => a.status === "failed" || a.status === "stopped").length,
-    total: params.agentGraph.length,
+    running: visibleSubAgentGraph.filter((a) => a.status === "running").length,
+    complete: visibleSubAgentGraph.filter((a) => a.status === "complete").length,
+    failed: visibleSubAgentGraph.filter((a) => a.status === "failed" || a.status === "stopped").length,
+    total: visibleSubAgentGraph.length,
   };
   const agentStatsJson = safeJsonForScript(agentStats);
 
@@ -154,6 +157,18 @@ export function renderDashboard(params: {
       task,
     })),
   );
+  const executionNodesJson = safeJsonForScript(
+    params.nodes.map(({ id, label, backend, status, connected_at }) => ({
+      id,
+      label,
+      backend,
+      status,
+      connected_at,
+    })),
+  );
+  const maxAgentDepthRaw = Number.parseInt(String(process.env.NEXUS_MAX_AGENT_DEPTH ?? "4"), 10);
+  const maxAgentDepth = Number.isFinite(maxAgentDepthRaw) ? Math.max(0, maxAgentDepthRaw) : 4;
+  const maxAgentLevels = maxAgentDepth + 1;
 
   // HA section data
   const leaseInfo = (params.status as { activeLease?: { key: string; holderId: string; held: boolean; expiresAt: number | null; ttlMs: number; renewMs: number } }).activeLease ?? {
@@ -228,6 +243,7 @@ export function renderDashboard(params: {
               </div>
               <div class="graph-controls">
                 <button class="graph-btn" id="btn-pause">Pause</button>
+                <button class="graph-btn" id="btn-reset-view">Reset View</button>
               </div>
               <div class="refresh-indicator" id="refresh-indicator">Update in 5s</div>
             </div>
@@ -640,7 +656,11 @@ export function renderDashboard(params: {
       const container = document.getElementById("agent-graph");
       const tooltip = document.getElementById("agent-tooltip");
       const pauseBtn = document.getElementById("btn-pause");
+      const resetViewBtn = document.getElementById("btn-reset-view");
       const refreshIndicator = document.getElementById("refresh-indicator");
+      const nodeLimit = ${params.nodeLimit};
+      const maxAgentLevels = ${maxAgentLevels};
+      let executionNodeData = ${executionNodesJson};
       const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
       const tabPanels = {
         "agents-view": document.getElementById("tab-agents-view"),
@@ -822,8 +842,14 @@ export function renderDashboard(params: {
       const MAX_RENDER_PIXEL_RATIO = 1.5;
       const TARGET_RENDER_FPS = 30;
       const FRAME_INTERVAL_MS = 1000 / TARGET_RENDER_FPS;
-      const NODE_SPHERE_SEGMENTS = 20;
-      const CORE_SPHERE_SEGMENTS = 24;
+      const NODE_ICOSAHEDRON_DETAIL = 0;
+      const CORE_ICOSAHEDRON_DETAIL = 1;
+      const FLOOR_GRID_MAJOR_COLOR = 0x00ff41;
+      const FLOOR_GRID_MINOR_COLOR = 0x004d1f;
+      const ORBIT_RING_COLOR = 0xffc44d;
+      const ORCHESTRATOR_COLOR = 0xff8c2f;
+      const ORCHESTRATOR_Y = 42;
+      const FLOOR_Y = -66;
       const ORBIT_RING_SEGMENTS = 48;
       let agentRefreshInFlight = false;
       let logsFetchInFlight = false;
@@ -1786,18 +1812,61 @@ export function renderDashboard(params: {
       fetchFederationOnboarding();
       updateCliComposerState();
 
+      const isOrchestratorRun = (node) => String(node?.preset ?? "").trim().toLowerCase() === "orchestrator";
+      const isRunVisible = (node, nowMs) => node.status === "running" || !node.ended_at || (nowMs - node.ended_at) < visibleNodeWindowMs;
+      const normalizeExecutionNodes = (rows) =>
+        (Array.isArray(rows) ? rows : [])
+          .filter((row) => row && typeof row === "object")
+          .map((row) => ({
+            id: String(row.id ?? ""),
+            label: String(row.label ?? ""),
+            backend: String(row.backend ?? ""),
+            status: String(row.status ?? "offline"),
+            connected_at:
+              typeof row.connected_at === "number"
+                ? row.connected_at
+                : typeof row.connectedAt === "number"
+                  ? row.connectedAt
+                  : null,
+          }))
+          .filter((row) => row.id);
+      const filterConnectedExecutionNodes = (rows) =>
+        normalizeExecutionNodes(rows).filter((row) => row.status === "online" || Boolean(row.connected_at));
+      const buildDisplayedSubAgentNodes = (nodes) => {
+        const now = Date.now();
+        const visibleRuns = (Array.isArray(nodes) ? nodes : []).filter((node) => isRunVisible(node, now));
+        const visibleById = new Map(visibleRuns.map((node) => [node.run_id, node]));
+        const subAgentIds = new Set(visibleRuns.filter((node) => !isOrchestratorRun(node)).map((node) => node.run_id));
+        return visibleRuns
+          .filter((node) => !isOrchestratorRun(node))
+          .map((node) => {
+            let parentId = node.parent_run_id;
+            while (parentId && !subAgentIds.has(parentId)) {
+              const parent = visibleById.get(parentId);
+              parentId = parent?.parent_run_id ?? null;
+            }
+            return { ...node, parent_run_id: parentId ?? null };
+          });
+      };
+      const computeDisplayedAgentStats = (nodes) => ({
+        running: nodes.filter((node) => node.status === "running").length,
+        complete: nodes.filter((node) => node.status === "complete").length,
+        failed: nodes.filter((node) => node.status === "failed" || node.status === "stopped").length,
+        total: nodes.length,
+      });
+
       // Update stats display
       const updateStats = (stats) => {
         const running = document.getElementById("stat-running");
         const complete = document.getElementById("stat-complete");
         const failed = document.getElementById("stat-failed");
         const total = document.getElementById("stat-total");
-        if (running) running.textContent = stats.running;
-        if (complete) complete.textContent = stats.complete;
-        if (failed) failed.textContent = stats.failed;
-        if (total) total.textContent = stats.total;
+        if (running) running.textContent = String(stats.running);
+        if (complete) complete.textContent = String(stats.complete);
+        if (failed) failed.textContent = String(stats.failed);
+        if (total) total.textContent = String(stats.total);
       };
-      updateStats(agentStats);
+      updateStats(computeDisplayedAgentStats(buildDisplayedSubAgentNodes(graphData)));
 
       // Helper to escape HTML
       const escapeHtml = (str) => {
@@ -1916,12 +1985,6 @@ export function renderDashboard(params: {
       };
       updateRefreshIndicator();
 
-      // Keep graph/table visibility consistent with backend node visibility window.
-      const filterVisibleNodes = (nodes) => {
-        const now = Date.now();
-        return nodes.filter((n) => n.status === 'running' || !n.ended_at || (now - n.ended_at) < visibleNodeWindowMs);
-      };
-
       // Scene state - will be populated when scene is created
       let sceneState = null;
 
@@ -1930,19 +1993,31 @@ export function renderDashboard(params: {
         if (agentRefreshInFlight) return;
         agentRefreshInFlight = true;
         try {
-          const res = await fetchWithAuth(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`);
-          if (!res.ok) return;
-          const data = await res.json();
+          const [agentsRes, nodesRes] = await Promise.all([
+            fetchWithAuth(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`),
+            fetchWithAuth(\`/api/nodes?limit=\${nodeLimit}\`),
+          ]);
+          if (!agentsRes.ok) return;
+          const data = await agentsRes.json();
           graphData = data.nodes;
-          agentStats = data.stats;
-          updateStats(agentStats);
+          const displayedSubAgentNodes = buildDisplayedSubAgentNodes(data.nodes);
+          updateStats(computeDisplayedAgentStats(displayedSubAgentNodes));
+
+          if (nodesRes.ok) {
+            try {
+              const nodePayload = await nodesRes.json();
+              executionNodeData = normalizeExecutionNodes(nodePayload?.nodes);
+            } catch (err) {
+              console.warn("Failed to parse node payload:", err);
+            }
+          }
 
           if (data.tables) {
             updateTables(data.tables);
           }
 
           if (sceneState) {
-            updateSceneWithNewData(sceneState, filterVisibleNodes(data.nodes));
+            updateSceneWithNewData(sceneState, displayedSubAgentNodes, filterConnectedExecutionNodes(executionNodeData));
           }
         } catch (e) {
           console.warn("Failed to fetch agent data:", e);
@@ -1974,28 +2049,55 @@ export function renderDashboard(params: {
         running: 0x00ff41,
         complete: 0x00d4ff,
         failed: 0xff0040,
+        stopped: 0xff0040,
         budget_exhausted: 0xffb800,
+      };
+      const executionNodeStatusColors = {
+        online: 0x5fd7ff,
+        approved: 0x5fd7ff,
+        pending: 0x7f8ea3,
+        blocked: 0xff5f5f,
+        offline: 0x708090,
       };
       const baseOrbitRadius = 90;
       const orbitRadiusStep = 55;
+      const connectedNodeOrbitRadius = baseOrbitRadius + Math.max(0, maxAgentLevels - 1) * orbitRadiusStep * 0.6 + 150;
+      const connectedNodeOrbitY = ORCHESTRATOR_Y + 8;
 
-      // Helper to create a node mesh
+      // Helper to create a sub-agent mesh (low-poly orb)
       const createNodeMesh = (node, THREE) => {
         const color = statusColors[node.status] ?? 0x00aa2a;
         const radius = Math.max(5, 9 - node.depth * 1.2);
-        const geometry = new THREE.SphereGeometry(radius, NODE_SPHERE_SEGMENTS, NODE_SPHERE_SEGMENTS);
+        const geometry = new THREE.IcosahedronGeometry(radius, NODE_ICOSAHEDRON_DETAIL);
         const material = new THREE.MeshStandardMaterial({
           color,
           emissive: color,
           emissiveIntensity: node.status === 'running' ? 0.5 : 0.25,
-          roughness: 0.3,
-          metalness: 0.7,
+          roughness: 0.35,
+          metalness: 0.62,
+          flatShading: true,
         });
         return new THREE.Mesh(geometry, material);
       };
 
+      const createExecutionNodeMesh = (node, THREE) => {
+        const color = executionNodeStatusColors[node.status] ?? 0x5fd7ff;
+        const geometry = new THREE.TorusGeometry(10, 2.5, 6, 14);
+        const material = new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 0.35,
+          roughness: 0.38,
+          metalness: 0.5,
+          flatShading: true,
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.rotation.x = Math.PI / 2;
+        return mesh;
+      };
+
       // Helper to create connection line
-      const createConnectionLine = (fromX, fromY, fromZ, toX, toY, toZ, opacity, THREE) => {
+      const createAgentConnectionLine = (fromX, fromY, fromZ, toX, toY, toZ, opacity, THREE) => {
         const points = [
           new THREE.Vector3(fromX, fromY, fromZ),
           new THREE.Vector3(toX, toY, toZ),
@@ -2003,6 +2105,38 @@ export function renderDashboard(params: {
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
         const material = new THREE.LineBasicMaterial({ color: 0x00ff41, transparent: true, opacity });
         return new THREE.Line(geometry, material);
+      };
+
+      const createExecutionConnectionLine = (fromX, fromY, fromZ, toX, toY, toZ, THREE) => {
+        const points = [
+          new THREE.Vector3(fromX, fromY, fromZ),
+          new THREE.Vector3(toX, toY, toZ),
+        ];
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineDashedMaterial({
+          color: 0x5fd7ff,
+          transparent: true,
+          opacity: 0.8,
+          dashSize: 8,
+          gapSize: 6,
+        });
+        const line = new THREE.Line(geometry, material);
+        line.computeLineDistances();
+        return line;
+      };
+
+      const updateLineGeometry = (line, fromX, fromY, fromZ, toX, toY, toZ) => {
+        const positions = line.geometry.attributes.position.array;
+        positions[0] = fromX;
+        positions[1] = fromY;
+        positions[2] = fromZ;
+        positions[3] = toX;
+        positions[4] = toY;
+        positions[5] = toZ;
+        line.geometry.attributes.position.needsUpdate = true;
+        if (typeof line.computeLineDistances === "function") {
+          line.computeLineDistances();
+        }
       };
 
       // Position a node in the solar system layout
@@ -2014,8 +2148,12 @@ export function renderDashboard(params: {
         node.x = centerX + Math.cos(angle) * orbitRadius;
         node.y = centerY - depth * 12;
         node.z = centerZ + Math.sin(angle) * orbitRadius;
-        node.orbitAngle = angle;
-        node.orbitSpeed = 0.0004 + Math.random() * 0.0003 - depth * 0.00005;
+        if (typeof node.orbitAngle !== "number") {
+          node.orbitAngle = angle;
+        }
+        if (typeof node.orbitSpeed !== "number") {
+          node.orbitSpeed = 0.0004 + Math.random() * 0.0003 - depth * 0.00005;
+        }
         node.orbitRadius = orbitRadius;
         node.orbitCenterX = centerX;
         node.orbitCenterY = centerY;
@@ -2032,24 +2170,127 @@ export function renderDashboard(params: {
         }
         const roots = [...nodesById.values()].filter((n) => !n.parent_run_id || !nodesById.has(n.parent_run_id));
 
-        const positionChildren = (node, cx, cy, cz, depth) => {
+        const positionChildren = (node, depth) => {
           node.children.forEach((child, idx) => {
             positionNode(child, node.x, node.y, node.z, depth + 1, idx, node.children.length);
-            positionChildren(child, child.x, child.y, child.z, depth + 1);
+            positionChildren(child, depth + 1);
           });
         };
         roots.forEach((root, idx) => {
-          positionNode(root, 0, 0, 0, 0, idx, roots.length);
-          positionChildren(root, root.x, root.y, root.z, 0);
+          positionNode(root, 0, ORCHESTRATOR_Y, 0, 0, idx, roots.length);
+          positionChildren(root, 0);
         });
         return { nodesById, roots };
       };
 
+      const applyConnectedNodeLayout = (state, connectedNodes) => {
+        const { scene, executionNodesById, meshToNode, pickableMeshes, sunPosition, THREE } = state;
+        const normalized = filterConnectedExecutionNodes(connectedNodes);
+        const newIds = new Set(normalized.map((node) => node.id));
+
+        for (const [nodeId, existingNode] of executionNodesById.entries()) {
+          if (!newIds.has(nodeId)) {
+            if (existingNode.mesh) {
+              scene.remove(existingNode.mesh);
+              meshToNode.delete(existingNode.mesh);
+              const meshIndex = pickableMeshes.indexOf(existingNode.mesh);
+              if (meshIndex >= 0) pickableMeshes.splice(meshIndex, 1);
+              existingNode.mesh.geometry.dispose();
+              existingNode.mesh.material.dispose();
+            }
+            if (existingNode.connectionLine) {
+              scene.remove(existingNode.connectionLine);
+              existingNode.connectionLine.geometry.dispose();
+              existingNode.connectionLine.material.dispose();
+            }
+            executionNodesById.delete(nodeId);
+          }
+        }
+
+        const total = Math.max(1, normalized.length);
+        normalized.forEach((node, idx) => {
+          const targetAngle = (idx / total) * Math.PI * 2;
+          let existingNode = executionNodesById.get(node.id);
+
+          if (!existingNode) {
+            const mesh = createExecutionNodeMesh(node, THREE);
+            scene.add(mesh);
+            const tooltipNode = {
+              agent_id: node.id,
+              preset: "execution-node",
+              status: node.status || "online",
+              started_at: node.connected_at,
+              ended_at: null,
+              task: node.label || "Connected execution node",
+              isExecutionNode: true,
+            };
+            existingNode = {
+              ...node,
+              tooltipNode,
+              mesh,
+              connectionLine: null,
+              orbitAngle: targetAngle,
+              orbitSpeed: 0.00012 + (idx % 5) * 0.00002,
+              orbitRadius: connectedNodeOrbitRadius,
+              orbitCenterX: 0,
+              orbitCenterY: connectedNodeOrbitY,
+              orbitCenterZ: 0,
+            };
+            executionNodesById.set(node.id, existingNode);
+            meshToNode.set(mesh, tooltipNode);
+            pickableMeshes.push(mesh);
+          } else {
+            existingNode.status = node.status;
+            existingNode.label = node.label;
+            existingNode.connected_at = node.connected_at;
+            existingNode.backend = node.backend;
+            if (existingNode.tooltipNode) {
+              existingNode.tooltipNode.status = node.status || "online";
+              existingNode.tooltipNode.started_at = node.connected_at;
+              existingNode.tooltipNode.task = node.label || "Connected execution node";
+            }
+            const color = executionNodeStatusColors[node.status] ?? 0x5fd7ff;
+            existingNode.mesh.material.color.setHex(color);
+            existingNode.mesh.material.emissive.setHex(color);
+          }
+
+          existingNode.orbitRadius = connectedNodeOrbitRadius;
+          existingNode.orbitCenterX = 0;
+          existingNode.orbitCenterY = connectedNodeOrbitY;
+          existingNode.orbitCenterZ = 0;
+          if (typeof existingNode.orbitAngle !== "number") {
+            existingNode.orbitAngle = targetAngle;
+          }
+          const x = existingNode.orbitCenterX + Math.cos(existingNode.orbitAngle) * existingNode.orbitRadius;
+          const y = existingNode.orbitCenterY;
+          const z = existingNode.orbitCenterZ + Math.sin(existingNode.orbitAngle) * existingNode.orbitRadius;
+          existingNode.mesh.position.set(x, y, z);
+          existingNode.x = x;
+          existingNode.y = y;
+          existingNode.z = z;
+
+          if (!existingNode.connectionLine) {
+            existingNode.connectionLine = createExecutionConnectionLine(
+              sunPosition.x,
+              sunPosition.y,
+              sunPosition.z,
+              x,
+              y,
+              z,
+              THREE,
+            );
+            scene.add(existingNode.connectionLine);
+          } else {
+            updateLineGeometry(existingNode.connectionLine, sunPosition.x, sunPosition.y, sunPosition.z, x, y, z);
+          }
+        });
+      };
+
       // Update scene with new data (add new nodes, update existing, remove old)
-      const updateSceneWithNewData = (state, newNodes) => {
-        const { scene, nodesById, meshToNode, pickableMeshes, THREE } = state;
+      const updateSceneWithNewData = (state, newNodes, connectedNodes) => {
+        const { scene, nodesById, meshToNode, pickableMeshes, executionNodesById, sunPosition, THREE } = state;
         const newNodeIds = new Set(newNodes.map((n) => n.run_id));
-        const { nodesById: newNodesById, roots: newRoots } = buildNodeTree(newNodes);
+        const { nodesById: newNodesById } = buildNodeTree(newNodes);
 
         // Remove nodes that no longer exist
         for (const [runId, node] of nodesById.entries()) {
@@ -2071,24 +2312,10 @@ export function renderDashboard(params: {
           }
         }
 
-        // Add or update nodes
+        // Add or update sub-agent nodes
         for (const [runId, newNode] of newNodesById.entries()) {
-          if (nodesById.has(runId)) {
-            // Update existing node
-            const existingNode = nodesById.get(runId);
-            if (existingNode.status !== newNode.status) {
-              // Status changed - update color
-              const color = statusColors[newNode.status] ?? 0x00aa2a;
-              existingNode.mesh.material.color.setHex(color);
-              existingNode.mesh.material.emissive.setHex(color);
-              existingNode.mesh.material.emissiveIntensity = newNode.status === 'running' ? 0.5 : 0.25;
-              existingNode.status = newNode.status;
-            }
-            // Update other data fields
-            existingNode.ended_at = newNode.ended_at;
-            existingNode.task = newNode.task;
-          } else {
-            // Add new node
+          let existingNode = nodesById.get(runId);
+          if (!existingNode) {
             const mesh = createNodeMesh(newNode, THREE);
             mesh.position.set(newNode.x ?? 0, newNode.y ?? 0, newNode.z ?? 0);
             scene.add(mesh);
@@ -2096,21 +2323,46 @@ export function renderDashboard(params: {
             nodesById.set(runId, newNode);
             meshToNode.set(mesh, newNode);
             pickableMeshes.push(mesh);
-
-            // Create connection line
-            const isRoot = newNode.depth === 0;
-            if (isRoot) {
-              const line = createConnectionLine(0, 0, 0, newNode.x, newNode.y, newNode.z, 0.5, THREE);
-              scene.add(line);
-              newNode.connectionLine = line;
-            } else if (newNode.parent_run_id && nodesById.has(newNode.parent_run_id)) {
-              const parent = nodesById.get(newNode.parent_run_id);
-              const line = createConnectionLine(parent.x, parent.y, parent.z, newNode.x, newNode.y, newNode.z, 0.35, THREE);
-              scene.add(line);
-              newNode.connectionLine = line;
+            existingNode = newNode;
+          } else {
+            if (existingNode.status !== newNode.status) {
+              const color = statusColors[newNode.status] ?? 0x00aa2a;
+              existingNode.mesh.material.color.setHex(color);
+              existingNode.mesh.material.emissive.setHex(color);
+              existingNode.mesh.material.emissiveIntensity = newNode.status === 'running' ? 0.5 : 0.25;
+              existingNode.status = newNode.status;
             }
+            existingNode.parent_run_id = newNode.parent_run_id;
+            existingNode.depth = newNode.depth;
+            existingNode.ended_at = newNode.ended_at;
+            existingNode.task = newNode.task;
+            existingNode.orbitRadius = newNode.orbitRadius;
+            existingNode.orbitCenterX = newNode.orbitCenterX;
+            existingNode.orbitCenterY = newNode.orbitCenterY;
+            existingNode.orbitCenterZ = newNode.orbitCenterZ;
+            existingNode.y = newNode.y;
+            existingNode.mesh.position.y = newNode.y;
+          }
+
+          let fromX = sunPosition.x;
+          let fromY = sunPosition.y;
+          let fromZ = sunPosition.z;
+          if (existingNode.parent_run_id && nodesById.has(existingNode.parent_run_id)) {
+            const parent = nodesById.get(existingNode.parent_run_id);
+            fromX = parent.x;
+            fromY = parent.y;
+            fromZ = parent.z;
+          }
+          if (!existingNode.connectionLine) {
+            const line = createAgentConnectionLine(fromX, fromY, fromZ, existingNode.x, existingNode.y, existingNode.z, 0.45, THREE);
+            scene.add(line);
+            existingNode.connectionLine = line;
+          } else {
+            updateLineGeometry(existingNode.connectionLine, fromX, fromY, fromZ, existingNode.x, existingNode.y, existingNode.z);
           }
         }
+
+        applyConnectedNodeLayout({ scene, executionNodesById, meshToNode, pickableMeshes, sunPosition, THREE }, connectedNodes);
       };
 
       if (!container) {
@@ -2118,12 +2370,16 @@ export function renderDashboard(params: {
       } else {
         const width = container.clientWidth || 800;
         const height = 480;
+        const sunPosition = new THREE.Vector3(0, ORCHESTRATOR_Y, 0);
 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x050505);
 
         const camera = new THREE.PerspectiveCamera(50, width / height, 1, 2000);
-        camera.position.set(0, 200, 350);
+        const defaultView = {
+          position: new THREE.Vector3(300, 235, 300),
+          target: new THREE.Vector3(0, ORCHESTRATOR_Y - 10, 0),
+        };
 
         const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "low-power" });
         renderer.setSize(width, height);
@@ -2134,13 +2390,34 @@ export function renderDashboard(params: {
         controls.enableDamping = true;
         controls.dampingFactor = 0.08;
         controls.minDistance = 100;
-        controls.maxDistance = 600;
+        controls.maxDistance = 900;
+        controls.maxPolarAngle = Math.PI / 2.02;
 
-        const ambientLight = new THREE.AmbientLight(0x00ff41, 0.15);
+        const applyDefaultView = () => {
+          camera.position.copy(defaultView.position);
+          controls.target.copy(defaultView.target);
+          controls.update();
+        };
+        applyDefaultView();
+
+        if (resetViewBtn) {
+          resetViewBtn.addEventListener("click", applyDefaultView);
+        }
+
+        const ambientLight = new THREE.AmbientLight(0x00ff41, 0.18);
         scene.add(ambientLight);
-        const pointLight = new THREE.PointLight(0x00ff41, 1.5, 500);
-        pointLight.position.set(0, 50, 0);
+        const pointLight = new THREE.PointLight(ORCHESTRATOR_COLOR, 1.6, 700);
+        pointLight.position.set(sunPosition.x, sunPosition.y + 15, sunPosition.z);
         scene.add(pointLight);
+
+        const floorGrid = new THREE.GridHelper(1200, 48, FLOOR_GRID_MAJOR_COLOR, FLOOR_GRID_MINOR_COLOR);
+        floorGrid.position.y = FLOOR_Y;
+        const floorMaterials = Array.isArray(floorGrid.material) ? floorGrid.material : [floorGrid.material];
+        floorMaterials.forEach((material) => {
+          material.transparent = true;
+          material.opacity = 0.36;
+        });
+        scene.add(floorGrid);
 
         // Create orbit rings
         const createOrbitRing = (radius, y) => {
@@ -2151,37 +2428,43 @@ export function renderDashboard(params: {
             points.push(new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius));
           }
           const geometry = new THREE.BufferGeometry().setFromPoints(points);
-          const material = new THREE.LineBasicMaterial({ color: 0x003311, transparent: true, opacity: 0.3 });
+          const material = new THREE.LineBasicMaterial({ color: ORBIT_RING_COLOR, transparent: true, opacity: 0.35 });
           return new THREE.Line(geometry, material);
         };
-        [90, 145, 200].forEach((r, i) => scene.add(createOrbitRing(r, -i * 12)));
+        for (let level = 0; level < Math.max(1, maxAgentLevels); level++) {
+          const radius = baseOrbitRadius + level * orbitRadiusStep * 0.6;
+          scene.add(createOrbitRing(radius, ORCHESTRATOR_Y - level * 12));
+        }
 
         // Create central orchestrator
-        const orchestratorColor = 0x00ff41;
+        const orchestratorColor = ORCHESTRATOR_COLOR;
         const orchestratorRadius = 18;
         const orchestratorMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
+          new THREE.IcosahedronGeometry(orchestratorRadius, CORE_ICOSAHEDRON_DETAIL),
           new THREE.MeshStandardMaterial({
             color: orchestratorColor,
             emissive: orchestratorColor,
             emissiveIntensity: 0.8,
-            roughness: 0.2,
+            roughness: 0.25,
             metalness: 0.8,
+            flatShading: true,
           })
         );
-        orchestratorMesh.position.set(0, 0, 0);
+        orchestratorMesh.position.copy(sunPosition);
         scene.add(orchestratorMesh);
 
         const glow1 = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius * 1.6, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
+          new THREE.SphereGeometry(orchestratorRadius * 1.6, 12, 12),
           new THREE.MeshBasicMaterial({ color: orchestratorColor, transparent: true, opacity: 0.12 })
         );
+        glow1.position.copy(sunPosition);
         scene.add(glow1);
 
         const glow2 = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius * 2.4, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
+          new THREE.SphereGeometry(orchestratorRadius * 2.4, 12, 12),
           new THREE.MeshBasicMaterial({ color: orchestratorColor, transparent: true, opacity: 0.05 })
         );
+        glow2.position.copy(sunPosition);
         scene.add(glow2);
 
         const orchestratorNode = {
@@ -2199,8 +2482,8 @@ export function renderDashboard(params: {
         const pickableMeshes = [];
         meshToNode.set(orchestratorMesh, orchestratorNode);
 
-        // Build initial node tree (filter out stale completed nodes from visualization)
-        const { nodesById, roots } = buildNodeTree(filterVisibleNodes(graphData));
+        // Build initial node tree (sub-agents only; orchestrator is represented by the central sun)
+        const { nodesById } = buildNodeTree(buildDisplayedSubAgentNodes(graphData));
 
         // Create initial node meshes
         for (const node of nodesById.values()) {
@@ -2213,22 +2496,29 @@ export function renderDashboard(params: {
         }
 
         // Create initial connection lines
-        for (const root of roots) {
-          const line = createConnectionLine(0, 0, 0, root.x, root.y, root.z, 0.5, THREE);
-          scene.add(line);
-          root.connectionLine = line;
-        }
         for (const node of nodesById.values()) {
+          let fromX = sunPosition.x;
+          let fromY = sunPosition.y;
+          let fromZ = sunPosition.z;
           if (node.parent_run_id && nodesById.has(node.parent_run_id)) {
             const parent = nodesById.get(node.parent_run_id);
-            const line = createConnectionLine(parent.x, parent.y, parent.z, node.x, node.y, node.z, 0.35, THREE);
-            scene.add(line);
-            node.connectionLine = line;
+            fromX = parent.x;
+            fromY = parent.y;
+            fromZ = parent.z;
           }
+          const line = createAgentConnectionLine(fromX, fromY, fromZ, node.x, node.y, node.z, 0.45, THREE);
+          scene.add(line);
+          node.connectionLine = line;
         }
 
+        const executionNodesById = new Map();
+        applyConnectedNodeLayout(
+          { scene, executionNodesById, meshToNode, pickableMeshes, sunPosition, THREE },
+          filterConnectedExecutionNodes(executionNodeData),
+        );
+
         // Store scene state for live updates
-        sceneState = { scene, nodesById, meshToNode, pickableMeshes, THREE };
+        sceneState = { scene, nodesById, executionNodesById, meshToNode, pickableMeshes, sunPosition, THREE };
 
         // Raycaster for hover detection
         const raycaster = new THREE.Raycaster();
@@ -2344,9 +2634,9 @@ export function renderDashboard(params: {
                 if (node.connectionLine) {
                   const positions = node.connectionLine.geometry.attributes.position.array;
                   if (node.depth === 0) {
-                    positions[0] = 0;
-                    positions[1] = 0;
-                    positions[2] = 0;
+                    positions[0] = sunPosition.x;
+                    positions[1] = sunPosition.y;
+                    positions[2] = sunPosition.z;
                   } else if (node.parent_run_id && nodesById.has(node.parent_run_id)) {
                     const parent = nodesById.get(node.parent_run_id);
                     positions[0] = parent.x;
@@ -2358,6 +2648,20 @@ export function renderDashboard(params: {
                   positions[5] = node.z;
                   node.connectionLine.geometry.attributes.position.needsUpdate = true;
                 }
+              }
+            }
+
+            for (const node of executionNodesById.values()) {
+              if (!node.mesh || node.orbitRadius <= 0) continue;
+              node.orbitAngle += node.orbitSpeed * deltaFrames;
+              const newX = node.orbitCenterX + Math.cos(node.orbitAngle) * node.orbitRadius;
+              const newZ = node.orbitCenterZ + Math.sin(node.orbitAngle) * node.orbitRadius;
+              node.mesh.position.x = newX;
+              node.mesh.position.z = newZ;
+              node.x = newX;
+              node.z = newZ;
+              if (node.connectionLine) {
+                updateLineGeometry(node.connectionLine, sunPosition.x, sunPosition.y, sunPosition.z, node.x, node.y, node.z);
               }
             }
           }
@@ -2381,6 +2685,7 @@ export function renderDashboard(params: {
           document.removeEventListener("visibilitychange", onVisibilityChange);
           renderer.domElement.removeEventListener("mousemove", onMouseMove);
           renderer.domElement.removeEventListener("mouseleave", hideTooltip);
+          if (resetViewBtn) resetViewBtn.removeEventListener("click", applyDefaultView);
           if (rafId) cancelAnimationFrame(rafId);
           controls.dispose();
           scene.traverse((object) => {
