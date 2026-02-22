@@ -844,12 +844,13 @@ export function renderDashboard(params: {
       const FRAME_INTERVAL_MS = 1000 / TARGET_RENDER_FPS;
       const NODE_ICOSAHEDRON_DETAIL = 0;
       const CORE_ICOSAHEDRON_DETAIL = 1;
-      const FLOOR_GRID_MAJOR_COLOR = 0x00ff41;
-      const FLOOR_GRID_MINOR_COLOR = 0x004d1f;
+      const FLOOR_GRID_COLOR = 0x004d1f;
       const ORBIT_RING_COLOR = 0xffc44d;
       const ORCHESTRATOR_COLOR = 0xff8c2f;
+      const EXECUTION_NODE_COLOR = 0xc4ccd6;
       const ORCHESTRATOR_Y = 42;
       const FLOOR_Y = -66;
+      const ORTHO_VIEW_HALF_HEIGHT = 250;
       const ORBIT_RING_SEGMENTS = 48;
       let agentRefreshInFlight = false;
       let logsFetchInFlight = false;
@@ -2052,17 +2053,11 @@ export function renderDashboard(params: {
         stopped: 0xff0040,
         budget_exhausted: 0xffb800,
       };
-      const executionNodeStatusColors = {
-        online: 0x5fd7ff,
-        approved: 0x5fd7ff,
-        pending: 0x7f8ea3,
-        blocked: 0xff5f5f,
-        offline: 0x708090,
-      };
       const baseOrbitRadius = 90;
       const orbitRadiusStep = 55;
-      const connectedNodeOrbitRadius = baseOrbitRadius + Math.max(0, maxAgentLevels - 1) * orbitRadiusStep * 0.6 + 150;
-      const connectedNodeOrbitY = ORCHESTRATOR_Y + 8;
+      const orbitRingStep = orbitRadiusStep * 0.6;
+      const connectedNodeOrbitRadius = baseOrbitRadius + Math.max(1, maxAgentLevels) * orbitRingStep;
+      const connectedNodeOrbitY = ORCHESTRATOR_Y;
 
       // Helper to create a sub-agent mesh (low-poly orb)
       const createNodeMesh = (node, THREE) => {
@@ -2081,12 +2076,12 @@ export function renderDashboard(params: {
       };
 
       const createExecutionNodeMesh = (node, THREE) => {
-        const color = executionNodeStatusColors[node.status] ?? 0x5fd7ff;
+        const color = EXECUTION_NODE_COLOR;
         const geometry = new THREE.TorusGeometry(10, 2.5, 6, 14);
         const material = new THREE.MeshStandardMaterial({
           color,
-          emissive: color,
-          emissiveIntensity: 0.35,
+          emissive: 0x808891,
+          emissiveIntensity: 0.22,
           roughness: 0.38,
           metalness: 0.5,
           flatShading: true,
@@ -2114,9 +2109,9 @@ export function renderDashboard(params: {
         ];
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
         const material = new THREE.LineDashedMaterial({
-          color: 0x5fd7ff,
+          color: 0xc4ccd6,
           transparent: true,
-          opacity: 0.8,
+          opacity: 0.7,
           dashSize: 8,
           gapSize: 6,
         });
@@ -2142,11 +2137,11 @@ export function renderDashboard(params: {
       // Position a node in the solar system layout
       const positionNode = (node, centerX, centerY, centerZ, depth, siblingIndex, siblingCount) => {
         node.depth = depth;
-        const orbitRadius = baseOrbitRadius + depth * orbitRadiusStep * 0.6;
+        const orbitRadius = baseOrbitRadius + depth * orbitRingStep;
         const angleOffset = depth * 0.7;
         const angle = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2 + angleOffset;
         node.x = centerX + Math.cos(angle) * orbitRadius;
-        node.y = centerY - depth * 12;
+        node.y = centerY;
         node.z = centerZ + Math.sin(angle) * orbitRadius;
         if (typeof node.orbitAngle !== "number") {
           node.orbitAngle = angle;
@@ -2249,9 +2244,8 @@ export function renderDashboard(params: {
               existingNode.tooltipNode.started_at = node.connected_at;
               existingNode.tooltipNode.task = node.label || "Connected execution node";
             }
-            const color = executionNodeStatusColors[node.status] ?? 0x5fd7ff;
-            existingNode.mesh.material.color.setHex(color);
-            existingNode.mesh.material.emissive.setHex(color);
+            existingNode.mesh.material.color.setHex(EXECUTION_NODE_COLOR);
+            existingNode.mesh.material.emissive.setHex(0x808891);
           }
 
           existingNode.orbitRadius = connectedNodeOrbitRadius;
@@ -2375,10 +2369,19 @@ export function renderDashboard(params: {
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x050505);
 
-        const camera = new THREE.PerspectiveCamera(50, width / height, 1, 2000);
+        const cameraAspect = width / height;
+        const camera = new THREE.OrthographicCamera(
+          -ORTHO_VIEW_HALF_HEIGHT * cameraAspect,
+          ORTHO_VIEW_HALF_HEIGHT * cameraAspect,
+          ORTHO_VIEW_HALF_HEIGHT,
+          -ORTHO_VIEW_HALF_HEIGHT,
+          1,
+          2500,
+        );
         const defaultView = {
-          position: new THREE.Vector3(300, 235, 300),
-          target: new THREE.Vector3(0, ORCHESTRATOR_Y - 10, 0),
+          position: new THREE.Vector3(420, 420, 420),
+          target: new THREE.Vector3(0, ORCHESTRATOR_Y, 0),
+          zoom: 1.2,
         };
 
         const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "low-power" });
@@ -2389,13 +2392,15 @@ export function renderDashboard(params: {
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.08;
-        controls.minDistance = 100;
-        controls.maxDistance = 900;
+        controls.minZoom = 0.55;
+        controls.maxZoom = 3.4;
         controls.maxPolarAngle = Math.PI / 2.02;
 
         const applyDefaultView = () => {
           camera.position.copy(defaultView.position);
           controls.target.copy(defaultView.target);
+          camera.zoom = defaultView.zoom;
+          camera.updateProjectionMatrix();
           controls.update();
         };
         applyDefaultView();
@@ -2410,7 +2415,7 @@ export function renderDashboard(params: {
         pointLight.position.set(sunPosition.x, sunPosition.y + 15, sunPosition.z);
         scene.add(pointLight);
 
-        const floorGrid = new THREE.GridHelper(1200, 48, FLOOR_GRID_MAJOR_COLOR, FLOOR_GRID_MINOR_COLOR);
+        const floorGrid = new THREE.GridHelper(1200, 48, FLOOR_GRID_COLOR, FLOOR_GRID_COLOR);
         floorGrid.position.y = FLOOR_Y;
         const floorMaterials = Array.isArray(floorGrid.material) ? floorGrid.material : [floorGrid.material];
         floorMaterials.forEach((material) => {
@@ -2420,7 +2425,7 @@ export function renderDashboard(params: {
         scene.add(floorGrid);
 
         // Create orbit rings
-        const createOrbitRing = (radius, y) => {
+        const createOrbitRing = (radius, y, opacity = 0.35) => {
           const segments = ORBIT_RING_SEGMENTS;
           const points = [];
           for (let i = 0; i <= segments; i++) {
@@ -2428,13 +2433,14 @@ export function renderDashboard(params: {
             points.push(new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius));
           }
           const geometry = new THREE.BufferGeometry().setFromPoints(points);
-          const material = new THREE.LineBasicMaterial({ color: ORBIT_RING_COLOR, transparent: true, opacity: 0.35 });
+          const material = new THREE.LineBasicMaterial({ color: ORBIT_RING_COLOR, transparent: true, opacity });
           return new THREE.Line(geometry, material);
         };
         for (let level = 0; level < Math.max(1, maxAgentLevels); level++) {
-          const radius = baseOrbitRadius + level * orbitRadiusStep * 0.6;
-          scene.add(createOrbitRing(radius, ORCHESTRATOR_Y - level * 12));
+          const radius = baseOrbitRadius + level * orbitRingStep;
+          scene.add(createOrbitRing(radius, ORCHESTRATOR_Y, 0.32));
         }
+        scene.add(createOrbitRing(connectedNodeOrbitRadius, ORCHESTRATOR_Y, 0.45));
 
         // Create central orchestrator
         const orchestratorColor = ORCHESTRATOR_COLOR;
@@ -2592,7 +2598,11 @@ export function renderDashboard(params: {
           const w = container.clientWidth || width;
           const h = height;
           renderer.setSize(w, h);
-          camera.aspect = w / h;
+          const aspect = w / h;
+          camera.left = -ORTHO_VIEW_HALF_HEIGHT * aspect;
+          camera.right = ORTHO_VIEW_HALF_HEIGHT * aspect;
+          camera.top = ORTHO_VIEW_HALF_HEIGHT;
+          camera.bottom = -ORTHO_VIEW_HALF_HEIGHT;
           camera.updateProjectionMatrix();
         };
         window.addEventListener("resize", resize);
