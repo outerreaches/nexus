@@ -101,12 +101,90 @@ function envInt(name: string, fallback: number, opts: { min?: number; max?: numb
   return intVal;
 }
 
+type TelegramMessageEntity = {
+  type?: unknown;
+  offset?: unknown;
+  length?: unknown;
+  user?: { id?: unknown } | null;
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeTelegramUsername(value: string): string {
+  return value.replace(/^@+/, "").trim().toLowerCase();
+}
+
+function firstTelegramToken(raw: string): string {
+  const trimmed = raw.trimStart();
+  if (!trimmed) return "";
+  const match = trimmed.match(/^\S+/);
+  return match ? match[0] : "";
+}
+
+function parseTelegramCommandToken(token: string): { command: string; target: string | null } | null {
+  const match = /^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?$/.exec(token);
+  if (!match) return null;
+  return {
+    command: (match[1] ?? "").toLowerCase(),
+    target: match[2] ? match[2].toLowerCase() : null,
+  };
+}
+
+function isTelegramCommandForBot(token: string, commands: string[], botUsername: string): boolean {
+  const parsed = parseTelegramCommandToken(token);
+  if (!parsed) return false;
+  if (!commands.includes(parsed.command)) return false;
+  if (!parsed.target) return true;
+  const normalizedBot = normalizeTelegramUsername(botUsername);
+  return normalizedBot.length > 0 && parsed.target === normalizedBot;
+}
+
+function isNexusInvocation(raw: string, botUsername: string): boolean {
+  return isTelegramCommandForBot(firstTelegramToken(raw), ["nexus", "n"], botUsername);
+}
+
+function isPairInvocation(raw: string, botUsername: string): boolean {
+  return isTelegramCommandForBot(firstTelegramToken(raw), ["pair"], botUsername);
+}
+
+function hasBotMentionText(raw: string, botUsername: string): boolean {
+  const normalizedBot = normalizeTelegramUsername(botUsername);
+  if (!normalizedBot) return false;
+  return raw.toLowerCase().includes(`@${normalizedBot}`);
+}
+
+function hasBotMentionEntity(raw: string, entities: TelegramMessageEntity[], botUsername: string, botUserId: number): boolean {
+  const normalizedBot = normalizeTelegramUsername(botUsername);
+  for (const entity of entities) {
+    const type = typeof entity.type === "string" ? entity.type : "";
+    const offset = typeof entity.offset === "number" ? entity.offset : -1;
+    const length = typeof entity.length === "number" ? entity.length : -1;
+    if (!type || offset < 0 || length <= 0) continue;
+    const token = raw.slice(offset, offset + length);
+    if (!token) continue;
+
+    if (type === "mention" && normalizedBot && token.toLowerCase() === `@${normalizedBot}`) return true;
+    if (type === "text_mention" && typeof entity.user?.id === "number" && entity.user.id === botUserId) return true;
+    if (type === "bot_command" && offset === 0 && isNexusInvocation(token, botUsername)) return true;
+  }
+  return false;
+}
+
+function stripLeadingNexusCommand(raw: string, botUsername: string): string {
+  const trimmed = raw.trimStart();
+  if (!trimmed) return "";
+  const token = firstTelegramToken(trimmed);
+  if (!token || !isTelegramCommandForBot(token, ["nexus", "n"], botUsername)) return raw;
+  return trimmed.slice(token.length).trimStart();
+}
+
 function sanitizeMessageText(raw: string, botUsername: string): string {
-  return raw
-    .replace(botUsername ? new RegExp(`@${botUsername}\\b`, "g") : /$^/, "")
-    .replace(/^\/nexus\b\s*/i, "")
-    .replace(/^\/n\b\s*/i, "")
-    .trim();
+  const normalizedBot = normalizeTelegramUsername(botUsername);
+  const mentionPattern = normalizedBot ? new RegExp(`@${escapeRegExp(normalizedBot)}\\b`, "gi") : /$^/;
+  const withoutMentions = raw.replace(mentionPattern, "");
+  return stripLeadingNexusCommand(withoutMentions, botUsername).trim();
 }
 
 function normalizeInlineFilePath(line: string): string | null {
@@ -610,12 +688,20 @@ export async function startTelegramBot(deps: {
       const caption =
         typeof (message as { caption?: unknown }).caption === "string" ? String((message as { caption?: unknown }).caption) : "";
       const rawInputText = text || caption;
+      const entitiesRaw = text
+        ? ((message as { entities?: unknown }).entities ?? [])
+        : ((message as { caption_entities?: unknown }).caption_entities ?? []);
+      const entities = Array.isArray(entitiesRaw) ? (entitiesRaw as TelegramMessageEntity[]) : [];
       const userId = ctx.from?.id;
       const chatId = ctx.chat?.id;
       const messageId = typeof (message as { message_id?: unknown }).message_id === "number"
         ? Number((message as { message_id?: unknown }).message_id)
         : Date.now();
-      if (!userId || !chatId) return;
+      if (!chatId) return;
+      if (!userId) {
+        deps.log(`telegram: ignore chat_id=${chatId} reason=missing_user_id`);
+        return;
+      }
       deps.log(`telegram: msg user_id=${userId} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
 
       const allowed = isTelegramUserAllowed(deps.db, {
@@ -626,6 +712,10 @@ export async function startTelegramBot(deps: {
       if (!allowed) {
         deps.log(`telegram: ignore user_id=${userId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);
         if (tg.pairing.enabled && !isGroupChat(ctx)) {
+          if (!isPairInvocation(rawInputText, botUsername)) {
+            await ctx.reply("Pairing required. Send /pair in this DM to request a pairing code.");
+            return;
+          }
           const nowMs = Date.now();
           const req = createPairingRequest(deps.db, {
             channel: "telegram",
@@ -724,8 +814,9 @@ export async function startTelegramBot(deps: {
       }
 
       if (isGroupChat(ctx) && tg.requireMentionInGroups) {
-        const mentioned = botUsername ? rawInputText.includes(`@${botUsername}`) : false;
-        const invoked = rawInputText.startsWith("/nexus") || rawInputText.startsWith("/n");
+        const mentioned = hasBotMentionEntity(rawInputText, entities, botUsername, me.id)
+          || hasBotMentionText(rawInputText, botUsername);
+        const invoked = isNexusInvocation(rawInputText, botUsername);
         if (!mentioned && !invoked) {
           deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=require_mention`);
           return;

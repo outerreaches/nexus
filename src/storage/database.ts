@@ -60,12 +60,6 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       note TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS pairing_codes (
-      code TEXT PRIMARY KEY,
-      created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS pairing_requests (
       code TEXT PRIMARY KEY,
       channel TEXT NOT NULL,

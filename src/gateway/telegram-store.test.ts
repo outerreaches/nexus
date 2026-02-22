@@ -6,7 +6,13 @@ import path from "node:path";
 import test from "node:test";
 
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
-import { approvePairingRequest, createPairingRequest, getPairingRequest } from "./telegram-store.js";
+import {
+  approvePairingRequest,
+  approveTelegramPairingRequestAndAllowUser,
+  createPairingRequest,
+  getPairingRequest,
+  isTelegramUserAllowed,
+} from "./telegram-store.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-pairing-test-"));
@@ -132,5 +138,72 @@ test("createPairingRequest retries on pairing code collisions", async () => {
     } finally {
       (crypto as { randomBytes: typeof crypto.randomBytes }).randomBytes = originalRandomBytes;
     }
+  });
+});
+
+test("approveTelegramPairingRequestAndAllowUser allowlists user atomically", async () => {
+  await withDb(async (db) => {
+    const nowMs = 1_700_000_000_000;
+    const created = createPairingRequest(db, {
+      channel: "telegram",
+      senderKey: "1000000001",
+      nowMs,
+      ttlMs: 10 * 60_000,
+      maxPending: 3,
+    });
+    assert.equal(created.status, "created");
+
+    const approved = approveTelegramPairingRequestAndAllowUser(db, {
+      code: created.code.toLowerCase(),
+      nowMs: nowMs + 1000,
+      note: "paired via test",
+    });
+    assert.equal(approved.ok, true);
+    if (!approved.ok) return;
+    assert.equal(approved.userId, 1000000001);
+
+    const pending = getPairingRequest(db, {
+      channel: "telegram",
+      code: created.code,
+      nowMs: nowMs + 1000,
+    });
+    assert.equal(pending, null);
+
+    const allowed = isTelegramUserAllowed(db, {
+      userId: approved.userId,
+      staticAllowFrom: [],
+      allowAll: false,
+    });
+    assert.equal(allowed, true);
+  });
+});
+
+test("approveTelegramPairingRequestAndAllowUser rejects non-numeric sender keys", async () => {
+  await withDb(async (db) => {
+    const nowMs = 1_700_000_000_000;
+    const created = createPairingRequest(db, {
+      channel: "telegram",
+      senderKey: "abc123",
+      nowMs,
+      ttlMs: 10 * 60_000,
+      maxPending: 3,
+    });
+    assert.equal(created.status, "created");
+
+    const approved = approveTelegramPairingRequestAndAllowUser(db, {
+      code: created.code,
+      nowMs: nowMs + 1000,
+    });
+    assert.equal(approved.ok, false);
+    if (approved.ok) return;
+    assert.equal(approved.error, "sender_not_numeric");
+
+    const pending = getPairingRequest(db, {
+      channel: "telegram",
+      code: created.code,
+      nowMs: nowMs + 1000,
+    });
+    assert.ok(pending);
+    assert.equal(pending?.senderKey, "abc123");
   });
 });
