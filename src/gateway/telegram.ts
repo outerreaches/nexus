@@ -108,6 +108,16 @@ type TelegramMessageEntity = {
   user?: { id?: unknown } | null;
 };
 
+type TelegramSenderChat = {
+  id?: unknown;
+  type?: unknown;
+};
+
+function parseTelegramNumericId(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+  return value;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -692,25 +702,53 @@ export async function startTelegramBot(deps: {
         ? ((message as { entities?: unknown }).entities ?? [])
         : ((message as { caption_entities?: unknown }).caption_entities ?? []);
       const entities = Array.isArray(entitiesRaw) ? (entitiesRaw as TelegramMessageEntity[]) : [];
-      const userId = ctx.from?.id;
-      const chatId = ctx.chat?.id;
+      const userId = parseTelegramNumericId(ctx.from?.id);
+      const chatId = parseTelegramNumericId(ctx.chat?.id);
+      const senderChatRaw = (message as { sender_chat?: unknown }).sender_chat;
+      const senderChat = senderChatRaw && typeof senderChatRaw === "object" ? (senderChatRaw as TelegramSenderChat) : null;
+      const senderChatId = parseTelegramNumericId(senderChat?.id);
+      const senderChatType = typeof senderChat?.type === "string" ? senderChat.type : "unknown";
+      const actorId = userId ?? senderChatId;
+      const actorKind = userId ? "user" : senderChatId !== null ? `sender_chat:${senderChatType}` : "unknown";
+      const mentioned = hasBotMentionEntity(rawInputText, entities, botUsername, me.id)
+        || hasBotMentionText(rawInputText, botUsername);
+      const invoked = isNexusInvocation(rawInputText, botUsername);
       const messageId = typeof (message as { message_id?: unknown }).message_id === "number"
         ? Number((message as { message_id?: unknown }).message_id)
         : Date.now();
       if (!chatId) return;
-      if (!userId) {
-        deps.log(`telegram: ignore chat_id=${chatId} reason=missing_user_id`);
+      if (actorId === null) {
+        deps.log(`telegram: ignore chat_id=${chatId} reason=missing_sender_identity`);
+        if (isGroupChat(ctx) && tg.requireMentionInGroups && (mentioned || invoked)) {
+          await ctx.reply(
+            "I can't identify this sender in the group message. Send as your personal account (not anonymous/send-as-chat) and try again.",
+          );
+        }
         return;
       }
-      deps.log(`telegram: msg user_id=${userId} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
+      deps.log(`telegram: msg actor_id=${actorId} actor_kind=${actorKind} chat_id=${chatId} kind=${ctx.chat?.type ?? "unknown"}`);
 
       const allowed = isTelegramUserAllowed(deps.db, {
-        userId,
+        userId: actorId,
         staticAllowFrom: allowFrom,
         allowAll: allowAllUsers,
       });
       if (!allowed) {
-        deps.log(`telegram: ignore user_id=${userId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);
+        deps.log(`telegram: ignore actor_id=${actorId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);
+        if (!userId && senderChatId !== null && isGroupChat(ctx)) {
+          await ctx.reply(
+            [
+              "I can't authenticate anonymous/send-as-chat group messages by user allowlist.",
+              "Send as your personal account, or ask the operator to allowlist this group chat id:",
+              String(chatId),
+            ].join("\n"),
+          );
+          return;
+        }
+        if (!userId) {
+          await ctx.reply("Unable to authenticate this Telegram sender. Please DM this bot from your personal account and send /pair.");
+          return;
+        }
         if (tg.pairing.enabled && !isGroupChat(ctx)) {
           if (!isPairInvocation(rawInputText, botUsername)) {
             await ctx.reply("Pairing required. Send /pair in this DM to request a pairing code.");
@@ -774,6 +812,10 @@ export async function startTelegramBot(deps: {
       }
 
       if (/^\/(act|action)\b/i.test(text.trim())) {
+        if (!userId) {
+          await ctx.reply("Action responses must come from a personal Telegram account (not anonymous/send-as-chat).");
+          return;
+        }
         const parts = text.trim().split(/\s+/);
         const id = parts[1] ?? "";
         const response = parts.slice(2).join(" ").trim();
@@ -814,11 +856,8 @@ export async function startTelegramBot(deps: {
       }
 
       if (isGroupChat(ctx) && tg.requireMentionInGroups) {
-        const mentioned = hasBotMentionEntity(rawInputText, entities, botUsername, me.id)
-          || hasBotMentionText(rawInputText, botUsername);
-        const invoked = isNexusInvocation(rawInputText, botUsername);
         if (!mentioned && !invoked) {
-          deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=require_mention`);
+          deps.log(`telegram: ignore actor_id=${actorId} chat_id=${chatId} reason=require_mention`);
           return;
         }
       }
@@ -861,7 +900,7 @@ export async function startTelegramBot(deps: {
         const blackboardId = writeTelegramUploadBlackboardEntry({
           db: deps.db,
           chatId,
-          userId,
+          userId: actorId,
           messageId,
           sessionId,
           agentId: tg.agentId,
@@ -871,7 +910,7 @@ export async function startTelegramBot(deps: {
           files: ingest.stored,
         });
         deps.log(
-          `telegram: blackboard upload id=${blackboardId} user_id=${userId} chat_id=${chatId} files=${ingest.stored.length}`,
+          `telegram: blackboard upload id=${blackboardId} actor_id=${actorId} chat_id=${chatId} files=${ingest.stored.length}`,
         );
 
         if (ingest.rejected.length > 0) {
@@ -888,7 +927,7 @@ export async function startTelegramBot(deps: {
       }
 
       if (!dispatchText.trim()) {
-        deps.log(`telegram: ignore user_id=${userId} chat_id=${chatId} reason=empty_text`);
+        deps.log(`telegram: ignore actor_id=${actorId} chat_id=${chatId} reason=empty_text`);
         return;
       }
 
@@ -912,7 +951,7 @@ export async function startTelegramBot(deps: {
       }
 
       deps.log(
-        `telegram: dispatch chat_id=${chatId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
+        `telegram: dispatch chat_id=${chatId} actor_id=${actorId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
       );
       bot.api.sendChatAction(chatId, "typing").catch(() => { });
       const typingInterval = setInterval(() => {
