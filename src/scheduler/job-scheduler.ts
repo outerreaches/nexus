@@ -6,9 +6,7 @@ import { z } from "zod";
 
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
-import { buildTelegramDelta } from "../core/telegram-delta.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { getContextCursor, upsertContextCursor } from "../storage/context-cursors.js";
 import { archiveAndDeleteJob } from "../storage/job-archive.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
 import type { Tool, ToolContext } from "../core/tools.js";
@@ -34,8 +32,6 @@ const ToolCallSpec = z.object({
   tool: z.string(),
   args: z.record(z.any()),
 });
-
-type ContextMode = "full" | "delta" | "none";
 
 function envBool(name: string): boolean | null {
   const v = (process.env[name] ?? "").trim().toLowerCase();
@@ -86,13 +82,6 @@ function parseJobReportMarker(output: string): "none" | "update" | "urgent" | nu
   if (matches.length === 0) return null;
   const marker = matches[matches.length - 1]?.[1]?.toLowerCase();
   return marker === "none" || marker === "update" || marker === "urgent" ? marker : null;
-}
-
-function normalizeContextMode(value: unknown, fallback: ContextMode): ContextMode {
-  if (typeof value !== "string") return fallback;
-  const mode = value.trim().toLowerCase();
-  if (mode === "full" || mode === "delta" || mode === "none") return mode;
-  return fallback;
 }
 
 function isIdleOutput(output: string): boolean {
@@ -159,18 +148,6 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const notifyAgentOnFailure = envBool("NEXUS_SCHEDULER_NOTIFY_AGENT_ON_FAILURE") ?? deps.config.scheduler.notifyAgentOnFailure;
   const notifyCooldownMs = Math.max(0, envInt("NEXUS_SCHEDULER_NOTIFY_COOLDOWN_MS") ?? deps.config.scheduler.notifyCooldownMs);
   const schedulerAgentId = (process.env.NEXUS_SCHEDULER_AGENT_ID ?? "main").trim() || "main";
-  const schedulerContextMode = normalizeContextMode(process.env.NEXUS_SCHEDULER_CONTEXT_MODE, deps.config.scheduler.contextMode);
-  const deltaMaxMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_MAX_MESSAGES") ?? 20);
-  const deltaMaxChars = Math.max(800, envInt("NEXUS_SCHEDULER_DELTA_MAX_CHARS") ?? 12_000);
-  const deltaBootstrapMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_BOOTSTRAP_MESSAGES") ?? deltaMaxMessages);
-  const fullContextMaxMessages = Math.max(
-    deltaMaxMessages,
-    envInt("NEXUS_SCHEDULER_FULL_MAX_MESSAGES") ?? 80,
-  );
-  const fullContextMaxChars = Math.max(
-    deltaMaxChars,
-    envInt("NEXUS_SCHEDULER_FULL_MAX_CHARS") ?? 48_000,
-  );
   const notifyRunReports = envBool("NEXUS_SCHEDULER_NOTIFY_RUN_REPORTS")
     ?? envBool("NEXUS_SCHEDULER_NOTIFY_TELEGRAM_REPORTS")
     ?? true;
@@ -406,50 +383,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       const task = parsed.success
         ? parsed.data.task.trim()
         : (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
-      const contextMode = normalizeContextMode(raw?.contextMode, schedulerContextMode);
-      let contextBlock: string | null = null;
-      let deltaCursorUpdate: { telegramSessionId: string | null; lastMessageId: number | null } | null = null;
-
-      if (contextMode === "delta") {
-        const cursor = getContextCursor(deps.db, {
-          flowType: "job",
-          flowKey: job.id,
-          agentId: schedulerAgentId,
-        });
-        const delta = buildTelegramDelta(deps.db, {
-          agentId: schedulerAgentId,
-          cursor: cursor
-            ? {
-                telegramSessionId: cursor.telegramSessionId,
-                lastMessageId: cursor.lastMessageId,
-              }
-            : null,
-          options: {
-            maxMessages: deltaMaxMessages,
-            maxChars: deltaMaxChars,
-            bootstrapMessages: deltaBootstrapMessages,
-          },
-        });
-        contextBlock = delta.block;
-        deltaCursorUpdate = delta.nextCursor;
-        deps.log(
-          `scheduler: context_delta job=${job.id} source=${delta.stats.source} included=${delta.stats.includedMessages} omitted=${delta.stats.omittedMessages} hasMore=${delta.stats.hasMore} bytes=${delta.stats.bytes}`,
-        );
-      } else if (contextMode === "full") {
-        const full = buildTelegramDelta(deps.db, {
-          agentId: schedulerAgentId,
-          cursor: null,
-          options: {
-            maxMessages: fullContextMaxMessages,
-            maxChars: fullContextMaxChars,
-            bootstrapMessages: fullContextMaxMessages,
-          },
-        });
-        contextBlock = full.block;
-        deps.log(
-          `scheduler: context_full job=${job.id} source=${full.stats.source} included=${full.stats.includedMessages} omitted=${full.stats.omittedMessages} hasMore=${full.stats.hasMore} bytes=${full.stats.bytes}`,
-        );
-      }
+      deps.log(`scheduler: context_disabled job=${job.id} mode=agent_task`);
 
       const userTextParts = [
         "SCHEDULED JOB RUN",
@@ -459,14 +393,11 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         `scheduled_for=${new Date(scheduledFor).toISOString()}`,
         `cron=${job.cron}`,
         `timezone=${job.timezone}`,
-        `context_mode=${contextMode}`,
+        "context_mode=disabled",
         "",
         "Task:",
         task || "(no task specified)",
       ];
-      if (contextBlock) {
-        userTextParts.push("", contextBlock);
-      }
       userTextParts.push(
         "",
         "When you finish, end your response with exactly two lines:",
@@ -484,17 +415,6 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         text: userText,
         executionLane: "background",
       });
-
-      if (contextMode === "delta" && deltaCursorUpdate) {
-        upsertContextCursor(deps.db, {
-          flowType: "job",
-          flowKey: job.id,
-          agentId: schedulerAgentId,
-          telegramSessionId: deltaCursorUpdate.telegramSessionId,
-          lastMessageId: deltaCursorUpdate.lastMessageId,
-          updatedAt: Date.now(),
-        });
-      }
 
       const marker = parseJobStatusMarker(res.output);
       const ok = marker ? marker === "ok" : res.status === "complete";
@@ -845,7 +765,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars} fullMaxMessages=${fullContextMaxMessages} fullMaxChars=${fullContextMaxChars}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=disabled`,
   );
 
   // Start shortly after boot.

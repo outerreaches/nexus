@@ -1,9 +1,7 @@
 import { HEARTBEAT_FILENAME, readPersonalizationFile } from "../state/personalization.js";
 import type { NexusConfig } from "../state/config.js";
 import type { AgentService } from "../core/agent-service.js";
-import { buildTelegramDelta } from "../core/telegram-delta.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { getContextCursor, upsertContextCursor } from "../storage/context-cursors.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
 
 export type ProactiveDeps = {
@@ -153,9 +151,6 @@ export function startProactiveHeartbeat(
     0,
     envInt("NEXUS_PROACTIVE_MAX_SKIP_ACTIVE_TELEGRAM_MS") ?? 5 * 60_000,
   );
-  const deltaMaxMessages = Math.max(1, envInt("NEXUS_PROACTIVE_DELTA_MAX_MESSAGES") ?? 20);
-  const deltaMaxChars = Math.max(800, envInt("NEXUS_PROACTIVE_DELTA_MAX_CHARS") ?? 12_000);
-  const deltaBootstrapMessages = Math.max(1, envInt("NEXUS_PROACTIVE_DELTA_BOOTSTRAP_MESSAGES") ?? deltaMaxMessages);
 
   let stopped = false;
   let paused = false;
@@ -244,29 +239,7 @@ export function startProactiveHeartbeat(
         return;
       }
 
-      const cursor = getContextCursor(deps.db, {
-        flowType: "heartbeat",
-        flowKey: "gateway",
-        agentId,
-      });
-      const delta = buildTelegramDelta(deps.db, {
-        agentId,
-        cursor: cursor
-          ? {
-              telegramSessionId: cursor.telegramSessionId,
-              lastMessageId: cursor.lastMessageId,
-            }
-          : null,
-        options: {
-          maxMessages: deltaMaxMessages,
-          maxChars: deltaMaxChars,
-          bootstrapMessages: deltaBootstrapMessages,
-        },
-      });
-      const deltaBlock = delta.block;
-      deps.log(
-        `proactive: context_delta id=${tickId} source=${delta.stats.source} included=${delta.stats.includedMessages} omitted=${delta.stats.omittedMessages} hasMore=${delta.stats.hasMore} bytes=${delta.stats.bytes}`,
-      );
+      deps.log(`proactive: context_delta id=${tickId} source=disabled included=0 omitted=0 hasMore=false bytes=0`);
 
       const textParts = [
         "HEARTBEAT TICK",
@@ -282,9 +255,6 @@ export function startProactiveHeartbeat(
         `- When given new standing instructions about heartbeat behavior, append them to \`${deps.stateDir}/HEARTBEAT.md\` using absolute paths.`,
         `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: "${deps.stateDir}/NOTES.md", limit: 200 })\`.`,
       ];
-      if (deltaBlock) {
-        textParts.push("", deltaBlock);
-      }
       const text = textParts.join("\n");
 
       deps.log(`proactive: dispatch id=${tickId} channel=heartbeat key=gateway agent=${agentId}`);
@@ -292,21 +262,11 @@ export function startProactiveHeartbeat(
         channel: "heartbeat",
         channelKey: "gateway",
         agentId,
+        preset: "orchestrator",
         text,
         executionLane: "background",
         ephemeralSessionSave: "unless_action",
       });
-      if (delta.nextCursor) {
-        upsertContextCursor(deps.db, {
-          flowType: "heartbeat",
-          flowKey: "gateway",
-          agentId,
-          telegramSessionId: delta.nextCursor.telegramSessionId,
-          lastMessageId: delta.nextCursor.lastMessageId,
-          updatedAt: Date.now(),
-        });
-      }
-
       const idle = isIdleOutput(res.output);
       const hadToolActivity = (res.toolCallsUsed ?? 0) > 0;
       const tookMs = Date.now() - startMs;
@@ -384,7 +344,7 @@ export function startProactiveHeartbeat(
   };
 
   deps.log(
-    `proactive: enabled agent=${agentId} intervalMs=${intervalMs} maxIntervalMs=${maxIntervalMs} notifyTelegram=${notifyTelegram} pauseOnActiveTelegram=${pauseOnActiveTelegram} activeTelegramQuietMs=${activeTelegramQuietMs} inflightMaxAgeMs=${activeTelegramRunningMaxAgeMs} maxSkipActiveMs=${maxSkipActiveTelegramMs} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars}`,
+    `proactive: enabled agent=${agentId} intervalMs=${intervalMs} maxIntervalMs=${maxIntervalMs} notifyTelegram=${notifyTelegram} pauseOnActiveTelegram=${pauseOnActiveTelegram} activeTelegramQuietMs=${activeTelegramQuietMs} inflightMaxAgeMs=${activeTelegramRunningMaxAgeMs} maxSkipActiveMs=${maxSkipActiveTelegramMs} telegramContext=disabled`,
   );
 
   // Start shortly after boot.
