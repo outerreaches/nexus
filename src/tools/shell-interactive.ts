@@ -716,11 +716,11 @@ async function executeOnNode(params: {
 export const shellInteractive = defineTool({
   name: "shell_interactive",
   description: [
-    "Manage interactive tmux shell sessions with timed output reads.",
+    "Manage interactive tmux shell sessions locally or on connected Nexus nodes.",
     "Workflow: open → send+read cycles → close.",
     "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
     "read returns output since the given cursor; pass the nextCursor from the previous read/send response. Use waitMs to block until output appears.",
-    "Use target=node for remote Nexus nodes (requires nexus-shellctl allowlisted and firewallMode=transparent).",
+    "Defaults to local (target=local). Use target=node only when the task specifically requires running on a remote node (e.g. node-local files, GPU, node-specific services). Node shells require nodeId, nexus-shellctl allowlisted, and firewallMode=transparent.",
   ].join(" "),
   parameters: z.object({
     action: z.enum(["open", "send", "read", "list", "close", "interrupt"]),

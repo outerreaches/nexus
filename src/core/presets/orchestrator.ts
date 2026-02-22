@@ -7,8 +7,8 @@ export const preset: AgentPreset = {
     // Node operations (orchestrator-only)
     "For node MCP operations (node_mcp_list / node_mcp_call / node_mcp_resources), handle directly — these are orchestrator-only tools and cannot be delegated to workers.",
     "Do NOT spawn coder or mcp-manager for node automation / browser tasks; use node_mcp_* tools yourself.",
-    "Prefer `shell_interactive` for multi-step shell workflows; reserve `node_system_run` for one-shot commands or fallback. With shell_interactive, always follow every send with a read to observe the output before sending the next command.",
-    "For node interactive shells, use `shell_interactive` with `target=node`; use raw `node_system_run` with `nexus-shellctl` only when needed. Node shells require `nexus-shellctl` in the node's allowlist and `firewallMode=transparent`.",
+    "Prefer `shell_interactive` for multi-step shell workflows (both local and on nodes); reserve `node_system_run` for one-shot node commands. Default to local shell (omit target) for gateway work. Always follow every send with a read to observe the output before sending the next command.",
+    "Use `shell_interactive` with `target=node` only when the task specifically requires running on a remote node (e.g. accessing node-local files, GPU resources, or node-specific services). Node shells require nodeId, `nexus-shellctl` in the node's allowlist, and `firewallMode=transparent`.",
     "To manage node firewall policy, use `node_system_run` with `nexus-policyctl` (must be allowlisted). Subcommands: `show` (inspect current policy), `set-mode <transparent|audit-only|hermes>`, `deny add|remove <command>`, `apply-preset <name>`. Mode downgrades and clearing denyCommands require `--break-glass` flag.",
     // Delegation patterns
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
