@@ -52,8 +52,8 @@ const STOPWORDS = new Set([
   "simple", "basic", "main", "full", "local", "remote",
 ]);
 
-const MIN_KEYWORD_LENGTH = 3;
-const MAX_KEYWORDS = 8;
+const MIN_KEYWORD_LENGTH = 4;
+const MAX_KEYWORDS = 5;
 
 /**
  * Extract meaningful keywords from user message text.
@@ -115,7 +115,7 @@ export function extractKeywords(text: string): string[] {
 // ── Memory hint generation ──────────────────────────────────────────
 
 const MAX_HINTS_PER_MESSAGE = 3;
-const MAX_MATCH_THRESHOLD = 10; // Skip keywords matching too many memories (too generic to be useful)
+const MAX_MATCH_THRESHOLD = 5; // Skip keywords matching too many memories (too generic to be useful)
 
 // Cache memory keys for a short period to avoid repeated DB queries within a burst of messages.
 let _memoryKeysCache: Map<string, { keys: string[]; ts: number }> | null = null;
@@ -166,6 +166,7 @@ export function generateMemoryHints(opts: {
     if (memoryKeys.length > 0) {
       const words = messageText.toLowerCase().match(/\b[a-z][\w]{2,}\b/g) ?? [];
       for (const word of words) {
+        if (word.length < MIN_KEYWORD_LENGTH) continue;
         if (STOPWORDS.has(word) || boosted.has(word) || seenKeywords.has(word)) continue;
         const wordRegex = new RegExp(`\\b${word}\\b`, "i");
         if (memoryKeys.some((k) => wordRegex.test(k))) {
@@ -178,11 +179,20 @@ export function generateMemoryHints(opts: {
   const newKeywords = [...boosted].filter((k) => !seenKeywords.has(k));
   if (newKeywords.length === 0) return null;
 
+  // Use space-delimited patterns for better word-boundary matching.
+  // For keys: check common delimiters (space, hyphen, underscore, start/end).
+  // For value: require spaces around keyword to reduce substring noise.
+  // For tags_json: keep plain substring (tags are short identifiers).
   const countStmt = db.db.prepare(
     `SELECT COUNT(*) as cnt FROM memories
      WHERE agent_id = ? AND (
-       key LIKE ? ESCAPE '\\' OR 
-       value LIKE ? ESCAPE '\\' OR 
+       key = ? OR
+       key LIKE ? ESCAPE '\\' OR
+       key LIKE ? ESCAPE '\\' OR
+       key LIKE ? ESCAPE '\\' OR
+       key LIKE ? ESCAPE '\\' OR
+       key LIKE ? ESCAPE '\\' OR
+       (' ' || value || ' ') LIKE ? ESCAPE '\\' OR
        tags_json LIKE ? ESCAPE '\\'
      )`,
   );
@@ -191,9 +201,18 @@ export function generateMemoryHints(opts: {
 
   for (const keyword of newKeywords) {
     seenKeywords.add(keyword);
-    const escapedKeyword = keyword.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const pattern = `%${escapedKeyword}%`;
-    const row = countStmt.get(agentId, pattern, pattern, pattern) as { cnt: number } | undefined;
+    const esc = keyword.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const row = countStmt.get(
+      agentId,
+      keyword,            // exact key match
+      `${esc} %`,         // key starts with keyword + space
+      `% ${esc}`,         // key ends with space + keyword
+      `% ${esc} %`,       // keyword delimited by spaces in key
+      `%-${esc}%`,        // hyphenated in key (e.g. "ha-rollout")
+      `%${esc}-%`,        // hyphenated in key (e.g. "docker-compose")
+      `% ${esc} %`,       // space-delimited in value
+      `%${esc}%`,         // substring in tags (tags are short)
+    ) as { cnt: number } | undefined;
     if (row && row.cnt > 0 && row.cnt <= MAX_MATCH_THRESHOLD) {
       matches.push({ keyword, count: row.cnt });
     }
