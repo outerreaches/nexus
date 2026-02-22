@@ -30,6 +30,7 @@ import { webSearch } from "./web-search.js";
 import { imageAnalyze } from "./image-analyze.js";
 import { imageGenerate } from "./image-generate.js";
 import { imageEdit } from "./image-edit.js";
+import { videoAnalyze } from "./video-analyze.js";
 import { langextractExtract } from "./langextract.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { gatewayRestart } from "./lifecycle.js";
@@ -92,6 +93,7 @@ export function getBuiltInTools(): Tool[] {
     imageAnalyze,
     imageGenerate,
     imageEdit,
+    videoAnalyze,
     langextractExtract,
     shellExec,
     shellInteractive,

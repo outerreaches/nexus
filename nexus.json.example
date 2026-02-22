@@ -73,7 +73,8 @@
         "process-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "coder": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "trader": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
-        "analyst": { "primary": { "provider": "openrouter", "model": "google/gemini-3.1-pro-preview" }, "fallback": { "provider": "local" } }
+        "analyst": { "primary": { "provider": "openrouter", "model": "google/gemini-3.1-pro-preview" }, "fallback": { "provider": "local" } },
+        "graphic-designer": { "primary": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" } }
       },
       "byAgent": {},
       "localProvider": "local"

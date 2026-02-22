@@ -3,6 +3,8 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
+  videoModel: "google/gemini-3.1-pro-preview",
+  videoProvider: "openrouter",
   systemPrompt: [
     // Node operations (orchestrator-only)
     "For node MCP operations (node_mcp_list / node_mcp_call / node_mcp_resources), handle directly — these are orchestrator-only tools and cannot be delegated to workers.",
@@ -41,6 +43,7 @@ export const preset: AgentPreset = {
     "file_list",
     "shell_interactive",
     "image_analyze",
+    "video_analyze",
     // Swarm coordination
     "spawn_agent",
     "tool_catalog",

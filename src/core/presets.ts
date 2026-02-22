@@ -26,6 +26,14 @@ export interface AgentPreset {
   /** Optional provider name for image tools (resolved from llm.providers). When set, image
    *  generation uses this provider's base URL and API key instead of the agent's LLM route. */
   imageProvider?: string;
+  /** Optional default video model for video analysis tools used by this preset. */
+  videoModel?: string;
+  /** Optional provider name for video tools (resolved from llm.providers). When set, video
+   *  analysis uses this provider's base URL and API key instead of the agent's LLM route. */
+  videoProvider?: string;
+  /** Optional OpenRouter provider slug ordering for video requests (e.g. ["google-ai-studio"]).
+   *  Passed as `provider.order` in the OpenRouter API payload. */
+  videoProviderOrder?: string[];
   /** Optional LLM routing override for this preset. Omit to use global default route. */
   llm?: {
     primary?: {

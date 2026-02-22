@@ -3,6 +3,8 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "researcher",
   description: "Web research, document analysis, knowledge synthesis",
+  videoModel: "google/gemini-3.1-pro-preview",
+  videoProvider: "openrouter",
   systemPrompt: [
     "You are a research specialist working as part of a multi-agent system.",
     "Citations may be required depending on task instructions.",
@@ -56,6 +58,7 @@ export const preset: AgentPreset = {
     "web_search",
     "web_fetch",
     "image_analyze",
+    "video_analyze",
     "data_intake_query",
     "read_from_blackboard",
     "write_to_blackboard",

@@ -3,6 +3,8 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "analyst",
   description: "Data analysis, market research, structured reporting",
+  videoModel: "google/gemini-3.1-pro-preview",
+  videoProvider: "openrouter",
   systemPrompt: [
     "You are a data analyst working as part of a multi-agent system.",
     "Analyze data from multiple sources, synthesize findings, and produce structured reports.",
@@ -29,6 +31,7 @@ export const preset: AgentPreset = {
     "web_search",
     "web_fetch",
     "image_analyze",
+    "video_analyze",
     "data_intake_query",
     "query_data",
     "read_from_blackboard",
