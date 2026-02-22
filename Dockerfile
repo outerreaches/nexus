@@ -7,6 +7,7 @@ RUN apt-get update \
     curl \
     fonts-liberation \
     git \
+    openssh-client \
     tmux \
     python3 \
     python3-pip \
