@@ -277,6 +277,7 @@ export class AgentService {
 
       let llm: LLMClient = this.deps.llm;
       let llmConfig = this.deps.toolContext.llmConfig;
+      let trackCircuitBreaker = true;
       if (this.deps.modelRouter) {
         const route = this.deps.modelRouter.resolve({
           agentId: params.agentId,
@@ -288,8 +289,9 @@ export class AgentService {
           onLog: onRunnerLog,
         });
         llmConfig = route.primary;
+        trackCircuitBreaker = route.primaryProvider === "default";
         onRunnerLog?.(
-          `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model}`,
+          `llm_route mode=${route.mode} source=${route.source} primary=${route.primaryProvider}/${route.primary.model} breaker_track=${trackCircuitBreaker ? "yes" : "no"}`,
         );
       }
 
@@ -335,6 +337,7 @@ export class AgentService {
         toolContext,
         onLog: onRunnerLog,
         circuitBreaker: this.deps.circuitBreaker,
+        trackCircuitBreaker,
         transientRetries: this.deps.transientRetries ?? 5,
       });
 

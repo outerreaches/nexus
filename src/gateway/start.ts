@@ -1282,6 +1282,7 @@ export async function startGateway(
     isolatedWorkers.clear();
 
     await deactivateServices("shutdown");
+    circuitBreaker.dispose();
     nodeWsGateway.close();
     await http.stop();
     await mcp.close();

@@ -381,10 +381,22 @@ export class AgentRunner {
       toolContext: ToolContext;
       onLog?: (line: string) => void;
       circuitBreaker?: LlmCircuitBreaker;
+      /** Track circuit-breaker health for this run (default true). */
+      trackCircuitBreaker?: boolean;
       /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
       transientRetries?: number;
     },
   ) { }
+
+  private recordCircuitSuccess(): void {
+    if (this.deps.trackCircuitBreaker === false) return;
+    this.deps.circuitBreaker?.recordSuccess();
+  }
+
+  private recordCircuitFailure(err: unknown): void {
+    if (this.deps.trackCircuitBreaker === false) return;
+    this.deps.circuitBreaker?.recordFailure(err);
+  }
 
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     const baseMessages: ChatMessage[] = [{ role: "system", content: params.systemPrompt }, ...params.history];
@@ -461,13 +473,13 @@ export class AgentRunner {
           messages,
           tools: this.deps.tools,
         });
-        this.deps.circuitBreaker?.recordSuccess();
+        this.recordCircuitSuccess();
         content = res.content;
         toolCalls = res.toolCalls;
         const usageLine = formatLlmUsage(res.usage);
         if (usageLine) this.deps.onLog?.(`llm_usage mode=default ${usageLine}`);
       } catch (err) {
-        this.deps.circuitBreaker?.recordFailure(err);
+        this.recordCircuitFailure(err);
         const isTimeout = isLlmTimeoutError(err);
         const isTransient = isTransientLlmError(err);
 
@@ -503,7 +515,7 @@ export class AgentRunner {
                 messages,
                 tools: this.deps.tools,
               });
-              this.deps.circuitBreaker?.recordSuccess();
+              this.recordCircuitSuccess();
               content = retry.content;
               toolCalls = retry.toolCalls;
               const usageLine = formatLlmUsage(retry.usage);
@@ -512,7 +524,7 @@ export class AgentRunner {
               retrySucceeded = true;
               break;
             } catch (retryErr) {
-              this.deps.circuitBreaker?.recordFailure(retryErr);
+              this.recordCircuitFailure(retryErr);
               errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
               if (attempt === maxRetries || !isTransientLlmError(retryErr)) {
                 this.deps.onLog?.(`llm_error ${truncate(errMsg, 240)}`);
@@ -599,14 +611,14 @@ export class AgentRunner {
               tools: this.deps.tools,
               timeoutMode: "extended",
             });
-            this.deps.circuitBreaker?.recordSuccess();
+            this.recordCircuitSuccess();
             content = retry.content;
             toolCalls = retry.toolCalls;
             const usageLine = formatLlmUsage(retry.usage);
             if (usageLine) this.deps.onLog?.(`llm_usage mode=extended ${usageLine}`);
             this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
           } catch (retryErr) {
-            this.deps.circuitBreaker?.recordFailure(retryErr);
+            this.recordCircuitFailure(retryErr);
             const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
             this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
             const errorText = `LLM error: ${msg}`;

@@ -3,6 +3,11 @@ import { OpenAICompatClient, type OpenAICompatConfig } from "./openai-compat.js"
 
 export type CircuitState = "closed" | "open" | "half_open";
 
+const TRIP_ON_429 = (() => {
+  const raw = (process.env.NEXUS_CIRCUIT_BREAKER_TRIP_ON_429 ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+})();
+
 export type CircuitBreakerConfig = {
   /** Consecutive eligible failures before tripping open (default: 3). */
   failureThreshold?: number;
@@ -54,17 +59,32 @@ export class LlmCircuitBreaker {
 
   /** Record a failed LLM request. Only circuit-eligible errors count. */
   recordFailure(err: unknown): void {
-    if (!isCircuitBreakerEligibleError(err)) return;
+    const message = err instanceof Error ? err.message : String(err);
+    const eligible = isCircuitBreakerEligibleError(err);
+
+    // Any failed recovery probe should move us back to open so probing can continue.
+    if (this.state === "half_open") {
+      this.lastFailureMs = Date.now();
+      this.lastFailureMessage = message;
+      if (eligible) {
+        this.consecutiveFailures++;
+      }
+      this.onLog?.(
+        `circuit_breaker_probe_failure eligible=${eligible ? "yes" : "no"} err=${message.slice(0, 200)}`,
+      );
+      this.transition("open", eligible ? "probe_failure" : "probe_failure_non_eligible");
+      return;
+    }
+
+    if (!eligible) return;
     this.consecutiveFailures++;
     this.lastFailureMs = Date.now();
-    this.lastFailureMessage = err instanceof Error ? err.message : String(err);
+    this.lastFailureMessage = message;
     this.onLog?.(
       `circuit_breaker_failure count=${this.consecutiveFailures}/${this.failureThreshold} err=${this.lastFailureMessage.slice(0, 200)}`,
     );
     if (this.state === "closed" && this.consecutiveFailures >= this.failureThreshold) {
       this.transition("open", `${this.consecutiveFailures} consecutive failures`);
-    } else if (this.state === "half_open") {
-      this.transition("open", "probe_failure");
     }
   }
 
@@ -176,5 +196,5 @@ export function isCircuitBreakerEligibleError(err: unknown): boolean {
   if (!statusMatch) return false;
   const status = Number(statusMatch[1]);
   if (!Number.isFinite(status)) return false;
-  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  return status === 408 || status === 409 || status === 425 || (status === 429 && TRIP_ON_429) || status >= 500;
 }
