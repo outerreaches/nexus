@@ -234,7 +234,7 @@ export const videoAnalyze = defineTool({
     "Accepts a local file path, a public video URL (HTTP/HTTPS/YouTube), or a blackboard attachment reference. " +
     "Local files are base64-encoded and sent inline (keep files small, <=10 MB default). " +
     "URL support varies by provider: Vertex AI supports HTTP URLs; AI Studio supports YouTube URLs. " +
-    "Default model: google/gemini-3-pro via OpenRouter.",
+    "Default model: google/gemini-2.5-flash-lite via OpenRouter.",
   parameters: z.object({
     root: z.enum(FILE_ROOTS).default("state").describe("Root for `path` resolution (ignored when using url or blackboardId)."),
     path: z.string().optional().describe("Local video file path (relative to root, or absolute inside allowed roots)."),
