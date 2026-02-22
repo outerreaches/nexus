@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
+import { startRunReportBroker, type RunReportBroker } from "../core/run-report-broker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
 import { getPreset } from "../core/presets.js";
@@ -423,6 +424,7 @@ export async function startGateway(
 
   let proactive: ReturnType<typeof startProactiveHeartbeat> | null = null;
   const getProactiveStatus = () => proactive?.getStatus() ?? { enabled: false, lastTickAt: null, nextTickAt: null };
+  let runReportBroker: RunReportBroker | null = null;
   let federationOutboxWorker: FederationOutboxWorker | null = null;
   let webhookDeliveryWorker: WebhookDeliveryWorker | null = null;
   let federationGlobalDisabled = false;
@@ -769,6 +771,9 @@ export async function startGateway(
           notifyAgentOnFailure: config.scheduler.notifyAgentOnFailure,
           notifyCooldownMs: config.scheduler.notifyCooldownMs,
         },
+        runReports: {
+          enabled: runReportBroker !== null,
+        },
         proactive: getProactiveStatus(),
         mode: getMode(),
         activeLease: {
@@ -824,6 +829,17 @@ export async function startGateway(
         allowAll: process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1",
       };
     }
+
+    runReportBroker?.stop();
+    runReportBroker = startRunReportBroker({
+      db,
+      telegram: toolContext.telegram as any,
+      log,
+    });
+    void runReportBroker?.tick().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`run_report_broker: initial tick failed: ${message}`);
+    });
 
     // Process lifecycle callbacks (best-effort). Requires db + agent + telegram.
     processNotifier = startProcessNotifier({
@@ -943,6 +959,8 @@ export async function startGateway(
     federationOutboxWorker = null;
     webhookDeliveryWorker?.stop();
     webhookDeliveryWorker = null;
+    runReportBroker?.stop();
+    runReportBroker = null;
     processNotifier?.stop();
     processNotifier = null;
     scheduler?.stop();

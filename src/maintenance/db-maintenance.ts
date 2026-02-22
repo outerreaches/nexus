@@ -41,6 +41,7 @@ const ARCHIVE_TABLES = [
 const CLEANUP_TABLES = ["job_runs", "job_events"] as const;
 const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes", "federation_replay_nonces"] as const;
 const OPERATIONAL_CLEANUP_TABLES = [
+  "run_reports",
   "federation_outbox",
   "federation_events",
   "webhook_deliveries",
@@ -183,6 +184,22 @@ export async function runMaintenance(params: {
   }
 
   // 4. Operational retention cleanup for federation/webhook tables
+  try {
+    const runReportsDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM run_reports
+            WHERE status IN ('sent', 'dead_letter')
+              AND updated_at < ?`,
+      args: [cleanupCutoffMs],
+      dryRun,
+    });
+    result.operational.run_reports!.deleted = runReportsDeleted;
+  } catch (e) {
+    const msg = `operational run_reports: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
   try {
     const outboxDeleted = cleanupOperationalTable({
       db,

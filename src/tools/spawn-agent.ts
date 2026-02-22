@@ -18,6 +18,7 @@ import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
 import type { McpManager } from "../mcp/manager.js";
+import { enqueueRunReport, findNearestTelegramAncestorRun } from "../storage/run-reports.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -293,6 +294,17 @@ export const spawnAgent = defineTool({
         blackboardTitle,
       });
     }
+
+    queueSpawnRunReport({
+      ctx,
+      presetName: preset.name,
+      task: cleanedTask,
+      parent: parent ?? null,
+      sourceRunId: runId ?? null,
+      parentRunId: effectiveParentRunId,
+      sourceAgentId: agentId,
+      workerResult,
+    });
 
     return attachBlackboardReference(ctx, workerResult, blackboardTitle, spawnStartedAtMs);
   },
@@ -675,6 +687,14 @@ function envInt(name: string): number | null {
   return Math.floor(n);
 }
 
+function envBool(name: string): boolean | null {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "y") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "n") return false;
+  return null;
+}
+
 function envFloat(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
   if (!raw) return null;
@@ -751,6 +771,92 @@ function safeJsonParse(raw: string): unknown {
   } catch {
     return [];
   }
+}
+
+function queueSpawnRunReport(params: {
+  ctx: ToolContext;
+  presetName: string;
+  task: string;
+  parent: ToolContext["request"] | null;
+  sourceRunId: string | null;
+  parentRunId: string | null;
+  sourceAgentId: string;
+  workerResult: string;
+}): void {
+  const enabled = envBool("NEXUS_RUN_REPORT_BROKER_SPAWN") ?? true;
+  if (!enabled) return;
+  const parent = params.parent;
+  if (!parent) return;
+  // Interactive Telegram callers already receive the child output inline.
+  if ((parent.channel ?? "").trim().toLowerCase() === "telegram") return;
+
+  const db = params.ctx.db as NexusDatabase | undefined;
+  if (!db) return;
+
+  const parsed = safeJsonParse(params.workerResult);
+  const parsedObject =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  const status =
+    typeof parsedObject?.status === "string"
+      ? parsedObject.status.trim()
+      : params.workerResult.trimStart().startsWith("ERROR:")
+        ? "failed"
+        : "complete";
+  const output =
+    typeof parsedObject?.output === "string"
+      ? parsedObject.output
+      : params.workerResult;
+
+  const nearestTelegram = params.parentRunId
+    ? findNearestTelegramAncestorRun(db, params.parentRunId)
+    : null;
+  const targetChannelKey = nearestTelegram?.channelKey ?? null;
+
+  const body = [
+    `preset=${params.presetName}`,
+    `status=${status || "unknown"}`,
+    `source_run_id=${params.sourceRunId ?? "n/a"}`,
+    `parent_run_id=${params.parentRunId ?? "n/a"}`,
+    "",
+    "Task:",
+    truncate(params.task, 1000),
+    "",
+    "Output:",
+    truncate(output, 3200),
+  ].join("\n");
+
+  try {
+    enqueueRunReport(db, {
+      kind: "spawn_agent",
+      title: `SUB-AGENT REPORT (${params.presetName})`,
+      body,
+      sourceRunId: params.sourceRunId,
+      parentRunId: params.parentRunId,
+      sourceAgentId: params.sourceAgentId,
+      sourceChannel: parent.channel,
+      sourceChannelKey: parent.channelKey,
+      targetAgentId: parent.agentId,
+      targetChannel: "telegram",
+      targetChannelKey,
+      metadata: {
+        preset: params.presetName,
+        status,
+      },
+      nowMs: params.ctx.nowMs(),
+    });
+    params.ctx.log(
+      `spawn_agent: report queued preset=${params.presetName} sourceRun=${params.sourceRunId ?? "n/a"} target=${targetChannelKey ?? "latest_agent_session"}`,
+    );
+  } catch (err) {
+    params.ctx.log(`spawn_agent: report queue failed err=${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
 }
 
 function didRunApplyDeploy(messages: ChatMessage[]): boolean {

@@ -10,6 +10,7 @@ import { buildTelegramDelta } from "../core/telegram-delta.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getContextCursor, upsertContextCursor } from "../storage/context-cursors.js";
 import { archiveAndDeleteJob } from "../storage/job-archive.js";
+import { enqueueRunReport } from "../storage/run-reports.js";
 import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
 
@@ -87,6 +88,13 @@ function normalizeContextMode(value: unknown, fallback: ContextMode): ContextMod
   return fallback;
 }
 
+function isIdleOutput(output: string): boolean {
+  const t = output.trim();
+  if (!t) return true;
+  const upper = t.toUpperCase();
+  return upper === "IDLE" || upper === "NOOP" || upper === "NO-OP";
+}
+
 function computeFailureBackoffMs(consecutiveFailures: number): number {
   const minutes = Math.min(60, Math.max(1, 2 ** Math.max(0, consecutiveFailures - 1)));
   return minutes * 60_000;
@@ -148,6 +156,16 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const deltaMaxMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_MAX_MESSAGES") ?? 20);
   const deltaMaxChars = Math.max(800, envInt("NEXUS_SCHEDULER_DELTA_MAX_CHARS") ?? 12_000);
   const deltaBootstrapMessages = Math.max(1, envInt("NEXUS_SCHEDULER_DELTA_BOOTSTRAP_MESSAGES") ?? deltaMaxMessages);
+  const fullContextMaxMessages = Math.max(
+    deltaMaxMessages,
+    envInt("NEXUS_SCHEDULER_FULL_MAX_MESSAGES") ?? 80,
+  );
+  const fullContextMaxChars = Math.max(
+    deltaMaxChars,
+    envInt("NEXUS_SCHEDULER_FULL_MAX_CHARS") ?? 48_000,
+  );
+  const notifyTelegramReports = envBool("NEXUS_SCHEDULER_NOTIFY_TELEGRAM_REPORTS") ?? true;
+  const reportOutputMaxChars = Math.max(600, envInt("NEXUS_SCHEDULER_REPORT_MAX_OUTPUT_CHARS") ?? 3_200);
 
   const leaseId = `${process.pid}:${randomId("L")}`;
   const scheduleCache = new Map<string, { schedule: ReturnType<typeof parseCron>; timeZone: string }>();
@@ -286,11 +304,82 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     deps.db.db.prepare("UPDATE jobs SET last_notified_at = ?, updated_at = ? WHERE id = ?").run(nowMs, nowMs, job.id);
   };
 
+  const notifyTelegramReport = async (params: {
+    job: JobRow;
+    runId: string;
+    agentRunId: string | null;
+    scheduledFor: number;
+    endedAt: number;
+    status: "success" | "failed";
+    output: string;
+    idle: boolean;
+  }) => {
+    if (!notifyTelegramReports) return;
+    if (params.idle && params.status === "success") return;
+
+    const statusLabel = params.status === "success" ? "ok" : "error";
+    const message = [
+      "SCHEDULED AGENT TASK REPORT",
+      `job_id=${params.job.id}`,
+      `job_name=${params.job.name}`,
+      `run_id=${params.runId}`,
+      `agent_run_id=${params.agentRunId ?? "n/a"}`,
+      `status=${statusLabel}`,
+      `scheduled_for=${new Date(params.scheduledFor).toISOString()}`,
+      `ended_at=${new Date(params.endedAt).toISOString()}`,
+      "",
+      "Output:",
+      truncate(params.output, reportOutputMaxChars),
+    ].join("\n");
+
+    try {
+      const reportId = enqueueRunReport(deps.db, {
+        kind: "agent_task",
+        title: "SCHEDULED AGENT TASK REPORT",
+        body: message,
+        sourceRunId: params.agentRunId,
+        sourceAgentId: schedulerAgentId,
+        sourceChannel: "job",
+        sourceChannelKey: params.job.id,
+        targetAgentId: schedulerAgentId,
+        targetChannel: "telegram",
+        metadata: {
+          jobId: params.job.id,
+          runId: params.runId,
+          status: params.status,
+          idle: params.idle,
+        },
+        nowMs: params.endedAt,
+      });
+      insertEvent({
+        jobId: params.job.id,
+        runId: params.runId,
+        agentId: schedulerAgentId,
+        kind: "report_queued",
+        payload: { reportId, status: params.status, idle: params.idle },
+        nowMs: params.endedAt,
+      });
+    } catch (err) {
+      deps.log(
+        `scheduler: report queue failed job=${params.job.id} run=${params.runId} err=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
   const executeJobLogic = async (
     job: JobRow,
     runId: string,
     scheduledFor: number,
-  ): Promise<{ status: string; output: string; error: string | null; toolCalls: number | null; iterations: number | null }> => {
+  ): Promise<{
+    status: string;
+    output: string;
+    error: string | null;
+    toolCalls: number | null;
+    iterations: number | null;
+    mode: "agent_task" | "script" | "tool_call";
+    idle: boolean;
+    agentRunId: string | null;
+  }> => {
     const raw = safeJsonParse(job.spec_json) as any;
     const mode = raw?.mode || "agent_task";
 
@@ -300,7 +389,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         ? parsed.data.task.trim()
         : (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
       const contextMode = normalizeContextMode(raw?.contextMode, schedulerContextMode);
-      let deltaBlock: string | null = null;
+      let contextBlock: string | null = null;
       let deltaCursorUpdate: { telegramSessionId: string | null; lastMessageId: number | null } | null = null;
 
       if (contextMode === "delta") {
@@ -323,10 +412,24 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
             bootstrapMessages: deltaBootstrapMessages,
           },
         });
-        deltaBlock = delta.block;
+        contextBlock = delta.block;
         deltaCursorUpdate = delta.nextCursor;
         deps.log(
           `scheduler: context_delta job=${job.id} source=${delta.stats.source} included=${delta.stats.includedMessages} omitted=${delta.stats.omittedMessages} hasMore=${delta.stats.hasMore} bytes=${delta.stats.bytes}`,
+        );
+      } else if (contextMode === "full") {
+        const full = buildTelegramDelta(deps.db, {
+          agentId: schedulerAgentId,
+          cursor: null,
+          options: {
+            maxMessages: fullContextMaxMessages,
+            maxChars: fullContextMaxChars,
+            bootstrapMessages: fullContextMaxMessages,
+          },
+        });
+        contextBlock = full.block;
+        deps.log(
+          `scheduler: context_full job=${job.id} source=${full.stats.source} included=${full.stats.includedMessages} omitted=${full.stats.omittedMessages} hasMore=${full.stats.hasMore} bytes=${full.stats.bytes}`,
         );
       }
 
@@ -343,8 +446,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         "Task:",
         task || "(no task specified)",
       ];
-      if (deltaBlock) {
-        userTextParts.push("", deltaBlock);
+      if (contextBlock) {
+        userTextParts.push("", contextBlock);
       }
       userTextParts.push(
         "",
@@ -362,7 +465,6 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         preset: "orchestrator",
         text: userText,
         executionLane: "background",
-        ...(contextMode === "full" ? { historyScope: { mode: "latest_telegram_for_agent" as const } } : {}),
       });
 
       if (contextMode === "delta" && deltaCursorUpdate) {
@@ -384,6 +486,9 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         error: ok ? null : res.output,
         toolCalls: res.toolCallsUsed ?? null,
         iterations: res.iterationsUsed ?? null,
+        mode: "agent_task",
+        idle: isIdleOutput(res.output),
+        agentRunId: res.runId ?? null,
       };
     }
 
@@ -401,6 +506,9 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         error: null,
         toolCalls: 0,
         iterations: 0,
+        mode: "script",
+        idle: false,
+        agentRunId: null,
       };
     }
 
@@ -428,6 +536,9 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         error: isToolError ? outputTrimmed : null,
         toolCalls: 1,
         iterations: 0,
+        mode: "tool_call",
+        idle: false,
+        agentRunId: null,
       };
     }
 
@@ -500,6 +611,19 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           "UPDATE job_runs SET ended_at = ?, status = ?, error = ?, output = ?, tool_calls_used = ?, iterations_used = ? WHERE id = ?",
         )
         .run(endedAt, res.status, errText, res.output, res.toolCalls, res.iterations, runId);
+
+      if (res.mode === "agent_task") {
+        await notifyTelegramReport({
+          job,
+          runId,
+          agentRunId: res.agentRunId,
+          scheduledFor,
+          endedAt,
+          status: res.status === "success" ? "success" : "failed",
+          output: res.output,
+          idle: res.idle,
+        });
+      }
 
       if (ok) {
         if (oneShot) {
@@ -698,7 +822,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyTelegramReports=${notifyTelegramReports} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars} fullMaxMessages=${fullContextMaxMessages} fullMaxChars=${fullContextMaxChars}`,
   );
 
   // Start shortly after boot.

@@ -519,6 +519,38 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
 
     -- ───────────────────────────────────────────────────────────────────────
+    -- Run reports (durable background reporting outbox)
+    -- ───────────────────────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS run_reports (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL, -- heartbeat | agent_task | spawn_agent | ...
+      source_run_id TEXT,
+      parent_run_id TEXT,
+      source_agent_id TEXT,
+      source_channel TEXT,
+      source_channel_key TEXT,
+      target_agent_id TEXT,
+      target_channel TEXT NOT NULL DEFAULT 'telegram',
+      target_channel_key TEXT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | dead_letter
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER,
+      next_attempt_at INTEGER,
+      last_error TEXT,
+      delivered_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_run_reports_status_next ON run_reports(status, next_attempt_at, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_run_reports_parent ON run_reports(parent_run_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_run_reports_source_run ON run_reports(source_run_id, created_at DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
     -- Context cursor tracking (delta injection checkpoints)
     -- ───────────────────────────────────────────────────────────────────────
 
