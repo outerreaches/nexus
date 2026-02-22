@@ -853,6 +853,9 @@ export function renderDashboard(params: {
       const FLOOR_Y = -66;
       const ORTHO_VIEW_HALF_HEIGHT = 250;
       const ORBIT_RING_SEGMENTS = 48;
+      const AGENT_ORB_SPACING_PADDING = 3;
+      const AGENT_RING_FILL_RATIO = 0.9;
+      const AGENT_COLLISION_RELAXATION_PASSES = 6;
       let agentRefreshInFlight = false;
       let logsFetchInFlight = false;
       const cliState = {
@@ -2066,11 +2069,20 @@ export function renderDashboard(params: {
         const variation = (seed % 7) * 0.00001;
         return baseSpeed * keplerFalloff + variation;
       };
+      const computeAgentOrbRadius = (depth) => Math.max(5, 9 - depth * 1.2);
+      const computeMinimumAgentAngleSpacing = (depth, ringCount) => {
+        const orbitRadius = baseOrbitRadius + depth * orbitRingStep;
+        const orbDiameter = computeAgentOrbRadius(depth) * 2;
+        const desiredLinearSpacing = orbDiameter + AGENT_ORB_SPACING_PADDING;
+        const desiredAngle = desiredLinearSpacing / Math.max(1, orbitRadius);
+        const maxFeasibleAngle = ((Math.PI * 2) * AGENT_RING_FILL_RATIO) / Math.max(1, ringCount);
+        return Math.max(0.035, Math.min(desiredAngle, maxFeasibleAngle));
+      };
 
       // Helper to create a sub-agent mesh (low-poly orb)
       const createNodeMesh = (node, THREE) => {
         const color = statusColors[node.status] ?? 0x00aa2a;
-        const radius = Math.max(5, 9 - node.depth * 1.2);
+        const radius = computeAgentOrbRadius(node.depth);
         const geometry = new THREE.IcosahedronGeometry(radius, NODE_ICOSAHEDRON_DETAIL);
         const material = new THREE.MeshStandardMaterial({
           color,
@@ -2171,7 +2183,11 @@ export function renderDashboard(params: {
         } else {
           const parentAngle =
             typeof parent.orbitAngle === "number" ? parent.orbitAngle : Math.atan2(parent.z ?? 0, parent.x ?? 0);
-          const clusterSpan = Math.min(1.1, 0.32 + Math.max(0, siblingCount - 1) * 0.11);
+          const minSiblingAngle = computeMinimumAgentAngleSpacing(depth, siblingCount);
+          const baseClusterSpan = 0.32 + Math.max(0, siblingCount - 1) * 0.11;
+          const requiredClusterSpan =
+            siblingCount <= 1 ? 0 : (minSiblingAngle * Math.max(0, siblingCount - 1)) / 2;
+          const clusterSpan = Math.min(Math.PI - 0.12, Math.max(baseClusterSpan, requiredClusterSpan));
           const rel = siblingCount <= 1 ? 0 : (siblingIndex / (siblingCount - 1)) * 2 - 1;
           const clustered = parentAngle + rel * clusterSpan;
           angle = typeof node.orbitAngle === "number" ? node.orbitAngle : clustered;
@@ -2188,6 +2204,45 @@ export function renderDashboard(params: {
         node.orbitCenterX = 0;
         node.orbitCenterY = ORCHESTRATOR_Y;
         node.orbitCenterZ = 0;
+      };
+
+      const enforceSubAgentOrbSpacing = (nodesById) => {
+        const nodesByDepth = new Map();
+        for (const node of nodesById.values()) {
+          if (typeof node.depth !== "number" || node.depth < 0 || typeof node.orbitAngle !== "number") continue;
+          const depthNodes = nodesByDepth.get(node.depth) ?? [];
+          depthNodes.push(node);
+          nodesByDepth.set(node.depth, depthNodes);
+        }
+
+        for (const [depth, ringNodes] of nodesByDepth.entries()) {
+          if (ringNodes.length <= 1) continue;
+          const minAngleSpacing = computeMinimumAgentAngleSpacing(depth, ringNodes.length);
+          for (let pass = 0; pass < AGENT_COLLISION_RELAXATION_PASSES; pass++) {
+            let changed = false;
+            ringNodes.sort((a, b) => a.orbitAngle - b.orbitAngle);
+            for (let i = 0; i < ringNodes.length; i++) {
+              const left = ringNodes[i];
+              const right = ringNodes[(i + 1) % ringNodes.length];
+              const rightAngle = i === ringNodes.length - 1 ? right.orbitAngle + Math.PI * 2 : right.orbitAngle;
+              const gap = rightAngle - left.orbitAngle;
+              if (gap >= minAngleSpacing) continue;
+              const push = (minAngleSpacing - gap) * 0.5;
+              left.orbitAngle = normalizeAngle(left.orbitAngle - push);
+              right.orbitAngle = normalizeAngle(right.orbitAngle + push);
+              changed = true;
+            }
+            if (!changed) break;
+          }
+
+          const orbitRadius = baseOrbitRadius + depth * orbitRingStep;
+          for (const node of ringNodes) {
+            node.x = Math.cos(node.orbitAngle) * orbitRadius;
+            node.y = ORCHESTRATOR_Y;
+            node.z = Math.sin(node.orbitAngle) * orbitRadius;
+            node.orbitRadius = orbitRadius;
+          }
+        }
       };
 
       // Build node tree and position nodes
@@ -2235,6 +2290,7 @@ export function renderDashboard(params: {
           });
           positionChildren(root, 0);
         });
+        enforceSubAgentOrbSpacing(nodesById);
         return { nodesById, roots };
       };
 
