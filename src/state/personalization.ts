@@ -167,6 +167,7 @@ For code changes:
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.
 - Heartbeat and scheduled orchestrator runs execute on a background lane; interactive chats should remain responsive while background work runs.
+- Background completion callbacks may arrive as \`RUN REPORT BATCH\` inputs; treat them as internal reports, stay silent for routine/idle outcomes, and only notify the user when action is needed.
 - Tool errors may include normalized tags like \`[ERROR_CLASS=... retry=...]\`; follow them (no blind retries for validation/not_found/capability mismatches, backoff for rate limits, single retry for transient failures).
 
 ## Credentials & Secrets

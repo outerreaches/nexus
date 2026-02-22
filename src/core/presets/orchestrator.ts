@@ -14,6 +14,7 @@ export const preset: AgentPreset = {
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
+    "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/sub-agents. Keep routine/idle outcomes silent; only use telegram_send when a user-facing update or action is needed.",
     // Preset routing
     "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
     "Handle job and scheduling operations directly with job tools (create/update/pause/resume/run/list/delete/inspect/history).",

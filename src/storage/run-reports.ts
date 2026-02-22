@@ -67,7 +67,7 @@ function mapRow(row: RunReportRow): RunReportRecord {
     sourceChannel: row.source_channel ?? null,
     sourceChannelKey: row.source_channel_key ?? null,
     targetAgentId: row.target_agent_id ?? null,
-    targetChannel: row.target_channel || "telegram",
+    targetChannel: row.target_channel || "agent",
     targetChannelKey: row.target_channel_key ?? null,
     title: row.title,
     body: row.body,
@@ -119,7 +119,7 @@ export function enqueueRunReport(
   const kind = params.kind.trim() || "unknown";
   const title = params.title.trim() || "Run Report";
   const body = params.body.trim() || "(empty)";
-  const targetChannel = params.targetChannel?.trim() || "telegram";
+  const targetChannel = params.targetChannel?.trim() || "agent";
   const metadataJson = JSON.stringify(params.metadata ?? {});
 
   db.db

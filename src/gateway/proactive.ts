@@ -347,8 +347,9 @@ export function startProactiveHeartbeat(
           sourceChannel: "heartbeat",
           sourceChannelKey: "gateway",
           targetAgentId: agentId,
-          targetChannel: "telegram",
-          metadata: { tickId, status: res.status },
+          targetChannel: "agent",
+          targetChannelKey: "heartbeat:gateway",
+          metadata: { tickId, status: res.status, targetPreset: "orchestrator" },
           nowMs: Date.now(),
         });
         deps.log(`proactive: report_queued id=${tickId} kind=heartbeat runId=${res.runId ?? "n/a"}`);
@@ -369,8 +370,9 @@ export function startProactiveHeartbeat(
           sourceChannel: "heartbeat",
           sourceChannelKey: "gateway",
           targetAgentId: agentId,
-          targetChannel: "telegram",
-          metadata: { tickId },
+          targetChannel: "agent",
+          targetChannelKey: "heartbeat:gateway",
+          metadata: { tickId, targetPreset: "orchestrator" },
           nowMs: Date.now(),
         });
         deps.log(`proactive: report_queued id=${tickId} kind=heartbeat_error`);

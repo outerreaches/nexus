@@ -18,7 +18,7 @@ import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
 import type { McpManager } from "../mcp/manager.js";
-import { enqueueRunReport, findNearestTelegramAncestorRun } from "../storage/run-reports.js";
+import { enqueueRunReport } from "../storage/run-reports.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -787,7 +787,7 @@ function queueSpawnRunReport(params: {
   if (!enabled) return;
   const parent = params.parent;
   if (!parent) return;
-  // Interactive Telegram callers already receive the child output inline.
+  // Interactive Telegram callers already receive the child output inline from spawn_agent itself.
   if ((parent.channel ?? "").trim().toLowerCase() === "telegram") return;
 
   const db = params.ctx.db as NexusDatabase | undefined;
@@ -809,10 +809,9 @@ function queueSpawnRunReport(params: {
       ? parsedObject.output
       : params.workerResult;
 
-  const nearestTelegram = params.parentRunId
-    ? findNearestTelegramAncestorRun(db, params.parentRunId)
-    : null;
-  const targetChannelKey = nearestTelegram?.channelKey ?? null;
+  const targetChannelKey = params.parentRunId
+    ? `parent_run:${params.parentRunId}`
+    : `channel:${parent.channel ?? "unknown"}:${parent.channelKey ?? "unknown"}`;
 
   const body = [
     `preset=${params.presetName}`,
@@ -838,16 +837,17 @@ function queueSpawnRunReport(params: {
       sourceChannel: parent.channel,
       sourceChannelKey: parent.channelKey,
       targetAgentId: parent.agentId,
-      targetChannel: "telegram",
+      targetChannel: "agent",
       targetChannelKey,
       metadata: {
         preset: params.presetName,
         status,
+        targetPreset: typeof parent.preset === "string" ? parent.preset : null,
       },
       nowMs: params.ctx.nowMs(),
     });
     params.ctx.log(
-      `spawn_agent: report queued preset=${params.presetName} sourceRun=${params.sourceRunId ?? "n/a"} target=${targetChannelKey ?? "latest_agent_session"}`,
+      `spawn_agent: report queued preset=${params.presetName} sourceRun=${params.sourceRunId ?? "n/a"} targetAgent=${parent.agentId}`,
     );
   } catch (err) {
     params.ctx.log(`spawn_agent: report queue failed err=${err instanceof Error ? err.message : String(err)}`);

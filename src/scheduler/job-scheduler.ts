@@ -81,6 +81,13 @@ function parseJobStatusMarker(output: string): "ok" | "error" | null {
   return marker === "ok" || marker === "error" ? marker : null;
 }
 
+function parseJobReportMarker(output: string): "none" | "update" | "urgent" | null {
+  const matches = [...output.matchAll(/^\s*JOB_REPORT:\s*(none|update|urgent)\s*$/gim)];
+  if (matches.length === 0) return null;
+  const marker = matches[matches.length - 1]?.[1]?.toLowerCase();
+  return marker === "none" || marker === "update" || marker === "urgent" ? marker : null;
+}
+
 function normalizeContextMode(value: unknown, fallback: ContextMode): ContextMode {
   if (typeof value !== "string") return fallback;
   const mode = value.trim().toLowerCase();
@@ -164,7 +171,9 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     deltaMaxChars,
     envInt("NEXUS_SCHEDULER_FULL_MAX_CHARS") ?? 48_000,
   );
-  const notifyTelegramReports = envBool("NEXUS_SCHEDULER_NOTIFY_TELEGRAM_REPORTS") ?? true;
+  const notifyRunReports = envBool("NEXUS_SCHEDULER_NOTIFY_RUN_REPORTS")
+    ?? envBool("NEXUS_SCHEDULER_NOTIFY_TELEGRAM_REPORTS")
+    ?? true;
   const reportOutputMaxChars = Math.max(600, envInt("NEXUS_SCHEDULER_REPORT_MAX_OUTPUT_CHARS") ?? 3_200);
 
   const leaseId = `${process.pid}:${randomId("L")}`;
@@ -304,7 +313,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     deps.db.db.prepare("UPDATE jobs SET last_notified_at = ?, updated_at = ? WHERE id = ?").run(nowMs, nowMs, job.id);
   };
 
-  const notifyTelegramReport = async (params: {
+  const queueAgentTaskReport = async (params: {
     job: JobRow;
     runId: string;
     agentRunId: string | null;
@@ -313,9 +322,13 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     status: "success" | "failed";
     output: string;
     idle: boolean;
+    reportMarker: "none" | "update" | "urgent" | null;
   }) => {
-    if (!notifyTelegramReports) return;
-    if (params.idle && params.status === "success") return;
+    if (!notifyRunReports) return;
+    const shouldQueue = params.status === "failed"
+      || params.reportMarker === "update"
+      || params.reportMarker === "urgent";
+    if (!shouldQueue) return;
 
     const statusLabel = params.status === "success" ? "ok" : "error";
     const message = [
@@ -325,6 +338,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       `run_id=${params.runId}`,
       `agent_run_id=${params.agentRunId ?? "n/a"}`,
       `status=${statusLabel}`,
+      `report=${params.reportMarker ?? "unspecified"}`,
       `scheduled_for=${new Date(params.scheduledFor).toISOString()}`,
       `ended_at=${new Date(params.endedAt).toISOString()}`,
       "",
@@ -342,12 +356,15 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         sourceChannel: "job",
         sourceChannelKey: params.job.id,
         targetAgentId: schedulerAgentId,
-        targetChannel: "telegram",
+        targetChannel: "agent",
+        targetChannelKey: `job:${params.job.id}`,
         metadata: {
           jobId: params.job.id,
           runId: params.runId,
           status: params.status,
           idle: params.idle,
+          report: params.reportMarker,
+          targetPreset: "orchestrator",
         },
         nowMs: params.endedAt,
       });
@@ -379,6 +396,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     mode: "agent_task" | "script" | "tool_call";
     idle: boolean;
     agentRunId: string | null;
+    reportMarker: "none" | "update" | "urgent" | null;
   }> => {
     const raw = safeJsonParse(job.spec_json) as any;
     const mode = raw?.mode || "agent_task";
@@ -451,10 +469,10 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       }
       userTextParts.push(
         "",
-        "When you finish, end your response with exactly one line:",
-        "JOB_STATUS: ok",
-        "or",
-        "JOB_STATUS: error",
+        "When you finish, end your response with exactly two lines:",
+        "JOB_STATUS: ok|error",
+        "JOB_REPORT: none|update|urgent",
+        "Use JOB_REPORT:none when there is nothing meaningful to surface to the orchestrator.",
       );
       const userText = userTextParts.join("\n");
 
@@ -480,6 +498,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
       const marker = parseJobStatusMarker(res.output);
       const ok = marker ? marker === "ok" : res.status === "complete";
+      const reportMarker = parseJobReportMarker(res.output);
       return {
         status: ok ? "success" : "failed",
         output: res.output,
@@ -489,6 +508,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         mode: "agent_task",
         idle: isIdleOutput(res.output),
         agentRunId: res.runId ?? null,
+        reportMarker,
       };
     }
 
@@ -509,6 +529,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         mode: "script",
         idle: false,
         agentRunId: null,
+        reportMarker: null,
       };
     }
 
@@ -539,6 +560,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         mode: "tool_call",
         idle: false,
         agentRunId: null,
+        reportMarker: null,
       };
     }
 
@@ -613,7 +635,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         .run(endedAt, res.status, errText, res.output, res.toolCalls, res.iterations, runId);
 
       if (res.mode === "agent_task") {
-        await notifyTelegramReport({
+        await queueAgentTaskReport({
           job,
           runId,
           agentRunId: res.agentRunId,
@@ -622,6 +644,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
           status: res.status === "success" ? "success" : "failed",
           output: res.output,
           idle: res.idle,
+          reportMarker: res.reportMarker,
         });
       }
 
@@ -822,7 +845,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyTelegramReports=${notifyTelegramReports} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars} fullMaxMessages=${fullContextMaxMessages} fullMaxChars=${fullContextMaxChars}`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=${schedulerContextMode} deltaMaxMessages=${deltaMaxMessages} deltaMaxChars=${deltaMaxChars} fullMaxMessages=${fullContextMaxMessages} fullMaxChars=${fullContextMaxChars}`,
   );
 
   // Start shortly after boot.

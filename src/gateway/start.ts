@@ -834,6 +834,7 @@ export async function startGateway(
     runReportBroker = startRunReportBroker({
       db,
       telegram: toolContext.telegram as any,
+      agent,
       log,
     });
     void runReportBroker?.tick().catch((err) => {

@@ -531,7 +531,7 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       source_channel TEXT,
       source_channel_key TEXT,
       target_agent_id TEXT,
-      target_channel TEXT NOT NULL DEFAULT 'telegram',
+      target_channel TEXT NOT NULL DEFAULT 'agent',
       target_channel_key TEXT,
       title TEXT NOT NULL,
       body TEXT NOT NULL,
