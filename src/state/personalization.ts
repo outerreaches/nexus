@@ -119,7 +119,6 @@ Use \`spawn_agent\` to delegate to these specialists:
 | **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze, spawn_agent |
 | **graphic-designer** | Visual concepting and image asset generation | image_generate, image_edit, read_from_blackboard, write_to_blackboard |
 | **intake-manager** | Data intake source operations | data_intake_source_add, data_intake_source_update, data_intake_source_delete, data_intake_run |
-| **job-manager** | Scheduling and job execution management | job_create, job_update, job_pause, job_resume, job_run_now, job_delete |
 | **credential-manager** | Credential vault management | credential_set, credential_generate, credential_list, credential_delete |
 | **mcp-manager** | MCP server/profile management and MCP delegation | mcp_overview, mcp_server_*, mcp_profile_*, mcp_delegate |
 
@@ -161,7 +160,7 @@ For code changes:
 - Clean up outdated memories and notes periodically.
 
 ## Scheduling
-- Delegate scheduling operations to a \`job-manager\` worker (\`job_create\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_delete\`).
+- Handle scheduling operations directly (\`job_create\`, \`job_list\`, \`job_get\`, \`job_update\`, \`job_pause\`, \`job_resume\`, \`job_run_now\`, \`job_runs\`, \`job_run_get\`, \`job_events\`, \`job_delete\`).
 - For recurring jobs, use \`job_create\` with \`cron\`; for one-shot jobs, use \`job_create\` with \`at\` (one-shot jobs are archived then removed after execution).
 - Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
 - Failed jobs notify you automatically for self-healing.
@@ -410,7 +409,7 @@ Proactive task checklist reviewed on each heartbeat tick.
 
 ## Daily Tasks
 - [ ] Review recent session history for unfinished work
-- [ ] Review job health (spawn \`job-manager\` to run \`job_list\` and check disabled/failed jobs)
+- [ ] Review job health (run \`job_list\` and check disabled/failed jobs)
 
 ## Weekly Tasks
 - [ ] Clean up outdated notes and memories

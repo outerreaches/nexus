@@ -3,7 +3,6 @@ import { preset as credentialManager } from "./presets/credential-manager.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as intakeManager } from "./presets/intake-manager.js";
-import { preset as jobManager } from "./presets/job-manager.js";
 import { preset as mcpManager } from "./presets/mcp-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as processManager } from "./presets/process-manager.js";
@@ -76,7 +75,6 @@ const PRESETS: Record<string, AgentPreset> = {
   "credential-manager": credentialManager,
   "graphic-designer": graphicDesigner,
   "intake-manager": intakeManager,
-  "job-manager": jobManager,
   "mcp-manager": mcpManager,
 };
 

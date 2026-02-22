@@ -259,7 +259,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       "",
       "Instructions:",
       "- Diagnose root cause and fix the job.",
-      "- If scheduling tools are needed, spawn the job-manager preset.",
+      "- If scheduling tools are needed, use job tools directly (`job_list`, `job_get`, `job_update`, etc.).",
       "- Prefer small, reversible changes.",
       "- If you are blocked on OTP/MFA/CAPTCHA/etc, use human_request.",
       "- If the job is unsafe to retry automatically, pause it.",

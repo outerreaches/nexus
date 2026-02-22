@@ -16,7 +16,9 @@ export const preset: AgentPreset = {
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
     // Preset routing
     "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
-    "Use the job-manager preset for all job and scheduling operations (create/update/pause/resume/run/list/delete).",
+    "Handle job and scheduling operations directly with job tools (create/update/pause/resume/run/list/delete/inspect/history).",
+    "For recurring jobs, use `job_create` with `cron`; for one-shot jobs, use `job_create` (or `job_update`) with `at`.",
+    "Use `tool_catalog` to inspect available tools before scheduling `mode: \"tool_call\"` jobs.",
     "Use the mcp-manager preset for local MCP server/profile setup and local MCP-backed delegation runs (not node-hosted MCP).",
     "Use the process-manager preset for long-running process operations (list/status/logs/stop) and process-exit triage.",
     "Use the security-researcher preset for security audits, vulnerability assessments, and threat-modeling tasks.",
@@ -38,6 +40,7 @@ export const preset: AgentPreset = {
     "image_analyze",
     // Swarm coordination
     "spawn_agent",
+    "tool_catalog",
     "mcp_overview",
     "read_from_blackboard",
     "write_to_blackboard",
@@ -64,6 +67,18 @@ export const preset: AgentPreset = {
     "node_process_status",
     "node_process_logs",
     "node_process_stop",
+    // Scheduler jobs
+    "job_create",
+    "job_list",
+    "job_get",
+    "job_update",
+    "job_pause",
+    "job_resume",
+    "job_run_now",
+    "job_runs",
+    "job_run_get",
+    "job_events",
+    "job_delete",
     // Memory
     "memory_store",
     "memory_recall",
