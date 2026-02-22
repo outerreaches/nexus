@@ -41,7 +41,7 @@ const ProactiveSchema = z
     jitterMs: z.number().int().min(0).default(5_000),
     notifyTelegram: z.boolean().default(true),
     pauseOnActiveTelegram: z.boolean().default(true),
-    activeTelegramQuietMs: z.number().int().min(0).default(2 * 60_000),
+    activeTelegramQuietMs: z.number().int().min(0).default(45_000),
   })
   .default({});
 
@@ -305,7 +305,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           jitterMs: 5000,
           notifyTelegram: true,
           pauseOnActiveTelegram: true,
-          activeTelegramQuietMs: 120000,
+          activeTelegramQuietMs: 45000,
         },
         scheduler: {
           enabled: true,

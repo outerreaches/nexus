@@ -2,66 +2,26 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import Database from "better-sqlite3";
-
-export type PersistedProcessStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export type PersistedFirewallQuarantineState = "none" | "soft" | "hard";
-
-export type PersistedProcessRecord = {
-  processId: string;
-  status: PersistedProcessStatus;
-  command: string;
-  cwd: string | null;
-  startedAt: number;
-  endedAt: number | null;
-  exitCode: number | null;
-  signal: string | null;
-  cancelRequested: boolean;
-  timeoutMs: number | null;
-  logs: string;
-  routing: Record<string, unknown> | null;
-};
-
-export type PersistedOutboxEntry = {
-  deliveryId: string;
-  processId: string;
-  payload: Record<string, unknown>;
-  createdAt: number;
-  delivered: boolean;
-  deliveredAt: number | null;
-};
-
-export type PersistedFirewallSessionRecord = {
-  sessionId: string;
-  quarantineState: PersistedFirewallQuarantineState;
-  createdAt: number;
-  lastUsedAt: number;
-  expiresAt: number;
-  metadata: Record<string, unknown> | null;
-};
-
-export type PersistedAuditEventRecord = {
-  eventId: string;
-  createdAt: number;
-  type: string;
-  processId: string | null;
-  firewallSession: string | null;
-  actor: string | null;
-  toolName: string | null;
-  details: Record<string, unknown> | null;
-};
-
-export type PersistedReferenceRecord = {
-  refId: string;
-  sourceType: string;
-  processId: string | null;
-  toolName: string | null;
-  title: string | null;
-  safeSummary: string;
-  metadata: Record<string, unknown> | null;
-  createdAt: number;
-  updatedAt: number;
-};
+import type {
+  PersistedAuditEventRecord,
+  PersistedFirewallQuarantineState,
+  PersistedFirewallSessionRecord,
+  PersistedOutboxEntry,
+  PersistedProcessRecord,
+  PersistedProcessStatus,
+  PersistedReferenceRecord,
+  ReferenceNodeStateStoreLike,
+} from "./state-store-types.js";
+export type {
+  PersistedAuditEventRecord,
+  PersistedFirewallQuarantineState,
+  PersistedFirewallSessionRecord,
+  PersistedOutboxEntry,
+  PersistedProcessRecord,
+  PersistedProcessStatus,
+  PersistedReferenceRecord,
+  ReferenceNodeStateStoreLike,
+} from "./state-store-types.js";
 
 type PersistedProcessRow = {
   process_id: string;
@@ -119,6 +79,8 @@ type PersistedReferenceRow = {
   updated_at: number;
 };
 
+type SqliteDatabase = import("better-sqlite3").Database;
+
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
@@ -139,21 +101,27 @@ function parseJsonObject(raw: string | null): Record<string, unknown> | null {
   }
 }
 
-export class ReferenceNodeStateStore {
+export class ReferenceNodeStateStore implements ReferenceNodeStateStoreLike {
+  readonly backend = "sqlite" as const;
   readonly dbPath: string;
+  readonly statePath: string;
 
   private constructor(
-    private readonly db: Database.Database,
+    private readonly db: SqliteDatabase,
     dbPath: string,
   ) {
     this.dbPath = dbPath;
+    this.statePath = dbPath;
   }
 
   static async open(stateDir: string): Promise<ReferenceNodeStateStore> {
     const dbDir = path.join(stateDir, "state");
     const dbPath = path.join(dbDir, "reference-node.db");
     await fs.mkdir(dbDir, { recursive: true });
-    const db = new Database(dbPath);
+    const sqliteModule = (await import("better-sqlite3")) as {
+      default: new (filePath: string) => SqliteDatabase;
+    };
+    const db = new sqliteModule.default(dbPath);
     db.pragma("journal_mode = WAL");
     db.pragma("synchronous = NORMAL");
     db.exec(`

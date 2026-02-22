@@ -49,13 +49,59 @@ Optional flags:
 - `--node-id <id>`
 - `--name <display-name>`
 - `--state-dir <dir>` (default `~/.nexus-node`)
+- `--state-backend <sqlite|json>` (default `sqlite`; `reference-node-lite` forces `json`)
+- `--profile <standard|minimal>`
 - `--caps <csv>`
 - `--allow <csv>` (command allowlist for `system.run`/`process.start`; include `nexus-policyctl,nexus-shellctl,file_pull,file_push` to enable control surfaces)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
+- `--init` (bootstrap keys, policy file, backend storage, and env template)
+- `--env-file <path>` (env file used by `--init` and optional runtime env loading)
+- `--doctor` (run preflight checks for Node version, gateway reachability, state backend, and tmux when shellctl is allowlisted)
 - `--file-transfer-roots <csv>` (allowed roots for node file paths; default `<stateDir>/file-transfer`)
 - `--file-transfer-max-bytes <n>` (max bytes per file transfer payload; default 5242880)
 - `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
 - `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
+
+## Lite Runtime (JSON + Prebuilt)
+
+Use the lightweight variant for SSH-host installs where SQLite/native modules are undesirable:
+
+```bash
+npm run node:lite -- --gateway ws://127.0.0.1:18789/nx/nodes --doctor
+```
+
+Build a distributable artifact:
+
+```bash
+npm run node:lite:build
+```
+
+The lite entrypoint defaults to:
+
+- `NEXUS_NODE_PROFILE=minimal`
+- `NEXUS_NODE_STATE_BACKEND=json`
+- `NEXUS_NODE_LOG_FORMAT=json`
+- `NEXUS_NODE_MCP_BRIDGE=0`
+
+JSON state is stored under `{stateDir}/state-json/`.
+
+### SSH Deployment + systemd
+
+Deploy the prebuilt lite artifact directly to a remote Linux host over SSH:
+
+```bash
+npm run node:deploy:lite:ssh -- \
+  --host user@remote-host \
+  --gateway wss://gateway.example.com/nx/nodes \
+  --gateway-fingerprint AB:CD:...:EF
+```
+
+The script:
+
+- builds `dist/node-lite`
+- uploads a versioned release to the remote host
+- runs `--init` to bootstrap keys/state/env file
+- installs and starts a `systemd` service (system scope if sudo is available; user scope fallback)
 
 ## Hermes symbol stores (node-local)
 
@@ -273,13 +319,21 @@ Operational notes from live validation:
 
 - First Puppeteer call can take noticeably longer due to `npx`/package bootstrap and first browser launch. Subsequent calls should be much faster.
 - Keep exactly one node process writing to a given `stateDir` (`~/.nexus-node`). Running host and container nodes against the same state database can corrupt SQLite indexes.
+- Use the bundled host scripts to avoid duplicate starts and duplicate env keys:
+
+```bash
+chmod +x /path/to/Nexus/examples/nexus-node/run-node-background.sh \
+  /path/to/Nexus/examples/nexus-node/stop-node.sh
+NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env /path/to/Nexus/examples/nexus-node/run-node-background.sh
+```
+
 - If logs show `database disk image is malformed`, stop the node, back up DB, run `REINDEX`, and restart:
 
 ```bash
-~/nexus-node-host/stop-node.sh
+NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env /path/to/Nexus/examples/nexus-node/stop-node.sh
 cp ~/.nexus-node/state/reference-node.db ~/.nexus-node/state/reference-node.db.bak
 sqlite3 ~/.nexus-node/state/reference-node.db "REINDEX; PRAGMA integrity_check;"
-~/nexus-node-host/run-node-background.sh
+NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env /path/to/Nexus/examples/nexus-node/run-node-background.sh
 ```
 
 Current Telegram behavior for MCP screenshots:

@@ -25,7 +25,6 @@ export const preset: AgentPreset = {
     "file_edit",
     "file_edit_lines",
     "file_list",
-    "image_analyze",
     "shell_exec",
     "shell_interactive",
     "tools_reload",

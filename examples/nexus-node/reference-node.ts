@@ -12,22 +12,25 @@ import {
   type KeyObject,
 } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import type { IncomingMessage } from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { TLSSocket } from "node:tls";
+import { fileURLToPath } from "node:url";
 
 import { WebSocket } from "ws";
 import type { McpResourceInfo, McpToolInfo } from "../../src/mcp/stdio-client.js";
 
 import {
-  ReferenceNodeStateStore,
   type PersistedFirewallSessionRecord,
   type PersistedOutboxEntry,
   type PersistedProcessRecord,
   type PersistedReferenceRecord,
-} from "./state-store.js";
+  type ReferenceNodeStateStoreLike,
+} from "./state-store-types.js";
 
 const ED25519_SPKI_RAW_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_OUTPUT_CHARS = 60_000;
@@ -73,6 +76,9 @@ const SYMBOL_TOKEN_PATTERN = /\{\{([a-z]+):([a-zA-Z0-9._-]+)(?::([a-zA-Z0-9._-]+
 type ProcessStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 type SymbolKind = "contact" | "account" | "secret" | "user";
 type FirewallMode = "transparent" | "audit-only" | "hermes";
+type StateBackend = "sqlite" | "json";
+type NodeProfile = "standard" | "minimal";
+type LogFormat = "text" | "json";
 const SYMBOL_KINDS: SymbolKind[] = ["contact", "account", "secret", "user"];
 
 type SymbolCatalogEntry = {
@@ -195,6 +201,8 @@ type Config = {
   gatewayUrl: string;
   gatewayTlsFingerprint: string | null;
   stateDir: string;
+  stateBackend: StateBackend;
+  profile: NodeProfile;
   policyRequired: boolean;
   nodeId: string;
   displayName: string;
@@ -211,6 +219,11 @@ type Config = {
   mcpBridgeTimeoutMs: number;
   fileTransferRoots: string[];
   fileTransferMaxBytes: number;
+  logFormat: LogFormat;
+  logFilePath: string;
+  logMaxBytes: number;
+  logMaxFiles: number;
+  initEnvFilePath: string;
 };
 
 type McpBridgeServerConfig = {
@@ -237,34 +250,57 @@ class NodeToolError extends Error {
   }
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+export async function runReferenceNode(
+  argv: string[] = process.argv.slice(2),
+  options: {
+    forceStateBackend?: StateBackend;
+    forceProfile?: NodeProfile;
+  } = {},
+): Promise<void> {
+  const args = parseArgs(argv);
   if (args.help) {
     printHelp();
     return;
   }
-  const config = buildConfig(args.values);
-  const identity = await loadOrCreateIdentity(config.stateDir);
-  const stateStore = await ReferenceNodeStateStore.open(config.stateDir);
-  const client = new ReferenceNodeClient(config, identity, stateStore);
+  const envFilePath = args.values["env-file"] ?? process.env.NEXUS_NODE_ENV_FILE;
+  if (envFilePath) {
+    await loadEnvFileIntoProcessEnv(path.resolve(envFilePath));
+  }
+  const config = buildConfig(args.values, options);
+  const logger = await ReferenceNodeLogger.create(config);
 
-  process.stdout.write(
-    `[reference-node] id=${config.nodeId} fingerprint=${identity.fingerprint} gateway=${config.gatewayUrl}\n`,
-  );
-  process.stdout.write(
-    `[reference-node] capabilities=${config.capabilities.join(",")} allow_commands=${[
-      ...config.allowCommands,
-    ].join(",")}\n`,
-  );
-  process.stdout.write(`[reference-node] state_db=${stateStore.dbPath}\n`);
-  process.stdout.write(
-    `[reference-node] mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}\n`,
-  );
+  if (isTruthyFlag(args.values.init)) {
+    await initializeNodeBootstrap(config, logger);
+    if (!isTruthyFlag(args.values["run-after-init"])) {
+      logger.info("init complete; exiting (use --run-after-init to continue startup)");
+      return;
+    }
+  }
+
+  if (isTruthyFlag(args.values.doctor)) {
+    const doctor = await runDoctorChecks(config, logger);
+    if (!doctor.ok) {
+      throw new Error("Doctor checks failed. Resolve the reported errors before starting the node.");
+    }
+    if (!isTruthyFlag(args.values["doctor-continue"])) {
+      logger.info("doctor checks passed; exiting (use --doctor-continue to continue startup)");
+      return;
+    }
+  }
+
+  const identity = await loadOrCreateIdentity(config.stateDir);
+  const stateStore = await openStateStore(config.stateDir, config.stateBackend);
+  const client = new ReferenceNodeClient(config, identity, stateStore, logger);
+
+  logger.info(`id=${config.nodeId} fingerprint=${identity.fingerprint} gateway=${config.gatewayUrl}`);
+  logger.info(`capabilities=${config.capabilities.join(",")} allow_commands=${[...config.allowCommands].join(",")}`);
+  logger.info(`state_backend=${stateStore.backend} state_path=${stateStore.statePath}`);
+  logger.info(`mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}`);
   const fileTransferOps: string[] = [];
   if (isAllowedCommand(FILE_PULL_COMMAND, config.allowCommands)) fileTransferOps.push("pull");
   if (isAllowedCommand(FILE_PUSH_COMMAND, config.allowCommands)) fileTransferOps.push("push");
-  process.stdout.write(
-    `[reference-node] file_transfer=${fileTransferOps.join(",") || "disabled"} roots=${config.fileTransferRoots.join(",")} max_bytes=${config.fileTransferMaxBytes}\n`,
+  logger.info(
+    `file_transfer=${fileTransferOps.join(",") || "disabled"} roots=${config.fileTransferRoots.join(",")} max_bytes=${config.fileTransferMaxBytes}`,
   );
 
   const shutdown = (): void => {
@@ -304,7 +340,8 @@ class ReferenceNodeClient {
   constructor(
     private readonly config: Config,
     private readonly identity: NodeIdentity,
-    private readonly stateStore: ReferenceNodeStateStore,
+    private readonly stateStore: ReferenceNodeStateStoreLike,
+    private readonly logger: ReferenceNodeLogger,
   ) {
     this.policyPath = path.join(this.config.stateDir, "hermes-policy.json");
     this.policyPresetDir = path.join(this.config.stateDir, POLICY_PRESET_DIRNAME);
@@ -3688,7 +3725,7 @@ class ReferenceNodeClient {
   }
 
   private log(line: string): void {
-    process.stdout.write(`[reference-node] ${new Date().toISOString()} ${line}\n`);
+    this.logger.info(line);
   }
 }
 
@@ -3718,8 +3755,324 @@ function parseArgs(argv: string[]): {
   return { help, values };
 }
 
-function buildConfig(values: Record<string, string>): Config {
+type DoctorCheckResult = {
+  check: string;
+  ok: boolean;
+  detail: string;
+};
+
+async function loadEnvFileIntoProcessEnv(filePath: string): Promise<void> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const lines = raw.split(/\r?\n/);
+    for (const lineRaw of lines) {
+      const line = lineRaw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const idx = line.indexOf("=");
+      if (idx <= 0) continue;
+      const key = line.slice(0, idx).trim();
+      let value = line.slice(idx + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      if (!key || process.env[key] !== undefined) continue;
+      process.env[key] = value;
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== "ENOENT") throw err;
+  }
+}
+
+class ReferenceNodeLogger {
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  private constructor(private readonly config: Config) {}
+
+  static async create(config: Config): Promise<ReferenceNodeLogger> {
+    await fs.mkdir(path.dirname(config.logFilePath), { recursive: true });
+    return new ReferenceNodeLogger(config);
+  }
+
+  info(message: string, fields: Record<string, unknown> = {}): void {
+    this.write("info", message, fields);
+  }
+
+  warn(message: string, fields: Record<string, unknown> = {}): void {
+    this.write("warn", message, fields);
+  }
+
+  error(message: string, fields: Record<string, unknown> = {}): void {
+    this.write("error", message, fields);
+  }
+
+  private write(level: "info" | "warn" | "error", message: string, fields: Record<string, unknown>): void {
+    const ts = new Date().toISOString();
+    const line =
+      this.config.logFormat === "json"
+        ? JSON.stringify({ ts, level, component: "reference-node", msg: message, ...fields })
+        : `[reference-node] ${ts} ${message}`;
+    process.stdout.write(`${line}\n`);
+    this.writeQueue = this.writeQueue
+      .then(async () => {
+        await this.rotateIfNeeded(Buffer.byteLength(`${line}\n`, "utf8"));
+        await fs.appendFile(this.config.logFilePath, `${line}\n`, "utf8");
+      })
+      .catch(() => undefined);
+  }
+
+  private async rotateIfNeeded(incomingBytes: number): Promise<void> {
+    if (this.config.logMaxBytes <= 0) return;
+    let currentSize = 0;
+    try {
+      const stat = await fs.stat(this.config.logFilePath);
+      currentSize = stat.size;
+    } catch {
+      currentSize = 0;
+    }
+    if (currentSize + incomingBytes <= this.config.logMaxBytes) return;
+    const maxFiles = Math.max(1, this.config.logMaxFiles);
+    for (let i = maxFiles - 1; i >= 1; i -= 1) {
+      const src = `${this.config.logFilePath}.${i}`;
+      const dest = `${this.config.logFilePath}.${i + 1}`;
+      if (!fsSync.existsSync(src)) continue;
+      try {
+        await fs.rename(src, dest);
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      await fs.rename(this.config.logFilePath, `${this.config.logFilePath}.1`);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+declare const __NEXUS_LITE_BUNDLE__: boolean | undefined;
+const FORCE_JSON_BUNDLE = typeof __NEXUS_LITE_BUNDLE__ !== "undefined" && __NEXUS_LITE_BUNDLE__;
+
+const openStateStore: (stateDir: string, stateBackend: StateBackend) => Promise<ReferenceNodeStateStoreLike> =
+  FORCE_JSON_BUNDLE
+    ? async (stateDir: string): Promise<ReferenceNodeStateStoreLike> => {
+        const mod = await import("./state-store-json.js");
+        return await mod.ReferenceNodeJsonStateStore.open(stateDir);
+      }
+    : async (stateDir: string, stateBackend: StateBackend): Promise<ReferenceNodeStateStoreLike> => {
+        if (stateBackend === "json") {
+          const mod = await import("./state-store-json.js");
+          return await mod.ReferenceNodeJsonStateStore.open(stateDir);
+        }
+        const mod = await import("./state-store.js");
+        return await mod.ReferenceNodeStateStore.open(stateDir);
+      };
+
+async function initializeNodeBootstrap(config: Config, logger: ReferenceNodeLogger): Promise<void> {
+  await fs.mkdir(config.stateDir, { recursive: true });
+  await fs.mkdir(path.dirname(config.logFilePath), { recursive: true });
+  const identity = await loadOrCreateIdentity(config.stateDir);
+  const store = await openStateStore(config.stateDir, config.stateBackend);
+  store.close();
+
+  const policyPath = path.join(config.stateDir, "hermes-policy.json");
+  try {
+    await fs.access(policyPath);
+  } catch {
+    await fs.writeFile(policyPath, `${JSON.stringify({ ...DEFAULT_POLICY_DOC, updatedAt: Date.now() }, null, 2)}\n`, {
+      mode: 0o600,
+      encoding: "utf8",
+    });
+  }
+
+  await writeInitEnvFile(config, identity.fingerprint, logger);
+  logger.info(`init backend=${config.stateBackend} state_dir=${config.stateDir} env_file=${config.initEnvFilePath}`);
+  logger.info("next step: start with --doctor (or --doctor --doctor-continue to run immediately)");
+}
+
+async function writeInitEnvFile(config: Config, fingerprint: string, logger: ReferenceNodeLogger): Promise<void> {
+  try {
+    await fs.access(config.initEnvFilePath);
+    logger.info(`init env exists path=${config.initEnvFilePath}; leaving unchanged`);
+    return;
+  } catch {
+    // continue
+  }
+  await fs.mkdir(path.dirname(config.initEnvFilePath), { recursive: true });
+  const template = [
+    "# Bootstrap environment for Nexus reference node",
+    `NEXUS_NODE_GATEWAY_URL=${config.gatewayUrl}`,
+    "# Optional for wss:// self-signed gateways",
+    "# NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=AB:CD:...",
+    `NEXUS_NODE_STATE_DIR=${config.stateDir}`,
+    `NEXUS_NODE_STATE_BACKEND=${config.stateBackend}`,
+    `NEXUS_NODE_PROFILE=${config.profile}`,
+    `NEXUS_NODE_ID=${config.nodeId}`,
+    `NEXUS_NODE_NAME=${config.displayName}`,
+    `NEXUS_NODE_CAPS=${config.capabilities.join(",")}`,
+    `NEXUS_NODE_ALLOW_COMMANDS=${[...config.allowCommands].join(",")}`,
+    `NEXUS_NODE_LOG_FORMAT=${config.logFormat}`,
+    `NEXUS_NODE_LOG_FILE=${config.logFilePath}`,
+    `NEXUS_NODE_LOG_MAX_BYTES=${config.logMaxBytes}`,
+    `NEXUS_NODE_LOG_MAX_FILES=${config.logMaxFiles}`,
+    `NEXUS_NODE_MCP_BRIDGE=${config.mcpBridgeEnabled ? "1" : "0"}`,
+    `NEXUS_NODE_MCP_BRIDGE_CONFIG=${config.mcpBridgeConfigPath}`,
+    "",
+    `# Generated node fingerprint: ${fingerprint}`,
+    "",
+  ].join("\n");
+  await fs.writeFile(config.initEnvFilePath, template, { mode: 0o600, encoding: "utf8" });
+  logger.info(`init wrote env template path=${config.initEnvFilePath}`);
+}
+
+async function runDoctorChecks(config: Config, logger: ReferenceNodeLogger): Promise<{ ok: boolean; results: DoctorCheckResult[] }> {
+  const results: DoctorCheckResult[] = [];
+
+  const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
+  results.push({
+    check: "node.version",
+    ok: Number.isFinite(nodeMajor) && nodeMajor >= 22,
+    detail: `node=${process.versions.node} required>=22`,
+  });
+
+  try {
+    await fs.mkdir(config.stateDir, { recursive: true });
+    const probePath = path.join(config.stateDir, `.doctor-write-${process.pid}-${Date.now()}`);
+    await fs.writeFile(probePath, "ok\n", { mode: 0o600, encoding: "utf8" });
+    await fs.rm(probePath, { force: true });
+    results.push({ check: "state.writable", ok: true, detail: config.stateDir });
+  } catch (err) {
+    results.push({
+      check: "state.writable",
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const gatewayProbe = await probeGateway(config.gatewayUrl, 3_000);
+  results.push({
+    check: "gateway.reachable",
+    ok: gatewayProbe.ok,
+    detail: gatewayProbe.detail,
+  });
+
+  try {
+    const store = await openStateStore(config.stateDir, config.stateBackend);
+    store.close();
+    results.push({ check: "state.backend", ok: true, detail: config.stateBackend });
+  } catch (err) {
+    results.push({
+      check: "state.backend",
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  if (isAllowedCommand(SHELLCTL_COMMAND, config.allowCommands)) {
+    const tmuxProbe = await runTmuxCommand(["-V"]);
+    const tmuxOk = tmuxProbe.ok;
+    const detail = tmuxOk
+      ? truncateOutput(tmuxProbe.stdout || "tmux available", 180)
+      : truncateOutput(tmuxProbe.stderr || tmuxProbe.errorMessage || "tmux not available", 180);
+    results.push({ check: "tmux.available", ok: tmuxOk, detail });
+  } else {
+    results.push({
+      check: "tmux.available",
+      ok: true,
+      detail: `${SHELLCTL_COMMAND} not allowlisted; tmux is optional`,
+    });
+  }
+
+  for (const result of results) {
+    if (result.ok) {
+      logger.info(`doctor ok check=${result.check} detail=${result.detail}`);
+    } else {
+      logger.error(`doctor fail check=${result.check} detail=${result.detail}`);
+    }
+  }
+  return {
+    ok: results.every((result) => result.ok),
+    results,
+  };
+}
+
+async function probeGateway(gatewayUrl: string, timeoutMs: number): Promise<{ ok: boolean; detail: string }> {
+  let parsed: URL;
+  try {
+    parsed = new URL(gatewayUrl);
+  } catch {
+    return { ok: false, detail: `invalid gateway URL: ${gatewayUrl}` };
+  }
+  const host = parsed.hostname;
+  const port = Number(parsed.port || (parsed.protocol === "wss:" ? "443" : "80"));
+  if (!host || !Number.isFinite(port) || port <= 0) {
+    return { ok: false, detail: `invalid host/port host=${host} port=${String(parsed.port || "")}` };
+  }
+  return await new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve({ ok: false, detail: `timeout connecting ${host}:${port}` });
+    }, Math.max(500, timeoutMs));
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ ok: true, detail: `${host}:${port}` });
+    });
+    socket.once("error", (err) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ ok: false, detail: truncateOutput(err.message || String(err), 200) });
+    });
+  });
+}
+
+function isTruthyFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function parseStateBackend(value: string): StateBackend {
+  switch ((value || "").trim()) {
+    case "sqlite":
+    case "json":
+      return value.trim() as StateBackend;
+    default:
+      throw new Error(`Invalid state backend: ${value}. Expected sqlite or json.`);
+  }
+}
+
+function parseNodeProfile(value: string): NodeProfile {
+  switch ((value || "").trim()) {
+    case "standard":
+    case "minimal":
+      return value.trim() as NodeProfile;
+    default:
+      throw new Error(`Invalid profile: ${value}. Expected standard or minimal.`);
+  }
+}
+
+function parseLogFormat(value: string): LogFormat {
+  switch ((value || "").trim()) {
+    case "text":
+    case "json":
+      return value.trim() as LogFormat;
+    default:
+      throw new Error(`Invalid log format: ${value}. Expected text or json.`);
+  }
+}
+
+function buildConfig(
+  values: Record<string, string>,
+  options: {
+    forceStateBackend?: StateBackend;
+    forceProfile?: NodeProfile;
+  } = {},
+): Config {
   const hostId = os.hostname().replace(/[^a-zA-Z0-9_-]/g, "-");
+  const profileRaw = options.forceProfile ?? values.profile ?? process.env.NEXUS_NODE_PROFILE ?? "standard";
+  const profile = parseNodeProfile(profileRaw);
   const nodeId = values["node-id"] ?? process.env.NEXUS_NODE_ID ?? `reference-${hostId}`;
   const displayName = values.name ?? process.env.NEXUS_NODE_NAME ?? "Nexus Reference Node";
   const gatewayUrl =
@@ -3744,6 +4097,10 @@ function buildConfig(values: Record<string, string>): Config {
     values["state-dir"] ??
     process.env.NEXUS_NODE_STATE_DIR ??
     path.join(os.homedir(), ".nexus-node");
+  const resolvedStateDir = path.resolve(stateDir);
+  const stateBackendRaw =
+    options.forceStateBackend ?? values["state-backend"] ?? process.env.NEXUS_NODE_STATE_BACKEND ?? (profile === "minimal" ? "json" : "sqlite");
+  const stateBackend = parseStateBackend(stateBackendRaw);
   const policyRequired =
     (values["policy-required"] ?? process.env.NEXUS_NODE_POLICY_REQUIRED ?? "").trim() === "1";
   const capabilities = splitCsv(values.caps ?? process.env.NEXUS_NODE_CAPS, DEFAULT_CAPABILITIES);
@@ -3766,28 +4123,43 @@ function buildConfig(values: Record<string, string>): Config {
     clampInt(values["max-clock-skew-ms"] ?? process.env.NEXUS_NODE_MAX_CLOCK_SKEW_MS, 5_000, 600_000) ?? 120_000;
   const insecureSkipGatewayProof =
     (values["insecure-skip-gateway-proof"] ?? process.env.NEXUS_NODE_INSECURE_SKIP_GATEWAY_PROOF ?? "").trim() === "1";
-  const mcpBridgeEnabled =
-    (values["mcp-bridge"] ?? process.env.NEXUS_NODE_MCP_BRIDGE ?? "").trim() === "1";
+  const rawMcpBridge = values["mcp-bridge"] ?? process.env.NEXUS_NODE_MCP_BRIDGE;
+  const mcpBridgeEnabled = (rawMcpBridge ?? "").trim() === "1";
   const mcpBridgeConfigPath = path.resolve(
     values["mcp-bridge-config"] ??
       process.env.NEXUS_NODE_MCP_BRIDGE_CONFIG ??
-      path.join(stateDir, MCP_BRIDGE_CONFIG_FILE),
+      path.join(resolvedStateDir, MCP_BRIDGE_CONFIG_FILE),
   );
   const mcpBridgeTimeoutMs =
     clampInt(values["mcp-bridge-timeout-ms"] ?? process.env.NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS, 2_000, 300_000) ??
     30_000;
   const fileTransferRoots = normalizeFileTransferRoots(
     values["file-transfer-roots"] ?? process.env.NEXUS_NODE_FILE_TRANSFER_ROOTS,
-    stateDir,
+    resolvedStateDir,
   );
   const fileTransferMaxBytes =
     clampInt(values["file-transfer-max-bytes"] ?? process.env.NEXUS_NODE_FILE_TRANSFER_MAX_BYTES, 1_024, 50 * 1024 * 1024) ??
     DEFAULT_FILE_TRANSFER_MAX_BYTES;
+  const logFormat = parseLogFormat(
+    values["log-format"] ?? process.env.NEXUS_NODE_LOG_FORMAT ?? (profile === "minimal" ? "json" : "text"),
+  );
+  const logFilePath = path.resolve(
+    values["log-file"] ?? process.env.NEXUS_NODE_LOG_FILE ?? path.join(resolvedStateDir, "logs", "reference-node.log"),
+  );
+  const logMaxBytes =
+    clampInt(values["log-max-bytes"] ?? process.env.NEXUS_NODE_LOG_MAX_BYTES, 64 * 1024, 64 * 1024 * 1024) ?? 5 * 1024 * 1024;
+  const logMaxFiles =
+    clampInt(values["log-max-files"] ?? process.env.NEXUS_NODE_LOG_MAX_FILES, 1, 50) ?? 5;
+  const initEnvFilePath = path.resolve(
+    values["env-file"] ?? process.env.NEXUS_NODE_ENV_FILE ?? path.join(resolvedStateDir, "reference-node.env"),
+  );
 
   return {
     gatewayUrl,
     gatewayTlsFingerprint,
-    stateDir: path.resolve(stateDir),
+    stateDir: resolvedStateDir,
+    stateBackend,
+    profile,
     policyRequired,
     nodeId,
     displayName,
@@ -3804,6 +4176,11 @@ function buildConfig(values: Record<string, string>): Config {
     mcpBridgeTimeoutMs,
     fileTransferRoots,
     fileTransferMaxBytes,
+    logFormat,
+    logFilePath,
+    logMaxBytes,
+    logMaxFiles,
+    initEnvFilePath,
   };
 }
 
@@ -4689,12 +5066,23 @@ function printHelp(): void {
       "  --node-id <id>                  Node ID (sender becomes node:<id>)",
       "  --name <display-name>           Node display name",
       "  --state-dir <dir>               Local state dir for keys (default ~/.nexus-node)",
+      "  --state-backend <sqlite|json>   Persistent backend (default sqlite; minimal profile defaults to json)",
+      "  --profile <standard|minimal>    Startup profile (default standard)",
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,nexus-shellctl,file_pull,file_push to enable control surfaces)",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
+      "  --init                          Bootstrap state dir, keys, policy file, and env template then exit",
+      "  --run-after-init 1              Continue startup after --init completes",
+      "  --env-file <path>               Env file path used by --init (default <stateDir>/reference-node.env)",
+      "  --doctor                        Run startup preflight checks then exit",
+      "  --doctor-continue 1             Continue startup after --doctor passes",
       "  --run-timeout-ms <ms>           Max system.run timeout (default 60000)",
       "  --file-transfer-roots <csv>     Allowed absolute roots for file transfer paths (default <stateDir>/file-transfer)",
       "  --file-transfer-max-bytes <n>   Max bytes per file.pull/file.push payload (default 5242880)",
+      "  --log-format <text|json>        Log format for stdout and rotating log file (default text)",
+      "  --log-file <path>               Log file path (default <stateDir>/logs/reference-node.log)",
+      "  --log-max-bytes <n>             Rotate log when current file reaches size in bytes (default 5242880)",
+      "  --log-max-files <n>             Number of rotated files to keep (default 5)",
       "  --mcp-bridge 1                  Enable MCP bridge methods (mcp.list/mcp.call/mcp.resources)",
       "  --mcp-bridge-config <path>      MCP bridge JSON config path (default <stateDir>/mcp-bridge.json)",
       "  --mcp-bridge-timeout-ms <ms>    MCP bridge request timeout per server (default 30000)",
@@ -4713,7 +5101,11 @@ function printHelp(): void {
   );
 }
 
-void main().catch((err) => {
-  process.stderr.write(`[reference-node] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exitCode = 1;
-});
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
+const currentPath = fileURLToPath(import.meta.url);
+if ((process.env.NEXUS_REFERENCE_NODE_NO_AUTORUN ?? "") !== "1" && invokedPath && invokedPath === currentPath) {
+  void runReferenceNode().catch((err) => {
+    process.stderr.write(`[reference-node] fatal: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}

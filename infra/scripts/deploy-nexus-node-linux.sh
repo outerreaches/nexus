@@ -12,6 +12,24 @@ log() { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[!]${NC} $1"; exit 1; }
 
+count_env_key() {
+  local file="$1"
+  local key="$2"
+  grep -cE "^[[:space:]]*${key}=" "$file" || true
+}
+
+validate_unique_env_keys() {
+  local file="$1"
+  shift
+  local key count
+  for key in "$@"; do
+    count="$(count_env_key "$file" "$key")"
+    if [ "${count:-0}" -gt 1 ]; then
+      error "Duplicate ${key} entries found in ${file}. Keep only one value per key."
+    fi
+  done
+}
+
 print_help() {
   cat <<'EOF'
 Usage: deploy-nexus-node-linux.sh [--dry-run]
@@ -223,6 +241,12 @@ fi
 if grep -q "CHANGE_ME" .env; then
   error "NEXUS_NODE_GATEWAY_URL still contains CHANGE_ME in $DEPLOY_DIR/.env"
 fi
+
+validate_unique_env_keys .env \
+  NEXUS_NODE_GATEWAY_URL \
+  NEXUS_NODE_GATEWAY_TLS_FINGERPRINT \
+  NEXUS_NODE_ID \
+  NEXUS_NODE_STATE_DIR
 
 if ! grep -Eq '^NEXUS_NODE_GATEWAY_URL=wss?://.*/nx/nodes$' .env; then
   warn "NEXUS_NODE_GATEWAY_URL should usually end with /nx/nodes (ws://.../nx/nodes)."
