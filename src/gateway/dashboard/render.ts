@@ -2142,30 +2142,70 @@ export function renderDashboard(params: {
         }
       };
 
-      // Position a node in the solar system layout
-      const positionNode = (node, centerX, centerY, centerZ, depth, siblingIndex, siblingCount) => {
+      const normalizeAngle = (angle) => {
+        let a = angle % (Math.PI * 2);
+        if (a < 0) a += Math.PI * 2;
+        return a;
+      };
+
+      const computeAgentOrbitSpeed = (depth, seed, parentSpeed) => {
+        if (typeof parentSpeed === "number") {
+          const variation = ((seed % 5) - 2) * 0.0000015;
+          return Math.max(0.00014, parentSpeed * 0.995 + variation);
+        }
+        const base = Math.max(0.0002, 0.00046 - depth * 0.00004);
+        const variation = ((seed % 7) - 3) * 0.000008;
+        return Math.max(0.00016, base + variation);
+      };
+
+      // Position a node in the ringed solar-system layout:
+      // each depth level stays on its global ring, while children cluster around parent angle.
+      const positionNode = (params) => {
+        const { node, parent, depth, siblingIndex, siblingCount } = params;
         node.depth = depth;
         const orbitRadius = baseOrbitRadius + depth * orbitRingStep;
-        const angleOffset = depth * 0.7;
-        const angle = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2 + angleOffset;
-        node.x = centerX + Math.cos(angle) * orbitRadius;
-        node.y = centerY;
-        node.z = centerZ + Math.sin(angle) * orbitRadius;
-        if (typeof node.orbitAngle !== "number") {
-          node.orbitAngle = angle;
+        let angle;
+        if (!parent) {
+          const rootBase = (siblingIndex / Math.max(1, siblingCount)) * Math.PI * 2;
+          angle = typeof node.orbitAngle === "number" ? node.orbitAngle : rootBase;
+        } else {
+          const parentAngle =
+            typeof parent.orbitAngle === "number" ? parent.orbitAngle : Math.atan2(parent.z ?? 0, parent.x ?? 0);
+          const clusterSpan = Math.min(1.1, 0.32 + Math.max(0, siblingCount - 1) * 0.11);
+          const rel = siblingCount <= 1 ? 0 : (siblingIndex / (siblingCount - 1)) * 2 - 1;
+          const clustered = parentAngle + rel * clusterSpan;
+          angle = typeof node.orbitAngle === "number" ? node.orbitAngle : clustered;
         }
+        node.orbitAngle = normalizeAngle(angle);
+        node.x = Math.cos(node.orbitAngle) * orbitRadius;
+        node.y = ORCHESTRATOR_Y;
+        node.z = Math.sin(node.orbitAngle) * orbitRadius;
         if (typeof node.orbitSpeed !== "number") {
-          node.orbitSpeed = 0.0004 + Math.random() * 0.0003 - depth * 0.00005;
+          const seed = siblingIndex + depth * 13 + siblingCount * 7;
+          node.orbitSpeed = computeAgentOrbitSpeed(depth, seed, parent?.orbitSpeed);
         }
         node.orbitRadius = orbitRadius;
-        node.orbitCenterX = centerX;
-        node.orbitCenterY = centerY;
-        node.orbitCenterZ = centerZ;
+        node.orbitCenterX = 0;
+        node.orbitCenterY = ORCHESTRATOR_Y;
+        node.orbitCenterZ = 0;
       };
 
       // Build node tree and position nodes
-      const buildNodeTree = (nodes) => {
-        const nodesById = new Map(nodes.map((n) => [n.run_id, { ...n, children: [] }]));
+      const buildNodeTree = (nodes, previousNodesById = null) => {
+        const nodesById = new Map(
+          nodes.map((n) => {
+            const previous = previousNodesById?.get(n.run_id);
+            return [
+              n.run_id,
+              {
+                ...n,
+                orbitAngle: typeof previous?.orbitAngle === "number" ? previous.orbitAngle : undefined,
+                orbitSpeed: typeof previous?.orbitSpeed === "number" ? previous.orbitSpeed : undefined,
+                children: [],
+              },
+            ];
+          }),
+        );
         for (const node of nodesById.values()) {
           if (node.parent_run_id && nodesById.has(node.parent_run_id)) {
             nodesById.get(node.parent_run_id).children.push(node);
@@ -2175,12 +2215,24 @@ export function renderDashboard(params: {
 
         const positionChildren = (node, depth) => {
           node.children.forEach((child, idx) => {
-            positionNode(child, node.x, node.y, node.z, depth + 1, idx, node.children.length);
+            positionNode({
+              node: child,
+              parent: node,
+              depth: depth + 1,
+              siblingIndex: idx,
+              siblingCount: node.children.length,
+            });
             positionChildren(child, depth + 1);
           });
         };
         roots.forEach((root, idx) => {
-          positionNode(root, 0, ORCHESTRATOR_Y, 0, 0, idx, roots.length);
+          positionNode({
+            node: root,
+            parent: null,
+            depth: 0,
+            siblingIndex: idx,
+            siblingCount: roots.length,
+          });
           positionChildren(root, 0);
         });
         return { nodesById, roots };
@@ -2301,7 +2353,7 @@ export function renderDashboard(params: {
       const updateSceneWithNewData = (state, newNodes, connectedNodes) => {
         const { scene, nodesById, meshToNode, pickableMeshes, executionNodesById, sunPosition, THREE } = state;
         const newNodeIds = new Set(newNodes.map((n) => n.run_id));
-        const { nodesById: newNodesById } = buildNodeTree(newNodes);
+        const { nodesById: newNodesById } = buildNodeTree(newNodes, nodesById);
 
         // Remove nodes that no longer exist
         for (const [runId, node] of nodesById.entries()) {
