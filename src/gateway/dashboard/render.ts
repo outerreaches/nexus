@@ -792,6 +792,8 @@ export function renderDashboard(params: {
 
       const fetchLogs = async () => {
         if (!logsPre) return;
+        if (logsFetchInFlight) return;
+        logsFetchInFlight = true;
         const maxChars = Math.min(200000, Math.max(200, Number(logsMaxInput?.value ?? 50000) || 50000));
         try {
           const res = await fetchWithAuth("/api/logs?maxChars=" + maxChars);
@@ -802,6 +804,8 @@ export function renderDashboard(params: {
           logsPre.innerHTML = renderHighlightedLogs(await res.text());
         } catch (err) {
           logsPre.innerHTML = renderHighlightedLogs("ERROR: " + (err instanceof Error ? err.message : String(err)));
+        } finally {
+          logsFetchInFlight = false;
         }
       };
 
@@ -812,6 +816,17 @@ export function renderDashboard(params: {
         hasMore: false,
         nextBeforeId: null,
       };
+      const MAX_LLM_ROWS = 1200;
+      const MAX_NODE_AUDIT_EVENTS = 1500;
+      const HOVER_RAYCAST_INTERVAL_MS = 50;
+      const MAX_RENDER_PIXEL_RATIO = 1.5;
+      const TARGET_RENDER_FPS = 30;
+      const FRAME_INTERVAL_MS = 1000 / TARGET_RENDER_FPS;
+      const NODE_SPHERE_SEGMENTS = 20;
+      const CORE_SPHERE_SEGMENTS = 24;
+      const ORBIT_RING_SEGMENTS = 48;
+      let agentRefreshInFlight = false;
+      let logsFetchInFlight = false;
       const cliState = {
         sessions: [],
         selectedSessionId: null,
@@ -948,6 +963,9 @@ export function renderDashboard(params: {
           } else {
             nodeAuditState.events = events;
           }
+          if (nodeAuditState.events.length > MAX_NODE_AUDIT_EVENTS) {
+            nodeAuditState.events = nodeAuditState.events.slice(0, MAX_NODE_AUDIT_EVENTS);
+          }
           nodeAuditState.nextCursorCreatedAt =
             typeof payload?.nextCursorCreatedAt === "number" && Number.isFinite(payload.nextCursorCreatedAt)
               ? Math.floor(payload.nextCursorCreatedAt)
@@ -1054,6 +1072,9 @@ export function renderDashboard(params: {
             llmState.rows = rows;
           } else {
             llmState.rows = rows.concat(llmState.rows);
+          }
+          if (llmState.rows.length > MAX_LLM_ROWS) {
+            llmState.rows = llmState.rows.slice(-MAX_LLM_ROWS);
           }
           llmState.hasMore = Boolean(payload?.hasMore);
           llmState.nextBeforeId = payload?.nextBeforeId ?? null;
@@ -1906,6 +1927,8 @@ export function renderDashboard(params: {
 
       // Fetch new data and update scene
       const fetchAndUpdate = async () => {
+        if (agentRefreshInFlight) return;
+        agentRefreshInFlight = true;
         try {
           const res = await fetchWithAuth(\`/api/agents?agentWindowMinutes=\${agentWindowMinutes}&visibleNodeWindowSeconds=\${visibleNodeWindowSeconds}\`);
           if (!res.ok) return;
@@ -1923,10 +1946,13 @@ export function renderDashboard(params: {
           }
         } catch (e) {
           console.warn("Failed to fetch agent data:", e);
+        } finally {
+          agentRefreshInFlight = false;
         }
       };
 
-      setInterval(() => {
+      const refreshTimer = window.setInterval(() => {
+        if (document.hidden) return;
         refreshCountdown--;
         federationRefreshCountdown--;
         updateRefreshIndicator();
@@ -1957,7 +1983,7 @@ export function renderDashboard(params: {
       const createNodeMesh = (node, THREE) => {
         const color = statusColors[node.status] ?? 0x00aa2a;
         const radius = Math.max(5, 9 - node.depth * 1.2);
-        const geometry = new THREE.SphereGeometry(radius, 32, 32);
+        const geometry = new THREE.SphereGeometry(radius, NODE_SPHERE_SEGMENTS, NODE_SPHERE_SEGMENTS);
         const material = new THREE.MeshStandardMaterial({
           color,
           emissive: color,
@@ -2021,7 +2047,7 @@ export function renderDashboard(params: {
 
       // Update scene with new data (add new nodes, update existing, remove old)
       const updateSceneWithNewData = (state, newNodes) => {
-        const { scene, nodesById, meshToNode, THREE } = state;
+        const { scene, nodesById, meshToNode, pickableMeshes, THREE } = state;
         const newNodeIds = new Set(newNodes.map((n) => n.run_id));
         const { nodesById: newNodesById, roots: newRoots } = buildNodeTree(newNodes);
 
@@ -2031,6 +2057,8 @@ export function renderDashboard(params: {
             if (node.mesh) {
               scene.remove(node.mesh);
               meshToNode.delete(node.mesh);
+              const meshIndex = pickableMeshes.indexOf(node.mesh);
+              if (meshIndex >= 0) pickableMeshes.splice(meshIndex, 1);
               node.mesh.geometry.dispose();
               node.mesh.material.dispose();
             }
@@ -2067,6 +2095,7 @@ export function renderDashboard(params: {
             newNode.mesh = mesh;
             nodesById.set(runId, newNode);
             meshToNode.set(mesh, newNode);
+            pickableMeshes.push(mesh);
 
             // Create connection line
             const isRoot = newNode.depth === 0;
@@ -2096,9 +2125,9 @@ export function renderDashboard(params: {
         const camera = new THREE.PerspectiveCamera(50, width / height, 1, 2000);
         camera.position.set(0, 200, 350);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "low-power" });
         renderer.setSize(width, height);
-        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_RENDER_PIXEL_RATIO));
         container.appendChild(renderer.domElement);
 
         const controls = new OrbitControls(camera, renderer.domElement);
@@ -2115,7 +2144,7 @@ export function renderDashboard(params: {
 
         // Create orbit rings
         const createOrbitRing = (radius, y) => {
-          const segments = 64;
+          const segments = ORBIT_RING_SEGMENTS;
           const points = [];
           for (let i = 0; i <= segments; i++) {
             const angle = (i / segments) * Math.PI * 2;
@@ -2131,7 +2160,7 @@ export function renderDashboard(params: {
         const orchestratorColor = 0x00ff41;
         const orchestratorRadius = 18;
         const orchestratorMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius, 32, 32),
+          new THREE.SphereGeometry(orchestratorRadius, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
           new THREE.MeshStandardMaterial({
             color: orchestratorColor,
             emissive: orchestratorColor,
@@ -2144,13 +2173,13 @@ export function renderDashboard(params: {
         scene.add(orchestratorMesh);
 
         const glow1 = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius * 1.6, 32, 32),
+          new THREE.SphereGeometry(orchestratorRadius * 1.6, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
           new THREE.MeshBasicMaterial({ color: orchestratorColor, transparent: true, opacity: 0.12 })
         );
         scene.add(glow1);
 
         const glow2 = new THREE.Mesh(
-          new THREE.SphereGeometry(orchestratorRadius * 2.4, 32, 32),
+          new THREE.SphereGeometry(orchestratorRadius * 2.4, CORE_SPHERE_SEGMENTS, CORE_SPHERE_SEGMENTS),
           new THREE.MeshBasicMaterial({ color: orchestratorColor, transparent: true, opacity: 0.05 })
         );
         scene.add(glow2);
@@ -2167,6 +2196,7 @@ export function renderDashboard(params: {
         };
 
         const meshToNode = new Map();
+        const pickableMeshes = [];
         meshToNode.set(orchestratorMesh, orchestratorNode);
 
         // Build initial node tree (filter out stale completed nodes from visualization)
@@ -2179,6 +2209,7 @@ export function renderDashboard(params: {
           scene.add(mesh);
           node.mesh = mesh;
           meshToNode.set(mesh, node);
+          pickableMeshes.push(mesh);
         }
 
         // Create initial connection lines
@@ -2197,12 +2228,13 @@ export function renderDashboard(params: {
         }
 
         // Store scene state for live updates
-        sceneState = { scene, nodesById, meshToNode, THREE };
+        sceneState = { scene, nodesById, meshToNode, pickableMeshes, THREE };
 
         // Raycaster for hover detection
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         let hoveredNode = null;
+        let lastRaycastAt = 0;
 
         const formatTime = (ms) => {
           if (!ms) return '-';
@@ -2235,13 +2267,15 @@ export function renderDashboard(params: {
         };
 
         const onMouseMove = (event) => {
+          const now = performance.now();
+          if (now - lastRaycastAt < HOVER_RAYCAST_INTERVAL_MS) return;
+          lastRaycastAt = now;
           const rect = renderer.domElement.getBoundingClientRect();
           mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
           mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
           raycaster.setFromCamera(mouse, camera);
-          const meshes = [...meshToNode.keys()];
-          const intersects = raycaster.intersectObjects(meshes);
+          const intersects = raycaster.intersectObjects(pickableMeshes, false);
 
           if (intersects.length > 0) {
             const mesh = intersects[0].object;
@@ -2272,12 +2306,22 @@ export function renderDashboard(params: {
           camera.updateProjectionMatrix();
         };
         window.addEventListener("resize", resize);
+        const onVisibilityChange = () => {
+          if (document.hidden) hideTooltip();
+        };
+        document.addEventListener("visibilitychange", onVisibilityChange);
 
         // Animation loop
         let time = 0;
-        const animate = () => {
-          requestAnimationFrame(animate);
-          time += 1;
+        let lastFrameAt = 0;
+        let rafId = 0;
+        const animate = (now = 0) => {
+          rafId = requestAnimationFrame(animate);
+          if (document.hidden) return;
+          if (lastFrameAt !== 0 && now - lastFrameAt < FRAME_INTERVAL_MS) return;
+          const deltaFrames = lastFrameAt === 0 ? 1 : Math.min(4, (now - lastFrameAt) / FRAME_INTERVAL_MS);
+          lastFrameAt = now;
+          time += deltaFrames;
 
           // Orchestrator glow pulse
           const glowPulse = 1 + Math.sin(time * 0.02) * 0.15;
@@ -2289,7 +2333,7 @@ export function renderDashboard(params: {
           if (!isPaused) {
             for (const node of nodesById.values()) {
               if (node.mesh && node.orbitRadius > 0) {
-                node.orbitAngle += node.orbitSpeed;
+                node.orbitAngle += node.orbitSpeed * deltaFrames;
                 const newX = node.orbitCenterX + Math.cos(node.orbitAngle) * node.orbitRadius;
                 const newZ = node.orbitCenterZ + Math.sin(node.orbitAngle) * node.orbitRadius;
                 node.mesh.position.x = newX;
@@ -2330,6 +2374,31 @@ export function renderDashboard(params: {
           renderer.render(scene, camera);
         };
         animate();
+
+        const cleanup = () => {
+          window.clearInterval(refreshTimer);
+          window.removeEventListener("resize", resize);
+          document.removeEventListener("visibilitychange", onVisibilityChange);
+          renderer.domElement.removeEventListener("mousemove", onMouseMove);
+          renderer.domElement.removeEventListener("mouseleave", hideTooltip);
+          if (rafId) cancelAnimationFrame(rafId);
+          controls.dispose();
+          scene.traverse((object) => {
+            const anyObject = object;
+            if (anyObject.geometry?.dispose) {
+              anyObject.geometry.dispose();
+            }
+            const material = anyObject.material;
+            if (Array.isArray(material)) {
+              material.forEach((entry) => entry?.dispose?.());
+            } else if (material?.dispose) {
+              material.dispose();
+            }
+          });
+          renderer.dispose();
+          sceneState = null;
+        };
+        window.addEventListener("pagehide", cleanup, { once: true });
       }
     </script>
   </body>
