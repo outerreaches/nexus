@@ -847,7 +847,8 @@ export function renderDashboard(params: {
       const FLOOR_GRID_COLOR = 0x004d1f;
       const ORBIT_RING_COLOR = 0xffc44d;
       const ORCHESTRATOR_COLOR = 0xff8c2f;
-      const EXECUTION_NODE_COLOR = 0xc4ccd6;
+      const EXECUTION_NODE_COLOR = 0xf4f7fb;
+      const EXECUTION_NODE_EMISSIVE = 0xd3dbe8;
       const ORCHESTRATOR_Y = 42;
       const FLOOR_Y = -66;
       const ORTHO_VIEW_HALF_HEIGHT = 250;
@@ -2058,6 +2059,13 @@ export function renderDashboard(params: {
       const orbitRingStep = orbitRadiusStep * 0.6;
       const connectedNodeOrbitRadius = baseOrbitRadius + Math.max(1, maxAgentLevels) * orbitRingStep;
       const connectedNodeOrbitY = ORCHESTRATOR_Y;
+      const computeExecutionOrbitSpeedByRadius = (radius, seed = 0) => {
+        const normalizedRadius = Math.max(1, radius / Math.max(1, baseOrbitRadius));
+        const keplerFalloff = 1 / Math.sqrt(normalizedRadius);
+        const baseSpeed = 0.00034; // Faster than before while keeping outer orbits slower than inner ones.
+        const variation = (seed % 7) * 0.00001;
+        return baseSpeed * keplerFalloff + variation;
+      };
 
       // Helper to create a sub-agent mesh (low-poly orb)
       const createNodeMesh = (node, THREE) => {
@@ -2080,10 +2088,10 @@ export function renderDashboard(params: {
         const geometry = new THREE.TorusGeometry(10, 2.5, 6, 14);
         const material = new THREE.MeshStandardMaterial({
           color,
-          emissive: 0x808891,
-          emissiveIntensity: 0.22,
+          emissive: EXECUTION_NODE_EMISSIVE,
+          emissiveIntensity: 0.26,
           roughness: 0.38,
-          metalness: 0.5,
+          metalness: 0.58,
           flatShading: true,
         });
         const mesh = new THREE.Mesh(geometry, material);
@@ -2225,11 +2233,13 @@ export function renderDashboard(params: {
               mesh,
               connectionLine: null,
               orbitAngle: targetAngle,
-              orbitSpeed: 0.00012 + (idx % 5) * 0.00002,
+              orbitSpeed: computeExecutionOrbitSpeedByRadius(connectedNodeOrbitRadius, idx),
               orbitRadius: connectedNodeOrbitRadius,
               orbitCenterX: 0,
               orbitCenterY: connectedNodeOrbitY,
               orbitCenterZ: 0,
+              spinSpeed: 0.012 + (idx % 4) * 0.003,
+              spinPhase: (idx / Math.max(1, total)) * Math.PI * 2,
             };
             executionNodesById.set(node.id, existingNode);
             meshToNode.set(mesh, tooltipNode);
@@ -2245,13 +2255,20 @@ export function renderDashboard(params: {
               existingNode.tooltipNode.task = node.label || "Connected execution node";
             }
             existingNode.mesh.material.color.setHex(EXECUTION_NODE_COLOR);
-            existingNode.mesh.material.emissive.setHex(0x808891);
+            existingNode.mesh.material.emissive.setHex(EXECUTION_NODE_EMISSIVE);
           }
 
           existingNode.orbitRadius = connectedNodeOrbitRadius;
           existingNode.orbitCenterX = 0;
           existingNode.orbitCenterY = connectedNodeOrbitY;
           existingNode.orbitCenterZ = 0;
+          existingNode.orbitSpeed = computeExecutionOrbitSpeedByRadius(existingNode.orbitRadius, idx);
+          if (typeof existingNode.spinSpeed !== "number") {
+            existingNode.spinSpeed = 0.014;
+          }
+          if (typeof existingNode.spinPhase !== "number") {
+            existingNode.spinPhase = 0;
+          }
           if (typeof existingNode.orbitAngle !== "number") {
             existingNode.orbitAngle = targetAngle;
           }
@@ -2670,6 +2687,8 @@ export function renderDashboard(params: {
               node.mesh.position.z = newZ;
               node.x = newX;
               node.z = newZ;
+              node.mesh.rotation.z += (node.spinSpeed ?? 0.014) * deltaFrames;
+              node.mesh.rotation.y = Math.sin(time * 0.01 + (node.spinPhase ?? 0)) * 0.18;
               if (node.connectionLine) {
                 updateLineGeometry(node.connectionLine, sunPosition.x, sunPosition.y, sunPosition.z, node.x, node.y, node.z);
               }
