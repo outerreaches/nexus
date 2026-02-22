@@ -114,6 +114,50 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+read_env_file_value() {
+  local key="$1"
+  local file="$2"
+  [ -f "$file" ] || return 0
+  local line raw
+  line="$(grep -E "^${key}=" "$file" | tail -n 1 || true)"
+  [ -n "$line" ] || return 0
+  raw="${line#*=}"
+  raw="${raw%$'\r'}"
+  if [[ "${raw:0:1}" == "\"" && "${raw: -1}" == "\"" && ${#raw} -ge 2 ]]; then
+    raw="${raw:1:${#raw}-2}"
+  elif [[ "${raw:0:1}" == "'" && "${raw: -1}" == "'" && ${#raw} -ge 2 ]]; then
+    raw="${raw:1:${#raw}-2}"
+  fi
+  printf '%s' "$raw"
+}
+
+resolve_control_plane_api_key() {
+  if [ -n "$CONTROL_PLANE_API_KEY" ]; then
+    export NEXUS_HA_API_KEY="$CONTROL_PLANE_API_KEY"
+    return 0
+  fi
+
+  local watchdog_key gateway_key
+  watchdog_key="$(read_env_file_value "NEXUS_HA_API_KEY" "$WATCHDOG_ENV_FILE")"
+  gateway_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$GATEWAY_ENV_FILE")"
+  CONTROL_PLANE_API_KEY="${watchdog_key:-$gateway_key}"
+  [ -n "$CONTROL_PLANE_API_KEY" ] || fail \
+    "missing control-plane API key. Set NEXUS_HA_API_KEY or NEXUS_HTTP_API_KEY, or populate ${WATCHDOG_ENV_FILE}/${GATEWAY_ENV_FILE}."
+  export NEXUS_HA_API_KEY="$CONTROL_PLANE_API_KEY"
+}
+
+verify_control_plane_auth() {
+  local mode_payload
+  mode_payload="$(curl_with_auth -fsS --max-time 5 "http://localhost:${API_PORT}/api/mode" || true)"
+  case "$mode_payload" in
+    *'"mode":"active"'*|*'"mode":"standby"'*)
+      return 0
+      ;;
+  esac
+  fail \
+    "control-plane auth probe failed for /api/mode. Verify NEXUS_HA_API_KEY and NEXUS_HTTP_API_KEY values in ${WATCHDOG_ENV_FILE} and ${GATEWAY_ENV_FILE}."
+}
+
 curl_with_auth() {
   if [ -n "$CONTROL_PLANE_API_KEY" ]; then
     curl -H "authorization: Bearer ${CONTROL_PLANE_API_KEY}" "$@"
@@ -183,9 +227,15 @@ init_compose_files() {
 }
 
 compose() {
+  local runtime_uid runtime_gid
+  runtime_uid="${NEXUS_GATEWAY_UID:-$(stat -c '%u' "$CODE_DIR" 2>/dev/null || id -u)}"
+  runtime_gid="${NEXUS_GATEWAY_GID:-$(stat -c '%g' "$CODE_DIR" 2>/dev/null || id -g)}"
   NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}" \
   NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}" \
   NEXUS_WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE}" \
+  NEXUS_HA_API_KEY="${CONTROL_PLANE_API_KEY}" \
+  NEXUS_GATEWAY_UID="${runtime_uid}" \
+  NEXUS_GATEWAY_GID="${runtime_gid}" \
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
@@ -723,6 +773,7 @@ cmd_apply_local() {
   detect_slots
   old_active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
+  verify_control_plane_auth
 
   LAST_DEPLOY_SHA="$base_sha"
   LAST_STATUS="applying_local"
@@ -844,6 +895,7 @@ cmd_deploy() {
   detect_slots
   old_active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
+  verify_control_plane_auth
 
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deploying"
@@ -912,6 +964,7 @@ cmd_rollback() {
   detect_slots
   old_active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
+  verify_control_plane_auth
 
   if ! refresh_secret_sidecar_if_present; then
     fail "rollback failed during secret-sidecar refresh"
@@ -956,6 +1009,7 @@ cmd_finalize() {
   detect_slots
   active="$ACTIVE_SLOT"
   candidate="$INACTIVE_SLOT"
+  verify_control_plane_auth
 
   if ! refresh_secret_sidecar_if_present; then
     fail "finalize failed during secret-sidecar refresh"
@@ -1003,6 +1057,7 @@ main() {
       require_cmd docker
       require_cmd curl
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
+      resolve_control_plane_api_key
       init_compose_files
       cmd_status
       ;;
@@ -1011,6 +1066,7 @@ main() {
       require_cmd docker
       require_cmd curl
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
+      resolve_control_plane_api_key
       init_compose_files
       ensure_tls_preflight
       ensure_secrets_preflight

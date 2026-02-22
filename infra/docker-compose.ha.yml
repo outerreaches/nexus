@@ -44,6 +44,8 @@ services:
       context: ..
       dockerfile: Dockerfile
     command: gateway --verbose
+    # Match host deploy user to avoid root-owned artifacts on bind mounts.
+    user: "${NEXUS_GATEWAY_UID:-1000}:${NEXUS_GATEWAY_GID:-1000}"
     volumes:
       # Persistent host state (reuse existing DB/backups/config)
       - /data/nexus:/data/nexus
@@ -77,6 +79,8 @@ services:
       context: ..
       dockerfile: Dockerfile
     command: gateway --verbose --standby
+    # Match host deploy user to avoid root-owned artifacts on bind mounts.
+    user: "${NEXUS_GATEWAY_UID:-1000}:${NEXUS_GATEWAY_GID:-1000}"
     volumes:
       # Same bind mounts as primary
       - /data/nexus:/data/nexus

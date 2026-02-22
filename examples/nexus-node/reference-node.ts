@@ -19,11 +19,7 @@ import process from "node:process";
 import type { TLSSocket } from "node:tls";
 
 import { WebSocket } from "ws";
-import {
-  McpStdioClient,
-  type McpResourceInfo,
-  type McpToolInfo,
-} from "../../src/mcp/stdio-client.js";
+import type { McpResourceInfo, McpToolInfo } from "../../src/mcp/stdio-client.js";
 
 import {
   ReferenceNodeStateStore,
@@ -228,6 +224,8 @@ type McpBridgeServerConfig = {
   allowResources: string[];
 };
 
+type McpStdioClient = import("../../src/mcp/stdio-client.js").McpStdioClient;
+
 class NodeToolError extends Error {
   constructor(
     readonly code: string,
@@ -301,6 +299,7 @@ class ReferenceNodeClient {
   private readonly mcpBridgeConfigPath: string;
   private readonly mcpBridgeServers = new Map<string, McpBridgeServerConfig>();
   private readonly mcpBridgeClients = new Map<string, McpStdioClient>();
+  private mcpBridgeClientCtorPromise: Promise<typeof import("../../src/mcp/stdio-client.js").McpStdioClient> | null = null;
 
   constructor(
     private readonly config: Config,
@@ -634,7 +633,8 @@ class ReferenceNodeClient {
   private async getMcpBridgeClient(server: McpBridgeServerConfig): Promise<McpStdioClient> {
     const existing = this.mcpBridgeClients.get(server.id);
     if (existing) return existing;
-    const client = new McpStdioClient({
+    const McpStdioClientCtor = await this.loadMcpBridgeClientCtor();
+    const client = new McpStdioClientCtor({
       command: server.command,
       args: server.args,
       env: server.env,
@@ -649,6 +649,27 @@ class ReferenceNodeClient {
       await client.close().catch(() => undefined);
       throw err;
     }
+  }
+
+  private async loadMcpBridgeClientCtor(): Promise<typeof import("../../src/mcp/stdio-client.js").McpStdioClient> {
+    if (!this.mcpBridgeClientCtorPromise) {
+      this.mcpBridgeClientCtorPromise = import("../../src/mcp/stdio-client.js")
+        .then((mod) => {
+          if (typeof mod.McpStdioClient !== "function") {
+            throw new Error("McpStdioClient export missing");
+          }
+          return mod.McpStdioClient;
+        })
+        .catch((err) => {
+          this.mcpBridgeClientCtorPromise = null;
+          throw new NodeToolError(
+            "CAPABILITY_UNAVAILABLE",
+            `MCP bridge runtime unavailable: ${err instanceof Error ? err.message : String(err)}`,
+            false,
+          );
+        });
+    }
+    return this.mcpBridgeClientCtorPromise;
   }
 
   private allowlistedMcpName(name: string, allowPatterns: string[]): boolean {
