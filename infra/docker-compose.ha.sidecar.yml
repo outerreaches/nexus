@@ -40,6 +40,8 @@ services:
       - NEXUS_SECRETS_PROCESS_ROLE=sidecar
       - NEXUS_CREDENTIALS_STORE_DIR=/data/nexus-secrets
       - NEXUS_SECRET_SIDECAR_SOCKET_PATH=/run/nexus/secret-sidecar.sock
+      - NEXUS_SECRET_SIDECAR_SOCKET_MODE=0660
+      - NEXUS_SECRET_SIDECAR_SOCKET_GID=${NEXUS_GATEWAY_GID:-1000}
       - NEXUS_SECRET_SIDECAR_MAX_BODY_BYTES=32768
     env_file:
       - ${NEXUS_SIDECAR_ENV_FILE:-/data/nexus-config/sidecar/nexus.env}

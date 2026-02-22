@@ -10,6 +10,8 @@ export type SecretSidecarOptions = {
   bindHost?: string;
   port?: number;
   socketPath?: string | null;
+  socketMode?: number | null;
+  socketGid?: number | null;
   maxBodyBytes?: number;
   bearerToken?: string | null;
   strictMode?: boolean;
@@ -31,6 +33,26 @@ export type SecretSidecarHandle = {
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024;
 const RESOLVE_PATHS = new Set(["/v1/secrets/resolve", "/resolve"]);
 const HEALTH_PATH = "/health";
+const DEFAULT_SOCKET_MODE = 0o666;
+
+function parseSocketMode(raw: string | undefined): number | null {
+  const value = (raw ?? "").trim();
+  if (!value) return null;
+  let normalized = value;
+  if (normalized.startsWith("0o")) normalized = normalized.slice(2);
+  if (normalized.length > 1 && normalized.startsWith("0")) normalized = normalized.slice(1);
+  if (!/^[0-7]{3,4}$/.test(normalized)) return null;
+  return Number.parseInt(normalized, 8);
+}
+
+function parseNonNegativeInt(raw: string | undefined): number | null {
+  const value = (raw ?? "").trim();
+  if (!value) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const intValue = Math.floor(parsed);
+  return intValue >= 0 ? intValue : null;
+}
 
 function safeTokenEquals(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
@@ -109,6 +131,8 @@ export async function startSecretSidecar(options: SecretSidecarOptions): Promise
   const log = options.log ?? (() => {});
   const strictMode = true;
   const socketPath = options.socketPath?.trim() ? options.socketPath.trim() : null;
+  const socketMode = options.socketMode ?? parseSocketMode(process.env.NEXUS_SECRET_SIDECAR_SOCKET_MODE) ?? DEFAULT_SOCKET_MODE;
+  const socketGid = options.socketGid ?? parseNonNegativeInt(process.env.NEXUS_SECRET_SIDECAR_SOCKET_GID);
   const bindHost = (options.bindHost ?? "127.0.0.1").trim();
   const requestedPortRaw = options.port ?? 7788;
   const requestedPort = Number.isFinite(requestedPortRaw) ? Math.floor(requestedPortRaw) : 7788;
@@ -212,6 +236,20 @@ export async function startSecretSidecar(options: SecretSidecarOptions): Promise
 
   let effectivePort: number | null = null;
   if (socketPath) {
+    if (socketGid !== null && typeof process.getuid === "function" && typeof process.getgid === "function") {
+      try {
+        await fs.chown(socketPath, process.getuid(), socketGid);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`secret_sidecar_socket_chown_failed:${detail}`);
+      }
+    }
+    try {
+      await fs.chmod(socketPath, socketMode);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`secret_sidecar_socket_chmod_failed:${detail}`);
+    }
     log(`secret-sidecar: listening on unix://${socketPath}`);
   } else {
     const address = server.address();
