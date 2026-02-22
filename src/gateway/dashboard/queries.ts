@@ -55,7 +55,36 @@ export function listAgentGraph(db: NexusDatabase | undefined, allowedRunIds: Set
   const placeholders = ids.map(() => "?").join(", ");
   return db.db
     .prepare(
-      `SELECT run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task FROM agent_runs WHERE run_id IN (${placeholders}) ORDER BY started_at ASC`,
+      `WITH RECURSIVE
+         seed(run_id) AS (
+           SELECT run_id
+           FROM agent_runs
+           WHERE run_id IN (${placeholders})
+         ),
+         descendants(run_id) AS (
+           SELECT run_id FROM seed
+           UNION
+           SELECT child.run_id
+           FROM agent_runs child
+           JOIN descendants d ON child.parent_run_id = d.run_id
+         ),
+         ancestors(run_id) AS (
+           SELECT run_id FROM seed
+           UNION
+           SELECT parent.parent_run_id
+           FROM agent_runs parent
+           JOIN ancestors a ON parent.run_id = a.run_id
+           WHERE parent.parent_run_id IS NOT NULL
+         ),
+         expanded(run_id) AS (
+           SELECT run_id FROM descendants
+           UNION
+           SELECT run_id FROM ancestors
+         )
+       SELECT run_id, parent_run_id, agent_id, preset, status, started_at, ended_at, task
+       FROM agent_runs
+       WHERE run_id IN (SELECT run_id FROM expanded)
+       ORDER BY started_at ASC`,
     )
     .all(...ids) as AgentRunRow[];
 }
