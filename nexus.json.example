@@ -10,6 +10,8 @@
   // Plain string values are also supported for non-sensitive config.
   "secrets": {
     "env": {
+      "FIREWORKS_API_KEY": "{{secret:sidecar-main/llm.fireworks.api#password}}",
+      "BASETEN_API_KEY": "{{secret:sidecar-main/llm.baseten.k2.5.api#password}}",
       "OPENROUTER_API_KEY": "{{secret:sidecar-main/llm.openrouter.api#password}}",
       "BRAVE_API_KEY": "{{secret:sidecar-main/search.brave.api#password}}",
       "PERPLEXITY_API_KEY": "{{secret:sidecar-main/search.perplexity.api#password}}",
@@ -34,26 +36,49 @@
 
   // ── LLM ──────────────────────────────────────────────────────────────────
   "llm": {
+    // Default provider — Fireworks AI (Kimi-K2.5)
     "openaiCompat": {
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "moonshotai/kimi-k2.5"
+      "baseUrl": "https://api.fireworks.ai/inference/v1",
+      "apiKey": "${FIREWORKS_API_KEY}",
+      "model": "accounts/fireworks/models/kimi-k2p5",
+      "stripCacheControl": true
     },
     "providers": {
       "local": {
         "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
         "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}",
         "model": "${NEXUS_LOCAL_LLM_MODEL}"
+      },
+      "baseten": {
+        "baseUrl": "https://inference.baseten.co/v1",
+        "apiKey": "${BASETEN_API_KEY}",
+        "model": "moonshotai/Kimi-K2.5"
+      },
+      "openrouter": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": "${OPENROUTER_API_KEY}",
+        "model": "moonshotai/kimi-k2.5"
       }
     },
     "routing": {
       "default": {
-        "primary": { "provider": "default" }
+        "primary": { "provider": "default" },
+        "fallback": { "provider": "local" }
       },
-      "byPreset": {},
+      "byPreset": {
+        "security-researcher": { "primary": { "provider": "openrouter", "model": "openai/gpt-5.2-codex" }, "fallback": { "provider": "local" } },
+        "credential-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "intake-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "mcp-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "process-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "coder": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "trader": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
+        "analyst": { "primary": { "provider": "openrouter", "model": "google/gemini-3.1-pro-preview" }, "fallback": { "provider": "local" } }
+      },
       "byAgent": {},
       "localProvider": "local"
-    }
+    },
+    "transientRetries": 5
   },
 
   // ── Channels ─────────────────────────────────────────────────────────────
@@ -116,14 +141,14 @@
   // ── Limits ───────────────────────────────────────────────────────────────
   "limits": {
     "maxConcurrentAgents": 5,
-    "maxToolCallsPerRun": 140,
-    "maxIterationsPerRun": 60,
+    "maxToolCallsPerRun": 200,
+    "maxIterationsPerRun": 100,
     "maxContextTokens": 128000
   },
 
   // ── Federation ───────────────────────────────────────────────────────────
   "federation": {
-    "enabled": false,
+    "enabled": true,
     "localInstanceId": "local"
   }
 }
