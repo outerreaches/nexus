@@ -158,13 +158,7 @@ npm run dev -- init
 npm run dev -- gateway --verbose
 ```
 
-Containerized local dev:
-
-```bash
-docker compose up --build
-```
-
-Production rollouts should still use the HA scripts above.
+Containerized/runtime deploys are HA-only and should use the HA scripts above (`pull-deploy.sh` / `ha-rollout.sh`).
 
 ## Security Notes
 
