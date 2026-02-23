@@ -57,6 +57,11 @@ export type WorkerConfig = {
 
   // Optional run-scoped MCP grants for this worker.
   mcpGrantIds?: string[];
+  // Optional runtime denylist applied to this worker's preset tool set.
+  blockedToolNames?: string[];
+  // Optional coder-mode metadata for read-only/write behavior.
+  taskType?: "plan" | "review" | "walkthrough" | "write";
+  taskTypeEnforcement?: "soft" | "hard";
 
   // Resolved secrets forwarded from parent process (populated by resolveEnvSecrets at startup).
   // Allows isolated workers to use getSecret() for tools like web_search.

@@ -81,6 +81,16 @@ process.on("message", async (msg: ParentMessage) => {
     if (cfg.currentDepth >= cfg.maxDepth) {
       allowedNames.delete("spawn_agent");
     }
+    const blockedToolNames = new Set((cfg.blockedToolNames ?? []).map((name) => name.trim()).filter(Boolean));
+    for (const name of blockedToolNames) {
+      allowedNames.delete(name);
+    }
+    if (cfg.presetName === "coder" && cfg.taskType) {
+      log(
+        `coder task policy: taskType=${cfg.taskType} enforcement=${cfg.taskTypeEnforcement ?? "soft"} ` +
+        `blocked_tools=${blockedToolNames.size}`,
+      );
+    }
     const baseTools = registry.list().filter((t) => allowedNames.has(t.name));
     const grantTools = mcp
       ? mcp.listToolsForGrants({
@@ -146,10 +156,12 @@ process.on("message", async (msg: ParentMessage) => {
 
     const calls = collectToolCallRecords(result.newMessages);
     let deployApplied = calls.some((call) => isApplyDeployCall(call) && isSuccessfulResult(call.result));
+    const readOnlyTask = isReadOnlyCoderTaskType(cfg.taskType);
 
     // Coder safeguard: if code was edited and built but ha_deploy was never
     // called, auto-trigger it so deploys can't be silently skipped.
-    if (cfg.presetName === "coder") {
+    // Disabled for explicit read-only coder task types.
+    if (cfg.presetName === "coder" && !readOnlyTask) {
       const codeEditMatches = calls.filter((call) => isCodeEditCall(call, cfg.codeDir));
       const editedCode = codeEditMatches.length > 0;
       const buildValidation = collectSuccessfulBuildCommands(calls);
@@ -294,6 +306,10 @@ function isCodeEditCall(call: ToolCallRecord, codeDir: string): boolean {
   const normalizedPath = path.normalize(rawPath);
   const normalizedCodeDir = path.normalize(codeDir);
   return normalizedPath === normalizedCodeDir || normalizedPath.startsWith(`${normalizedCodeDir}${path.sep}`);
+}
+
+function isReadOnlyCoderTaskType(taskType: WorkerConfig["taskType"]): boolean {
+  return taskType === "plan" || taskType === "review" || taskType === "walkthrough";
 }
 
 function collectSuccessfulBuildCommands(calls: ToolCallRecord[]): { typecheckCommands: string[]; buildCommands: string[] } {

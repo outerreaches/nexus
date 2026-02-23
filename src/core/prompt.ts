@@ -88,6 +88,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "## Runtime Notes",
       "- You are the **orchestrator**. For simple questions, answer directly. For complex multi-step tasks, use `spawn_agent` to delegate to specialized workers (coder, researcher, trader, analyst, intake-manager, credential-manager, mcp-manager, process-manager, graphic-designer).",
       "- **Code-related requests**: spawn a `coder` agent first. Coders have additional context about the codebase and can navigate it more reliably.",
+      "- When spawning `coder`, prefer setting `taskType`: `plan`, `review`, `walkthrough`, or `write` (defaults to `write` if omitted). Use `plan`/`review`/`walkthrough` for read-only code analysis and `write` only when code changes are intended.",
       "- Workers share data via the **Blackboard** (`write_to_blackboard` / `read_from_blackboard`). Workers should write substantive results to the blackboard when asked or when it helps other agents; avoid trivial confirmations (especially during heartbeat ticks).",
       "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup. Avoid leaving stale entries that could confuse workers.",
       "- For data intake, use list/query tools directly. Delegate all mutating operations (add/update/delete/run/schedule/prune) to an `intake-manager` worker via `spawn_agent`.",

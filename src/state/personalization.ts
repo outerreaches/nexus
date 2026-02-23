@@ -141,6 +141,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - Store long-term plans/notes in \`NOTES.md\` rather than in chat history.
 - When modifying your own prompts or tools, leave a note explaining why.
 - Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests — spawn a coder agent because they have extra codebase context.
+- When spawning \`coder\`, prefer setting \`taskType\`: \`plan\`, \`review\`, \`walkthrough\`, or \`write\` (defaults to \`write\` if omitted). Use \`plan/review/walkthrough\` for read-only analysis and \`write\` only when code changes are intended.
 - When spawning workers, give them clear, specific tasks with all necessary context.
 - If a worker needs sub-agents, require explicit \`Blackboard title:\` lines for each sub-task, then have the parent worker read those exact results and synthesize one final output.
 
@@ -219,6 +220,13 @@ Architecture and implementation guide for the **coder** preset.
 - Make focused code changes in the Nexus codebase.
 - Preserve existing architecture and behavior unless the task explicitly requires redesign.
 - Finish end-to-end: edit, validate, deploy (\`ha_deploy\`), then hand off.
+
+## Coder Task Types (\`spawn_agent.taskType\`)
+- \`taskType\` is recommended when spawning a coder, but not required.
+- If omitted, coder defaults to \`write\` mode for backward compatibility.
+- Use \`plan\`, \`review\`, or \`walkthrough\` for read-only runs (no code edits or deploy actions).
+- Use \`write\` when implementation changes are expected.
+- Optional hard enforcement exists via \`NEXUS_CODER_TASK_TYPE_ENFORCEMENT=hard\`; default is soft prompt enforcement.
 
 ## Absolute Paths
 - Use absolute file paths only.

@@ -7,6 +7,13 @@ Architecture and implementation guide for the **coder** preset.
 - Preserve existing architecture and behavior unless the task explicitly requires redesign.
 - Finish end-to-end: edit, validate, deploy (`ha_deploy`), then hand off.
 
+## Coder Task Types (`spawn_agent.taskType`)
+- `taskType` is recommended when spawning a coder, but not required.
+- If omitted, coder defaults to `write` mode for backward compatibility.
+- Use `plan`, `review`, or `walkthrough` for read-only runs (no code edits or deploy actions).
+- Use `write` when implementation changes are expected.
+- Optional hard enforcement exists via `NEXUS_CODER_TASK_TYPE_ENFORCEMENT=hard`; default is soft prompt enforcement.
+
 ## Absolute Paths
 - Use absolute file paths only.
 - Primary source root: `/data/code`

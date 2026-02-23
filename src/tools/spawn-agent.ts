@@ -21,6 +21,21 @@ import type { McpManager } from "../mcp/manager.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CODER_TASK_TYPES = ["plan", "review", "walkthrough", "write"] as const;
+const CODER_READ_ONLY_TASK_TYPES = new Set<CoderTaskType>(["plan", "review", "walkthrough"]);
+const HARD_BLOCKED_CODER_TOOLS_READ_ONLY = ["file_write", "file_edit", "file_edit_lines", "ha_deploy"] as const;
+
+type CoderTaskType = typeof CODER_TASK_TYPES[number];
+type CoderTaskTypeEnforcement = "soft" | "hard";
+
+type CoderTaskPolicy = {
+  taskType: CoderTaskType | null;
+  readOnly: boolean;
+  enforcement: CoderTaskTypeEnforcement;
+  enforceHardReadOnly: boolean;
+  blockedToolNames: string[];
+  promptLines: string[];
+};
 
 function resolveIsolatedWorkerPath(): string {
   const candidates = [
@@ -42,6 +57,7 @@ export const spawnAgent = defineTool({
     "The worker runs with a scoped set of tools and its own LLM context. " +
     "Available presets: " + getPresetNames().filter(n => n !== "orchestrator").join(", ") + ". " +
     "Use this to delegate coding, research, trading, or analysis tasks to specialists. " +
+    "For coder runs, set `taskType` to control read-only planning/review/walkthrough vs write mode. " +
     "The worker's output is returned to you and also written to the Blackboard. " +
     "Note: spawning is depth-limited to prevent infinite delegation.",
   parameters: z.object({
@@ -54,6 +70,13 @@ export const spawnAgent = defineTool({
       .min(1)
       .max(8000)
       .describe("Detailed task description for the worker"),
+    taskType: z
+      .enum(CODER_TASK_TYPES)
+      .optional()
+      .describe(
+        "Coder-only task mode: `plan`, `review`, `walkthrough`, or `write`. " +
+        "Defaults to `write` for coder. `plan`/`review`/`walkthrough` are read-only by policy prompt.",
+      ),
     context: z
       .array(z.string())
       .max(10)
@@ -89,6 +112,9 @@ export const spawnAgent = defineTool({
     if (args.preset === "orchestrator") {
       return "ERROR: cannot spawn another orchestrator";
     }
+    if (args.taskType && args.preset !== "coder") {
+      return `ERROR: taskType is only supported for the "coder" preset (got preset="${args.preset}").`;
+    }
 
     const parentPresetName = ctx.request?.preset;
     const parentPreset = parentPresetName ? getPreset(parentPresetName) : undefined;
@@ -97,6 +123,7 @@ export const spawnAgent = defineTool({
       return `ERROR: preset "${parentPresetName}" cannot spawn "${args.preset}". Allowed: ${spawnAllowlist.join(", ")}`;
     }
 
+    const coderTaskPolicy = resolveCoderTaskPolicy({ presetName: preset.name, requestedTaskType: args.taskType });
     const workerModelMode: ModelRoutingMode = args.modelMode ?? ctx.request?.modelMode ?? ctx.modelMode ?? "default";
 
     // Get dependencies from context
@@ -218,6 +245,8 @@ export const spawnAgent = defineTool({
       `- state: ${ctx.stateDir} (config files, HEARTBEAT.md, etc.; use absolute paths)`,
       `- code: ${ctx.codeDir} (source code, if enabled; use absolute paths)`,
       "",
+      ...coderTaskPolicy.promptLines,
+      coderTaskPolicy.promptLines.length > 0 ? "" : undefined,
       "We have a large list of verified data sources available via data intake tools. Use them when possible.",
       `Blackboard title: ${blackboardTitle}`,
       "When writing your primary result to the blackboard, use the exact Blackboard title above.",
@@ -230,7 +259,7 @@ export const spawnAgent = defineTool({
         ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
         : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
       "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
-    ].join("\n");
+    ].filter((line): line is string => typeof line === "string").join("\n");
 
     // Start run tracking BEFORE execution (so DB row exists for isolated workers)
     const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
@@ -256,8 +285,9 @@ export const spawnAgent = defineTool({
       runId: runId ?? null,
       grantIds: mcpGrantIds,
     });
-    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth);
+    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(coderTaskPolicy.blockedToolNames));
     const workerTools = mergeToolsByName(baseTools, grantedTools);
+    const workerAllowCodeWrite = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowCodeWrite ?? false);
 
     // Branch: isolated process vs in-process
     let workerResult: string;
@@ -277,6 +307,10 @@ export const spawnAgent = defineTool({
         tracker,
         blackboardTitle,
         mcpGrantIds,
+        blockedToolNames: coderTaskPolicy.blockedToolNames,
+        workerAllowCodeWrite,
+        taskType: coderTaskPolicy.taskType,
+        taskTypeEnforcement: coderTaskPolicy.enforcement,
       });
     } else {
       workerResult = await runInProcess({
@@ -292,6 +326,8 @@ export const spawnAgent = defineTool({
         workerTools,
         tracker,
         blackboardTitle,
+        workerAllowCodeWrite,
+        taskType: coderTaskPolicy.taskType,
       });
     }
 
@@ -299,6 +335,7 @@ export const spawnAgent = defineTool({
       ctx,
       presetName: preset.name,
       task: cleanedTask,
+      taskType: coderTaskPolicy.taskType,
       parent: parent ?? null,
       sourceRunId: runId ?? null,
       parentRunId: effectiveParentRunId,
@@ -327,8 +364,25 @@ async function runInProcess(params: {
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
+  workerAllowCodeWrite: boolean;
+  taskType: CoderTaskType | null;
 }): Promise<string> {
-  const { ctx, preset, systemPrompt, task, budget, runId, parentRunId, agentId, modelMode, workerTools, tracker, blackboardTitle } = params;
+  const {
+    ctx,
+    preset,
+    systemPrompt,
+    task,
+    budget,
+    runId,
+    parentRunId,
+    agentId,
+    modelMode,
+    workerTools,
+    tracker,
+    blackboardTitle,
+    workerAllowCodeWrite,
+    taskType,
+  } = params;
   const log = ctx.log;
   const onLog = log
     ? (line: string) => log(`worker[${preset.name}] ${line}`)
@@ -359,6 +413,7 @@ async function runInProcess(params: {
     llm,
     llmConfig,
     modelMode,
+    allowCodeWrite: workerAllowCodeWrite,
     request: ctx.request
       ? {
         ...ctx.request,
@@ -408,6 +463,9 @@ async function runInProcess(params: {
       deployApplied: didRunApplyDeploy(result.newMessages),
       blackboardTitle,
     };
+    if (taskType) {
+      returnValue.taskType = taskType;
+    }
     return JSON.stringify(returnValue, null, 2);
   } catch (e) {
     if (runId && tracker) {
@@ -440,6 +498,10 @@ async function runIsolated(params: {
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
   mcpGrantIds: string[];
+  blockedToolNames: string[];
+  workerAllowCodeWrite: boolean;
+  taskType: CoderTaskType | null;
+  taskTypeEnforcement: CoderTaskTypeEnforcement;
 }): Promise<string> {
   const {
     ctx,
@@ -456,6 +518,10 @@ async function runIsolated(params: {
     tracker,
     blackboardTitle,
     mcpGrantIds,
+    blockedToolNames,
+    workerAllowCodeWrite,
+    taskType,
+    taskTypeEnforcement,
   } = params;
 
   const log = ctx.log;
@@ -612,7 +678,7 @@ async function runIsolated(params: {
       modelRouterConfig,
       allowShellExec: ctx.allowShellExec ?? false,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
-      allowCodeWrite: ctx.allowCodeWrite ?? false,
+      allowCodeWrite: workerAllowCodeWrite,
       presetName: preset.name,
       systemPrompt,
       userMessage: task,
@@ -628,6 +694,9 @@ async function runIsolated(params: {
       currentDepth: workerDepth,
       maxDepth,
       mcpGrantIds,
+      blockedToolNames,
+      taskType: taskType ?? undefined,
+      taskTypeEnforcement,
       resolvedSecrets: getResolvedSecretsSnapshot(),
     };
 
@@ -671,12 +740,88 @@ function filterToolsForPreset(
   allTools: ReturnType<ToolRegistry["list"]>,
   preset: AgentPreset,
   isMaxDepth: boolean,
+  blockedToolNames: Set<string> = new Set(),
 ): ReturnType<ToolRegistry["list"]> {
   const allowedNames = new Set(preset.tools);
   if (isMaxDepth) {
     allowedNames.delete("spawn_agent");
   }
+  for (const blocked of blockedToolNames) {
+    allowedNames.delete(blocked);
+  }
   return allTools.filter((t) => allowedNames.has(t.name));
+}
+
+function resolveCoderTaskPolicy(params: {
+  presetName: string;
+  requestedTaskType: CoderTaskType | undefined;
+}): CoderTaskPolicy {
+  if (params.presetName !== "coder") {
+    return {
+      taskType: null,
+      readOnly: false,
+      enforcement: "soft",
+      enforceHardReadOnly: false,
+      blockedToolNames: [],
+      promptLines: [],
+    };
+  }
+
+  const taskType: CoderTaskType = params.requestedTaskType ?? "write";
+  const readOnly = CODER_READ_ONLY_TASK_TYPES.has(taskType);
+  const enforcement = resolveCoderTaskTypeEnforcement();
+  const enforceHardReadOnly = readOnly && enforcement === "hard";
+  const blockedToolNames = enforceHardReadOnly ? [...HARD_BLOCKED_CODER_TOOLS_READ_ONLY] : [];
+
+  return {
+    taskType,
+    readOnly,
+    enforcement,
+    enforceHardReadOnly,
+    blockedToolNames,
+    promptLines: buildCoderTaskPromptLines({ taskType, readOnly, enforcement, enforceHardReadOnly }),
+  };
+}
+
+function resolveCoderTaskTypeEnforcement(): CoderTaskTypeEnforcement {
+  const raw = (process.env.NEXUS_CODER_TASK_TYPE_ENFORCEMENT ?? "").trim().toLowerCase();
+  if (raw === "hard") return "hard";
+  return "soft";
+}
+
+function buildCoderTaskPromptLines(params: {
+  taskType: CoderTaskType;
+  readOnly: boolean;
+  enforcement: CoderTaskTypeEnforcement;
+  enforceHardReadOnly: boolean;
+}): string[] {
+  const lines = [
+    "## Coder Task Type",
+    `Task type: ${params.taskType}.`,
+  ];
+
+  if (params.taskType === "plan") {
+    lines.push("PLAN mode: produce an implementation plan only (scope, steps, risks, validation strategy).");
+  } else if (params.taskType === "review") {
+    lines.push("REVIEW mode: perform a general code review focused on bugs, regressions, risks, and test gaps.");
+  } else if (params.taskType === "walkthrough") {
+    lines.push("WALKTHROUGH mode: explain the requested code workflow step-by-step with concrete file references.");
+  } else {
+    lines.push("WRITE mode: implement the requested code changes when needed.");
+  }
+
+  if (params.readOnly) {
+    lines.push("Read-only requirement: do NOT make code changes.");
+    lines.push("Do NOT call `file_write`, `file_edit`, `file_edit_lines`, or `ha_deploy`.");
+    lines.push("Do NOT run mutating shell commands (edits, installs, git mutations, or deploy actions).");
+    if (params.enforceHardReadOnly === true) {
+      lines.push("Hard policy is enabled: code-mutating tools are removed for this run and code-root writes are blocked.");
+    } else {
+      lines.push("Soft policy is enabled: follow the read-only requirement strictly even though tools remain visible.");
+    }
+  }
+
+  return lines;
 }
 
 function envInt(name: string): number | null {
@@ -777,6 +922,7 @@ function queueSpawnRunReport(params: {
   ctx: ToolContext;
   presetName: string;
   task: string;
+  taskType: CoderTaskType | null;
   parent: ToolContext["request"] | null;
   sourceRunId: string | null;
   parentRunId: string | null;
@@ -815,6 +961,7 @@ function queueSpawnRunReport(params: {
 
   const body = [
     `preset=${params.presetName}`,
+    `task_type=${params.taskType ?? "n/a"}`,
     `status=${status || "unknown"}`,
     `source_run_id=${params.sourceRunId ?? "n/a"}`,
     `parent_run_id=${params.parentRunId ?? "n/a"}`,
@@ -841,6 +988,7 @@ function queueSpawnRunReport(params: {
       targetChannelKey,
       metadata: {
         preset: params.presetName,
+        taskType: params.taskType,
         status,
         targetPreset: typeof parent.preset === "string" ? parent.preset : null,
       },
