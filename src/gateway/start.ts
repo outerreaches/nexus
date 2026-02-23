@@ -35,6 +35,7 @@ import { randomId } from "../data-intake/utils.js";
 import { NodeRegistry, NodeToolRouter, NodeWebSocketGateway } from "../nodes/index.js";
 import { loadOrCreateGatewayIdentity } from "../nodes/auth.js";
 import { createNodeProcessDeliveryHandler } from "../nodes/process-delivery.js";
+import { createNodeWebhookIngressHandler } from "../nodes/webhook-ingress.js";
 import { registerNodeRoutes } from "./routes/nodes.js";
 import {
   appendFederationAudit,
@@ -151,6 +152,11 @@ export async function startGateway(
     stateDir: paths.stateDir,
     log,
   });
+  const nodeWebhookIngress = createNodeWebhookIngressHandler({
+    db,
+    log,
+    targetAgentId: process.env.NEXUS_NODE_WEBHOOK_TARGET_AGENT_ID,
+  });
   // Standby mode tracking is declared early so node transport, status, and HA
   // transitions all share the same source of truth.
   let isStandby = params.standby ?? false;
@@ -162,6 +168,9 @@ export async function startGateway(
     gatewaySender: `gateway:${hostId}`,
     onProcessUpdate: nodeProcessDelivery.handleProcessUpdate,
     onLogAppend: nodeProcessDelivery.handleLogAppend,
+    onWebhookIngress: async (ctx) => {
+      await nodeWebhookIngress.handle(ctx);
+    },
   });
   const nodeRouter = new NodeToolRouter({
     registry: nodeRegistry,

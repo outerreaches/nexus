@@ -59,8 +59,77 @@ Optional flags:
 - `--doctor` (run preflight checks for Node version, gateway reachability, state backend, and tmux when shellctl is allowlisted)
 - `--file-transfer-roots <csv>` (allowed roots for node file paths; default `<stateDir>/file-transfer`)
 - `--file-transfer-max-bytes <n>` (max bytes per file transfer payload; default 5242880)
+- `--webhook-host <host>` (local bind host for node webhook listener; default `127.0.0.1`)
+- `--webhook-port <port>` (enable node webhook listener when >0; default `0` disabled)
+- `--webhook-path <path>` (local webhook path; default `/node-webhook`)
+- `--webhook-token <token>` (optional bearer/`x-nexus-node-webhook-token` gate)
+- `--webhook-max-bytes <n>` (max webhook request body bytes; default 262144)
 - `--gateway-tls-fingerprint <sha256-fp>` (pin server cert fingerprint for `wss://` gateways; useful for self-signed certs)
 - `--insecure-allow-nonloopback-ws 1` (debug-only escape hatch for `ws://` on non-loopback hosts)
+
+## Node-local webhook ingress
+
+You can run a local webhook endpoint on each node and forward events to the gateway over the node WS session.
+
+Flow:
+
+1. Script/service on node sends HTTP webhook to the node-local listener.
+2. Reference node emits signed `webhook.deliver` event over `/nx/nodes`.
+3. Gateway validates + persists the event and queues a run report.
+4. Run-report broker delivers to orchestrator (`targetPreset=orchestrator`).
+
+Gateway setup (one-time):
+
+```bash
+curl -sS http://127.0.0.1:18789/api/webhooks/endpoints \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -d '{
+    "id":"wep-node-local-1",
+    "ownerScope":"local",
+    "url":"https://local.node/webhook"
+  }'
+
+curl -sS http://127.0.0.1:18789/api/webhooks/subscriptions \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  -d '{
+    "id":"wsub-node-local-1",
+    "endpointId":"wep-node-local-1",
+    "eventType":"node.webhook.*"
+  }'
+```
+
+Start node listener:
+
+```bash
+npm run node:reference -- \
+  --gateway ws://127.0.0.1:18789/nx/nodes \
+  --webhook-port 7780 \
+  --webhook-path /node-webhook \
+  --webhook-token change-me
+```
+
+Trigger from node-local script:
+
+```bash
+curl -sS http://127.0.0.1:7780/node-webhook \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer change-me' \
+  -d '{
+    "eventId":"evt-node-001",
+    "traceId":"trace-node-001",
+    "kind":"node.webhook.health",
+    "destination":{"endpointId":"wep-node-local-1"},
+    "payload":{"status":"ok","uptimeSec":123}
+  }'
+```
+
+Notes:
+
+- Node webhook ingress only accepts `ownerScope=local` webhook endpoints.
+- If payload looks like raw secret material, report body is redacted before orchestrator delivery.
+- `reference-node-lite` supports the same webhook flags/env (`NEXUS_NODE_WEBHOOK_*`).
 
 ## Lite Runtime (JSON + Prebuilt)
 
@@ -102,6 +171,18 @@ The script:
 - uploads a versioned release to the remote host
 - runs `--init` to bootstrap keys/state/env file
 - installs and starts a `systemd` service (system scope if sudo is available; user scope fallback)
+
+For routine code-only upgrades on existing lite nodes (including legacy SCP-style installs), use:
+
+```bash
+npm run node:upgrade:lite:ssh -- --host user@remote-host
+```
+
+Optional layout override for legacy flat installs:
+
+```bash
+npm run node:upgrade:lite:ssh -- --host user@remote-host --layout flat
+```
 
 ## Hermes symbol stores (node-local)
 
@@ -313,6 +394,8 @@ Host runtime env reminders:
 - `NEXUS_NODE_MCP_BRIDGE=1`
 - `NEXUS_NODE_MCP_BRIDGE_CONFIG=/Users/<user>/.nexus-node/mcp-bridge.json`
 - `NEXUS_NODE_MCP_BRIDGE_TIMEOUT_MS=120000` (recommended for first-run MCP bootstrap)
+- `NEXUS_NODE_WEBHOOK_PORT=7780` (optional; enables node-local webhook listener)
+- `NEXUS_NODE_WEBHOOK_PATH=/node-webhook` (optional)
 - `GITHUB_PERSONAL_ACCESS_TOKEN=<pat>` (required for GitHub MCP calls)
 
 Operational notes from live validation:
@@ -323,7 +406,8 @@ Operational notes from live validation:
 
 ```bash
 chmod +x /path/to/Nexus/examples/nexus-node/run-node-background.sh \
-  /path/to/Nexus/examples/nexus-node/stop-node.sh
+  /path/to/Nexus/examples/nexus-node/stop-node.sh \
+  /path/to/Nexus/examples/nexus-node/update-node-background.sh
 NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env /path/to/Nexus/examples/nexus-node/run-node-background.sh
 ```
 
@@ -548,6 +632,159 @@ This script:
 - creates `~/nexus-node-deploy/docker-compose.yml`
 - creates `~/nexus-node-deploy/.env` on first run
 - runs the reference node as a restartable Docker service
+
+### Fast updates for existing nodes
+
+#### Host-mode background node (`run-node-background.sh`)
+
+Use the one-shot updater:
+
+```bash
+NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env \
+  /path/to/Nexus/examples/nexus-node/update-node-background.sh
+```
+
+What it does:
+
+- fast-forward pulls latest code (`git pull --ff-only`)
+- runs `npm ci` only when needed (or with `--force-npm-ci`)
+- restarts node via `run-node-background.sh` with replace semantics
+
+Useful options:
+
+- `--ref <git-ref>` deploy a specific ref from `origin`
+- `--no-pull` restart only
+- `--skip-npm-ci` skip dependency reinstall
+
+#### Docker Compose node (`~/nexus-node-deploy`)
+
+```bash
+cd ~/nexus-node-deploy
+git -C /path/to/Nexus pull --ff-only
+docker compose build nexus-node
+docker compose up -d --force-recreate nexus-node
+docker compose logs --tail=80 nexus-node
+```
+
+You can also re-run:
+
+```bash
+NEXUS_NODE_CODE_DIR=/path/to/Nexus npm run node:deploy:linux
+```
+
+#### Remote `reference-node-lite` nodes (SSH + systemd)
+
+Use the lightweight upgrade command per host:
+
+```bash
+npm run node:upgrade:lite:ssh -- --host user@node-1
+```
+
+What it does:
+
+- builds and uploads fresh `reference-node-lite` artifact
+- auto-detects remote layout (`releases` or legacy flat SCP layout)
+- restarts existing `systemd` service without rewriting gateway/env config
+
+For multiple hosts:
+
+```bash
+npm run node:lite:build
+while read -r host; do
+  npm run node:upgrade:lite:ssh -- --host "$host" --skip-build
+done < ./node-hosts.txt
+```
+
+Use `node:deploy:lite:ssh` for first-time install or when intentionally changing gateway/node/service configuration.
+
+#### Gateway-driven rollout (agent runbook)
+
+Use this when the orchestrator/agent runs on the gateway host and should roll out node updates remotely.
+
+Gateway-side prerequisites:
+
+- Nexus repo checkout is available on gateway host (typical path: `/data/code`).
+- Gateway host can SSH to node hosts non-interactively (SSH keys already installed).
+- Fleet inventory files are maintained under `infra/node-fleet/*.txt` (one host per line, `#` comments allowed).
+
+Suggested inventory files:
+
+- `infra/node-fleet/lite-canary.txt`
+- `infra/node-fleet/lite-prod.txt`
+- `infra/node-fleet/host-canary.txt`
+- `infra/node-fleet/host-prod.txt`
+
+Lite-node rollout from gateway (SCP/release/flat layouts):
+
+```bash
+cd /data/code
+npm run node:lite:build
+while IFS= read -r host; do
+  [ -n "$host" ] || continue
+  case "$host" in \#*) continue ;; esac
+  npm run node:upgrade:lite:ssh -- --host "$host" --skip-build
+done < infra/node-fleet/lite-canary.txt
+```
+
+Promote to prod by switching input file to `infra/node-fleet/lite-prod.txt`.
+
+Host-mode node rollout from gateway (nodes with repo checkout + updater script):
+
+```bash
+cd /data/code
+RELEASE_REF=<git-ref-or-tag>
+while IFS= read -r host; do
+  [ -n "$host" ] || continue
+  case "$host" in \#*) continue ;; esac
+  ssh "$host" "NEXUS_NODE_CODE_DIR=/data/code \
+    NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env \
+    /data/code/examples/nexus-node/update-node-background.sh \
+    --ref $RELEASE_REF"
+done < infra/node-fleet/host-canary.txt
+```
+
+Promote to prod by switching input file to `infra/node-fleet/host-prod.txt`.
+
+Quick verification from gateway:
+
+```bash
+curl -sS http://127.0.0.1:18789/api/nodes \
+  -H "authorization: Bearer $NEXUS_HTTP_API_KEY" \
+  | jq -r '.nodes[] | [.id, .status, (.lastSeenAt|tostring)] | @tsv'
+```
+
+If you still have legacy flat lite installs and want cleaner rollback semantics, migrate those hosts once with `node:deploy:lite:ssh` so they use `releases/<id> + current` layout.
+
+#### Recommended fleet rollout pattern
+
+Use immutable refs/tags plus staged rollout waves:
+
+1. Build/test on a release ref (`main` SHA or tag like `node-v2026-02-23`).
+2. Roll out to a canary subset first (1-2 nodes).
+3. Verify node health + orchestrator webhook events for 10-15 minutes.
+4. Roll out to the rest of the fleet in batches.
+5. Roll back by redeploying the previous known-good ref.
+
+Host-mode canary rollout example:
+
+```bash
+while read -r host; do
+  ssh "$host" "NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env \
+    /path/to/Nexus/examples/nexus-node/update-node-background.sh \
+    --ref <release-ref>"
+done < ./node-canary-hosts.txt
+```
+
+Then promote with the same command for `node-hosts.txt`.
+
+Lite-node canary rollout example:
+
+```bash
+npm run node:lite:build
+while read -r host; do
+  npm run node:upgrade:lite:ssh -- --host "$host" --skip-build
+done < ./node-canary-hosts.txt
+```
 
 Platform roadmap:
 

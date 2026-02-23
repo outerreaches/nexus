@@ -1,0 +1,3 @@
+# One SSH target per line (user@host, IP, or SSH alias).
+# Example:
+# nexus@10.10.30.21

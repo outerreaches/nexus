@@ -109,6 +109,14 @@ type NodeProcessEventContext = {
   receivedAt: number;
 };
 
+export type NodeWebhookEventContext = {
+  nodeId: string;
+  sessionId: string;
+  event: string;
+  payload: Record<string, unknown>;
+  receivedAt: number;
+};
+
 type SymbolCatalogCache = {
   fetchedAt: number;
   generatedAt: number | null;
@@ -154,6 +162,7 @@ export class NodeWebSocketGateway {
       gatewaySender?: string;
       onProcessUpdate?: (ctx: NodeProcessEventContext) => Promise<boolean>;
       onLogAppend?: (ctx: NodeProcessEventContext) => Promise<void>;
+      onWebhookIngress?: (ctx: NodeWebhookEventContext) => Promise<void>;
     },
   ) {
     this.identity = deps.identity;
@@ -1266,6 +1275,31 @@ export class NodeWebSocketGateway {
         payload,
         receivedAt,
       });
+      return;
+    }
+
+    if (msg.event === "webhook.deliver" || msg.event === "transport.event.ingest") {
+      const nested = this.asObject(payload.payload);
+      const webhookKind =
+        this.asString(payload.kind) ??
+        this.asString(payload.eventType) ??
+        this.asString(nested.kind) ??
+        this.asString(nested.eventType) ??
+        "unknown";
+      this.deps.log(`nodes/ws: webhook ingress node=${session.nodeId} event=${msg.event} kind=${webhookKind}`);
+      if (this.deps.onWebhookIngress) {
+        void this.deps.onWebhookIngress({
+          nodeId: session.nodeId,
+          sessionId: session.sessionId,
+          event: msg.event,
+          payload,
+          receivedAt,
+        }).catch((err) => {
+          this.deps.log(
+            `nodes/ws: onWebhookIngress failed node=${session.nodeId} event=${msg.event} error=${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
       return;
     }
   }

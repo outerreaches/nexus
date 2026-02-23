@@ -170,6 +170,7 @@ Containerized/runtime deploys are HA-only and should use the HA scripts above (`
 ## Key Docs
 
 - Deployment runbook: `infra/DEPLOYMENT.md`
+- Node rollout inventory/runbook: `examples/nexus-node/README.md` and `infra/node-fleet/README.md`
 - Secrets operations: `infra/internal-doc`
 - HTTP auth rollout/migration: `infra/internal-doc`
 - MCP operations: `infra/internal-doc`

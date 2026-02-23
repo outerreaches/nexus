@@ -31,7 +31,6 @@ import {
   getFederationEventById,
   getFederationEventByEnvelopeId,
   getFederationExportById,
-  getFederationGrantProjectionForPeerResource,
   getIdentityKeyByScopeKid,
   getWebhookDeliveryById,
   getWebhookEndpointById,
@@ -88,11 +87,10 @@ import type { FederationSignedEnvelope } from "../../federation/types.js";
 import { evaluateFederationFirewall } from "../../federation/firewall.js";
 import {
   buildWebhookCanonicalSigningInput,
-  eventTypeMatchesFilter,
   type FederationWebhookEnvelope,
   verifyWebhookCanonicalInput,
 } from "../../federation/webhook.js";
-import { applySharedEventProjection } from "../../federation/sharing.js";
+import { ingestWebhookIngressEvent } from "../../federation/webhook-ingress.js";
 import { validateSecretBrokerProfile } from "../../secrets/broker.js";
 import { deleteCredential } from "../../secrets/credentials.js";
 import { containsRawSecretMaterial } from "../../secrets/policy.js";
@@ -1741,6 +1739,7 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       return c.json({ error: "invalid webhook signature" }, 401);
     }
 
+    const nowMs = Date.now();
     const nonceResult = consumeFederationReplayNonce(deps.db, {
       sourceInstance: envelope.sourceInstance,
       nonce: envelope.nonce,
@@ -1748,26 +1747,10 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       envelopeId: envelope.eventId,
       traceId: envelope.traceId,
       ttlMs: FEDERATION_WEBHOOK_MAX_SKEW_MS,
-      nowMs: Date.now(),
+      nowMs,
     });
     if (!nonceResult.accepted) {
       return c.json({ ok: true, duplicate: true, eventId: envelope.eventId, timestamp: Date.now() }, 409);
-    }
-
-    const existing = getFederationEventByEnvelopeId(deps.db, {
-      envelopeId: envelope.eventId,
-      direction: "inbound",
-    });
-    if (existing) {
-      return c.json({ ok: true, duplicate: true, eventId: envelope.eventId, timestamp: Date.now() }, 409);
-    }
-
-    const endpoint = getWebhookEndpointById(deps.db, envelope.destination.endpointId);
-    if (!endpoint || !endpoint.enabled || endpoint.status !== "active") {
-      return c.json({ error: "endpoint is not active" }, 410);
-    }
-    if (endpoint.ownerScope === "federation_peer" && endpoint.peerId !== peer.id) {
-      return c.json({ error: "endpoint peer binding mismatch" }, 403);
     }
     recordFederationSessionHeartbeat({
       peerId: peer.id,
@@ -1775,50 +1758,36 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       transportKind: "federation_http",
       envelopeId: envelope.eventId,
       traceId: envelope.traceId,
-      nowMs: Date.now(),
+      nowMs,
     });
-    const subscriptions = listWebhookSubscriptions(deps.db, {
-      endpointId: endpoint.id,
-      enabledOnly: true,
-      limit: 500,
-    });
-    if (subscriptions.length > 0) {
-      const match = subscriptions.some((sub) => eventTypeMatchesFilter(envelope.kind, sub.eventType));
-      if (!match) return c.json({ error: "no matching subscription for event kind" }, 403);
-    }
-
-    const resourceType = mapSharedEventToResourceType(envelope.kind);
-    let projectedWebhookPayload: Record<string, unknown> = envelope.payload;
-    if (resourceType && endpoint.peerId) {
-      const grantProjection = getFederationGrantProjectionForPeerResource(deps.db, {
-        peerId: endpoint.peerId,
-        resourceType,
-      });
-      if (!grantProjection) return c.json({ error: `no grant for shared resource type ${resourceType}` }, 403);
-      const projectionOutcome = applySharedEventProjection({
-        payload: envelope.payload,
-        projection: grantProjection.projection,
-        sensitivityCeiling: grantProjection.sensitivityCeiling,
-      });
-      if (!projectionOutcome.allowed) {
-        return c.json({ error: `shared event projection denied: ${projectionOutcome.reason}` }, 403);
-      }
-      projectedWebhookPayload = projectionOutcome.payload;
-    }
-
-    appendFederationEvent(deps.db, {
-      id: crypto.randomUUID(),
-      peerId: peer.id,
-      eventType: envelope.kind,
-      direction: "inbound",
-      envelopeId: envelope.eventId,
-      payload: {
-        webhook: projectedWebhookPayload,
-        destination: envelope.destination,
+    const ingress = ingestWebhookIngressEvent({
+      db: deps.db,
+      source: {
+        kind: "federation_peer",
+        peerId: peer.id,
+        sourceInstance: envelope.sourceInstance,
       },
-      traceId: envelope.traceId,
-      nowMs: Date.now(),
+      ingress: {
+        eventId: envelope.eventId,
+        traceId: envelope.traceId,
+        kind: envelope.kind,
+        ts: envelope.ts,
+        destinationEndpointId: envelope.destination.endpointId,
+        destinationPeerId: envelope.destination.peerId ?? null,
+        idempotencyKey: envelope.idempotencyKey,
+        sensitivity: envelope.sensitivity,
+        payload: envelope.payload,
+        meta: envelope.meta,
+      },
+      nowMs,
     });
+    if (!ingress.ok) {
+      return c.json({ error: ingress.error }, ingress.status as 400 | 401 | 403 | 409 | 410 | 413 | 503);
+    }
+    if (ingress.duplicate) {
+      return c.json({ ok: true, duplicate: true, eventId: envelope.eventId, timestamp: Date.now() }, 409);
+    }
+
     writeFederationAudit({
       peerId: peer.id,
       eventType: "control.webhook_ingress.accepted",
@@ -1827,10 +1796,10 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       traceId: envelope.traceId,
       details: {
         eventId: envelope.eventId,
-        endpointId: endpoint.id,
+        endpointId: ingress.endpoint?.id ?? envelope.destination.endpointId,
         kind: envelope.kind,
       },
-      nowMs: Date.now(),
+      nowMs,
     });
 
     return c.json(
@@ -2900,15 +2869,6 @@ function parseFederationWebhookEnvelope(value: unknown): FederationWebhookEnvelo
       orderingKey,
     },
   };
-}
-
-function mapSharedEventToResourceType(eventType: string): FederationExportResourceType | null {
-  const normalized = eventType.trim().toLowerCase();
-  if (normalized.startsWith("node.share.")) return "node_pool";
-  if (normalized.startsWith("data_intake.share.")) return "data_intake";
-  if (normalized.startsWith("blackboard.share.")) return "blackboard";
-  if (normalized.startsWith("mcp.share.")) return "mcp";
-  return null;
 }
 
 function isUnsafeWebhookHostname(hostname: string): boolean {

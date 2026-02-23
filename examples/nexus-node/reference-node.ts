@@ -13,7 +13,7 @@ import {
 } from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
-import type { IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -224,6 +224,12 @@ type Config = {
   logMaxBytes: number;
   logMaxFiles: number;
   initEnvFilePath: string;
+  webhookEnabled: boolean;
+  webhookHost: string;
+  webhookPort: number;
+  webhookPath: string;
+  webhookToken: string | null;
+  webhookMaxBodyBytes: number;
 };
 
 type McpBridgeServerConfig = {
@@ -296,6 +302,13 @@ export async function runReferenceNode(
   logger.info(`capabilities=${config.capabilities.join(",")} allow_commands=${[...config.allowCommands].join(",")}`);
   logger.info(`state_backend=${stateStore.backend} state_path=${stateStore.statePath}`);
   logger.info(`mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}`);
+  logger.info(
+    `local_webhook=${
+      config.webhookEnabled
+        ? `enabled http://${config.webhookHost}:${config.webhookPort}${config.webhookPath}`
+        : "disabled"
+    } auth=${config.webhookToken ? "token" : "none"}`,
+  );
   const fileTransferOps: string[] = [];
   if (isAllowedCommand(FILE_PULL_COMMAND, config.allowCommands)) fileTransferOps.push("pull");
   if (isAllowedCommand(FILE_PUSH_COMMAND, config.allowCommands)) fileTransferOps.push("push");
@@ -314,6 +327,7 @@ export async function runReferenceNode(
 
 class ReferenceNodeClient {
   private ws: WebSocket | null = null;
+  private webhookServer: Server | null = null;
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
@@ -353,6 +367,7 @@ class ReferenceNodeClient {
     await this.loadPolicyFromDisk();
     await this.loadMcpBridgeConfig();
     this.bootstrapPersistedState();
+    await this.startWebhookServer();
     this.connect();
   }
 
@@ -370,9 +385,233 @@ class ReferenceNodeClient {
         // ignore
       }
     }
+    void this.stopWebhookServer().catch(() => undefined);
     this.terminateAllProcesses(reason);
     void this.closeMcpBridgeClients().catch(() => undefined);
     this.stateStore.close();
+  }
+
+  private async startWebhookServer(): Promise<void> {
+    if (!this.config.webhookEnabled || this.webhookServer) return;
+    const server = createServer((req, res) => {
+      void this.handleWebhookHttpRequest(req, res).catch((err) => {
+        this.log(`local webhook handler error=${err instanceof Error ? err.message : String(err)}`);
+        this.sendWebhookJson(res, 500, { error: "internal server error" });
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        server.off("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(this.config.webhookPort, this.config.webhookHost);
+    });
+    server.on("error", (err) => {
+      this.log(`local webhook server error=${err instanceof Error ? err.message : String(err)}`);
+    });
+    this.webhookServer = server;
+    this.log(
+      `local webhook listening host=${this.config.webhookHost} port=${this.config.webhookPort} path=${this.config.webhookPath}`,
+    );
+  }
+
+  private async stopWebhookServer(): Promise<void> {
+    const server = this.webhookServer;
+    if (!server) return;
+    this.webhookServer = null;
+    await new Promise<void>((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+
+  private async handleWebhookHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let pathname = "/";
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      this.sendWebhookJson(res, 400, { error: "invalid request url" });
+      return;
+    }
+    if (pathname !== this.config.webhookPath) {
+      this.sendWebhookJson(res, 404, { error: "not found" });
+      return;
+    }
+    if ((req.method ?? "GET").toUpperCase() !== "POST") {
+      this.sendWebhookJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+
+    if (this.config.webhookToken) {
+      const suppliedToken = this.readWebhookAuthToken(req);
+      if (suppliedToken !== this.config.webhookToken) {
+        this.sendWebhookJson(res, 401, { error: "invalid webhook token" });
+        return;
+      }
+    }
+
+    const body = await this.readRequestBodyTextLimited(req, this.config.webhookMaxBodyBytes);
+    if (!body.ok) {
+      this.sendWebhookJson(res, body.status, { error: body.error });
+      return;
+    }
+    let parsed: Record<string, unknown> = {};
+    if (body.text.trim().length > 0) {
+      try {
+        parsed = asObject(JSON.parse(body.text) as unknown);
+      } catch {
+        this.sendWebhookJson(res, 400, { error: "invalid JSON body" });
+        return;
+      }
+    }
+    const destination = asObject(parsed.destination);
+    const endpointId = asString(destination.endpointId) ?? asString(parsed.endpointId);
+    if (!endpointId) {
+      this.sendWebhookJson(res, 400, { error: "endpointId or destination.endpointId is required" });
+      return;
+    }
+
+    const eventId = asString(parsed.eventId) ?? randomUUID();
+    const traceId = asString(parsed.traceId) ?? eventId;
+    const kind = asString(parsed.kind) ?? asString(parsed.eventType) ?? "node.webhook.received";
+    const ts = asNumber(parsed.ts) ?? Date.now();
+    const idempotencyKey = asString(parsed.idempotencyKey) ?? eventId;
+    const sensitivity = asString(parsed.sensitivity) ?? "internal";
+    const payload = asObject(parsed.payload);
+    const meta = asObject(parsed.meta);
+
+    if (!this.ready || !this.requireOpenSocket()) {
+      this.sendWebhookJson(res, 503, { error: "gateway websocket is not connected" });
+      return;
+    }
+
+    const sent = this.sendSignedEnvelope({
+      type: "event",
+      event: "webhook.deliver",
+      payload: {
+        schemaVersion: "1.0",
+        eventId,
+        traceId,
+        kind,
+        destination: {
+          endpointId,
+          peerId: asString(destination.peerId) ?? null,
+        },
+        ts,
+        idempotencyKey,
+        sensitivity,
+        payload,
+        meta: {
+          attempt: 1,
+          maxAttempts: 1,
+          orderingKey: asString(meta.orderingKey) ?? `node:${this.config.nodeId}:${kind}`,
+        },
+      },
+    });
+    if (!sent) {
+      this.sendWebhookJson(res, 503, { error: "failed to publish webhook event to gateway" });
+      return;
+    }
+
+    this.sendWebhookJson(res, 202, {
+      ok: true,
+      eventId,
+      traceId,
+      kind,
+      endpointId,
+      queuedAt: Date.now(),
+    });
+  }
+
+  private readWebhookAuthToken(req: IncomingMessage): string | null {
+    const header = req.headers.authorization;
+    if (typeof header === "string") {
+      const match = header.match(/^Bearer\s+(.+)$/i);
+      if (match?.[1]) {
+        const token = match[1].trim();
+        if (token) return token;
+      }
+    }
+    const tokenHeader = req.headers["x-nexus-node-webhook-token"];
+    if (typeof tokenHeader === "string") {
+      const token = tokenHeader.trim();
+      if (token) return token;
+    }
+    if (Array.isArray(tokenHeader)) {
+      for (const value of tokenHeader) {
+        const token = String(value ?? "").trim();
+        if (token) return token;
+      }
+    }
+    return null;
+  }
+
+  private async readRequestBodyTextLimited(
+    req: IncomingMessage,
+    maxBytes: number,
+  ): Promise<{ ok: true; text: string } | { ok: false; status: 400 | 413; error: string }> {
+    const contentLengthRaw = req.headers["content-length"];
+    const contentLengthHeader = Array.isArray(contentLengthRaw) ? contentLengthRaw[0] : contentLengthRaw;
+    if (contentLengthHeader) {
+      const declaredBytes = Number(contentLengthHeader);
+      if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+        return {
+          ok: false,
+          status: 413,
+          error: `request body exceeds max size (${maxBytes} bytes)`,
+        };
+      }
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const chunk of req) {
+        const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+        total += buffer.byteLength;
+        if (total > maxBytes) {
+          return {
+            ok: false,
+            status: 413,
+            error: `request body exceeds max size (${maxBytes} bytes)`,
+          };
+        }
+        chunks.push(buffer);
+      }
+    } catch {
+      return {
+        ok: false,
+        status: 400,
+        error: "failed to read request body",
+      };
+    }
+    const text = chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : "";
+    return { ok: true, text };
+  }
+
+  private sendWebhookJson(res: ServerResponse, status: number, payload: Record<string, unknown>): void {
+    const body = JSON.stringify(payload);
+    res.statusCode = status;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.setHeader("content-length", Buffer.byteLength(body));
+    try {
+      res.end(body);
+    } catch {
+      try {
+        res.end();
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private connect(): void {
@@ -3917,6 +4156,12 @@ async function writeInitEnvFile(config: Config, fingerprint: string, logger: Ref
     `NEXUS_NODE_LOG_MAX_FILES=${config.logMaxFiles}`,
     `NEXUS_NODE_MCP_BRIDGE=${config.mcpBridgeEnabled ? "1" : "0"}`,
     `NEXUS_NODE_MCP_BRIDGE_CONFIG=${config.mcpBridgeConfigPath}`,
+    `NEXUS_NODE_WEBHOOK_HOST=${config.webhookHost}`,
+    `NEXUS_NODE_WEBHOOK_PORT=${config.webhookEnabled ? String(config.webhookPort) : "0"}`,
+    `NEXUS_NODE_WEBHOOK_PATH=${config.webhookPath}`,
+    `NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES=${config.webhookMaxBodyBytes}`,
+    "# Optional static bearer token for local webhook ingress",
+    "# NEXUS_NODE_WEBHOOK_TOKEN=change-me",
     "",
     `# Generated node fingerprint: ${fingerprint}`,
     "",
@@ -4063,6 +4308,12 @@ function parseLogFormat(value: string): LogFormat {
   }
 }
 
+function normalizeWebhookPath(value: string | undefined): string {
+  const raw = (value ?? "").trim();
+  if (!raw) return "/node-webhook";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
 function buildConfig(
   values: Record<string, string>,
   options: {
@@ -4153,6 +4404,15 @@ function buildConfig(
   const initEnvFilePath = path.resolve(
     values["env-file"] ?? process.env.NEXUS_NODE_ENV_FILE ?? path.join(resolvedStateDir, "reference-node.env"),
   );
+  const webhookHost = (values["webhook-host"] ?? process.env.NEXUS_NODE_WEBHOOK_HOST ?? "127.0.0.1").trim() || "127.0.0.1";
+  const webhookPort =
+    clampInt(values["webhook-port"] ?? process.env.NEXUS_NODE_WEBHOOK_PORT, 0, 65_535) ?? 0;
+  const webhookPath = normalizeWebhookPath(values["webhook-path"] ?? process.env.NEXUS_NODE_WEBHOOK_PATH);
+  const webhookTokenRaw = values["webhook-token"] ?? process.env.NEXUS_NODE_WEBHOOK_TOKEN ?? "";
+  const webhookToken = webhookTokenRaw.trim() ? webhookTokenRaw.trim() : null;
+  const webhookMaxBodyBytes =
+    clampInt(values["webhook-max-bytes"] ?? process.env.NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES, 1_024, 10 * 1024 * 1024) ??
+    256 * 1024;
 
   return {
     gatewayUrl,
@@ -4181,6 +4441,12 @@ function buildConfig(
     logMaxBytes,
     logMaxFiles,
     initEnvFilePath,
+    webhookEnabled: webhookPort > 0,
+    webhookHost,
+    webhookPort,
+    webhookPath,
+    webhookToken,
+    webhookMaxBodyBytes,
   };
 }
 
@@ -5083,6 +5349,11 @@ function printHelp(): void {
       "  --log-file <path>               Log file path (default <stateDir>/logs/reference-node.log)",
       "  --log-max-bytes <n>             Rotate log when current file reaches size in bytes (default 5242880)",
       "  --log-max-files <n>             Number of rotated files to keep (default 5)",
+      "  --webhook-host <host>           Local webhook bind host (default 127.0.0.1)",
+      "  --webhook-port <port>           Enable node-local webhook listener on this port (default 0=disabled)",
+      "  --webhook-path <path>           Local webhook path (default /node-webhook)",
+      "  --webhook-max-bytes <n>         Max local webhook request size in bytes (default 262144)",
+      "  --webhook-token <token>         Optional bearer/x-nexus-node-webhook-token requirement",
       "  --mcp-bridge 1                  Enable MCP bridge methods (mcp.list/mcp.call/mcp.resources)",
       "  --mcp-bridge-config <path>      MCP bridge JSON config path (default <stateDir>/mcp-bridge.json)",
       "  --mcp-bridge-timeout-ms <ms>    MCP bridge request timeout per server (default 30000)",

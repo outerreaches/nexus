@@ -66,7 +66,12 @@ validate_env_keys() {
     NEXUS_NODE_STATE_DIR \
     NEXUS_NODE_NAME \
     NEXUS_NODE_CAPS \
-    NEXUS_NODE_ALLOW_COMMANDS
+    NEXUS_NODE_ALLOW_COMMANDS \
+    NEXUS_NODE_WEBHOOK_HOST \
+    NEXUS_NODE_WEBHOOK_PORT \
+    NEXUS_NODE_WEBHOOK_PATH \
+    NEXUS_NODE_WEBHOOK_TOKEN \
+    NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES
   do
     count="$(count_env_key "$env_file" "$key")"
     [ "${count:-0}" -le 1 ] || fail "duplicate ${key} entries in ${env_file}"
@@ -203,6 +208,21 @@ if [ -n "${NEXUS_NODE_FILE_TRANSFER_ROOTS:-}" ]; then
 fi
 if [ -n "${NEXUS_NODE_FILE_TRANSFER_MAX_BYTES:-}" ]; then
   cmd+=(--file-transfer-max-bytes "$NEXUS_NODE_FILE_TRANSFER_MAX_BYTES")
+fi
+if [ -n "${NEXUS_NODE_WEBHOOK_HOST:-}" ]; then
+  cmd+=(--webhook-host "$NEXUS_NODE_WEBHOOK_HOST")
+fi
+if [ -n "${NEXUS_NODE_WEBHOOK_PORT:-}" ]; then
+  cmd+=(--webhook-port "$NEXUS_NODE_WEBHOOK_PORT")
+fi
+if [ -n "${NEXUS_NODE_WEBHOOK_PATH:-}" ]; then
+  cmd+=(--webhook-path "$NEXUS_NODE_WEBHOOK_PATH")
+fi
+if [ -n "${NEXUS_NODE_WEBHOOK_TOKEN:-}" ]; then
+  cmd+=(--webhook-token "$NEXUS_NODE_WEBHOOK_TOKEN")
+fi
+if [ -n "${NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES:-}" ]; then
+  cmd+=(--webhook-max-bytes "$NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES")
 fi
 if [ "${NEXUS_NODE_POLICY_REQUIRED:-0}" = "1" ]; then
   cmd+=(--policy-required 1)

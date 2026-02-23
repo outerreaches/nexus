@@ -1,0 +1,2 @@
+# One SSH target per line (user@host, IP, or SSH alias).
+# These hosts should have /data/code checkout + update-node-background.sh available.

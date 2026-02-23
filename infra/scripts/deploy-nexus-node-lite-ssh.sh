@@ -29,6 +29,11 @@ Options:
   --node-name <name>          Node display name override
   --allow <csv>               Allowlisted command names
   --caps <csv>                Capability list
+  --webhook-host <host>       Node-local webhook bind host (default 127.0.0.1)
+  --webhook-port <port>       Node-local webhook port (default 0=disabled)
+  --webhook-path <path>       Node-local webhook path (default /node-webhook)
+  --webhook-token <token>     Optional node-local webhook bearer token
+  --webhook-max-bytes <n>     Max node-local webhook request bytes (default 262144)
   --gateway-fingerprint <fp>  Optional SHA-256 TLS fingerprint for wss://
   --dry-run                   Build locally, print actions, skip remote changes
   -h, --help                  Show help
@@ -48,6 +53,11 @@ NODE_ID=''
 NODE_NAME=''
 ALLOW_COMMANDS='echo,uname,whoami,pwd,date,ls'
 CAPS='system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query'
+WEBHOOK_HOST='127.0.0.1'
+WEBHOOK_PORT='0'
+WEBHOOK_PATH='/node-webhook'
+WEBHOOK_TOKEN=''
+WEBHOOK_MAX_BYTES='262144'
 GATEWAY_FP=''
 DRY_RUN=0
 ENV_FILE=''
@@ -92,6 +102,26 @@ while [ "$#" -gt 0 ]; do
       ;;
     --caps)
       CAPS="${2:-}"
+      shift 2
+      ;;
+    --webhook-host)
+      WEBHOOK_HOST="${2:-}"
+      shift 2
+      ;;
+    --webhook-port)
+      WEBHOOK_PORT="${2:-}"
+      shift 2
+      ;;
+    --webhook-path)
+      WEBHOOK_PATH="${2:-}"
+      shift 2
+      ;;
+    --webhook-token)
+      WEBHOOK_TOKEN="${2:-}"
+      shift 2
+      ;;
+    --webhook-max-bytes)
+      WEBHOOK_MAX_BYTES="${2:-}"
       shift 2
       ;;
     --gateway-fingerprint)
@@ -172,6 +202,11 @@ ssh "$HOST" \
   NODE_NAME="$NODE_NAME" \
   ALLOW_COMMANDS="$ALLOW_COMMANDS" \
   CAPS="$CAPS" \
+  WEBHOOK_HOST="$WEBHOOK_HOST" \
+  WEBHOOK_PORT="$WEBHOOK_PORT" \
+  WEBHOOK_PATH="$WEBHOOK_PATH" \
+  WEBHOOK_TOKEN="$WEBHOOK_TOKEN" \
+  WEBHOOK_MAX_BYTES="$WEBHOOK_MAX_BYTES" \
   'bash -s' <<'EOF'
 set -euo pipefail
 
@@ -249,6 +284,13 @@ upsert_env NEXUS_NODE_LOG_FORMAT "json"
 upsert_env NEXUS_NODE_LOG_FILE "$STATE_DIR/logs/reference-node.log"
 upsert_env NEXUS_NODE_LOG_MAX_BYTES "5242880"
 upsert_env NEXUS_NODE_LOG_MAX_FILES "5"
+upsert_env NEXUS_NODE_WEBHOOK_HOST "${WEBHOOK_HOST}"
+upsert_env NEXUS_NODE_WEBHOOK_PORT "${WEBHOOK_PORT}"
+upsert_env NEXUS_NODE_WEBHOOK_PATH "${WEBHOOK_PATH}"
+upsert_env NEXUS_NODE_WEBHOOK_MAX_BODY_BYTES "${WEBHOOK_MAX_BYTES}"
+if [ -n "${WEBHOOK_TOKEN}" ]; then
+  upsert_env NEXUS_NODE_WEBHOOK_TOKEN "${WEBHOOK_TOKEN}"
+fi
 if [ -n "${NODE_ID}" ]; then
   upsert_env NEXUS_NODE_ID "$NODE_ID"
 fi
