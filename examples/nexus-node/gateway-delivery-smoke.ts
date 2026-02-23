@@ -45,7 +45,6 @@ async function main(): Promise<void> {
     "NEXUS_PROCESS_NOTIFIER_TICK_MS",
     "NEXUS_PROCESS_NOTIFIER_MAX_PER_TICK",
     "NEXUS_PROCESS_NOTIFIER_LOCK_MS",
-    "NEXUS_PROCESS_NOTIFIER_ACK",
   ] as const;
   const previousEnv = new Map<string, string | undefined>();
   for (const key of envKeys) previousEnv.set(key, process.env[key]);
@@ -293,7 +292,6 @@ async function main(): Promise<void> {
     process.env.NEXUS_PROCESS_NOTIFIER_TICK_MS = "100";
     process.env.NEXUS_PROCESS_NOTIFIER_MAX_PER_TICK = "5";
     process.env.NEXUS_PROCESS_NOTIFIER_LOCK_MS = "3000";
-    process.env.NEXUS_PROCESS_NOTIFIER_ACK = "1";
 
     const processManager = {
       reconcileDetachedRunning: async () => ({ checked: 0, updated: 0 }),
@@ -359,15 +357,34 @@ async function main(): Promise<void> {
     notifierB = null;
 
     assert.equal(agentCalls.length, 1, "duplicate notifier runners should not execute summary callback twice");
-    assert.equal(sentOutputs.length, 2, "expected one ack + one summary message");
-    assert.ok(
-      sentOutputs.some((item) => item.chatId === 12345 && /Generating summary/.test(item.output)),
-      "ack message was not sent",
-    );
-    assert.ok(
-      sentOutputs.some((item) => item.chatId === 12345 && /Gateway notifier smoke summary/.test(item.output)),
-      "summary message was not sent",
-    );
+    assert.equal(sentOutputs.length, 0, "process notifier should not send direct Telegram messages");
+
+    const queuedReport = db.db
+      .prepare(
+        `SELECT kind, target_channel, target_channel_key, title, body, metadata_json
+         FROM run_reports
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get() as
+      | {
+          kind: string;
+          target_channel: string;
+          target_channel_key: string | null;
+          title: string;
+          body: string;
+          metadata_json: string;
+        }
+      | undefined;
+    assert.ok(queuedReport, "expected a queued run report");
+    assert.equal(queuedReport?.kind, "process");
+    assert.equal(queuedReport?.target_channel, "agent");
+    assert.equal(queuedReport?.target_channel_key, "12345");
+    assert.match(queuedReport?.title ?? "", /PROCESS ALERT/);
+    assert.match(queuedReport?.body ?? "", /Gateway notifier smoke summary/);
+    const reportMeta = JSON.parse(queuedReport?.metadata_json ?? "{}") as Record<string, unknown>;
+    assert.equal(reportMeta.targetPreset, "orchestrator");
+    assert.equal(reportMeta.preferredTelegramChatId, 12345);
 
     process.stdout.write(
       "[gateway-smoke] PASS: gateway delivery persistence + hermes metadata sanitization + routing security constraints + notifier duplicate suppression verified\n",

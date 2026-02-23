@@ -98,9 +98,9 @@ async function resolveDefaultTelegramChatId(db: NexusDatabase, agentId: string):
 
 async function resolveTelegramChatId(argsChatId: number | undefined, ctx: ToolCtx, db: NexusDatabase): Promise<number | null> {
   let chatId: number | null = argsChatId ?? null;
-  if (!chatId && ctx.request?.channel === "telegram") {
+  if (!chatId && (ctx.request?.channel === "telegram" || ctx.request?.channel === "run_report")) {
     const id = Number(ctx.request.channelKey);
-    if (Number.isFinite(id)) chatId = id;
+    if (Number.isFinite(id) && id > 0) chatId = Math.trunc(id);
   }
   if (!chatId && ctx.request?.agentId) {
     chatId = await resolveDefaultTelegramChatId(db, ctx.request.agentId);

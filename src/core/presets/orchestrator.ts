@@ -17,6 +17,7 @@ export const preset: AgentPreset = {
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
     "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/sub-agents. Keep routine/idle outcomes silent; only use telegram_send when a user-facing update or action is needed.",
+    "For process completion reports, default to silent handling (IDLE) for expected/benign exits; notify only when user action is actually required.",
     // Preset routing
     "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
     "Handle job and scheduling operations directly with job tools (create/update/pause/resume/run/list/delete/inspect/history).",

@@ -1,12 +1,12 @@
 import type { AgentService } from "../core/agent-service.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
+import { enqueueRunReport } from "../storage/run-reports.js";
 import type { ProcessManager } from "./manager.js";
 
 type NotifyMode = "never" | "on_failure" | "on_exit";
 
 type TelegramCtx = {
-  sendOutput: (chatId: number, output: string) => Promise<void>;
   allowFrom: number[];
   allowAll: boolean;
 };
@@ -59,22 +59,32 @@ function isSuccess(row: any): boolean {
   return status === "exited" && exitCode === 0 && !signal;
 }
 
-function buildAckMessage(row: any): string {
+function buildRunReportTitle(row: any): string {
   const id = String(row.id ?? "");
-  const status = String(row.status ?? "");
-  const exitCode = row.exit_code === null || row.exit_code === undefined ? null : Number(row.exit_code);
-  const signal = row.signal ? String(row.signal) : null;
-  const outcome = status === "stopped"
-    ? "stopped"
-    : isSuccess(row)
-      ? "completed successfully"
-      : `completed (status=${status || "unknown"}, code=${exitCode ?? "null"}, signal=${signal ?? "null"})`;
-  return `Process ${id} ${outcome}. Generating summary...`;
+  return isSuccess(row) ? `PROCESS COMPLETED (${id})` : `PROCESS ALERT (${id})`;
+}
+
+function buildRunReportBody(row: any, summary: string): string {
+  const lines = [
+    "PROCESS RUN COMPLETED",
+    "source=process_notifier",
+    "origin=internal_callback_not_user_message",
+    `process_id=${row.id}`,
+    `status=${row.status}`,
+    `exit_code=${row.exit_code ?? "null"}`,
+    `signal=${row.signal ?? "null"}`,
+    `started_at=${formatTs(row.started_at)}`,
+    `ended_at=${formatTs(row.ended_at)}`,
+    "",
+    summary.trim() || "(empty summary)",
+  ];
+  return lines.join("\n");
 }
 
 function buildCallbackTask(row: any): string {
   const lines = [
-    "PROCESS RUN COMPLETED",
+    "PROCESS NOTIFIER CALLBACK",
+    "Audience: orchestrator agent (internal callback, not a direct user request).",
     `process_id=${row.id}`,
     `status=${row.status}`,
     `exit_code=${row.exit_code ?? "null"}`,
@@ -86,12 +96,13 @@ function buildCallbackTask(row: any): string {
     "",
     "Task:",
     "- Tail logs once via process_logs (maxChars=12000).",
-    "- Write a concise Telegram-ready summary (<= 1500 chars).",
+    "- Write a concise orchestrator-ready summary (<= 1500 chars).",
+    "- Make it clear this came from process_notifier, not from a user message.",
     "- If failure: include 2-4 likely root causes and the next 3 concrete troubleshooting steps.",
     "- If success: confirm completion and mention any notable warnings from logs.",
     "",
     "Output:",
-    "- Return ONLY the message to send to the user. No additional sections.",
+    "- Return ONLY the completion summary text for orchestrator triage. No additional sections.",
   ];
   return lines.join("\n");
 }
@@ -109,7 +120,6 @@ export function startProcessNotifier(deps: {
   const tickIntervalMs = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_TICK_MS") ?? 15_000, 2_000, 120_000);
   const maxPerTick = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_MAX_PER_TICK") ?? 3, 1, 25);
   const lockMs = clampInt(envInt("NEXUS_PROCESS_NOTIFIER_LOCK_MS") ?? 60_000, 5_000, 10 * 60_000);
-  const sendAck = envBool("NEXUS_PROCESS_NOTIFIER_ACK") ?? true;
 
   let stopped = false;
   let running = false;
@@ -247,15 +257,6 @@ export function startProcessNotifier(deps: {
       }
       if (!claimed) continue;
 
-      // Immediate acknowledgment so the user knows we detected completion; summary follows.
-      if (sendAck && (row.notify_attempts ?? 0) <= 0) {
-        try {
-          await deps.telegram.sendOutput(chatId, buildAckMessage(row));
-        } catch (err) {
-          deps.log(`process_notifier: ack failed id=${row.id} err=${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
       const preset = (row.notify_preset && String(row.notify_preset).trim()) || "process-manager";
       const agentId = (row.request_agent_id && String(row.request_agent_id).trim()) || "main";
       const text = buildCallbackTask(row);
@@ -274,7 +275,31 @@ export function startProcessNotifier(deps: {
         if (!output) throw new Error("empty callback output");
         if (res.status !== "complete") throw new Error(`callback status=${res.status}`);
 
-        await deps.telegram.sendOutput(chatId, output.length > 18_000 ? `${output.slice(0, 18_000)}…` : output);
+        const reportId = enqueueRunReport(deps.db, {
+          kind: "process",
+          title: buildRunReportTitle(row),
+          body: buildRunReportBody(row, output),
+          sourceRunId: row.request_run_id ? String(row.request_run_id) : null,
+          parentRunId: row.request_parent_run_id ? String(row.request_parent_run_id) : null,
+          sourceAgentId: agentId,
+          sourceChannel: row.request_channel ? String(row.request_channel) : "process",
+          sourceChannelKey: row.request_channel_key ? String(row.request_channel_key) : String(chatId),
+          targetAgentId: agentId,
+          targetChannel: "agent",
+          // Preserve the originating Telegram chat as a hint for downstream telegram_send defaults.
+          targetChannelKey: String(chatId),
+          metadata: {
+            targetPreset: "orchestrator",
+            sourcePreset: preset,
+            processId: String(row.id ?? ""),
+            processStatus: String(row.status ?? ""),
+            processSignal: row.signal ? String(row.signal) : null,
+            processExitCode: row.exit_code === null || row.exit_code === undefined ? null : Number(row.exit_code),
+            preferredTelegramChatId: chatId,
+            callbackRunId: res.runId ?? null,
+          },
+          nowMs,
+        });
 
         deps.db.db
           .prepare(
@@ -285,6 +310,7 @@ export function startProcessNotifier(deps: {
           `,
           )
           .run(nowMs, nowMs, row.id);
+        deps.log(`process_notifier: report_queued id=${row.id} report_id=${reportId} target_agent=${agentId} chat_id=${chatId}`);
       } catch (err) {
         const attempt = typeof row.notify_attempts === "number" ? row.notify_attempts + 1 : 1;
         const backoffMs = computeBackoffMs(attempt);
