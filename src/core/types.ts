@@ -16,6 +16,6 @@ export type CacheControl = { type: "ephemeral" };
 
 export type ChatMessage =
   | { role: "system"; content: string; cacheControl?: CacheControl }
-  | { role: "user"; content: ChatUserContent; cacheControl?: CacheControl }
+  | { role: "user"; content: ChatUserContent; name?: string; cacheControl?: CacheControl }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[]; cacheControl?: CacheControl }
   | { role: "tool"; content: string; toolCallId: string; name: string; cacheControl?: CacheControl };

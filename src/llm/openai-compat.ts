@@ -60,6 +60,7 @@ type OpenAIChatMessage =
   | { role: "system"; content: string; cache_control?: { type: "ephemeral" } }
   | {
     role: "user";
+    name?: string;
     content:
     | string
     | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
@@ -108,6 +109,7 @@ function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatM
       return {
         role: "user",
         content: m.content,
+        ...(m.name ? { name: m.name } : {}),
         ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
       };
     }

@@ -27,6 +27,7 @@ const HARD_BLOCKED_CODER_TOOLS_READ_ONLY = [
   "file_write",
   "file_edit",
   "file_edit_lines",
+  "file_patch",
   "ha_deploy",
   "shell_exec",
   "shell_interactive",
@@ -879,7 +880,7 @@ function buildCoderTaskPromptLines(params: {
 
   if (params.readOnly) {
     lines.push("Read-only requirement: do NOT make code changes.");
-    lines.push("Do NOT call `file_write`, `file_edit`, `file_edit_lines`, or `ha_deploy`.");
+    lines.push("Do NOT call `file_write`, `file_edit`, `file_edit_lines`, `file_patch`, or `ha_deploy`.");
     lines.push("Do NOT run mutating shell commands (edits, installs, git mutations, or deploy actions).");
     if (params.enforceHardReadOnly === true) {
       lines.push(

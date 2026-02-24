@@ -8,7 +8,7 @@
 // cross-session recall.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { ChatMessage, ToolCall } from "./types.js";
+import type { ChatMessage } from "./types.js";
 import type { Tool } from "./tools.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -101,11 +101,137 @@ function findCompactionBoundary(messages: ChatMessage[], minRecentMessages: numb
   return boundary;
 }
 
+function parseJsonMaybe(raw: string): unknown | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function extractCodeStructure(raw: string, maxLines: number = 60): string {
+  const lines = raw.split(/\r?\n/);
+  const out: string[] = [];
+  for (const line of lines) {
+    const normalized = line.replace(/^\d+\s*:\s*/, "").trim();
+    if (!normalized) continue;
+    if (/^(import|export)\s+/.test(normalized)) {
+      out.push(normalized);
+      continue;
+    }
+    if (/^(async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(/.test(normalized)) {
+      out.push(normalized);
+      continue;
+    }
+    if (/^(class|interface|type|enum)\s+[A-Za-z_$][\w$]*/.test(normalized)) {
+      out.push(normalized);
+      continue;
+    }
+    if (/^(const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(async\s*)?\(/.test(normalized)) {
+      out.push(normalized);
+      continue;
+    }
+    if (/^(const|let|var)\s+[A-Za-z_$][\w$]*\s*=/.test(normalized) && normalized.length < 140) {
+      out.push(normalized);
+      continue;
+    }
+    if (normalized.startsWith("return ") && normalized.length < 160) {
+      out.push(normalized);
+      continue;
+    }
+    if (normalized.startsWith("if (") || normalized.startsWith("switch (")) {
+      out.push(normalized);
+      continue;
+    }
+  }
+  if (out.length === 0) return "";
+  const compacted = out.slice(0, maxLines);
+  const overflow = out.length - compacted.length;
+  return overflow > 0 ? `${compacted.join("\n")}\n…(+${overflow} structural lines)` : compacted.join("\n");
+}
+
+function summarizeStructuredToolOutput(name: string, content: string): string {
+  if (name === "file_read") {
+    const structure = extractCodeStructure(content, 80);
+    if (structure) {
+      return `structural excerpt:\n${truncateStr(structure, 2_400)}`;
+    }
+    return truncateStr(content, 1_600);
+  }
+
+  if (name === "code_search") {
+    const parsed = parseJsonMaybe(content) as { results?: Array<Record<string, unknown>> } | null;
+    const rows = Array.isArray(parsed?.results) ? parsed?.results ?? [] : [];
+    if (rows.length > 0) {
+      const preview = rows.slice(0, 30).map((row) => {
+        const file = typeof row.file === "string" ? row.file : "?";
+        const line = typeof row.line === "number" ? row.line : "?";
+        const kind = typeof row.kind === "string" ? row.kind : "match";
+        const text = typeof row.text === "string" ? row.text.trim() : "";
+        return `${file}:${line} [${kind}] ${truncateStr(text, 160)}`;
+      });
+      return `search hits:\n${preview.join("\n")}`;
+    }
+    return truncateStr(content, 1_400);
+  }
+
+  if (name === "code_symbols") {
+    const parsed = parseJsonMaybe(content) as { symbols?: unknown[]; results?: unknown[] } | null;
+    const rows = Array.isArray(parsed?.symbols) ? parsed?.symbols : Array.isArray(parsed?.results) ? parsed?.results : [];
+    if (rows.length > 0) {
+      const preview = rows.slice(0, 40).map((row) => {
+        const item = row as Record<string, unknown>;
+        const symbol = typeof item.symbol === "string" ? item.symbol : "?";
+        const file = typeof item.file === "string" ? item.file : "?";
+        const line = typeof item.line === "number" ? item.line : "?";
+        const kind = typeof item.kind === "string" ? item.kind : "symbol";
+        return `${symbol} (${kind}) @ ${file}:${line}`;
+      });
+      return `symbols:\n${preview.join("\n")}`;
+    }
+    return truncateStr(content, 1_400);
+  }
+
+  if (name === "file_glob") {
+    const parsed = parseJsonMaybe(content) as { files?: unknown[] } | null;
+    const files = Array.isArray(parsed?.files) ? parsed?.files as string[] : [];
+    if (files.length > 0) {
+      const preview = files.slice(0, 80).join("\n");
+      const overflow = files.length - Math.min(files.length, 80);
+      return overflow > 0 ? `glob files:\n${preview}\n…(+${overflow} files)` : `glob files:\n${preview}`;
+    }
+    return truncateStr(content, 1_200);
+  }
+
+  if (name === "code_diff") {
+    const parsed = parseJsonMaybe(content) as { changedFiles?: unknown[]; stat?: unknown } | null;
+    const changed = Array.isArray(parsed?.changedFiles) ? parsed?.changedFiles as string[] : [];
+    const stat = typeof parsed?.stat === "string" ? parsed.stat : "";
+    const lines: string[] = [];
+    if (changed.length > 0) {
+      lines.push(`changed files (${changed.length}): ${changed.slice(0, 30).join(", ")}`);
+    }
+    if (stat.trim()) {
+      lines.push(`stat: ${truncateStr(stat.replace(/\r?\n/g, " | "), 600)}`);
+    }
+    if (lines.length > 0) return lines.join("\n");
+    return truncateStr(content, 1_200);
+  }
+
+  if (name === "shell_exec" || name === "shell_interactive") {
+    return truncateStr(content, 1_000);
+  }
+
+  return truncateStr(content, 800);
+}
+
 /**
  * Build a text representation of messages for summarization.
- * Truncates very long tool results to keep the summarization request small.
+ * Truncates very long tool results while preserving code navigation structure.
  */
-function messagesToText(messages: ChatMessage[], maxCharsPerMessage: number = 1500): string {
+function messagesToText(messages: ChatMessage[], maxCharsPerMessage: number = 1_500): string {
   const lines: string[] = [];
   for (const m of messages) {
     if (m.role === "user") {
@@ -115,12 +241,12 @@ function messagesToText(messages: ChatMessage[], maxCharsPerMessage: number = 15
       const text = m.content ?? "";
       if (m.toolCalls && m.toolCalls.length > 0) {
         const calls = m.toolCalls.map((tc) => tc.name).join(", ");
-        lines.push(`[Assistant]: ${truncateStr(text, 500)} (called tools: ${calls})`);
+        lines.push(`[Assistant]: ${truncateStr(text, 700)} (called tools: ${calls})`);
       } else if (text) {
         lines.push(`[Assistant]: ${truncateStr(text, maxCharsPerMessage)}`);
       }
     } else if (m.role === "tool") {
-      const preview = truncateStr(m.content, 400);
+      const preview = summarizeStructuredToolOutput(m.name, m.content);
       lines.push(`[Tool:${m.name}]: ${preview}`);
     }
   }
@@ -216,7 +342,7 @@ export async function compactContext(params: {
  * Uses a minimal context (no tools) to keep the summarization call small.
  */
 async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise<string> {
-  const conversationText = messagesToText(messages, 800);
+  const conversationText = messagesToText(messages, 1_100);
 
   // Cap the text we send for summarization to ~30k chars (~8k tokens)
   const maxSummarizationChars = 30_000;

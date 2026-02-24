@@ -1,9 +1,9 @@
 import type { Tool } from "../core/tools.js";
 
-import { fileEdit, fileEditLines, fileList, fileRead, fileWrite } from "./file-ops.js";
+import { fileEdit, fileEditLines, fileList, filePatch, fileRead, fileWrite } from "./file-ops.js";
+import { codeDiff, codeSearch, codeSymbols, fileGlob } from "./code-intel.js";
 import { browserTool } from "./browser.js";
 import { queryData } from "./query-data.js";
-import { toolsReload } from "./registry.js";
 import { shellExec } from "./system.js";
 import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
 import {
@@ -89,7 +89,12 @@ export function getBuiltInTools(): Tool[] {
     fileWrite,
     fileEdit,
     fileEditLines,
+    filePatch,
     fileList,
+    fileGlob,
+    codeSearch,
+    codeSymbols,
+    codeDiff,
     webFetch,
     webSearch,
     imageAnalyze,
@@ -124,7 +129,6 @@ export function getBuiltInTools(): Tool[] {
     nodeManage,
     browserTool,
     queryData,
-    toolsReload,
     gatewayRestart,
     haDeploy,
     paperTrade,

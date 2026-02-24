@@ -395,7 +395,8 @@ export class AgentService {
         }
         : undefined;
 
-      if (preset?.name === "orchestrator" || !preset) {
+      const shouldInjectCompactionSummary = !preset || preset.name === "orchestrator" || preset.name === "coder";
+      if (shouldInjectCompactionSummary) {
         const compaction = this.loadLatestCompactionSummary(params.agentId, readSessionId);
         if (compaction) {
           const compactionHint = buildCompactionSummarySystemMessage(compaction);
@@ -618,7 +619,7 @@ export class AgentService {
           appendMessage({
             db: this.deps.db,
             sessionId: readSessionId,
-            message: { role: "user", content: summary },
+            message: { role: "user", name: "system_report", content: summary },
             nowMs: runNowMs,
           });
           onRunnerLog?.(`summary_injected target=${readSessionId} len=${summary.length}`);

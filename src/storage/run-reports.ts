@@ -164,12 +164,12 @@ export function listRunnableRunReports(
          target_agent_id, target_channel, target_channel_key, title, body, metadata_json,
          status, attempts, last_attempt_at, next_attempt_at, last_error, delivered_at, created_at, updated_at
        FROM run_reports
-       WHERE status IN ('pending', 'failed')
-         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+       WHERE (status IN ('pending', 'failed') AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+          OR (status = 'sending' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)
        ORDER BY created_at ASC
        LIMIT ?`,
     )
-    .all(nowMs, limit) as RunReportRow[];
+    .all(nowMs, nowMs, limit) as RunReportRow[];
   return rows.map(mapRow);
 }
 
@@ -188,10 +188,10 @@ export function claimRunReport(
            next_attempt_at = ?,
            updated_at = ?
        WHERE id = ?
-         AND status IN ('pending', 'failed')
-         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)`,
+         AND ((status IN ('pending', 'failed') AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+           OR (status = 'sending' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?))`,
     )
-    .run(nowMs, lockUntilMs, nowMs, params.id, nowMs);
+    .run(nowMs, lockUntilMs, nowMs, params.id, nowMs, nowMs);
   return (res.changes ?? 0) > 0;
 }
 

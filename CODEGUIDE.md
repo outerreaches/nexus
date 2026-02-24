@@ -6,6 +6,7 @@ Architecture and implementation guide for the **coder** preset.
 - Make focused code changes in the Nexus codebase.
 - Preserve existing architecture and behavior unless the task explicitly requires redesign.
 - Finish end-to-end: edit, validate, deploy (`ha_deploy`), then hand off.
+- Spend minimal budget on navigation: use structured code discovery tools first (`code_search`, `file_glob`, `code_symbols`).
 
 ## Coder Task Types (`spawn_agent.taskType`)
 - `taskType` is recommended when spawning a coder, but not required.
@@ -40,10 +41,12 @@ Architecture and implementation guide for the **coder** preset.
 - `src/core/presets/*.ts`: tool allowlists, budgets, role behavior, model defaults.
 - `src/core/presets/coder.ts`: coder-specific hard rules.
 - Prompt/state markdown files live in `/data/nexus` (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `MEMORY.md`, `HEARTBEAT.md`, `NOTES.md`).
+- `MEMORY.md` is an authoritative archive (manually read when concrete historical facts are needed).
 
 ### Tooling Layer
 - `src/tools/*.ts`: tool implementations.
 - `src/tools/file-ops.ts`: absolute-path file tools with root restrictions and write guards.
+- `src/tools/code-intel.ts`: code navigation/diff tools (`code_search`, `file_glob`, `code_symbols`, `code_diff`).
 - `src/tools/system.ts`: `shell_exec` plus mutating-git block on code repo.
 - `src/tools/ha-deploy.ts`: deploy trigger/status tool.
 
@@ -130,6 +133,7 @@ Architecture and implementation guide for the **coder** preset.
   - gateway-facing node tools: `src/tools/nodes.ts`
 - Webhook architecture invariants:
   - Node-local webhook ingress belongs on the node listener (`NEXUS_NODE_WEBHOOK_*` / `--webhook-port` + `--webhook-path`), not a new gateway route.
+  - Enable/disable switch is `NEXUS_NODE_WEBHOOK_PORT`: `>0` enables listener; `0` or unset disables. `reference-node-lite` also accepts `NEXUS_NODE_LITE_WEBHOOK_PORT` as an alias when `NEXUS_NODE_WEBHOOK_PORT` is not set.
   - Node forwards webhook events to gateway over the node websocket session (`webhook.deliver`), and gateway processes them via existing APIs/routes.
   - Dashboard integrations should read/write through existing gateway APIs (`/api/webhooks/*`, `/api/nodes/*`); do not add a parallel ad-hoc HTTP webhook transport unless explicitly requested.
 - For new node-exposed operations:
@@ -137,6 +141,32 @@ Architecture and implementation guide for the **coder** preset.
   2. Add router mapping and gateway execution path.
   3. Enforce allowlist/firewall constraints (Hermes/transparent/audit mode behavior).
   4. Add integration tests in node router/ws areas.
+
+### Webhook Implementation (Nexus-Specific, Do Not Genericize)
+- Treat webhooks in Nexus as a routed pipeline with ownership + signature policy, not as ad-hoc HTTP handlers.
+- Canonical implementation files:
+  - `src/gateway/routes/api.ts` (`/api/webhooks/*`, `/federation-webhook`, `/api/federation/inbox`)
+  - `src/nodes/webhook-ingress.ts` (node WS webhook ingestion + run report enqueue)
+  - `src/federation/webhook-ingress.ts` (shared ingress normalizer/validator)
+  - `src/federation/webhook-worker.ts` (delivery worker)
+  - `examples/nexus-node/README.md` (node-local webhook setup and expected flow)
+- Node webhooks (node -> gateway):
+  - Ingress starts on node-local HTTP listener (`reference-node` / `reference-node-lite`), then node emits `webhook.deliver` over `/nx/nodes`.
+  - Gateway node ingress path is `src/nodes/webhook-ingress.ts` and ultimately `ingestWebhookIngressEvent(...)`.
+  - Destination endpoint must be `ownerScope="local"`; node ingress is rejected for non-local endpoint ownership.
+  - Expected endpoint/subscription control plane is `/api/webhooks/endpoints` + `/api/webhooks/subscriptions` (typically `node.webhook.*` kinds).
+- Federation webhooks (peer gateway -> peer gateway):
+  - Ingress endpoint is `POST /federation-webhook`, not node WS.
+  - Requires canonical webhook signature headers (`x-nexus-event-id`, `x-nexus-timestamp`, `x-nexus-nonce`, `x-nexus-signature`, `x-nexus-key-id`), trusted peer state, firewall allow, key-scope verification, and replay nonce checks.
+  - For `ownerScope="federation_peer"` endpoints, `peerId` binding is required and `signingMode` must be `ed25519`.
+- Federation inbox transport (task/control envelopes):
+  - `POST /api/federation/inbox` handles signed federation protocol envelopes (task/control transport), distinct from `/federation-webhook`.
+  - Do not route node webhook payloads into federation inbox.
+- Hard anti-patterns:
+  - Do not create new generic webhook routes like `/api/webhook`, `/webhooks/:vendor`, or dashboard-only ad-hoc ingress handlers.
+  - Do not bypass `/api/webhooks/*` endpoint/subscription registration for production webhook flows.
+  - Do not implement node integrations by posting directly to gateway custom endpoints when node-local listener + WS relay is the intended path.
+  - Do not weaken ownerScope/signing/peer/firewall constraints to make integrations "just work".
 
 ### Tool Surface Extension Pattern
 1. Implement tool with `defineTool(...)` in `src/tools/*`.
@@ -152,21 +182,27 @@ Architecture and implementation guide for the **coder** preset.
 4. Update operator docs/examples when behavior changes.
 
 ## Editing and Validation Workflow
-1. Read relevant files first (`file_read` with line numbers when needed).
-2. Make minimal edits (`file_edit_lines` preferred for precise changes).
-3. Validate:
+1. Discover relevant files/symbols first:
+   - `file_glob` for path discovery
+   - `code_search` for cross-file text lookup
+   - `code_symbols` for exports/definitions/references
+2. Read relevant files (`file_read` with line numbers when needed; use `search` mode for focused in-file lookup).
+3. Make minimal edits (`file_edit_lines` preferred for precise changes; use `file_patch` for multi-hunk unified diffs).
+4. Validate:
    - `npm run typecheck`
    - `npm run build`
    - targeted tests for touched behavior when available
-4. Deploy in the same coder run:
+5. Review aggregate changes with `code_diff` before deploy (especially for multi-file edits).
+6. Deploy in the same coder run:
    - `ha_deploy` with `action="apply"`
-5. If deploy returns `ERROR`, stop and report recovery steps from `infra/DEPLOYMENT.md`.
-6. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
+7. If deploy returns `ERROR`, stop and report recovery steps from `infra/DEPLOYMENT.md`.
+8. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
 
 ## Guardrails
 - Do not run git commands in `/data/code` (Nexus repo). This repository is managed externally by host-side deploy tooling.
 - For other repositories under `/data/workspace`, git usage is allowed when relevant to the task.
 - Treat auto-deploy fallback as a safety net only; always call `ha_deploy action="apply"` explicitly.
+- Custom tool/runtime refresh is deploy-only; do not attempt hot-reload paths.
 - Keep probes non-fatal (`|| true`) when checking existence/grep-style conditions.
 
 ## Troubleshooting

@@ -449,6 +449,9 @@ export class AgentRunner {
     let buildOk = false;
 
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
+    const softCompactionThreshold = 0.65;
+    const hardCompactionThreshold = 0.85;
+    let softCompactionAttempted = false;
     const runStartedAtMs = this.deps.toolContext.nowMs();
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
@@ -456,15 +459,23 @@ export class AgentRunner {
       // ── Context compaction ─────────────────────────────────────────────
       if (maxContextTokens > 0) {
         const estimated = estimateTotalTokens(messages, this.deps.tools);
-        // Compact when we exceed 85% of the limit
-        if (estimated > maxContextTokens * 0.85) {
-          this.deps.onLog?.(`compaction: estimated ${estimated} tokens (limit ${maxContextTokens}), compacting`);
+        const shouldHardCompact = estimated > maxContextTokens * hardCompactionThreshold;
+        const shouldSoftCompact =
+          !softCompactionAttempted && estimated > maxContextTokens * softCompactionThreshold;
+        if (shouldHardCompact || shouldSoftCompact) {
+          const mode = shouldHardCompact ? "hard" : "soft";
+          if (shouldSoftCompact) softCompactionAttempted = true;
+          this.deps.onLog?.(
+            `compaction: mode=${mode} estimated=${estimated} limit=${maxContextTokens} ` +
+            `threshold=${Math.round((shouldHardCompact ? hardCompactionThreshold : softCompactionThreshold) * 100)}%`,
+          );
           try {
             const result = await compactContext({
               messages,
               tools: this.deps.tools,
               llm: this.deps.llm,
               maxContextTokens,
+              minRecentMessages: shouldHardCompact ? 10 : 14,
               onLog: this.deps.onLog,
             });
             if (result.compacted) {

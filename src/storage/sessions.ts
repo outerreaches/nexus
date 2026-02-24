@@ -311,7 +311,7 @@ function rowToHistoryEntry(row: MessageRow): HistoryEntry {
   if (row.role === "system") {
     return { id: row.id, message: { role: "system", content: row.content } };
   }
-  return { id: row.id, message: { role: "user", content: row.content } };
+  return { id: row.id, message: { role: "user", content: row.content, ...(row.name ? { name: row.name } : {}) } };
 }
 
 function findSliceStart(entries: HistoryEntry[], preferredStart: number): number {
@@ -391,7 +391,7 @@ export function appendMessage(params: {
       params.sessionId,
       params.message.role,
       params.message.role === "user" ? renderUserContentForStorage(params.message.content) : params.message.content,
-      null,
+      (params.message.role === "user" && params.message.name) || null,
       null,
       null,
       params.nowMs,
