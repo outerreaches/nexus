@@ -141,6 +141,11 @@ export const telegramSend = defineTool({
     const allowed = isTelegramUserAllowed(db, { userId: chatId, staticAllowFrom: tg.allowFrom ?? [], allowAll: Boolean(tg.allowAll) });
     if (!allowed) return "ERROR: chatId is not allowlisted";
 
+    const normalizedText = typeof args.text === "string" ? args.text.trim() : "";
+    if (!args.path && normalizedText.length === 0) {
+      return "ERROR: telegram_send text is blank. Provide a concise user-facing update before sending.";
+    }
+
     if (args.path) {
       let filePath: string;
       try {
@@ -149,9 +154,9 @@ export const telegramSend = defineTool({
         return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
       }
 
-      const textCaption = args.text && args.text.length > 1024 ? args.text.slice(0, 1024) : args.text;
+      const textCaption = normalizedText && normalizedText.length > 1024 ? normalizedText.slice(0, 1024) : normalizedText || undefined;
       const caption = args.caption ?? textCaption;
-      const captionNote = args.text && args.text.length > 1024 && !args.caption
+      const captionNote = normalizedText && normalizedText.length > 1024 && !args.caption
         ? " (caption truncated from text)"
         : "";
 
@@ -168,7 +173,7 @@ export const telegramSend = defineTool({
     }
 
     try {
-      await tg.sendOutput(chatId, args.text ?? "");
+      await tg.sendOutput(chatId, normalizedText);
       return "OK";
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;

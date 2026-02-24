@@ -453,7 +453,6 @@ export class AgentRunner {
     const hardCompactionThreshold = 0.85;
     let softCompactionAttempted = false;
     const runStartedAtMs = this.deps.toolContext.nowMs();
-    let emptyFinalRepairAttempted = false;
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       this.throwIfCancelled();
@@ -699,8 +698,7 @@ export class AgentRunner {
         const finalTextRaw = content ?? "";
         const finalText = finalTextRaw.trim();
         if (!finalText) {
-          if (!emptyFinalRepairAttempted && iteration + 1 < this.deps.budget.maxIterations) {
-            emptyFinalRepairAttempted = true;
+          if (iteration + 1 < this.deps.budget.maxIterations) {
             this.deps.onLog?.("llm_empty_final_output: requesting one repair turn");
             messages.push({
               role: "system",
@@ -710,15 +708,14 @@ export class AgentRunner {
             });
             continue;
           }
-          const fallbackText =
-            "I couldn't produce a complete response in this run. Please resend your last message.";
-          this.deps.onLog?.("llm_empty_final_output: emitting fallback text");
-          const msg: ChatMessage = { role: "assistant", content: fallbackText };
+          const errorText = "ERROR: assistant returned an empty final response at iteration limit.";
+          this.deps.onLog?.("llm_empty_final_output: failed at iteration limit");
+          const msg: ChatMessage = { role: "assistant", content: errorText };
           messages.push(msg);
           newMessages.push(msg);
           return {
-            status: "complete",
-            output: fallbackText,
+            status: "failed",
+            output: errorText,
             newMessages,
             toolCallsUsed,
             iterationsUsed: iteration + 1,

@@ -168,7 +168,7 @@ test("AgentRunner retries once when final assistant output is empty", async () =
   assert.equal(result.iterationsUsed, 2);
 });
 
-test("AgentRunner emits fallback when repeated final output remains empty", async () => {
+test("AgentRunner fails when repeated final output remains empty", async () => {
   const llm: LLMClient = {
     completeChat: async () => ({ content: null, toolCalls: [] }),
   };
@@ -186,7 +186,7 @@ test("AgentRunner emits fallback when repeated final output remains empty", asyn
     userMessage: "hello",
   });
 
-  assert.equal(result.status, "complete");
-  assert.match(result.output, /couldn't produce a complete response/i);
+  assert.equal(result.status, "failed");
+  assert.match(result.output, /empty final response/i);
   assert.equal(result.iterationsUsed, 2);
 });

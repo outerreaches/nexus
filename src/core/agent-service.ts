@@ -48,16 +48,9 @@ function buildRuntimeClockSystemMessage(nowMs: number): string {
   ].join("\n");
 }
 
-function buildRuntimeChannelSystemMessage(params: { channel: string; channelKey: string }): string {
+function buildRuntimeChannelSystemMessage(params: { channel: string }): string {
   const channel = params.channel.trim() || "unknown";
-  const channelKey = params.channelKey.trim() || "unknown";
-  return [
-    "Runtime channel context (ephemeral):",
-    `- inbound_channel: ${channel}`,
-    `- inbound_channel_key: ${channelKey}`,
-    "- Your final assistant text is delivered on this channel by default.",
-    "- Do not claim a different UI/channel unless you actually called a channel-specific tool.",
-  ].join("\n");
+  return `Runtime note (ephemeral): current inbound channel is ${channel}; provide your final user-facing response for this channel unless a tool explicitly sends output elsewhere.`;
 }
 
 const COMPACTION_SUMMARY_HINT_MAX_CHARS = 2400;
@@ -195,6 +188,10 @@ export class AgentService {
   }
 
   private shouldRunMemoryHintsForChannel(channel: string): boolean {
+    return channel === "telegram" || channel === "cli";
+  }
+
+  private shouldInjectRuntimeChannelHint(channel: string): boolean {
     return channel === "telegram" || channel === "cli";
   }
 
@@ -465,16 +462,17 @@ export class AgentService {
           cacheControl: { type: "ephemeral" },
         });
       }
-      const runtimeChannelHint = buildRuntimeChannelSystemMessage({
-        channel: params.channel,
-        channelKey: params.channelKey,
-      });
-      runHistory.push({
-        role: "system",
-        content: runtimeChannelHint,
-        cacheControl: { type: "ephemeral" },
-      });
-      onRunnerLog?.(`runtime_channel_injected channel=${params.channel} key=${params.channelKey} length=${runtimeChannelHint.length}`);
+      if (this.shouldInjectRuntimeChannelHint(params.channel)) {
+        const runtimeChannelHint = buildRuntimeChannelSystemMessage({
+          channel: params.channel,
+        });
+        runHistory.push({
+          role: "system",
+          content: runtimeChannelHint,
+          cacheControl: { type: "ephemeral" },
+        });
+        onRunnerLog?.(`runtime_channel_injected channel=${params.channel} length=${runtimeChannelHint.length}`);
+      }
       const runtimeClockHint = buildRuntimeClockSystemMessage(nowMs);
       runHistory.push({
         role: "system",
