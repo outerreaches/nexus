@@ -2,6 +2,10 @@ import type { ModelRouterConfig, SerializableOpenAICompatConfig } from "../llm/m
 
 // IPC message types for process-isolated worker agents
 
+export type WorkerExecutionTarget =
+  | { target: "local" }
+  | { target: "node"; nodeId: string };
+
 /**
  * Configuration sent from parent to worker process.
  * All fields must be JSON-serializable (no functions, no class instances).
@@ -62,6 +66,8 @@ export type WorkerConfig = {
   // Optional coder-mode metadata for read-only/write behavior.
   taskType?: "plan" | "review" | "walkthrough" | "write";
   taskTypeEnforcement?: "soft" | "hard";
+  // Optional execution target for this worker.
+  executionTarget?: WorkerExecutionTarget;
 
   // Resolved secrets forwarded from parent process (populated by resolveEnvSecrets at startup).
   // Allows isolated workers to use getSecret() for tools like web_search.
@@ -106,8 +112,46 @@ export type WorkerErrorMessage = {
   error: string;
 };
 
+export type WorkerNodeRouteContext = {
+  executionNode?: string;
+  executionMode?: "local" | "remote" | "auto";
+  firewallSession?: string | null;
+  request?: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    preset?: string;
+    sessionId: string;
+    runId?: string;
+    parentRunId?: string;
+    modelMode?: "default" | "local_only";
+  };
+};
+
+/**
+ * Worker → Parent: proxy a node-routed tool call through gateway-local nodeRouter.
+ */
+export type WorkerNodeRouteRequestMessage = {
+  type: "node_route_request";
+  requestId: string;
+  toolName: string;
+  args: unknown;
+  context?: WorkerNodeRouteContext;
+};
+
+/**
+ * Parent → Worker: response to node_route_request.
+ */
+export type ParentNodeRouteResponseMessage = {
+  type: "node_route_response";
+  requestId: string;
+  ok: boolean;
+  result?: string;
+  error?: string;
+};
+
 /** Messages sent from worker to parent */
-export type WorkerMessage = WorkerLogMessage | WorkerResultMessage | WorkerErrorMessage;
+export type WorkerMessage = WorkerLogMessage | WorkerResultMessage | WorkerErrorMessage | WorkerNodeRouteRequestMessage;
 
 /** Messages sent from parent to worker */
-export type ParentMessage = WorkerTaskMessage;
+export type ParentMessage = WorkerTaskMessage | ParentNodeRouteResponseMessage;

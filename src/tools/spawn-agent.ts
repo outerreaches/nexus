@@ -14,7 +14,13 @@ import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getNodeById, type NodeRecord } from "../storage/nodes.js";
-import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
+import type {
+  ParentMessage,
+  WorkerMessage,
+  WorkerConfig,
+  WorkerNodeRouteContext,
+  WorkerNodeRouteRequestMessage,
+} from "../core/isolated-worker-types.js";
 import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
@@ -354,14 +360,7 @@ export const spawnAgent = defineTool({
 
     // Branch: isolated process vs in-process
     let workerResult: string;
-    const forceInProcessForNode = executionTarget.target === "node";
-    if (forceInProcessForNode && preset.isolated) {
-      ctx.log(
-        `spawn_agent: forcing in-process execution for preset=${preset.name} ` +
-        `node=${executionTarget.nodeId} (isolated workers do not have node routing)`,
-      );
-    }
-    if (preset.isolated && !forceInProcessForNode) {
+    if (preset.isolated) {
       workerResult = await runIsolated({
         ctx,
         preset,
@@ -382,6 +381,7 @@ export const spawnAgent = defineTool({
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
         taskTypeEnforcement: coderTaskPolicy.enforcement,
+        executionTarget,
       });
     } else {
       workerResult = await runInProcess({
@@ -589,6 +589,7 @@ async function runIsolated(params: {
   workerAllowCodeWrite: boolean;
   taskType: CoderTaskType | null;
   taskTypeEnforcement: CoderTaskTypeEnforcement;
+  executionTarget: SpawnExecutionTarget;
 }): Promise<string> {
   const {
     ctx,
@@ -610,6 +611,7 @@ async function runIsolated(params: {
     workerAllowCodeWrite,
     taskType,
     taskTypeEnforcement,
+    executionTarget,
   } = params;
 
   const log = ctx.log;
@@ -676,7 +678,7 @@ async function runIsolated(params: {
       if (ctx.abortSignal && abortListener) {
         ctx.abortSignal.removeEventListener("abort", abortListener);
       }
-      resolve(attachBlackboardTitle(resultJson, blackboardTitle));
+      resolve(attachExecutionTarget(attachBlackboardTitle(resultJson, blackboardTitle), executionTarget));
     };
 
     let abortListener: (() => void) | null = null;
@@ -741,7 +743,16 @@ async function runIsolated(params: {
 
     // Handle IPC messages from worker
     child.on("message", (msg: WorkerMessage) => {
-      if (msg.type === "log") {
+      if (msg.type === "node_route_request") {
+        void handleNodeRouteRequestFromIsolatedWorker({
+          msg,
+          child,
+          ctx,
+          runId,
+          logWorker,
+          stopped: () => resolved,
+        });
+      } else if (msg.type === "log") {
         logWorker(msg.line);
       } else if (msg.type === "result") {
         clearTimeout(timer);
@@ -837,6 +848,7 @@ async function runIsolated(params: {
       blockedToolNames,
       taskType: taskType ?? undefined,
       taskTypeEnforcement,
+      executionTarget,
       resolvedSecrets: getResolvedSecretsSnapshot(),
     };
 
@@ -848,6 +860,134 @@ async function runIsolated(params: {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function handleNodeRouteRequestFromIsolatedWorker(params: {
+  msg: WorkerNodeRouteRequestMessage;
+  child: ChildProcess;
+  ctx: ToolContext;
+  runId: string | null;
+  logWorker: (line: string) => void;
+  stopped: () => boolean;
+}): Promise<void> {
+  const requestId = typeof params.msg.requestId === "string" ? params.msg.requestId.trim() : "";
+  if (!requestId) return;
+
+  const respond = (payload: { ok: boolean; result?: string; error?: string }): void => {
+    if (params.stopped()) return;
+    const response: ParentMessage = {
+      type: "node_route_response",
+      requestId,
+      ok: payload.ok,
+      ...(payload.result !== undefined ? { result: payload.result } : {}),
+      ...(payload.error !== undefined ? { error: payload.error } : {}),
+    };
+    try {
+      params.child.send(response);
+    } catch {
+      // ignore IPC send failures during teardown
+    }
+  };
+
+  if (!params.ctx.nodeRouter) {
+    respond({ ok: false, error: "node routing transport is not available." });
+    return;
+  }
+
+  const toolName = typeof params.msg.toolName === "string" ? params.msg.toolName.trim() : "";
+  if (!toolName) {
+    respond({ ok: false, error: "invalid node route request: toolName is required." });
+    return;
+  }
+
+  const routedContext = buildRouteContextFromIsolatedWorkerMessage(params.ctx, params.msg.context, params.runId);
+  const routedTool: Tool = {
+    name: toolName,
+    description: "Isolated-worker node routing proxy",
+    jsonSchema: {},
+    execute: async () => "ERROR: proxy tool cannot be executed directly",
+  };
+
+  try {
+    const result = await params.ctx.nodeRouter.routeToolExecution(routedTool, params.msg.args, routedContext);
+    respond({ ok: true, result });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    params.logWorker(`node_route_request failed tool=${toolName} err=${detail}`);
+    respond({ ok: false, error: detail });
+  }
+}
+
+function buildRouteContextFromIsolatedWorkerMessage(
+  baseCtx: ToolContext,
+  routeContext: WorkerNodeRouteContext | undefined,
+  runId: string | null,
+): ToolContext {
+  const next: ToolContext = {
+    ...baseCtx,
+  };
+
+  if (routeContext && typeof routeContext === "object") {
+    const executionNode =
+      typeof routeContext.executionNode === "string" && routeContext.executionNode.trim().length > 0
+        ? routeContext.executionNode.trim()
+        : undefined;
+    if (executionNode !== undefined) {
+      next.executionNode = executionNode;
+    }
+
+    const executionMode = routeContext.executionMode;
+    if (executionMode === "local" || executionMode === "remote" || executionMode === "auto") {
+      next.executionMode = executionMode;
+    }
+
+    if (typeof routeContext.firewallSession === "string" && routeContext.firewallSession.trim().length > 0) {
+      next.firewallSession = routeContext.firewallSession.trim();
+    } else if (routeContext.firewallSession === null) {
+      next.firewallSession = undefined;
+    }
+
+    const request = routeContext.request;
+    if (request && typeof request === "object") {
+      const channel = typeof request.channel === "string" ? request.channel.trim() : "";
+      const channelKey = typeof request.channelKey === "string" ? request.channelKey.trim() : "";
+      const agentId = typeof request.agentId === "string" ? request.agentId.trim() : "";
+      const sessionId = typeof request.sessionId === "string" ? request.sessionId.trim() : "";
+      const modelMode =
+        request.modelMode === "default" || request.modelMode === "local_only"
+          ? request.modelMode
+          : undefined;
+
+      if (channel && channelKey && agentId && sessionId) {
+        next.request = {
+          channel,
+          channelKey,
+          agentId,
+          sessionId,
+          ...(typeof request.preset === "string" && request.preset.trim().length > 0 ? { preset: request.preset.trim() } : {}),
+          ...(typeof request.runId === "string" && request.runId.trim().length > 0 ? { runId: request.runId.trim() } : {}),
+          ...(typeof request.parentRunId === "string" && request.parentRunId.trim().length > 0
+            ? { parentRunId: request.parentRunId.trim() }
+            : {}),
+          ...(modelMode ? { modelMode } : {}),
+        };
+      }
+    }
+  }
+
+  if (!next.request && baseCtx.request) {
+    next.request = baseCtx.request;
+  }
+  if (!next.request && runId) {
+    next.request = {
+      channel: "worker",
+      channelKey: runId,
+      agentId: "worker",
+      sessionId: runId,
+      runId,
+    };
+  }
+  return next;
+}
 
 function resolveMcpGrantTools(params: {
   ctx: ToolContext;
@@ -1305,6 +1445,23 @@ function attachBlackboardTitle(resultJson: string, blackboardTitle: string): str
     const parsed = JSON.parse(resultJson) as Record<string, unknown>;
     if (parsed && typeof parsed === "object") {
       parsed.blackboardTitle = blackboardTitle;
+      return JSON.stringify(parsed);
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return resultJson;
+}
+
+function attachExecutionTarget(resultJson: string, executionTarget: SpawnExecutionTarget): string {
+  if (executionTarget.target !== "node") return resultJson;
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object") {
+      parsed.execution = {
+        target: "node",
+        nodeId: executionTarget.nodeId,
+      };
       return JSON.stringify(parsed);
     }
   } catch {

@@ -20,7 +20,7 @@ import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
 import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
-import type { ToolContext } from "./tools.js";
+import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
 
@@ -32,8 +32,29 @@ function log(line: string): void {
   send({ type: "log", line });
 }
 
+const NODE_ROUTE_REQUEST_TIMEOUT_MS = 130_000;
+let nodeRouteRequestSeq = 0;
+let taskStarted = false;
+const pendingNodeRouteRequests = new Map<
+  string,
+  {
+    resolve: (value: string) => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+  }
+>();
+
 process.on("message", async (msg: ParentMessage) => {
+  if (msg.type === "node_route_response") {
+    resolveNodeRouteResponse(msg);
+    return;
+  }
   if (msg.type !== "task") return;
+  if (taskStarted) {
+    log("received duplicate task payload; ignoring");
+    return;
+  }
+  taskStarted = true;
   const cfg: WorkerConfig = msg.config;
 
   try {
@@ -104,6 +125,17 @@ process.on("message", async (msg: ParentMessage) => {
       byName.set(tool.name, tool);
     }
     const workerTools = [...byName.values()];
+    const effectiveWorkerTools = applyExecutionToolOverridesForIsolatedWorker(workerTools, cfg.executionTarget);
+    const nodeRoutingBridgeEnabled = cfg.executionTarget?.target === "node";
+    if (nodeRoutingBridgeEnabled && !effectiveWorkerTools.some((tool) => tool.name === "shell_interactive")) {
+      throw new Error("node-target worker requires shell_interactive, but it is unavailable after policy filtering");
+    }
+    const routeToolViaParent = async (tool: Tool, args: unknown, routeCtx: ToolContext): Promise<string> => {
+      if (!nodeRoutingBridgeEnabled) {
+        throw new Error("node routing bridge is not enabled for this worker");
+      }
+      return await requestNodeRouteFromParent(tool, args, routeCtx);
+    };
 
     // Build ToolContext
     const toolContext: ToolContext = {
@@ -134,6 +166,13 @@ process.on("message", async (msg: ParentMessage) => {
         parentRunId: cfg.parentRunId ?? undefined,
         modelMode: cfg.modelMode,
       },
+      ...(nodeRoutingBridgeEnabled
+        ? {
+          nodeRouter: {
+            routeToolExecution: routeToolViaParent,
+          },
+        }
+        : {}),
       runtimeLimits: cfg.runtimeLimits,
       nowMs: () => Date.now(),
       log,
@@ -141,7 +180,7 @@ process.on("message", async (msg: ParentMessage) => {
 
     const runner = new AgentRunner({
       llm,
-      tools: workerTools,
+      tools: effectiveWorkerTools,
       toolCallCaps: preset.toolCallCaps,
       budget: cfg.budget,
       toolContext,
@@ -177,7 +216,7 @@ process.on("message", async (msg: ParentMessage) => {
           `build=${summarizeItems(buildValidation.buildCommands)}`,
         );
         log("coder edited code + built but skipped ha_deploy — auto-triggering deploy");
-        const haDeployTool = workerTools.find((t) => t.name === "ha_deploy");
+        const haDeployTool = effectiveWorkerTools.find((t) => t.name === "ha_deploy");
         if (haDeployTool) {
           try {
             const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
@@ -214,6 +253,7 @@ process.on("message", async (msg: ParentMessage) => {
         deployApplied,
       },
     });
+    rejectPendingNodeRouteRequests("worker completed");
 
     if (mcp) {
       await mcp.close();
@@ -221,6 +261,7 @@ process.on("message", async (msg: ParentMessage) => {
     db.close();
     process.exit(0);
   } catch (err) {
+    rejectPendingNodeRouteRequests("worker failed");
     send({
       type: "error",
       error: err instanceof Error ? err.message : String(err),
@@ -231,14 +272,140 @@ process.on("message", async (msg: ParentMessage) => {
 
 // Handle uncaught errors
 process.on("uncaughtException", (err) => {
+  rejectPendingNodeRouteRequests("worker uncaught exception");
   send({ type: "error", error: `Uncaught exception: ${err.message}` });
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
+  rejectPendingNodeRouteRequests("worker unhandled rejection");
   send({ type: "error", error: `Unhandled rejection: ${reason}` });
   process.exit(1);
 });
+
+process.on("disconnect", () => {
+  rejectPendingNodeRouteRequests("worker IPC disconnected");
+});
+
+function applyExecutionToolOverridesForIsolatedWorker(tools: Tool[], executionTarget: WorkerConfig["executionTarget"]): Tool[] {
+  if (executionTarget?.target !== "node") return tools;
+  return tools.map((tool) => {
+    if (tool.name !== "shell_interactive") return tool;
+    return {
+      ...tool,
+      execute: async (args: unknown, ctx: ToolContext) => {
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+          return "ERROR: shell_interactive arguments must be an object.";
+        }
+        const patched = { ...(args as Record<string, unknown>) };
+        const target = typeof patched.target === "string" ? patched.target.trim().toLowerCase() : "";
+        if (target && target !== "node") {
+          return `ERROR: node-pinned worker requires shell_interactive target=node (nodeId=${executionTarget.nodeId}).`;
+        }
+        patched.target = "node";
+        patched.nodeId = executionTarget.nodeId;
+        return await tool.execute(patched, ctx);
+      },
+    };
+  });
+}
+
+function requestNodeRouteFromParent(tool: Tool, args: unknown, routeCtx: ToolContext): Promise<string> {
+  if (!process.send) {
+    return Promise.reject(new Error("node routing bridge unavailable: IPC channel is not connected"));
+  }
+  const requestId = `node_route_${Date.now()}_${++nodeRouteRequestSeq}`;
+  return new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingNodeRouteRequests.delete(requestId);
+      reject(new Error(`node routing bridge timed out after ${NODE_ROUTE_REQUEST_TIMEOUT_MS}ms`));
+    }, NODE_ROUTE_REQUEST_TIMEOUT_MS);
+    pendingNodeRouteRequests.set(requestId, { resolve, reject, timer });
+    try {
+      send({
+        type: "node_route_request",
+        requestId,
+        toolName: tool.name,
+        args,
+        context: serializeNodeRouteContext(routeCtx),
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      pendingNodeRouteRequests.delete(requestId);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
+function resolveNodeRouteResponse(msg: Extract<ParentMessage, { type: "node_route_response" }>): void {
+  const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+  if (!requestId) return;
+  const pending = pendingNodeRouteRequests.get(requestId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingNodeRouteRequests.delete(requestId);
+  if (msg.ok) {
+    pending.resolve(typeof msg.result === "string" ? msg.result : "");
+    return;
+  }
+  const detail = typeof msg.error === "string" && msg.error.trim().length > 0
+    ? msg.error
+    : "node routing bridge request failed";
+  pending.reject(new Error(detail));
+}
+
+function serializeNodeRouteContext(routeCtx: ToolContext): {
+  executionNode?: string;
+  executionMode?: "local" | "remote" | "auto";
+  firewallSession?: string | null;
+  request?: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    preset?: string;
+    sessionId: string;
+    runId?: string;
+    parentRunId?: string;
+    modelMode?: "default" | "local_only";
+  };
+} {
+  const request = routeCtx.request;
+  return {
+    ...(typeof routeCtx.executionNode === "string" && routeCtx.executionNode.trim().length > 0
+      ? { executionNode: routeCtx.executionNode.trim() }
+      : {}),
+    ...(routeCtx.executionMode === "local" || routeCtx.executionMode === "remote" || routeCtx.executionMode === "auto"
+      ? { executionMode: routeCtx.executionMode }
+      : {}),
+    ...(typeof routeCtx.firewallSession === "string" && routeCtx.firewallSession.trim().length > 0
+      ? { firewallSession: routeCtx.firewallSession.trim() }
+      : routeCtx.firewallSession === null
+        ? { firewallSession: null }
+        : {}),
+    ...(request
+      ? {
+        request: {
+          channel: request.channel,
+          channelKey: request.channelKey,
+          agentId: request.agentId,
+          sessionId: request.sessionId,
+          ...(request.preset ? { preset: request.preset } : {}),
+          ...(request.runId ? { runId: request.runId } : {}),
+          ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+          ...(request.modelMode ? { modelMode: request.modelMode } : {}),
+        },
+      }
+      : {}),
+  };
+}
+
+function rejectPendingNodeRouteRequests(reason: string): void {
+  for (const [requestId, pending] of pendingNodeRouteRequests.entries()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error(reason));
+    pendingNodeRouteRequests.delete(requestId);
+  }
+}
 
 type ToolCallRecord = {
   id: string;
