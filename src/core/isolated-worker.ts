@@ -166,6 +166,15 @@ process.on("message", async (msg: ParentMessage) => {
         parentRunId: cfg.parentRunId ?? undefined,
         modelMode: cfg.modelMode,
       },
+      ...(cfg.executionTarget?.target === "node"
+        ? {
+          executionNode: cfg.executionTarget.nodeId,
+          executionMode: "remote" as const,
+        }
+        : {
+          executionNode: undefined,
+          executionMode: "local" as const,
+        }),
       ...(nodeRoutingBridgeEnabled
         ? {
           nodeRouter: {

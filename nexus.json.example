@@ -66,7 +66,7 @@
         "fallback": { "provider": "local" }
       },
       "byPreset": {
-        "security-researcher": { "primary": { "provider": "openrouter", "model": "openai/gpt-5.2-codex" }, "fallback": { "provider": "local" } },
+        "security-researcher": { "primary": { "provider": "openrouter", "model": "openai/gpt-5.3-codex" }, "fallback": { "provider": "local" } },
         "credential-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "intake-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "mcp-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },

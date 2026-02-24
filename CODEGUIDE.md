@@ -121,7 +121,8 @@ Architecture and implementation guide for the **coder** preset.
    - tool allowlist,
    - budget (`maxIterations`, `maxToolCalls`),
    - optional `toolCallCaps`,
-   - optional `spawnAllowlist`.
+   - optional `spawnAllowlist`,
+   - optional `allowPinnedSpawnEscape` (default false; node-pinned runs of this preset must keep child spawns on the same node).
 2. Register in `src/core/presets.ts` (import + map wiring).
 3. Keep orchestrator delegation logic coherent in `src/core/presets/orchestrator.ts`.
 4. If preset depends on prompt files, ensure those files are stable in runtime state.

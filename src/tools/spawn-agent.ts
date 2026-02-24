@@ -180,6 +180,16 @@ export const spawnAgent = defineTool({
       return executionResolution.error;
     }
     const executionTarget = executionResolution.target;
+    const pinnedExecutionNode = resolvePinnedExecutionNode(ctx);
+    const pinnedSpawnPolicyError = enforcePinnedSpawnExecutionPolicy({
+      pinnedExecutionNode,
+      executionTarget,
+      parentPresetName,
+      parentPreset,
+    });
+    if (pinnedSpawnPolicyError) {
+      return pinnedSpawnPolicyError;
+    }
     if (executionTarget.target === "node" && !preset.tools.includes("shell_interactive")) {
       return `ERROR: preset "${preset.name}" does not support node execution because it lacks shell_interactive.`;
     }
@@ -503,6 +513,15 @@ async function runInProcess(params: {
         modelMode,
       }
       : undefined,
+    ...(executionTarget.target === "node"
+      ? {
+        executionNode: executionTarget.nodeId,
+        executionMode: "remote" as const,
+      }
+      : {
+        executionNode: undefined,
+        executionMode: "local" as const,
+      }),
   };
   const effectiveWorkerTools = applyExecutionToolOverrides(workerTools, executionTarget);
 
@@ -1039,6 +1058,36 @@ function applyExecutionToolOverrides(tools: Tool[], executionTarget: SpawnExecut
   });
 }
 
+function resolvePinnedExecutionNode(ctx: ToolContext): string | null {
+  const nodeId = typeof ctx.executionNode === "string" ? ctx.executionNode.trim() : "";
+  return nodeId.length > 0 ? nodeId : null;
+}
+
+function enforcePinnedSpawnExecutionPolicy(params: {
+  pinnedExecutionNode: string | null;
+  executionTarget: SpawnExecutionTarget;
+  parentPresetName: string | undefined;
+  parentPreset: AgentPreset | undefined;
+}): string | null {
+  const { pinnedExecutionNode, executionTarget, parentPresetName, parentPreset } = params;
+  if (!pinnedExecutionNode) return null;
+  if (parentPreset?.allowPinnedSpawnEscape === true) return null;
+
+  if (executionTarget.target !== "node") {
+    return (
+      `ERROR: node-pinned run (${pinnedExecutionNode}) cannot spawn local workers for preset ` +
+      `"${parentPresetName ?? "unknown"}". Child spawns must set execution.target=\"node\" with nodeId="${pinnedExecutionNode}".`
+    );
+  }
+  if (executionTarget.nodeId !== pinnedExecutionNode) {
+    return (
+      `ERROR: node-pinned run (${pinnedExecutionNode}) cannot spawn workers on node "${executionTarget.nodeId}" ` +
+      `for preset "${parentPresetName ?? "unknown"}". Child spawns must use the same nodeId unless allowPinnedSpawnEscape=true.`
+    );
+  }
+  return null;
+}
+
 function resolveSpawnExecutionTarget(params: {
   requested: { target: "local" | "node"; nodeId?: string } | undefined;
   ctx: ToolContext;
@@ -1090,6 +1139,7 @@ function buildExecutionPromptLines(target: SpawnExecutionTarget): string[] {
     `This run is pinned to remote node: ${target.nodeId}.`,
     "Use shell_interactive for command execution. shell_interactive calls are auto-pinned to this node.",
     "Local shell_exec and local file/code tools are disabled for this run.",
+    `When spawning child agents from this run, keep execution pinned to nodeId="${target.nodeId}" unless your preset explicitly allows escape.`,
     "Workflow reminder: open -> send -> read loops -> close. Always read after each send.",
   ];
 }

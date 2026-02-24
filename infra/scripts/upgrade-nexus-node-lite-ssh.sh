@@ -265,6 +265,37 @@ restart_system_service() {
     || sudo systemctl restart "${SERVICE_NAME}.service" >/dev/null 2>&1
 }
 
+ensure_tmux_installed() {
+  if command -v tmux >/dev/null 2>&1; then
+    echo "tmux_status=present"
+    return 0
+  fi
+
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      sudo apt-get install -y tmux >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y tmux >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y tmux >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+      sudo apk add --no-cache tmux >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -Sy --noconfirm tmux >/dev/null 2>&1 || true
+    elif command -v zypper >/dev/null 2>&1; then
+      sudo zypper --non-interactive install tmux >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    echo "tmux_status=installed"
+  else
+    echo "tmux_status=missing"
+    echo "note=tmux is not installed; install tmux manually before enabling nexus-shellctl."
+  fi
+}
+
 REMOTE_DIR="$(expand_home_path "$REMOTE_DIR")"
 if [ "$REMOTE_LAYOUT" = "releases" ]; then
   TARGET_DIR="$REMOTE_DIR/releases/$RELEASE_ID"
@@ -291,6 +322,8 @@ if [ ! -f "$APP_PATH" ]; then
   echo "missing runtime entrypoint after upgrade: $APP_PATH" >&2
   exit 1
 fi
+
+ensure_tmux_installed
 
 SERVICE_SCOPE="none"
 if command -v systemctl >/dev/null 2>&1; then

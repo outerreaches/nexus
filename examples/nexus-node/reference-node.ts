@@ -223,6 +223,7 @@ type Config = {
   displayName: string;
   capabilities: string[];
   allowCommands: Set<string>;
+  allowShellOperators: boolean;
   runTimeoutMs: number;
   reconnectMinMs: number;
   reconnectMaxMs: number;
@@ -314,7 +315,10 @@ export async function runReferenceNode(
   const client = new ReferenceNodeClient(config, identity, stateStore, logger);
 
   logger.info(`id=${config.nodeId} fingerprint=${identity.fingerprint} gateway=${config.gatewayUrl}`);
-  logger.info(`capabilities=${config.capabilities.join(",")} allow_commands=${[...config.allowCommands].join(",")}`);
+  logger.info(
+    `capabilities=${config.capabilities.join(",")} allow_commands=${[...config.allowCommands].join(",")} ` +
+      `allow_shell_operators=${config.allowShellOperators ? "1" : "0"}`,
+  );
   logger.info(`state_backend=${stateStore.backend} state_path=${stateStore.statePath}`);
   logger.info(`mcp_bridge=${config.mcpBridgeEnabled ? "enabled" : "disabled"} mcp_config=${config.mcpBridgeConfigPath}`);
   logger.info(
@@ -1421,7 +1425,9 @@ class ReferenceNodeClient {
       this.sendRequestError(msg.id, "INVALID_REQUEST", "process.start requires args.command.", false);
       return;
     }
-    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
+    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands, {
+      allowShellOperators: this.config.allowShellOperators,
+    });
     if (!commandValidation.ok) {
       this.sendRequestError(msg.id, "PERMISSION_DENIED", commandValidation.message, false);
       return;
@@ -1528,20 +1534,25 @@ class ReferenceNodeClient {
       },
     });
 
-    if (commandName === POLICYCTL_COMMAND) {
+    if (commandName === POLICYCTL_COMMAND || commandName === SHELLCTL_COMMAND) {
       try {
         entry.status = "running";
         entry.startedAt = Date.now();
         this.persistProcess(entry);
         this.emitProcessUpdate(entry, "running");
-        const output = await this.execPolicyCtlCommand({
-          command: executionCommand,
-          routing,
-          toolName: "process.start",
-          processId,
-          firewallSession: resolvedFirewallSession?.sessionId ?? null,
-          firewallMode,
-        });
+        const output =
+          commandName === POLICYCTL_COMMAND
+            ? await this.execPolicyCtlCommand({
+                command: executionCommand,
+                routing,
+                toolName: "process.start",
+                processId,
+                firewallSession: resolvedFirewallSession?.sessionId ?? null,
+                firewallMode,
+              })
+            : await this.execShellCtlCommand({
+                command: executionCommand,
+              });
         if (output) this.appendProcessLog(entry, `${output}\n`, "stdout");
         this.finishProcess(entry, 0, null);
         this.sendSignedEnvelope({
@@ -3200,7 +3211,9 @@ class ReferenceNodeClient {
   private async execSystemRun(args: Record<string, unknown>): Promise<string> {
     const command = asString(args.command);
     if (!command) throw new NodeToolError("INVALID_REQUEST", "system.run requires `command`.");
-    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands);
+    const commandValidation = validateAllowlistedCommand(command, this.config.allowCommands, {
+      allowShellOperators: this.config.allowShellOperators,
+    });
     if (!commandValidation.ok) throw new NodeToolError("PERMISSION_DENIED", commandValidation.message);
     const commandName = commandValidation.commandName;
     const routing = asObject(args.routing);
@@ -4248,6 +4261,7 @@ async function writeInitEnvFile(config: Config, fingerprint: string, logger: Ref
     `NEXUS_NODE_NAME=${config.displayName}`,
     `NEXUS_NODE_CAPS=${config.capabilities.join(",")}`,
     `NEXUS_NODE_ALLOW_COMMANDS=${[...config.allowCommands].join(",")}`,
+    `NEXUS_NODE_ALLOW_SHELL_OPERATORS=${config.allowShellOperators ? "1" : "0"}`,
     `NEXUS_NODE_LOG_FORMAT=${config.logFormat}`,
     `NEXUS_NODE_LOG_FILE=${config.logFilePath}`,
     `NEXUS_NODE_LOG_MAX_BYTES=${config.logMaxBytes}`,
@@ -4456,6 +4470,9 @@ function buildConfig(
   const allowCommands = new Set(
     splitCsv(values.allow ?? process.env.NEXUS_NODE_ALLOW_COMMANDS, DEFAULT_ALLOW_COMMANDS),
   );
+  const allowShellOperators = isTruthyFlag(
+    values["allow-shell-operators"] ?? process.env.NEXUS_NODE_ALLOW_SHELL_OPERATORS,
+  );
   const legacyFileTransferSetting = (values["allow-file-transfer"] ?? process.env.NEXUS_NODE_ALLOW_FILE_TRANSFER ?? "").trim();
   if (legacyFileTransferSetting) {
     throw new Error(
@@ -4523,6 +4540,7 @@ function buildConfig(
     displayName,
     capabilities,
     allowCommands,
+    allowShellOperators,
     runTimeoutMs,
     reconnectMinMs,
     reconnectMaxMs,
@@ -4804,8 +4822,9 @@ function hasDisallowedShellSyntax(command: string): boolean {
 function validateAllowlistedCommand(
   command: string,
   allowCommands: Set<string>,
+  options: { allowShellOperators?: boolean } = {},
 ): { ok: true; commandName: string } | { ok: false; message: string } {
-  if (hasDisallowedShellSyntax(command)) {
+  if (!options.allowShellOperators && hasDisallowedShellSyntax(command)) {
     return {
       ok: false,
       message:
@@ -5451,6 +5470,7 @@ function printHelp(): void {
       "  --profile <standard|minimal>    Startup profile (default standard)",
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,nexus-shellctl,file_pull,file_push to enable control surfaces)",
+      "  --allow-shell-operators 1       Allow shell control operators (&&, ||, ;, pipes, redirects, substitutions) in system.run/process.start",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --init                          Bootstrap state dir, keys, policy file, and env template then exit",
       "  --run-after-init 1              Continue startup after --init completes",

@@ -56,6 +56,9 @@ export interface AgentPreset {
   toolCallCaps?: Record<string, number>;
   /** Optional whitelist of preset names this agent may spawn via `spawn_agent`. */
   spawnAllowlist?: string[];
+  /** When true, node-pinned runs of this preset may spawn sub-agents outside the current node.
+   *  Default is false (node-pinned runs must keep child spawns on the same node). */
+  allowPinnedSpawnEscape?: boolean;
   budget?: {
     maxToolCalls?: number;
     maxIterations?: number;

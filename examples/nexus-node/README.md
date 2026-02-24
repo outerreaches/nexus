@@ -53,6 +53,7 @@ Optional flags:
 - `--profile <standard|minimal>`
 - `--caps <csv>`
 - `--allow <csv>` (command allowlist for `system.run`/`process.start`; include `nexus-policyctl,nexus-shellctl,file_pull,file_push` to enable control surfaces)
+- `--allow-shell-operators 1` (optional; allow shell control operators like `&&`, `||`, pipes, redirects, and substitutions in `system.run`/`process.start`)
 - `--policy-required 1` (fail startup if `hermes-policy.json` is missing/invalid)
 - `--init` (bootstrap keys, policy file, backend storage, and env template)
 - `--env-file <path>` (env file used by `--init` and optional runtime env loading)
@@ -229,6 +230,8 @@ Runtime policy mutation is command-gated. There is no gateway `policy.update` co
 - It is **not** the full firewall policy model.
 - It gates command execution before process launch.
 - Hermes `denyCommands` is an additional restriction layer in `firewallMode=hermes`.
+- By default, shell control operators are blocked (`&&`, `||`, `;`, pipes, redirects, substitutions).  
+  Set `NEXUS_NODE_ALLOW_SHELL_OPERATORS=1` (or `--allow-shell-operators 1`) to allow them.
 
 Effective command behavior:
 

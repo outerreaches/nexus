@@ -266,6 +266,37 @@ upsert_env() {
   fi
 }
 
+ensure_tmux_installed() {
+  if command -v tmux >/dev/null 2>&1; then
+    echo "tmux_status=present"
+    return 0
+  fi
+
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      sudo apt-get install -y tmux >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y tmux >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y tmux >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+      sudo apk add --no-cache tmux >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -Sy --noconfirm tmux >/dev/null 2>&1 || true
+    elif command -v zypper >/dev/null 2>&1; then
+      sudo zypper --non-interactive install tmux >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    echo "tmux_status=installed"
+  else
+    echo "tmux_status=missing"
+    echo "note=tmux is not installed; install tmux manually before enabling nexus-shellctl."
+  fi
+}
+
 "$NODE_BIN" "$APP" \
   --state-dir "$STATE_DIR" \
   --state-backend json \
@@ -301,6 +332,7 @@ if [ -n "${GATEWAY_FP}" ]; then
   upsert_env NEXUS_NODE_GATEWAY_TLS_FINGERPRINT "$GATEWAY_FP"
 fi
 
+ensure_tmux_installed
 "$NODE_BIN" "$APP" --state-dir "$STATE_DIR" --env-file "$ENV_FILE" --doctor
 
 install_system_service() {
