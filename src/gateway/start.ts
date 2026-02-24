@@ -457,9 +457,8 @@ export async function startGateway(
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
     limits: {
-      // Keep context lean for better cache hit rate and lower token spend.
-      maxMessages: 15,
-      anchorRolloverMessages: 30,
+      maxMessages: 20,
+      anchorRolloverMessages: 40,
       maxToolCalls: config.limits.maxToolCallsPerRun,
       maxIterations: config.limits.maxIterationsPerRun,
       maxConcurrent: config.limits.maxConcurrentAgents,

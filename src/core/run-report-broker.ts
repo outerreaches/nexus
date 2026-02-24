@@ -227,13 +227,14 @@ async function deliverAgentGroup(
   if (!targetAgentId) throw new Error("no_target_agent");
   const targetPreset = resolveTargetPreset(deps.db, group, targetAgentId) ?? undefined;
   await deps.agent.handleUserMessage({
-    channel: "run_report",
-    channelKey: first.targetChannelKey?.trim() || targetAgentId,
+    channel: "internal_events",
+    channelKey: targetAgentId,
     agentId: targetAgentId,
     preset: targetPreset,
     text: formatAgentBatchMessage(group),
     executionLane: "background",
     historyScope: { mode: "latest_telegram_for_agent" },
+    writeSession: { channel: "internal_events", channelKey: targetAgentId },
     ephemeralSessionSave: "unless_action",
   });
 }

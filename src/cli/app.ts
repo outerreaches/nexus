@@ -252,8 +252,8 @@ export async function runCli(argv: string[]): Promise<void> {
         stateDir: paths.stateDir,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
         limits: {
-          maxMessages: 15,
-          anchorRolloverMessages: 30,
+          maxMessages: 20,
+          anchorRolloverMessages: 40,
           maxToolCalls: config.limits.maxToolCallsPerRun,
           maxIterations: config.limits.maxIterationsPerRun,
           maxContextTokens,

@@ -273,6 +273,36 @@ export class AgentService {
     return { ...fallback, source: "latest_telegram_for_agent:fallback" };
   }
 
+  private buildInternalEventSummary(params: {
+    sourceChannel: string;
+    output: string;
+    toolCallsUsed: number;
+    newMessages: ChatMessage[];
+    maxChars: number;
+  }): string | null {
+    const t = params.output.trim().toUpperCase();
+    if ((t === "IDLE" || t === "NOOP" || t === "NO-OP") && params.toolCallsUsed === 0) return null;
+
+    const toolNames = new Set<string>();
+    for (const msg of params.newMessages) {
+      if (msg.role === "tool" && msg.name) toolNames.add(msg.name);
+    }
+
+    const outcomeLimit = Math.max(100, params.maxChars - 200);
+    const outcome = params.output.trim().length > outcomeLimit
+      ? params.output.trim().slice(0, outcomeLimit) + "…"
+      : params.output.trim();
+
+    const lines = [
+      `[INTERNAL_EVENT_SUMMARY source=${params.sourceChannel} internal_callback_not_user_message]`,
+      `tools_used: ${toolNames.size > 0 ? Array.from(toolNames).join(", ") : "none"}`,
+      `outcome: ${outcome}`,
+    ];
+
+    const text = lines.join("\n");
+    return text.length > params.maxChars ? text.slice(0, params.maxChars) + "…" : text;
+  }
+
   async handleUserMessage(params: {
     channel: string;
     channelKey: string;
@@ -289,6 +319,10 @@ export class AgentService {
     historyScope?: HistoryScope;
     /** If true, the session state and the result messages will NOT be saved to the DB, unless the agent takes an action. */
     ephemeralSessionSave?: "unless_action" | "always_skip";
+    /** Persist run messages to a separate session. History still loaded from historyScope. */
+    writeSession?: { channel: string; channelKey: string; agentId?: string };
+    /** Max chars for the summary injected into the read session when writeSession is set. Default 800. */
+    summaryMaxChars?: number;
   }): Promise<{
     runId: string | null;
     sessionId: string;
@@ -307,19 +341,28 @@ export class AgentService {
         agentId: params.agentId,
         historyScope: params.historyScope,
       });
-      const sessionId = getOrCreateSessionId({
+      const readSessionId = getOrCreateSessionId({
         db: this.deps.db,
         channel: historyScope.channel,
         channelKey: historyScope.channelKey,
         agentId: historyScope.agentId,
         nowMs,
       });
+      const writeSessionId = params.writeSession
+        ? getOrCreateSessionId({
+          db: this.deps.db,
+          channel: params.writeSession.channel,
+          channelKey: params.writeSession.channelKey,
+          agentId: params.writeSession.agentId ?? params.agentId,
+          nowMs,
+        })
+        : readSessionId;
 
       // Note: do not auto-archive/clear blackboard here; keep entries available across runs.
 
       const history = loadRecentHistory({
         db: this.deps.db,
-        sessionId,
+        sessionId: readSessionId,
         maxMessages: this.deps.limits.maxMessages,
         anchorRolloverMessages: this.deps.limits.anchorRolloverMessages,
         nowMs,
@@ -353,7 +396,7 @@ export class AgentService {
         : undefined;
 
       if (preset?.name === "orchestrator" || !preset) {
-        const compaction = this.loadLatestCompactionSummary(params.agentId, sessionId);
+        const compaction = this.loadLatestCompactionSummary(params.agentId, readSessionId);
         if (compaction) {
           const compactionHint = buildCompactionSummarySystemMessage(compaction);
           runHistory.push({
@@ -376,16 +419,16 @@ export class AgentService {
           const keywords = extractKeywords(messageText);
           onRunnerLog?.(`memory_hint_keywords [${keywords.join(", ")}]`);
           if (keywords.length > 0) {
-            if (!this.memoryHintsSeen.has(sessionId)) {
-              this.memoryHintsSeen.set(sessionId, new Set());
+            if (!this.memoryHintsSeen.has(readSessionId)) {
+              this.memoryHintsSeen.set(readSessionId, new Set());
             }
-            const seenItems = Array.from(this.memoryHintsSeen.get(sessionId)!);
+            const seenItems = Array.from(this.memoryHintsSeen.get(readSessionId)!);
             onRunnerLog?.(`memory_hint_seen [${seenItems.join(", ")}]`);
             memoryHint = generateMemoryHints({
               db: this.deps.db,
               agentId: params.agentId,
               keywords,
-              seenKeywords: this.memoryHintsSeen.get(sessionId)!,
+              seenKeywords: this.memoryHintsSeen.get(readSessionId)!,
               messageText,
             });
             onRunnerLog?.(`memory_hint_generated ${memoryHint ? 'YES' : 'NO'}`);
@@ -455,14 +498,14 @@ export class AgentService {
         preset: presetName ?? "default",
         channel: params.channel,
         channelKey: params.channelKey,
-        sessionId,
+        sessionId: writeSessionId,
         task: params.text,
       });
       const abortController = new AbortController();
       const cancellationKey = runId ?? `runless:${crypto.randomUUID()}`;
       this.activeRunCancels.set(cancellationKey, {
         runId: runId ?? null,
-        sessionId,
+        sessionId: writeSessionId,
         channel: params.channel,
         channelKey: params.channelKey,
         agentId: params.agentId,
@@ -483,7 +526,7 @@ export class AgentService {
           channelKey: params.channelKey,
           agentId: params.agentId,
           preset: preset?.name ?? presetName,
-          sessionId,
+          sessionId: writeSessionId,
           runId,
           modelMode: runModelMode,
         },
@@ -520,7 +563,7 @@ export class AgentService {
           }
           return {
             runId: runId ?? null,
-            sessionId,
+            sessionId: writeSessionId,
             output: this.cancellationMessage(abortController.signal),
             status: "failed",
             toolCallsUsed: 0,
@@ -556,12 +599,29 @@ export class AgentService {
 
       const runNowMs = this.deps.toolContext.nowMs();
       if (shouldPersistHistory) {
-        // Also persist the initial user message if we skipped doing it in proactive.ts
-        if (historyScope.source === "latest_telegram_for_agent" && params.channel === "heartbeat") {
-          appendMessage({ db: this.deps.db, sessionId, message: { role: "user", content: params.text }, nowMs: runNowMs });
-        }
         for (const msg of result.newMessages) {
-          appendMessage({ db: this.deps.db, sessionId, message: msg as ChatMessage, nowMs: runNowMs });
+          appendMessage({ db: this.deps.db, sessionId: writeSessionId, message: msg as ChatMessage, nowMs: runNowMs });
+        }
+      }
+
+      // When writing to a separate session, inject a brief summary into the read session
+      // so the orchestrator retains awareness without the full verbose exchange.
+      if (writeSessionId !== readSessionId && shouldPersistHistory) {
+        const summary = this.buildInternalEventSummary({
+          sourceChannel: params.channel,
+          output: result.output,
+          toolCallsUsed: result.toolCallsUsed,
+          newMessages: result.newMessages,
+          maxChars: params.summaryMaxChars ?? 800,
+        });
+        if (summary) {
+          appendMessage({
+            db: this.deps.db,
+            sessionId: readSessionId,
+            message: { role: "user", content: summary },
+            nowMs: runNowMs,
+          });
+          onRunnerLog?.(`summary_injected target=${readSessionId} len=${summary.length}`);
         }
       }
 
@@ -582,7 +642,7 @@ export class AgentService {
       if (params.channel !== "telegram") {
         this.ackDeployIfPending({
           runId: runId ?? null,
-          sessionId,
+          sessionId: writeSessionId,
           channel: params.channel,
           channelKey: params.channelKey,
           agentId: params.agentId,
@@ -591,7 +651,7 @@ export class AgentService {
 
       return {
         runId: runId ?? null,
-        sessionId,
+        sessionId: writeSessionId,
         output: result.output,
         status: result.status,
         toolCallsUsed: result.toolCallsUsed,
