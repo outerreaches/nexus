@@ -128,6 +128,10 @@ Architecture and implementation guide for the **coder** preset.
   - tool-to-method routing: `src/nodes/router.ts`
   - websocket protocol handling: `src/nodes/ws-gateway.ts`
   - gateway-facing node tools: `src/tools/nodes.ts`
+- Webhook architecture invariants:
+  - Node-local webhook ingress belongs on the node listener (`NEXUS_NODE_WEBHOOK_*` / `--webhook-port` + `--webhook-path`), not a new gateway route.
+  - Node forwards webhook events to gateway over the node websocket session (`webhook.deliver`), and gateway processes them via existing APIs/routes.
+  - Dashboard integrations should read/write through existing gateway APIs (`/api/webhooks/*`, `/api/nodes/*`); do not add a parallel ad-hoc HTTP webhook transport unless explicitly requested.
 - For new node-exposed operations:
   1. Define protocol method + payload validation.
   2. Add router mapping and gateway execution path.

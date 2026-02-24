@@ -9,11 +9,11 @@ import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getNodeById } from "../storage/nodes.js";
 import { resolveWithinRoots } from "./path-utils.js";
-import { truncateShellOutput } from "./system.js";
+import { isMutatingGitOnCodeDir, truncateShellOutput } from "./system.js";
 
 const execFileAsync = promisify(execFile);
 
-const ALLOWED_PRESETS = new Set(["orchestrator", "coder"]);
+const ALLOWED_PRESETS = new Set(["orchestrator", "coder", "security-researcher"]);
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const POLL_INTERVAL_MS = 60;
 const MAX_READ_BYTES = 128_000;
@@ -110,7 +110,14 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
 function requireAllowedPreset(ctx: ToolContext): string | null {
   const preset = ctx.request?.preset?.trim() ?? "";
   if (!ALLOWED_PRESETS.has(preset)) {
-    return "ERROR: shell_interactive is only available to orchestrator and coder presets.";
+    return "ERROR: shell_interactive is only available to orchestrator, coder, and security-researcher presets.";
+  }
+  return null;
+}
+
+function requireShellExecEnabled(ctx: ToolContext): string | null {
+  if (!ctx.allowShellExec) {
+    return "ERROR: shell_interactive is disabled by policy";
   }
   return null;
 }
@@ -251,6 +258,64 @@ async function tmuxHasSession(tmuxSession: string): Promise<boolean> {
   return res.ok;
 }
 
+async function tmuxPaneCurrentPath(tmuxSession: string): Promise<string | null> {
+  const res = await runTmux(["display-message", "-p", "-t", `${tmuxSession}:0.0`, "#{pane_current_path}"]);
+  if (!res.ok) return null;
+  const value = res.stdout.trim();
+  return value.length > 0 ? value : null;
+}
+
+export function paginateUtf8Chunk(buffer: Buffer, maxChars: number): {
+  output: string;
+  consumedBytes: number;
+  truncatedByChars: boolean;
+} {
+  // Important: consumedBytes tracks exactly what we return so callers can
+  // paginate without skipping unseen output.
+  if (buffer.length === 0 || maxChars <= 0) {
+    return { output: "", consumedBytes: 0, truncatedByChars: false };
+  }
+
+  let offset = 0;
+  let chars = 0;
+  while (offset < buffer.length && chars < maxChars) {
+    const byte = buffer[offset];
+    let width = 1;
+    if ((byte & 0b1000_0000) === 0) {
+      width = 1;
+    } else if ((byte & 0b1110_0000) === 0b1100_0000) {
+      width = 2;
+    } else if ((byte & 0b1111_0000) === 0b1110_0000) {
+      width = 3;
+    } else if ((byte & 0b1111_1000) === 0b1111_0000) {
+      width = 4;
+    } else {
+      width = 1;
+    }
+
+    if (offset + width > buffer.length) break;
+    let valid = true;
+    for (let i = 1; i < width; i += 1) {
+      if ((buffer[offset + i]! & 0b1100_0000) !== 0b1000_0000) {
+        valid = false;
+        break;
+      }
+    }
+    offset += valid ? width : 1;
+    chars += 1;
+  }
+
+  if (offset === 0 && buffer.length > 0) {
+    offset = 1;
+  }
+
+  return {
+    output: buffer.subarray(0, offset).toString("utf8"),
+    consumedBytes: offset,
+    truncatedByChars: offset < buffer.length,
+  };
+}
+
 async function readTimedOutput(params: {
   logPath: string;
   cursor: number;
@@ -299,16 +364,15 @@ async function readTimedOutput(params: {
 
   const bytesAvailable = Math.max(0, finalSize - startCursor);
   const bytesToRead = Math.min(bytesAvailable, MAX_READ_BYTES);
-  const nextCursor = startCursor + bytesToRead;
   const chunk = bytesToRead > 0 ? await readFileRange(params.logPath, startCursor, bytesToRead) : Buffer.alloc(0);
-  const decoded = chunk.toString("utf8");
-  const output = truncateShellOutput(decoded, params.maxChars);
+  const paged = paginateUtf8Chunk(chunk, params.maxChars);
+  const nextCursor = startCursor + paged.consumedBytes;
 
   return {
-    output,
+    output: paged.output,
     nextCursor,
     totalBytes: finalSize,
-    truncated: nextCursor < finalSize || decoded.length > params.maxChars,
+    truncated: nextCursor < finalSize || paged.truncatedByChars,
     resetCursor,
   };
 }
@@ -410,6 +474,16 @@ async function sendLocalInput(params: {
     return `ERROR: interactive session is not running: ${params.sessionId}`;
   }
 
+  const liveCwd = await tmuxPaneCurrentPath(meta.tmuxSession);
+  const cwdForPolicy = liveCwd ?? meta.cwd;
+  if (liveCwd) {
+    meta.cwd = liveCwd;
+  }
+
+  if (params.enter && isMutatingGitOnCodeDir(params.input, params.ctx.codeDir, { cwd: cwdForPolicy })) {
+    return "ERROR: Mutating git commands on the code repository are not allowed from agents. Use ha_deploy to queue a deploy.";
+  }
+
   const sendRes = await runTmux(["send-keys", "-t", target, "-l", params.input]);
   if (!sendRes.ok) {
     const detail = [sendRes.errorMessage, sendRes.stderr].filter(Boolean).join(" | ");
@@ -424,8 +498,7 @@ async function sendLocalInput(params: {
     }
   }
 
-  const cursor = await fileSize(meta.logPath);
-  meta.lastReadCursor = cursor;
+  // Cursor remains stable across send; read() advances it based on returned bytes.
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
 
@@ -435,7 +508,7 @@ async function sendLocalInput(params: {
     action: "send",
     session: params.sessionId,
     enter: params.enter,
-    cursor,
+    cursor: meta.lastReadCursor,
   });
 }
 
@@ -461,6 +534,10 @@ async function readLocalOutput(params: {
     maxChars: params.maxChars,
   });
   const running = await tmuxHasSession(meta.tmuxSession);
+  const liveCwd = running ? await tmuxPaneCurrentPath(meta.tmuxSession) : null;
+  if (liveCwd) {
+    meta.cwd = liveCwd;
+  }
   meta.lastReadCursor = read.nextCursor;
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
@@ -756,6 +833,9 @@ export const shellInteractive = defineTool({
     timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   }),
   execute: async (args, ctx) => {
+    const shellPolicyError = requireShellExecEnabled(ctx);
+    if (shellPolicyError) return shellPolicyError;
+
     const presetError = requireAllowedPreset(ctx);
     if (presetError) return presetError;
 

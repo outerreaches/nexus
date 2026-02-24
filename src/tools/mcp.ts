@@ -188,6 +188,42 @@ function normalizeDelegateTask(task: string, blackboardTitle?: string): string {
   return `${clean}\n\nBlackboard title: ${blackboardTitle.trim()}`;
 }
 
+type SpawnAgentSummary = {
+  ok: boolean;
+  status: string;
+  output: string;
+};
+
+function summarizeSpawnAgentResult(raw: string): SpawnAgentSummary {
+  const trimmed = raw.trimStart();
+  if (trimmed.startsWith("ERROR:")) {
+    return { ok: false, status: "failed", output: raw };
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: true, status: "complete", output: raw };
+    }
+    const obj = parsed as Record<string, unknown>;
+    const status = typeof obj.status === "string" ? obj.status.trim().toLowerCase() : "complete";
+    const output = typeof obj.output === "string" ? obj.output : raw;
+    const ok = status === "complete" || status === "completed";
+    return { ok, status, output };
+  } catch {
+    return { ok: true, status: "complete", output: raw };
+  }
+}
+
+function firstLine(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0] ?? "";
+  return line.trim() || text.trim();
+}
+
+function truncateDetail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
+}
+
 const McpDelegateSchema = z.object({
   preset: z.string().min(1).default("researcher").describe("Worker preset that will receive scoped MCP grant tools."),
   task: z.string().min(1).max(8000),
@@ -756,15 +792,21 @@ export const mcpDelegate = defineTool({
       }, ctx);
 
       manager.touchProfileUsed(profile.id);
+      const spawnSummary = summarizeSpawnAgentResult(spawnResult);
+      if (!spawnSummary.ok) {
+        const detail = truncateDetail(firstLine(spawnSummary.output || spawnResult), 280);
+        return `ERROR: mcp_delegate worker failed (status=${spawnSummary.status || "failed"}): ${detail}`;
+      }
 
       return JSON.stringify({
-        ok: !spawnResult.trimStart().startsWith("ERROR:"),
+        ok: true,
         targetPreset: args.preset,
         profile: profile.name,
         grantId: grant.id,
         serverId: profile.serverId,
         createdEphemeralProfile: createdProfileId !== null,
         cleanupPolicy: args.cleanupPolicy,
+        status: spawnSummary.status,
         output: spawnResult,
       });
     } catch (err) {

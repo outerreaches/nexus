@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import path from "node:path";
 
 import { z } from "zod";
 
@@ -25,7 +26,18 @@ const MUTATING_GIT_SUBCMDS = new Set([
  * directory. Commands with `-C <other-dir>` are allowed (they target a
  * different repo). Read-only commands like status/log/diff are allowed.
  */
-function isMutatingGitOnCodeDir(command: string, codeDir: string): boolean {
+function isUnderRoot(targetPath: string, rootPath: string): boolean {
+  const rel = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function resolveCommandPath(input: string, cwd: string): string {
+  if (path.isAbsolute(input)) return path.resolve(input);
+  return path.resolve(cwd, input);
+}
+
+export function isMutatingGitOnCodeDir(command: string, codeDir: string, options?: { cwd?: string }): boolean {
+  const commandCwd = options?.cwd ?? codeDir;
   // Quick check: does this command invoke git at all?
   if (!/(^|\s|&&|\||\;)git\s/.test(command)) return false;
 
@@ -41,15 +53,16 @@ function isMutatingGitOnCodeDir(command: string, codeDir: string): boolean {
     // If -C is used and points somewhere other than codeDir, allow it
     const dashCMatch = args.match(/^-C\s+(\S+)\s+(.*)/);
     if (dashCMatch) {
-      const targetDir = dashCMatch[1];
-      if (targetDir !== codeDir && !targetDir.startsWith(codeDir + "/")) continue;
+      const targetDir = resolveCommandPath(dashCMatch[1], commandCwd);
+      if (!isUnderRoot(targetDir, codeDir)) continue;
       // -C points at codeDir — check the subcommand
       const subcmd = dashCMatch[2].split(/\s/)[0];
       if (MUTATING_GIT_SUBCMDS.has(subcmd)) return true;
       continue;
     }
 
-    // No -C — this targets whatever cwd is (assumed to be codeDir for agents)
+    // No -C — this targets the command cwd.
+    if (!isUnderRoot(commandCwd, codeDir)) continue;
     const subcmd = args.split(/\s/)[0];
     if (MUTATING_GIT_SUBCMDS.has(subcmd)) return true;
   }
@@ -83,7 +96,7 @@ export const shellExec = defineTool({
     // Block mutating git commands that target the code repository.
     // Read-only commands (status, log, diff, show) are allowed.
     // Commands explicitly using -C to target a different directory are allowed.
-    if (isMutatingGitOnCodeDir(command, ctx.codeDir)) {
+    if (isMutatingGitOnCodeDir(command, ctx.codeDir, { cwd: ctx.codeDir })) {
       return "ERROR: Mutating git commands on the code repository are not allowed from agents. Use ha_deploy to queue a deploy.";
     }
 

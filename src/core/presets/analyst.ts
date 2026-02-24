@@ -28,6 +28,11 @@ export const preset: AgentPreset = {
     "When finished, write your analysis to the blackboard.",
   ].join("\n"),
   tools: [
+    "file_read",
+    "file_write",
+    "file_edit",
+    "file_edit_lines",
+    "file_list",
     "web_search",
     "web_fetch",
     "image_analyze",

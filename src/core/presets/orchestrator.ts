@@ -16,6 +16,7 @@ export const preset: AgentPreset = {
     // Delegation patterns
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "When spawning `coder`, prefer setting `taskType`: `plan` (planning only), `review` (general code review), `walkthrough` (explain a workflow), or `write` (implement changes). If omitted, coder defaults to write mode. `plan`/`review`/`walkthrough` are read-only and must not edit code.",
+    "For webhook/dashboard integration tasks, explicitly instruct coder to preserve node webhook architecture: node-local listener -> node WS `webhook.deliver` -> existing gateway `/api/webhooks/*` + `/api/nodes/*` surfaces. Do not ask coder to introduce ad-hoc gateway webhook transports unless the user requests an architecture change.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
     "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/sub-agents. Keep routine/idle outcomes silent; only use telegram_send when a user-facing update or action is needed.",

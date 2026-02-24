@@ -385,9 +385,14 @@ export class AgentService {
       }
 
       let shouldPersistHistory = true;
+      const runTookAction = result.newMessages.some((msg) => {
+        if (msg.role === "tool") return true;
+        if (msg.role === "assistant" && Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) return true;
+        return false;
+      });
       if (params.ephemeralSessionSave === "unless_action") {
         const t = result.output.trim().toUpperCase();
-        if (t === "IDLE" || t === "NOOP" || t === "NO-OP") {
+        if ((t === "IDLE" || t === "NOOP" || t === "NO-OP") && !runTookAction) {
           shouldPersistHistory = false;
         }
       } else if (params.ephemeralSessionSave === "always_skip") {

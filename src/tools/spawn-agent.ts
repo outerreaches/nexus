@@ -23,7 +23,14 @@ import { enqueueRunReport } from "../storage/run-reports.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODER_TASK_TYPES = ["plan", "review", "walkthrough", "write"] as const;
 const CODER_READ_ONLY_TASK_TYPES = new Set<CoderTaskType>(["plan", "review", "walkthrough"]);
-const HARD_BLOCKED_CODER_TOOLS_READ_ONLY = ["file_write", "file_edit", "file_edit_lines", "ha_deploy"] as const;
+const HARD_BLOCKED_CODER_TOOLS_READ_ONLY = [
+  "file_write",
+  "file_edit",
+  "file_edit_lines",
+  "ha_deploy",
+  "shell_exec",
+  "shell_interactive",
+] as const;
 
 type CoderTaskType = typeof CODER_TASK_TYPES[number];
 type CoderTaskTypeEnforcement = "soft" | "hard";
@@ -287,6 +294,7 @@ export const spawnAgent = defineTool({
     });
     const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(coderTaskPolicy.blockedToolNames));
     const workerTools = mergeToolsByName(baseTools, grantedTools);
+    const workerAllowShellExec = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowShellExec ?? false);
     const workerAllowCodeWrite = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowCodeWrite ?? false);
 
     // Branch: isolated process vs in-process
@@ -308,6 +316,7 @@ export const spawnAgent = defineTool({
         blackboardTitle,
         mcpGrantIds,
         blockedToolNames: coderTaskPolicy.blockedToolNames,
+        workerAllowShellExec,
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
         taskTypeEnforcement: coderTaskPolicy.enforcement,
@@ -326,6 +335,7 @@ export const spawnAgent = defineTool({
         workerTools,
         tracker,
         blackboardTitle,
+        workerAllowShellExec,
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
       });
@@ -364,6 +374,7 @@ async function runInProcess(params: {
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
+  workerAllowShellExec: boolean;
   workerAllowCodeWrite: boolean;
   taskType: CoderTaskType | null;
 }): Promise<string> {
@@ -380,6 +391,7 @@ async function runInProcess(params: {
     workerTools,
     tracker,
     blackboardTitle,
+    workerAllowShellExec,
     workerAllowCodeWrite,
     taskType,
   } = params;
@@ -413,6 +425,7 @@ async function runInProcess(params: {
     llm,
     llmConfig,
     modelMode,
+    allowShellExec: workerAllowShellExec,
     allowCodeWrite: workerAllowCodeWrite,
     request: ctx.request
       ? {
@@ -499,6 +512,7 @@ async function runIsolated(params: {
   blackboardTitle: string;
   mcpGrantIds: string[];
   blockedToolNames: string[];
+  workerAllowShellExec: boolean;
   workerAllowCodeWrite: boolean;
   taskType: CoderTaskType | null;
   taskTypeEnforcement: CoderTaskTypeEnforcement;
@@ -519,6 +533,7 @@ async function runIsolated(params: {
     blackboardTitle,
     mcpGrantIds,
     blockedToolNames,
+    workerAllowShellExec,
     workerAllowCodeWrite,
     taskType,
     taskTypeEnforcement,
@@ -676,7 +691,7 @@ async function runIsolated(params: {
       dbPath: path.join(ctx.stateDir, "nexus.db"),
       llmConfig,
       modelRouterConfig,
-      allowShellExec: ctx.allowShellExec ?? false,
+      allowShellExec: workerAllowShellExec,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: workerAllowCodeWrite,
       presetName: preset.name,
@@ -815,7 +830,9 @@ function buildCoderTaskPromptLines(params: {
     lines.push("Do NOT call `file_write`, `file_edit`, `file_edit_lines`, or `ha_deploy`.");
     lines.push("Do NOT run mutating shell commands (edits, installs, git mutations, or deploy actions).");
     if (params.enforceHardReadOnly === true) {
-      lines.push("Hard policy is enabled: code-mutating tools are removed for this run and code-root writes are blocked.");
+      lines.push(
+        "Hard policy is enabled: mutating tools are removed, shell tools are disabled, and code-root writes are blocked.",
+      );
     } else {
       lines.push("Soft policy is enabled: follow the read-only requirement strictly even though tools remain visible.");
     }

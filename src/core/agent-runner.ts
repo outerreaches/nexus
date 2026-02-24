@@ -414,6 +414,8 @@ export class AgentRunner {
     const repeatedFailures = new Map<string, number>();
     const blockedToolCalls = new Map<string, string>();
     const maxSameToolFailures = 4;
+    // Keep spawn_agent execution sequential so deploy handoff/retry guards are deterministic.
+    const allowConcurrentSpawnBatches = false;
     const touchedFilePaths = new Set<string>();
     let typecheckOk = false;
     let buildOk = false;
@@ -882,8 +884,8 @@ export class AgentRunner {
           while (j < toolCalls.length && toolCalls[j]?.name === "spawn_agent") j += 1;
           const batch = toolCalls.slice(i, j);
           const remainingBudget = this.deps.budget.maxToolCalls - toolCallsUsed;
-          if (remainingBudget < batch.length) {
-            // Not enough budget to run a full batch concurrently; fall back to sequential handling.
+          if (remainingBudget < batch.length || !allowConcurrentSpawnBatches) {
+            // Fall back to sequential handling.
           } else {
             const executions: {
               call: import("./types.js").ToolCall;
@@ -916,6 +918,18 @@ export class AgentRunner {
               }
 
               const args = parsedArgs.args;
+              const callSig = toolCallSignature(batchCall);
+              const blockedReason = blockedToolCalls.get(callSig);
+              if (blockedReason) {
+                const blockedResult =
+                  `ERROR: blocked by retry policy for identical tool call. ${blockedReason} ` +
+                  "Change arguments/approach before retrying.";
+                this.deps.onLog?.(
+                  `tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))} blocked_by_retry_policy=true`,
+                );
+                executions.push({ call: batchCall, args, promise: Promise.resolve(blockedResult) });
+                continue;
+              }
               const cap = resolveToolCallCap(this.deps.toolCallCaps, batchCall.name);
               const usedForTool = toolCallsPerName.get(batchCall.name) ?? 0;
               if (cap !== null && usedForTool >= cap) {

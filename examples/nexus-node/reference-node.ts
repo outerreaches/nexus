@@ -2130,6 +2130,55 @@ class ReferenceNodeClient {
     return result.ok;
   }
 
+  private shellCtlPaginateUtf8Chunk(buffer: Buffer, maxChars: number): {
+    output: string;
+    consumedBytes: number;
+    truncatedByChars: boolean;
+  } {
+    if (buffer.length === 0 || maxChars <= 0) {
+      return { output: "", consumedBytes: 0, truncatedByChars: false };
+    }
+
+    let offset = 0;
+    let chars = 0;
+    while (offset < buffer.length && chars < maxChars) {
+      const byte = buffer[offset]!;
+      let width = 1;
+      if ((byte & 0b1000_0000) === 0) {
+        width = 1;
+      } else if ((byte & 0b1110_0000) === 0b1100_0000) {
+        width = 2;
+      } else if ((byte & 0b1111_0000) === 0b1110_0000) {
+        width = 3;
+      } else if ((byte & 0b1111_1000) === 0b1111_0000) {
+        width = 4;
+      } else {
+        width = 1;
+      }
+
+      if (offset + width > buffer.length) break;
+      let valid = true;
+      for (let i = 1; i < width; i += 1) {
+        if ((buffer[offset + i]! & 0b1100_0000) !== 0b1000_0000) {
+          valid = false;
+          break;
+        }
+      }
+      offset += valid ? width : 1;
+      chars += 1;
+    }
+
+    if (offset === 0 && buffer.length > 0) {
+      offset = 1;
+    }
+
+    return {
+      output: buffer.subarray(0, offset).toString("utf8"),
+      consumedBytes: offset,
+      truncatedByChars: offset < buffer.length,
+    };
+  }
+
   private async shellCtlReadTimedOutput(params: {
     logPath: string;
     cursor: number;
@@ -2183,24 +2232,25 @@ class ReferenceNodeClient {
     const bytesAvailable = Math.max(0, finalSize - startCursor);
     const maxBytes = Math.max(256, Math.min(SHELLCTL_MAX_READ_BYTES, params.maxChars * 4));
     const bytesToRead = Math.min(bytesAvailable, maxBytes);
-    const nextCursor = startCursor + bytesToRead;
-    let output = "";
+    let chunk = Buffer.alloc(0);
     if (bytesToRead > 0) {
       const handle = await fs.open(params.logPath, "r");
       try {
         const buf = Buffer.alloc(bytesToRead);
         const { bytesRead } = await handle.read(buf, 0, bytesToRead, startCursor);
-        output = buf.subarray(0, bytesRead).toString("utf8");
+        chunk = buf.subarray(0, bytesRead);
       } finally {
         await handle.close();
       }
     }
+    const paged = this.shellCtlPaginateUtf8Chunk(chunk, params.maxChars);
+    const nextCursor = startCursor + paged.consumedBytes;
 
     return {
-      output,
+      output: paged.output,
       nextCursor,
       totalBytes: finalSize,
-      truncated: nextCursor < finalSize,
+      truncated: nextCursor < finalSize || paged.truncatedByChars,
       resetCursor,
     };
   }
@@ -2343,8 +2393,7 @@ class ReferenceNodeClient {
           throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to send Enter key: ${truncateOutput(detail || "unknown error", 500)}`);
         }
       }
-      const cursor = await this.shellCtlFileSize(meta.logPath);
-      meta.lastReadCursor = cursor;
+      const cursor = meta.lastReadCursor;
       meta.updatedAt = Date.now();
       await this.shellCtlSaveMeta(meta);
       return JSON.stringify(

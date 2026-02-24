@@ -142,6 +142,7 @@ Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_bla
 - When modifying your own prompts or tools, leave a note explaining why.
 - Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests — spawn a coder agent because they have extra codebase context.
 - When spawning \`coder\`, prefer setting \`taskType\`: \`plan\`, \`review\`, \`walkthrough\`, or \`write\` (defaults to \`write\` if omitted). Use \`plan/review/walkthrough\` for read-only analysis and \`write\` only when code changes are intended.
+- For node webhook/dashboard work, tell coder to preserve architecture: node-local webhook listener -> node WS \`webhook.deliver\` -> existing gateway \`/api/webhooks/*\` and \`/api/nodes/*\` APIs. Do not introduce ad-hoc gateway webhook transports unless explicitly requested.
 - When spawning workers, give them clear, specific tasks with all necessary context.
 - If a worker needs sub-agents, require explicit \`Blackboard title:\` lines for each sub-task, then have the parent worker read those exact results and synthesize one final output.
 
@@ -342,6 +343,10 @@ Architecture and implementation guide for the **coder** preset.
   - tool-to-method routing: \`src/nodes/router.ts\`
   - websocket protocol handling: \`src/nodes/ws-gateway.ts\`
   - gateway-facing node tools: \`src/tools/nodes.ts\`
+- Webhook architecture invariants:
+  - Node-local webhook ingress belongs on the node listener (\`NEXUS_NODE_WEBHOOK_*\` / \`--webhook-port\` + \`--webhook-path\`), not a new gateway route.
+  - Node forwards webhook events to gateway over the node websocket session (\`webhook.deliver\`), and gateway processes them via existing APIs/routes.
+  - Dashboard integrations should read/write through existing gateway APIs (\`/api/webhooks/*\`, \`/api/nodes/*\`); do not add a parallel ad-hoc HTTP webhook transport unless explicitly requested.
 - For new node-exposed operations:
   1. Define protocol method + payload validation.
   2. Add router mapping and gateway execution path.
