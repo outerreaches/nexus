@@ -241,7 +241,7 @@ export const nodeGet = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = getNodeById(db, args.id);
     if (!row) return "ERROR: node not found";
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 
@@ -256,7 +256,7 @@ export const nodeDelete = defineTool({
     if (!db) return "ERROR: database is not available";
     const result = deleteNodeCascadeById(db, args.id);
     if (!result.deleted) return "ERROR: node not found";
-    return JSON.stringify({ ok: true, ...result }, null, 2);
+    return JSON.stringify({ ok: true, ...result });
   },
 });
 
@@ -467,7 +467,7 @@ export const nodeMcpList = defineTool({
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
             const obj = parsed as Record<string, unknown>;
             const changed = stripMcpListSchemas(obj, !args.includeSchemas, args.toolName);
-            if (changed) return JSON.stringify(obj, null, 2);
+            if (changed) return JSON.stringify(obj);
           }
         } catch {
           // Parse failed — return raw response as-is

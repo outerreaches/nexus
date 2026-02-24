@@ -365,7 +365,7 @@ function formatWithBudget(rows: Record<string, unknown>[], maxTotalChars: number
     result.overflow = overflow;
   }
 
-  return JSON.stringify(result, null, 2);
+  return JSON.stringify(result);
 }
 
 function touchEntries(

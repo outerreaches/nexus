@@ -77,6 +77,6 @@ export const dbMaintenance = defineTool({
       log: ctx.log,
     });
 
-    return JSON.stringify(result, null, 2);
+    return JSON.stringify(result);
   },
 });

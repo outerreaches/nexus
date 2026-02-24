@@ -132,7 +132,7 @@ export const browserTool = defineTool({
 
     switch (args.action) {
       case "status":
-        return JSON.stringify(await mgr.status(), null, 2);
+        return JSON.stringify(await mgr.status());
       case "start":
         await mgr.start();
         return "OK";
@@ -140,7 +140,7 @@ export const browserTool = defineTool({
         await mgr.stop();
         return "OK";
       case "tabs":
-        return JSON.stringify(await mgr.tabs(), null, 2);
+        return JSON.stringify(await mgr.tabs());
       case "focus":
         return await mgr.focus(args.index!);
       case "close":

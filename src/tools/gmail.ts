@@ -63,7 +63,7 @@ export const gmailSend = defineTool({
         { stateDir: ctx.stateDir, oauth: oauthRes.oauth, timeoutMs: args.timeoutMs },
         { method: "POST", path: "/users/me/messages/send", body: { raw: rawBase64Url } },
       );
-      return truncateText(JSON.stringify(res, null, 2), 12000);
+      return truncateText(JSON.stringify(res), 12000);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -136,7 +136,7 @@ export const gmailSearch = defineTool({
         out.messages = expanded;
       }
 
-      return truncateText(JSON.stringify(out, null, 2), args.maxChars);
+      return truncateText(JSON.stringify(out), args.maxChars);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -168,7 +168,7 @@ export const gmailGetMessage = defineTool({
           },
         },
       );
-      return truncateText(JSON.stringify(msg, null, 2), args.maxChars);
+      return truncateText(JSON.stringify(msg), args.maxChars);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -190,7 +190,7 @@ export const gmailProfile = defineTool({
         { stateDir: ctx.stateDir, oauth: oauthRes.oauth, timeoutMs: args.timeoutMs },
         { method: "GET", path: "/users/me/profile" },
       );
-      return truncateText(JSON.stringify(res, null, 2), args.maxChars);
+      return truncateText(JSON.stringify(res), args.maxChars);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }

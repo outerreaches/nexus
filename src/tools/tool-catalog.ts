@@ -46,7 +46,7 @@ export const toolCatalog = defineTool({
       total: rows.length,
       tools: rows,
     };
-    return JSON.stringify(payload, null, 2);
+    return JSON.stringify(payload);
   },
 });
 

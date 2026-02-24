@@ -163,7 +163,7 @@ export const jobCreate = defineTool({
         );
 
       const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as any;
-      return JSON.stringify(row, null, 2);
+      return JSON.stringify(row);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -183,7 +183,7 @@ export const jobList = defineTool({
     const sql = "SELECT * FROM jobs WHERE (? = 1 OR enabled = 1) ORDER BY created_at DESC LIMIT ?";
     const stmt = db.db.prepare(sql);
     const rows = stmt.all(args.includeDisabled ? 1 : 0, args.limit) as any[];
-    return JSON.stringify(rows, null, 2);
+    return JSON.stringify(rows);
   },
 });
 
@@ -198,7 +198,7 @@ export const jobGet = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 
@@ -315,7 +315,7 @@ export const jobUpdate = defineTool({
       .run(name, cron, timezone, enabled ? 1 : 0, specJson, nextRunAt, nowMs, args.id);
 
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 
@@ -433,7 +433,7 @@ export const jobRuns = defineTool({
     const job = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!job) return "ERROR: not found";
     const rows = db.db.prepare("SELECT * FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?").all(args.id, args.limit) as any[];
-    return JSON.stringify(rows, null, 2);
+    return JSON.stringify(rows);
   },
 });
 
@@ -448,7 +448,7 @@ export const jobRunGet = defineTool({
     if (!db) return "ERROR: database is not available";
     const row = db.db.prepare("SELECT * FROM job_runs WHERE id = ?").get(args.runId) as any;
     if (!row) return "ERROR: not found";
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 
@@ -467,7 +467,7 @@ export const jobEvents = defineTool({
     const rows = db.db
       .prepare("SELECT * FROM job_events WHERE job_id = ? ORDER BY created_at DESC LIMIT ?")
       .all(args.id, args.limit) as any[];
-    return JSON.stringify(rows, null, 2);
+    return JSON.stringify(rows);
   },
 });
 

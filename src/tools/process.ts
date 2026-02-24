@@ -124,10 +124,10 @@ export const processStart = defineTool({
             // ignore
           }
         }
-        return `ERROR: process exited (status=${current.status}, code=${current.exitCode ?? "null"}, signal=${current.signal ?? "null"})\n${baseHint}${schedulerHint}\n\n${JSON.stringify(current, null, 2)}\n\nLOGS:\n${logs}`;
+        return `ERROR: process exited (status=${current.status}, code=${current.exitCode ?? "null"}, signal=${current.signal ?? "null"})\n${baseHint}${schedulerHint}\n\n${JSON.stringify(current)}\n\nLOGS:\n${logs}`;
       }
 
-      return JSON.stringify(current, null, 2);
+      return JSON.stringify(current);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -141,7 +141,7 @@ export const processList = defineTool({
   execute: async (_args, ctx) => {
     const mgr = ctx.processManager as ProcessManager | undefined;
     if (!mgr) return "ERROR: process manager unavailable";
-    return JSON.stringify(mgr.list(), null, 2);
+    return JSON.stringify(mgr.list());
   },
 });
 
@@ -156,7 +156,7 @@ export const processStatus = defineTool({
     if (!mgr) return "ERROR: process manager unavailable";
     const info = mgr.get(args.id);
     if (!info) return "ERROR: not found";
-    return JSON.stringify(info, null, 2);
+    return JSON.stringify(info);
   },
 });
 
@@ -174,7 +174,7 @@ export const processStop = defineTool({
     if (!mgr) return "ERROR: process manager unavailable";
     try {
       const info = await mgr.stop({ id: args.id, signal: args.signal as any, killAfterMs: args.killAfterMs });
-      return JSON.stringify(info, null, 2);
+      return JSON.stringify(info);
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }

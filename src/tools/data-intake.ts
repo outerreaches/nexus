@@ -133,7 +133,7 @@ export const dataIntakeRun = defineTool({
         lastRunAtMs: attemptedAtMs,
         lastError: formatErrorForStorage(validation.response.validationErrors) ?? validation.response.message,
       });
-      return JSON.stringify(validation.response, null, 2);
+      return JSON.stringify(validation.response);
     }
     let result: Awaited<ReturnType<typeof runDataSource>>;
     try {
@@ -155,7 +155,7 @@ export const dataIntakeRun = defineTool({
     }
 
     updateInstanceStatus?.({ lastRunAtMs: attemptedAtMs, lastError: formatErrorForStorage(result.errors) });
-    return JSON.stringify(result, null, 2);
+    return JSON.stringify(result);
   },
 });
 
@@ -188,7 +188,7 @@ export const dataIntakeQuery = defineTool({
       includeExpired: args.includeExpired,
       nowMs: ctx.nowMs(),
     });
-    return JSON.stringify(rows, null, 2);
+    return JSON.stringify(rows);
   },
 });
 
@@ -258,7 +258,7 @@ export const dataIntakeScheduleRefresh = defineTool({
       );
 
     const row = (db as any).db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as any;
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 
@@ -315,6 +315,6 @@ export const dataIntakeScheduleAll = defineTool({
       );
 
     const row = (db as any).db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as any;
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });

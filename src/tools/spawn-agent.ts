@@ -227,11 +227,13 @@ export const spawnAgent = defineTool({
     const { title: blackboardTitle, cleanedTask } = parseBlackboardTitle(args.task, preset.name);
 
     // Build worker system prompt
+    const hasSpawnAgent = preset.tools.includes("spawn_agent");
     const basePrompt = await buildPresetSystemPrompt({
       stateDir: ctx.stateDir,
       promptFiles: preset.promptFiles,
       systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
-      includePresets: true,
+      includePresets: hasSpawnAgent,
+      presetFilter: preset.spawnAllowlist,
     });
     const systemPrompt = [
       basePrompt,
@@ -253,12 +255,10 @@ export const spawnAgent = defineTool({
       "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
       "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
       "Before first tool use, infer what has already been checked from task/context and avoid repeating the same URLs/queries/commands.",
-      "If a repeat check is necessary for verification, do it once and state why it is needed.",
       "When spawning sub-agents, assign disjoint scopes and include explicit `Scope:` and `Do NOT repeat:` sections in each child task.",
       isMaxDepth
         ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
-        : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}. Do not recursively delegate beyond that.`,
-      "Do not delegate the exact same task text to another agent. If you spawn workers, break the task into distinct subtopics.",
+        : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}.`,
     ].filter((line): line is string => typeof line === "string").join("\n");
 
     // Start run tracking BEFORE execution (so DB row exists for isolated workers)
@@ -466,7 +466,7 @@ async function runInProcess(params: {
     if (taskType) {
       returnValue.taskType = taskType;
     }
-    return JSON.stringify(returnValue, null, 2);
+    return JSON.stringify(returnValue);
   } catch (e) {
     if (runId && tracker) {
       tracker.completeRun(runId, {
@@ -560,7 +560,7 @@ async function runIsolated(params: {
       toolCallsUsed: 0,
       iterationsUsed: 0,
       deployApplied: false,
-    }, null, 2);
+    });
   }
 
   return new Promise<string>((resolve) => {
@@ -597,7 +597,7 @@ async function runIsolated(params: {
         toolCallsUsed: 0,
         iterationsUsed: 0,
         deployApplied: false,
-      }, null, 2));
+      }));
     }, timeoutMs);
 
     // Handle IPC messages from worker
@@ -616,7 +616,7 @@ async function runIsolated(params: {
             endedAt: ctx.nowMs(),
           });
         }
-        finish(JSON.stringify(msg.result, null, 2));
+        finish(JSON.stringify(msg.result));
       } else if (msg.type === "error") {
         clearTimeout(timer);
         if (runId && tracker) {
@@ -632,7 +632,7 @@ async function runIsolated(params: {
           toolCallsUsed: 0,
           iterationsUsed: 0,
           deployApplied: false,
-        }, null, 2));
+        }));
       }
     });
 
@@ -656,7 +656,7 @@ async function runIsolated(params: {
           toolCallsUsed: 0,
           iterationsUsed: 0,
           deployApplied: false,
-        }, null, 2));
+        }));
       }
     });
 
@@ -1080,7 +1080,7 @@ function attachBlackboardTitle(resultJson: string, blackboardTitle: string): str
     const parsed = JSON.parse(resultJson) as Record<string, unknown>;
     if (parsed && typeof parsed === "object") {
       parsed.blackboardTitle = blackboardTitle;
-      return JSON.stringify(parsed, null, 2);
+      return JSON.stringify(parsed);
     }
   } catch {
     // ignore parse errors
@@ -1110,7 +1110,7 @@ function attachBlackboardReference(
   }
 
   const db = ctx.db as NexusDatabase | undefined;
-  if (!db) return JSON.stringify(parsed, null, 2);
+  if (!db) return JSON.stringify(parsed);
 
   const scope = ctx.request?.sessionId ?? "global";
   const nowMs = ctx.nowMs();
@@ -1135,5 +1135,5 @@ function attachBlackboardReference(
     parsed.blackboardEntryCreatedAt = Number(row.created_at);
   }
 
-  return JSON.stringify(parsed, null, 2);
+  return JSON.stringify(parsed);
 }

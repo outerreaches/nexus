@@ -216,7 +216,7 @@ export const mcpOverview = defineTool({
   execute: async (_args, ctx) => {
     try {
       const manager = requireManager(ctx);
-      return JSON.stringify(manager.getOverview(), null, 2);
+      return JSON.stringify(manager.getOverview());
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -233,7 +233,7 @@ export const mcpServerList = defineTool({
     const db = ctx.db as any;
     if (!db) return "ERROR: database unavailable";
     const rows = listMcpServers(db, { includeDisabled: args.includeDisabled });
-    return JSON.stringify({ total: rows.length, servers: rows }, null, 2);
+    return JSON.stringify({ total: rows.length, servers: rows });
   },
 });
 
@@ -269,7 +269,7 @@ export const mcpServerAdd = defineTool({
       return JSON.stringify({
         ok: true,
         server: getMcpServer(db, created.id),
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -311,7 +311,7 @@ export const mcpServerUpdate = defineTool({
       return JSON.stringify({
         ok: true,
         server: getMcpServer(db, updated.id),
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -339,7 +339,7 @@ export const mcpServerProbe = defineTool({
         server: res.server,
         totalTools: normalizedTools.length,
         tools: normalizedTools,
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -357,7 +357,7 @@ export const mcpServerActivate = defineTool({
       const manager = requireManager(ctx);
       const updated = await manager.activateServer(args.id);
       await reloadRegistry(ctx);
-      return JSON.stringify({ ok: true, server: updated }, null, 2);
+      return JSON.stringify({ ok: true, server: updated });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -375,7 +375,7 @@ export const mcpServerDeactivate = defineTool({
       const manager = requireManager(ctx);
       const updated = await manager.deactivateServer(args.id);
       await reloadRegistry(ctx);
-      return JSON.stringify({ ok: true, server: updated }, null, 2);
+      return JSON.stringify({ ok: true, server: updated });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -399,7 +399,7 @@ export const mcpServerRemove = defineTool({
       const ok = deleteMcpServer(db, existing.id);
       if (!ok) return `ERROR: failed to remove MCP server: ${existing.id}`;
       await reloadRegistry(ctx);
-      return JSON.stringify({ ok: true, removed: existing.id }, null, 2);
+      return JSON.stringify({ ok: true, removed: existing.id });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -416,7 +416,7 @@ export const mcpProfileList = defineTool({
     const db = ctx.db as any;
     if (!db) return "ERROR: database unavailable";
     const rows = listMcpProfiles(db, { includeDisabled: args.includeDisabled });
-    return JSON.stringify({ total: rows.length, profiles: rows }, null, 2);
+    return JSON.stringify({ total: rows.length, profiles: rows });
   },
 });
 
@@ -461,7 +461,7 @@ export const mcpProfileCreate = defineTool({
       return JSON.stringify({
         ok: true,
         profile: created,
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -516,7 +516,7 @@ export const mcpProfileUpdate = defineTool({
       return JSON.stringify({
         ok: true,
         profile: updated,
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -541,7 +541,7 @@ export const mcpProfileDelete = defineTool({
       return JSON.stringify({
         ok: true,
         removed: existing.name,
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -601,7 +601,7 @@ export const mcpGrantIssue = defineTool({
         issuedByAgentId: ctx.request?.agentId ?? null,
         issuedByRunId: ctx.request?.runId ?? null,
       }, nowMs);
-      return JSON.stringify({ ok: true, grant }, null, 2);
+      return JSON.stringify({ ok: true, grant });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -622,7 +622,7 @@ export const mcpGrantList = defineTool({
       includeExpired: args.includeExpired,
       includeRevoked: args.includeRevoked,
     });
-    return JSON.stringify({ total: grants.length, grants }, null, 2);
+    return JSON.stringify({ total: grants.length, grants });
   },
 });
 
@@ -640,7 +640,7 @@ export const mcpGrantRevoke = defineTool({
       const existing = getMcpGrant(db, args.id);
       if (!existing) return `ERROR: MCP grant not found: ${args.id}`;
       const updated = revokeMcpGrant(db, args.id, args.reason ?? "revoked_by_operator", ctx.nowMs());
-      return JSON.stringify({ ok: true, grant: updated }, null, 2);
+      return JSON.stringify({ ok: true, grant: updated });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -766,7 +766,7 @@ export const mcpDelegate = defineTool({
         createdEphemeralProfile: createdProfileId !== null,
         cleanupPolicy: args.cleanupPolicy,
         output: spawnResult,
-      }, null, 2);
+      });
     } catch (err) {
       return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
     } finally {

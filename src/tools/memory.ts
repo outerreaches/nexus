@@ -196,7 +196,7 @@ export const memorySearch = defineTool({
 
       const results = rows.map((r) => formatMemorySearchResult(r, { includeValues, valuePreviewChars }));
 
-      return JSON.stringify(results, null, 2);
+      return JSON.stringify(results);
     }
 
     const categoryClause = args.category ? "AND category = ?" : "";
@@ -218,7 +218,7 @@ export const memorySearch = defineTool({
 
     const results = rows.map((r) => formatMemorySearchResult(r, { includeValues, valuePreviewChars }));
 
-    return JSON.stringify(results, null, 2);
+    return JSON.stringify(results);
   },
 });
 

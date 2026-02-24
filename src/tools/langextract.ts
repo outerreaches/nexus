@@ -1185,7 +1185,7 @@ export const langextractExtract = defineTool({
         returnedCount,
         blackboardId,
         preview,
-      }, null, 2);
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/ENOENT/i.test(message) && /python/i.test(message)) {

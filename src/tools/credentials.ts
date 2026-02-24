@@ -151,7 +151,7 @@ export const credentialList = defineTool({
   execute: async (_args, ctx) => {
     try {
       const items = await listCredentials(ctx.stateDir);
-      return JSON.stringify({ storePath: getCredentialStorePath(ctx.stateDir), items }, null, 2);
+      return JSON.stringify({ storePath: getCredentialStorePath(ctx.stateDir), items });
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }

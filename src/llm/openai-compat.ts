@@ -1,6 +1,7 @@
 import type { ChatMessage, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
+import { CHARS_PER_TOKEN } from "../core/context-compactor.js";
 
 export type OpenAICompatConfig = {
   baseUrl: string;
@@ -243,7 +244,7 @@ function estimateRequestTokens(messages: ChatMessage[], tools: Tool[]): number {
     return sum + tool.name.length + tool.description.length + schemaChars;
   }, 0);
   const totalChars = messageChars + toolSchemaChars;
-  return Math.ceil(totalChars / 4);
+  return Math.ceil(totalChars / CHARS_PER_TOKEN);
 }
 
 function resolveHttpTimeoutMs(messages: ChatMessage[], tools: Tool[]): number {

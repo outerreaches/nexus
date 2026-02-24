@@ -212,7 +212,7 @@ export const webSearch = defineTool({
           timeoutMs: args.timeoutMs,
         });
 
-    const payload = truncateText(JSON.stringify(result, null, 2), args.maxChars);
+    const payload = truncateText(JSON.stringify(result), args.maxChars);
     writeCache(SEARCH_CACHE, cacheKey, { provider, payload }, args.cacheTtlMs);
     return payload;
   },

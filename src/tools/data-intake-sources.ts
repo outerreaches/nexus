@@ -121,7 +121,7 @@ export const dataIntakeSourceList = defineTool({
         jobId: row.job_id,
       };
     });
-    return JSON.stringify(transformed, null, 2);
+    return JSON.stringify(transformed);
   },
 });
 
@@ -170,7 +170,7 @@ export const dataIntakeSourceAdd = defineTool({
     const mergedParams = { ...extraParams, ...parsedParamsJson, ...(args.params ?? {}) };
     const validation = validateSourceParams(source, mergedParams);
     if (!validation.ok) {
-      return JSON.stringify(validation.response, null, 2);
+      return JSON.stringify(validation.response);
     }
     const canonicalParams = validation.params as Record<string, unknown>;
 
@@ -200,7 +200,7 @@ export const dataIntakeSourceAdd = defineTool({
           ...row,
           _note: "Deduped: matching source instance already exists.",
         };
-        return JSON.stringify(result, null, 2);
+        return JSON.stringify(result);
       }
     }
 
@@ -224,7 +224,7 @@ export const dataIntakeSourceAdd = defineTool({
       ...row,
       _hint: `Use data_intake_run(instanceId: "${row.id}") to fetch data. Query with data_intake_query(tag: "${args.label || row.source_id}").`,
     };
-    return JSON.stringify(result, null, 2);
+    return JSON.stringify(result);
   },
 });
 
@@ -268,7 +268,7 @@ export const dataIntakeSourceUpdate = defineTool({
       if (!source) return `ERROR: unknown source '${existing.source_id}'`;
       const validation = validateSourceParams(source, mergedParams);
       if (!validation.ok) {
-        return JSON.stringify(validation.response, null, 2);
+        return JSON.stringify(validation.response);
       }
     }
     const row = updateIntakeSource({
@@ -281,7 +281,7 @@ export const dataIntakeSourceUpdate = defineTool({
       nowMs: ctx.nowMs(),
     });
     if (!row) return "ERROR: source not found";
-    return JSON.stringify(row, null, 2);
+    return JSON.stringify(row);
   },
 });
 

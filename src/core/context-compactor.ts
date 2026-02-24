@@ -16,7 +16,7 @@ import { estimateUserContentPayloadChars, renderUserContentForText } from "./mes
 
 // ─── Token estimation ────────────────────────────────────────────────────────
 
-const CHARS_PER_TOKEN = 3.8; // conservative estimate for mixed content
+export const CHARS_PER_TOKEN = 3.5; // mixed English/code content estimate
 
 /** Estimate token count for a single string. */
 function estimateStringTokens(text: string): number {

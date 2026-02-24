@@ -119,8 +119,10 @@ export function clearDynamicPresetsBySource(source: string): void {
   }
 }
 
-/** Format presets list for injection into the orchestrator system prompt. */
-export function formatPresetsForPrompt(): string {
+/** Format presets list for injection into system prompts. When `filter` is
+ *  provided, only presets in the filter are listed (used for workers with a
+ *  spawnAllowlist). When omitted, all non-hidden presets are listed. */
+export function formatPresetsForPrompt(filter?: string[]): string {
   const lines = [
     "## Available Agent Presets",
     "",
@@ -128,7 +130,8 @@ export function formatPresetsForPrompt(): string {
     "",
   ];
   for (const p of listPresets()) {
-    if (p.name === "orchestrator" || p.hidden) continue; // Don't list self or hidden profiles
+    if (p.name === "orchestrator" || p.hidden) continue;
+    if (filter && !filter.includes(p.name)) continue;
     lines.push(`- **${p.name}**: ${p.description}`);
   }
   lines.push("");

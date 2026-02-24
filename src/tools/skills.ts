@@ -82,7 +82,7 @@ export const skillList = defineTool({
       instructions_preview: s.instructions.length > 200 ? s.instructions.slice(0, 200) + "..." : s.instructions,
     }));
 
-    return JSON.stringify(entries, null, 2);
+    return JSON.stringify(entries);
   },
 });
 

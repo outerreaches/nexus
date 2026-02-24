@@ -44,7 +44,7 @@ const nodeShellRoutingTool: Tool = {
 };
 
 function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
+  return JSON.stringify(value);
 }
 
 function truncateDetail(value: string): string {
