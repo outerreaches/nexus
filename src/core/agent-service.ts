@@ -48,6 +48,18 @@ function buildRuntimeClockSystemMessage(nowMs: number): string {
   ].join("\n");
 }
 
+function buildRuntimeChannelSystemMessage(params: { channel: string; channelKey: string }): string {
+  const channel = params.channel.trim() || "unknown";
+  const channelKey = params.channelKey.trim() || "unknown";
+  return [
+    "Runtime channel context (ephemeral):",
+    `- inbound_channel: ${channel}`,
+    `- inbound_channel_key: ${channelKey}`,
+    "- Your final assistant text is delivered on this channel by default.",
+    "- Do not claim a different UI/channel unless you actually called a channel-specific tool.",
+  ].join("\n");
+}
+
 const COMPACTION_SUMMARY_HINT_MAX_CHARS = 2400;
 
 function truncateWithMarker(text: string, maxChars: number): string {
@@ -453,6 +465,16 @@ export class AgentService {
           cacheControl: { type: "ephemeral" },
         });
       }
+      const runtimeChannelHint = buildRuntimeChannelSystemMessage({
+        channel: params.channel,
+        channelKey: params.channelKey,
+      });
+      runHistory.push({
+        role: "system",
+        content: runtimeChannelHint,
+        cacheControl: { type: "ephemeral" },
+      });
+      onRunnerLog?.(`runtime_channel_injected channel=${params.channel} key=${params.channelKey} length=${runtimeChannelHint.length}`);
       const runtimeClockHint = buildRuntimeClockSystemMessage(nowMs);
       runHistory.push({
         role: "system",

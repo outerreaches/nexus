@@ -453,6 +453,7 @@ export class AgentRunner {
     const hardCompactionThreshold = 0.85;
     let softCompactionAttempted = false;
     const runStartedAtMs = this.deps.toolContext.nowMs();
+    let emptyFinalRepairAttempted = false;
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       this.throwIfCancelled();
@@ -695,13 +696,40 @@ export class AgentRunner {
       }
 
       if (toolCalls.length === 0) {
-        const finalText = content ?? "";
-        const msg: ChatMessage = { role: "assistant", content: finalText };
+        const finalTextRaw = content ?? "";
+        const finalText = finalTextRaw.trim();
+        if (!finalText) {
+          if (!emptyFinalRepairAttempted && iteration + 1 < this.deps.budget.maxIterations) {
+            emptyFinalRepairAttempted = true;
+            this.deps.onLog?.("llm_empty_final_output: requesting one repair turn");
+            messages.push({
+              role: "system",
+              content:
+                "Previous assistant response was empty and had no tool calls. " +
+                "Respond now with a short, non-empty user-facing message.",
+            });
+            continue;
+          }
+          const fallbackText =
+            "I couldn't produce a complete response in this run. Please resend your last message.";
+          this.deps.onLog?.("llm_empty_final_output: emitting fallback text");
+          const msg: ChatMessage = { role: "assistant", content: fallbackText };
+          messages.push(msg);
+          newMessages.push(msg);
+          return {
+            status: "complete",
+            output: fallbackText,
+            newMessages,
+            toolCallsUsed,
+            iterationsUsed: iteration + 1,
+          };
+        }
+        const msg: ChatMessage = { role: "assistant", content: finalTextRaw };
         messages.push(msg);
         newMessages.push(msg);
         return {
           status: "complete",
-          output: finalText,
+          output: finalTextRaw,
           newMessages,
           toolCallsUsed,
           iterationsUsed: iteration + 1,

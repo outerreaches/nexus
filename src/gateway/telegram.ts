@@ -25,6 +25,8 @@ const DEFAULT_MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_FILE_BLACKBOARD_TTL_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_MAX_INLINE_IMAGES_FOR_LLM = 3;
 const DEFAULT_MAX_INLINE_IMAGE_BYTES_FOR_LLM = 4 * 1024 * 1024;
+const DEFAULT_EMPTY_OUTPUT_FALLBACK_TEXT =
+  "I couldn't produce a visible response for that request. Please resend or ask me to continue.";
 
 type IncomingAttachment = {
   kind: string;
@@ -99,6 +101,15 @@ function envInt(name: string, fallback: number, opts: { min?: number; max?: numb
   if (typeof opts.min === "number" && intVal < opts.min) return opts.min;
   if (typeof opts.max === "number" && intVal > opts.max) return opts.max;
   return intVal;
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+  return fallback;
 }
 
 type TelegramMessageEntity = {
@@ -639,6 +650,10 @@ export async function startTelegramBot(deps: {
       max: 32 * 1024 * 1024,
     },
   );
+  const emptyOutputFallbackEnabled = envBool("NEXUS_TELEGRAM_EMPTY_OUTPUT_FALLBACK", false);
+  const emptyOutputFallbackText =
+    (process.env.NEXUS_TELEGRAM_EMPTY_OUTPUT_TEXT ?? DEFAULT_EMPTY_OUTPUT_FALLBACK_TEXT).trim() ||
+    DEFAULT_EMPTY_OUTPUT_FALLBACK_TEXT;
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
@@ -648,6 +663,7 @@ export async function startTelegramBot(deps: {
   deps.log(
     `telegram: llm_media max_inline_images=${maxInlineImagesForLlm} max_inline_image_bytes=${maxInlineImageBytesForLlm}`,
   );
+  deps.log(`telegram: empty_output_fallback enabled=${emptyOutputFallbackEnabled ? "yes" : "no"}`);
   if (allowAllUsers) deps.log("telegram: WARN allow_all is enabled; any Telegram user can reach the agent.");
   if (allowFrom.length === 0 && !allowAllUsers && !tg.pairing.enabled) {
     deps.log("telegram: WARN no static allowlist and pairing is disabled; no users can authenticate.");
@@ -681,6 +697,14 @@ export async function startTelegramBot(deps: {
   const sendOutput = async (chatId: number, output: string): Promise<void> => {
     if (!output || output.trim().length === 0) {
       deps.log(`telegram: send chat_id=${chatId} skipped (empty output)`);
+      if (emptyOutputFallbackEnabled) {
+        deps.log(`telegram: send chat_id=${chatId} fallback=empty_output`);
+        const fallbackChunks = splitTelegramMessage(emptyOutputFallbackText);
+        for (const chunk of fallbackChunks) {
+          if (chunk.trim().length === 0) continue;
+          await bot.api.sendMessage(chatId, chunk);
+        }
+      }
       return;
     }
     const extracted = await extractTelegramImageAttachments(output);

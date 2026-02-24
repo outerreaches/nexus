@@ -6,16 +6,7 @@ import {
   markRunReportSent,
   type RunReportRecord,
 } from "../storage/run-reports.js";
-import { findNearestTelegramAncestorRun } from "../storage/run-reports.js";
-import { getLatestTelegramSessionForAgent } from "./telegram-delta.js";
-import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import type { AgentService } from "./agent-service.js";
-
-type TelegramCtx = {
-  sendOutput: (chatId: number, text: string) => Promise<void>;
-  allowFrom: number[];
-  allowAll: boolean;
-};
 
 type ClaimedReport = {
   row: RunReportRecord;
@@ -50,71 +41,6 @@ function computeBackoffMs(attempt: number): number {
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
-}
-
-function parseChatId(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  const asInt = Math.trunc(num);
-  return asInt !== 0 ? asInt : null;
-}
-
-function resolveTargetChatId(db: NexusDatabase, row: RunReportRecord): number | null {
-  const targetChannel = row.targetChannel.trim().toLowerCase();
-  if (targetChannel !== "telegram") return null;
-
-  const directChat = parseChatId(row.targetChannelKey);
-  if (directChat) return directChat;
-
-  if (row.targetAgentId) {
-    const latest = getLatestTelegramSessionForAgent(db, row.targetAgentId);
-    const latestChat = parseChatId(latest?.channelKey ?? null);
-    if (latestChat) return latestChat;
-  }
-
-  if (row.parentRunId) {
-    const ancestor = findNearestTelegramAncestorRun(db, row.parentRunId);
-    const ancestorChat = parseChatId(ancestor?.channelKey ?? null);
-    if (ancestorChat) return ancestorChat;
-  }
-
-  if (row.sourceRunId) {
-    const ancestor = findNearestTelegramAncestorRun(db, row.sourceRunId);
-    const ancestorChat = parseChatId(ancestor?.channelKey ?? null);
-    if (ancestorChat) return ancestorChat;
-  }
-
-  return null;
-}
-
-function formatReportMessage(row: RunReportRecord): string {
-  const metadata = [
-    `kind=${row.kind}`,
-    row.sourceRunId ? `source_run_id=${row.sourceRunId}` : null,
-    row.parentRunId ? `parent_run_id=${row.parentRunId}` : null,
-    row.sourceAgentId ? `source_agent_id=${row.sourceAgentId}` : null,
-  ].filter(Boolean);
-
-  const lines = [row.title.trim() || "Run Report"];
-  if (metadata.length > 0) {
-    lines.push(metadata.join(" "));
-  }
-  lines.push("", row.body.trim() || "(empty)");
-  return truncate(lines.join("\n"), 18_000);
-}
-
-function formatTelegramBatchMessage(rows: ClaimedReport[]): string {
-  if (rows.length === 1) return formatReportMessage(rows[0].row);
-  const lines: string[] = [
-    "RUN REPORT BATCH",
-    `report_count=${rows.length}`,
-    "",
-  ];
-  rows.forEach((item, index) => {
-    lines.push(`REPORT ${index + 1}/${rows.length}`, formatReportMessage(item.row), "");
-  });
-  return truncate(lines.join("\n"), 18_000);
 }
 
 function parseMetadata(row: RunReportRecord): Record<string, unknown> {
@@ -184,7 +110,7 @@ function formatAgentBatchMessage(rows: ClaimedReport[]): string {
 }
 
 function deliveryKey(row: RunReportRecord): string {
-  const channel = row.targetChannel.trim().toLowerCase() || "telegram";
+  const channel = row.targetChannel.trim().toLowerCase() || "agent";
   const targetAgent = (row.targetAgentId ?? row.sourceAgentId ?? "").trim().toLowerCase();
   const targetKey = (row.targetChannelKey ?? "").trim() || targetAgent;
   return `${channel}::${targetAgent}::${targetKey}`;
@@ -192,28 +118,9 @@ function deliveryKey(row: RunReportRecord): string {
 
 function isTerminalDeliveryError(msg: string, attempt: number, maxAttempts: number): boolean {
   if (attempt >= maxAttempts) return true;
-  if (msg === "no_telegram_target" || msg === "no_target_agent") return true;
-  if (msg.startsWith("chat_not_allowlisted:")) return true;
+  if (msg === "no_target_agent") return true;
   if (msg.startsWith("unsupported_target_channel:")) return true;
   return false;
-}
-
-async function deliverTelegramGroup(
-  deps: { db: NexusDatabase; telegram?: TelegramCtx | null },
-  group: ClaimedReport[],
-): Promise<void> {
-  if (!deps.telegram) throw new Error("telegram_unavailable");
-  const first = group[0]?.row;
-  if (!first) return;
-  const chatId = resolveTargetChatId(deps.db, first);
-  if (!chatId) throw new Error("no_telegram_target");
-  const allowed = isTelegramUserAllowed(deps.db, {
-    userId: chatId,
-    staticAllowFrom: deps.telegram.allowFrom ?? [],
-    allowAll: Boolean(deps.telegram.allowAll),
-  });
-  if (!allowed) throw new Error(`chat_not_allowlisted:${chatId}`);
-  await deps.telegram.sendOutput(chatId, formatTelegramBatchMessage(group));
 }
 
 async function deliverAgentGroup(
@@ -246,7 +153,6 @@ export type RunReportBroker = {
 
 export function startRunReportBroker(deps: {
   db: NexusDatabase;
-  telegram?: TelegramCtx | null;
   agent?: AgentService | null;
   log: (msg: string) => void;
 }): RunReportBroker | null {
@@ -294,9 +200,7 @@ export function startRunReportBroker(deps: {
         if (!first) continue;
         const targetChannel = first.targetChannel.trim().toLowerCase();
         try {
-          if (targetChannel === "telegram") {
-            await deliverTelegramGroup(deps, group);
-          } else if (targetChannel === "agent") {
+          if (targetChannel === "agent") {
             await deliverAgentGroup(deps, group);
           } else {
             throw new Error(`unsupported_target_channel:${targetChannel || "empty"}`);

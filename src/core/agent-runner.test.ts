@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyToolResultStatus, toolResultIndicatesDeployApplied } from "./agent-runner.js";
+import { AgentRunner, classifyToolResultStatus, toolResultIndicatesDeployApplied } from "./agent-runner.js";
+import type { LLMClient } from "../llm/openai-compat.js";
 import type { ToolCall } from "./types.js";
+import type { ToolContext } from "./tools.js";
 
 function makeCall(name: string): ToolCall {
   return {
@@ -126,4 +128,65 @@ test("toolResultIndicatesDeployApplied ignores ERROR-prefixed results", () => {
   const call = makeCall("ha_deploy");
   const didApply = toolResultIndicatesDeployApplied(call, { action: "apply" }, "ERROR: failed");
   assert.equal(didApply, false);
+});
+
+function makeToolContext(): ToolContext {
+  return {
+    workspaceDir: "/tmp",
+    stateDir: "/tmp",
+    codeDir: "/tmp",
+    nowMs: () => Date.now(),
+    log: () => {},
+  };
+}
+
+test("AgentRunner retries once when final assistant output is empty", async () => {
+  let callCount = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      callCount += 1;
+      if (callCount === 1) return { content: null, toolCalls: [] };
+      return { content: "non-empty", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 3, maxToolCalls: 5 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "hello",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "non-empty");
+  assert.equal(result.iterationsUsed, 2);
+});
+
+test("AgentRunner emits fallback when repeated final output remains empty", async () => {
+  const llm: LLMClient = {
+    completeChat: async () => ({ content: null, toolCalls: [] }),
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 2, maxToolCalls: 5 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "hello",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.match(result.output, /couldn't produce a complete response/i);
+  assert.equal(result.iterationsUsed, 2);
 });

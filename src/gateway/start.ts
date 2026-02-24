@@ -1269,7 +1269,6 @@ export async function startGateway(
     runReportBroker?.stop();
     runReportBroker = startRunReportBroker({
       db,
-      telegram: toolContext.telegram as any,
       agent,
       log,
     });

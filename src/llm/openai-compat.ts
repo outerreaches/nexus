@@ -474,6 +474,16 @@ export class OpenAICompatClient implements LLMClient {
         const content = normalizeAssistantContent(message?.content);
         const toolCalls = normalizeToolCalls(message?.tool_calls);
         const usage = normalizeUsage(json?.usage);
+        if (!content && toolCalls.length === 0) {
+          const completion = typeof usage?.completionTokens === "number" ? usage.completionTokens : "n/a";
+          const total = typeof usage?.totalTokens === "number" ? usage.totalTokens : "n/a";
+          log?.(
+            "llm_empty_assistant_content " +
+              `has_message=${message ? "yes" : "no"} ` +
+              `content_shape=${describeAssistantContentShape(message?.content)} ` +
+              `completion=${completion} total=${total}`,
+          );
+        }
         // Some providers return tool call arguments as non-JSON; keep raw string for tool execution layer.
         return { content, toolCalls, usage };
       } catch (err) {
@@ -497,28 +507,75 @@ export class OpenAICompatClient implements LLMClient {
   }
 }
 
-function normalizeAssistantContent(raw: unknown): string | null {
-  if (typeof raw === "string") return raw;
-  if (!Array.isArray(raw)) return null;
+function addAssistantText(out: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  out.push(trimmed);
+}
 
-  const textParts: string[] = [];
-  for (const part of raw) {
-    if (!part || typeof part !== "object") continue;
-    const p = part as Record<string, unknown>;
-    if (typeof p.text === "string") {
-      textParts.push(p.text);
-      continue;
-    }
-    if (typeof p.content === "string") {
-      textParts.push(p.content);
-      continue;
-    }
-    if (typeof p.type === "string" && p.type === "text" && typeof p.text === "object" && p.text) {
-      const textObj = p.text as Record<string, unknown>;
-      if (typeof textObj.value === "string") textParts.push(textObj.value);
-    }
+function collectAssistantText(raw: unknown, out: string[], depth: number): void {
+  if (depth > 4 || raw === null || raw === undefined) return;
+  if (typeof raw === "string") {
+    addAssistantText(out, raw);
+    return;
   }
+  if (Array.isArray(raw)) {
+    for (const item of raw) collectAssistantText(item, out, depth + 1);
+    return;
+  }
+  if (!isRecord(raw)) return;
 
-  const out = textParts.join("\n").trim();
+  addAssistantText(out, raw.text);
+  addAssistantText(out, raw.content);
+  addAssistantText(out, raw.value);
+  addAssistantText(out, raw.output_text);
+  addAssistantText(out, raw.refusal);
+
+  if (isRecord(raw.text)) addAssistantText(out, raw.text.value);
+  if (isRecord(raw.content)) addAssistantText(out, raw.content.value);
+  if (isRecord(raw.output_text)) addAssistantText(out, raw.output_text.value);
+  if (isRecord(raw.refusal)) addAssistantText(out, raw.refusal.value);
+
+  if (Array.isArray(raw.content)) collectAssistantText(raw.content, out, depth + 1);
+  if (Array.isArray(raw.parts)) collectAssistantText(raw.parts, out, depth + 1);
+  if (Array.isArray(raw.output)) collectAssistantText(raw.output, out, depth + 1);
+  if (Array.isArray(raw.items)) collectAssistantText(raw.items, out, depth + 1);
+
+  if (isRecord(raw.delta)) collectAssistantText(raw.delta, out, depth + 1);
+  if (isRecord(raw.message)) collectAssistantText(raw.message, out, depth + 1);
+}
+
+function describeAssistantContentShape(raw: unknown): string {
+  if (raw === null) return "null";
+  if (raw === undefined) return "undefined";
+  if (typeof raw === "string") return `string(len=${raw.length})`;
+  if (Array.isArray(raw)) {
+    const parts = raw
+      .slice(0, 4)
+      .map((part) => {
+        if (typeof part === "string") return "string";
+        if (isRecord(part)) {
+          if (typeof part.type === "string") return `obj:${part.type}`;
+          const keys = Object.keys(part).slice(0, 3).join("|");
+          return `obj:${keys || "empty"}`;
+        }
+        return typeof part;
+      })
+      .join(",");
+    return `array(len=${raw.length};parts=${parts || "none"})`;
+  }
+  if (isRecord(raw)) {
+    const keys = Object.keys(raw).slice(0, 6).join("|");
+    return `object(keys=${keys || "none"})`;
+  }
+  return typeof raw;
+}
+
+export function normalizeAssistantContent(raw: unknown): string | null {
+  const textParts: string[] = [];
+  collectAssistantText(raw, textParts, 0);
+  const unique = textParts.filter((part, idx) => textParts.indexOf(part) === idx);
+  const out = unique.join("\n").trim();
   return out.length > 0 ? out : null;
 }
