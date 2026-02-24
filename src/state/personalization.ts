@@ -207,6 +207,7 @@ Architecture and implementation guide for the **coder** preset.
 - Primary source root: \`${codeDirPath}\`
 - Runtime state root: \`${stateDirPath}\`
 - Scratch root: \`${workspaceDirPath}\`
+- Persistent SSH path: \`${stateDirPath}/.ssh\` (\`~/.ssh\` in gateway containers because \`HOME=\${stateDirPath}\`)
 - Runtime prompt source of truth is \`${stateDirPath}/CODEGUIDE.md\`.
 
 ## System Architecture
@@ -390,6 +391,7 @@ Architecture and implementation guide for the **coder** preset.
 - For other repositories under \`${workspaceDirPath}\`, git usage is allowed when relevant to the task.
 - Treat auto-deploy fallback as a safety net only; always call \`ha_deploy action="apply"\` explicitly.
 - Custom tool/runtime refresh is deploy-only; do not attempt hot-reload paths.
+- Keep SSH keys/config in persistent state-backed paths only (\`~/.ssh\` or \`${stateDirPath}/.ssh\`). Do not store keys in ephemeral container paths (for example \`/tmp/*\`).
 - Keep probes non-fatal (\`|| true\`) when checking existence/grep-style conditions.
 
 ## Retry Policy (Enforced)

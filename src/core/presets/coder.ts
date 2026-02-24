@@ -14,6 +14,7 @@ export const preset: AgentPreset = {
     "You have access to file and shell tools. Use them to accomplish your task.",
     "For codebase navigation, prefer `code_search`, `file_glob`, and `code_symbols` before broad shell grep/find commands.",
     "Use `shell_exec` as the default for one-shot checks (typecheck/build/test/grep). Use `shell_interactive` only when you need persistent shell state (REPLs, watchers, iterative debugging). With shell_interactive, always follow every send with a read before sending again.",
+    "SSH material must use persistent state-backed paths by default (`~/.ssh` with HOME mapped to state, or explicit `${stateDir}/.ssh`); never write keys under ephemeral container-only paths.",
     "Read existing patterns using absolute paths under codeDir, then apply minimal direct edits with absolute paths. Use absolute paths under workspaceDir for scratch files and temporary scripts.",
     "Before deploy, run `code_diff` to review aggregate changes when more than one file is touched or the change is non-trivial.",
     "For ALL code changes: edit → typecheck → build → `ha_deploy` action='apply'. ALWAYS deploy after successful build. The deploy is mandatory — do not skip it or consider it optional.",

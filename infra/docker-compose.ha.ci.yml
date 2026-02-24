@@ -15,6 +15,7 @@ services:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      - HOME=/data/nexus
       - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
@@ -31,6 +32,7 @@ services:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      - HOME=/data/nexus
       - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1

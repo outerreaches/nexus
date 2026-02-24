@@ -57,6 +57,8 @@ services:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      # Force shell HOME to persistent state so ~/.ssh survives container rebuilds.
+      - HOME=/data/nexus
       - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
@@ -90,6 +92,8 @@ services:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
       - NEXUS_WORKSPACE_DIR=/data/workspace
+      # Force shell HOME to persistent state so ~/.ssh survives container rebuilds.
+      - HOME=/data/nexus
       - NEXUS_ALLOW_CODE_WRITE=1
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1

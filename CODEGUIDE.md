@@ -20,6 +20,7 @@ Architecture and implementation guide for the **coder** preset.
 - Primary source root: `/data/code`
 - Runtime state root: `/data/nexus`
 - Scratch root: `/data/workspace`
+- Persistent SSH path: `/data/nexus/.ssh` (`~/.ssh` in gateway containers because `HOME=/data/nexus`)
 - Runtime prompt source of truth is `/data/nexus/CODEGUIDE.md`.
 
 ## System Architecture
@@ -203,6 +204,7 @@ Architecture and implementation guide for the **coder** preset.
 - For other repositories under `/data/workspace`, git usage is allowed when relevant to the task.
 - Treat auto-deploy fallback as a safety net only; always call `ha_deploy action="apply"` explicitly.
 - Custom tool/runtime refresh is deploy-only; do not attempt hot-reload paths.
+- Keep SSH keys/config in persistent state-backed paths only (`~/.ssh` or `/data/nexus/.ssh`). Do not store keys in ephemeral container paths (for example `/tmp/*`).
 - Keep probes non-fatal (`|| true`) when checking existence/grep-style conditions.
 
 ## Troubleshooting
