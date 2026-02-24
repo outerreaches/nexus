@@ -140,3 +140,132 @@ test("appendMessage leaves non-shell tool payloads unchanged", async () => {
     assert.equal(toolMessage.content, payload);
   });
 });
+
+test("appendMessage compacts memory_recall payload values in persisted history", async () => {
+  await withDb((db) => {
+    const nowMs = 1_700_000_000_200;
+    const sessionId = getOrCreateSessionId({
+      db,
+      channel: "cli",
+      channelKey: "test-memory-recall-history",
+      agentId: "main",
+      nowMs,
+    });
+
+    appendMessage({
+      db,
+      sessionId,
+      nowMs,
+      message: {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-3", name: "memory_recall", arguments: JSON.stringify({ key: "k1" }) }],
+      },
+    });
+
+    const originalValue = "value-0123456789\n".repeat(200);
+    appendMessage({
+      db,
+      sessionId,
+      nowMs: nowMs + 1,
+      message: {
+        role: "tool",
+        name: "memory_recall",
+        toolCallId: "call-3",
+        content: JSON.stringify({
+          key: "k1",
+          value: originalValue,
+          category: "observation",
+          tags: [],
+          access_count: 7,
+        }),
+      },
+    });
+
+    const history = loadRecentHistory({
+      db,
+      sessionId,
+      maxMessages: 20,
+      nowMs: nowMs + 10,
+    });
+
+    const toolMessage = history.find((m) => m.role === "tool");
+    assertToolMessage(toolMessage);
+
+    const parsed = JSON.parse(toolMessage.content) as Record<string, unknown>;
+    assert.equal(parsed.key, "k1");
+    assert.equal(parsed.value_compacted_for_history, true);
+    assert.equal(parsed.value_original_chars, originalValue.length);
+    assert.equal(typeof parsed.value, "string");
+    assert.ok((parsed.value as string).length < originalValue.length);
+    assert.equal(parsed.historyCompactedForTool, true);
+  });
+});
+
+test("appendMessage compacts memory_search payloads in persisted history", async () => {
+  await withDb((db) => {
+    const nowMs = 1_700_000_000_300;
+    const sessionId = getOrCreateSessionId({
+      db,
+      channel: "cli",
+      channelKey: "test-memory-search-history",
+      agentId: "main",
+      nowMs,
+    });
+
+    appendMessage({
+      db,
+      sessionId,
+      nowMs,
+      message: {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-4", name: "memory_search", arguments: JSON.stringify({ query: "docker" }) }],
+      },
+    });
+
+    const rows = Array.from({ length: 20 }, (_, idx) => ({
+      key: `k-${idx + 1}`,
+      value: "entry-0123456789\n".repeat(80),
+      category: "observation",
+      tags: ["demo"],
+      access_count: idx,
+    }));
+    appendMessage({
+      db,
+      sessionId,
+      nowMs: nowMs + 1,
+      message: {
+        role: "tool",
+        name: "memory_search",
+        toolCallId: "call-4",
+        content: JSON.stringify(rows),
+      },
+    });
+
+    const history = loadRecentHistory({
+      db,
+      sessionId,
+      maxMessages: 20,
+      nowMs: nowMs + 10,
+    });
+
+    const toolMessage = history.find((m) => m.role === "tool");
+    assertToolMessage(toolMessage);
+
+    const parsed = JSON.parse(toolMessage.content) as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(parsed));
+    assert.ok(parsed.length >= 2);
+
+    const first = parsed[0] ?? {};
+    assert.equal(first.value_compacted_for_history, true);
+    assert.equal(first.historyCompactedForTool, true);
+    assert.equal(typeof first.value, "string");
+
+    const marker = parsed[parsed.length - 1] ?? {};
+    assert.equal(marker.historyCompactedForTool, true);
+    assert.equal(typeof marker.omittedResults, "number");
+    assert.ok((marker.omittedResults as number) >= 1);
+    assert.equal(marker.originalResultCount, 20);
+  });
+});

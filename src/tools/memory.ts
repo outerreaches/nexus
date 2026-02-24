@@ -11,6 +11,57 @@ function currentAgentId(ctx: { request?: { agentId: string } }): string {
   return ctx.request?.agentId ? String(ctx.request.agentId) : "main";
 }
 
+const EXCLUDE_SYSTEM_MEMORIES_SQL =
+  "key NOT LIKE 'compaction:%' " +
+  "AND tags_json NOT LIKE '%\"compaction\"%' " +
+  "AND tags_json NOT LIKE '%\"context-summary\"%'";
+const DEFAULT_VALUE_PREVIEW_CHARS = 220;
+
+type MemorySearchRow = {
+  key: string;
+  value: string;
+  category: "fact" | "observation" | "preference" | "plan";
+  tags_json: string | null;
+  access_count: number;
+};
+
+function parseTags(raw: string | null): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    return [];
+  }
+}
+
+function previewValue(value: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}…(+${value.length - maxChars} chars)`;
+}
+
+function formatMemorySearchResult(
+  row: MemorySearchRow,
+  opts: { includeValues: boolean; valuePreviewChars: number },
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    key: row.key,
+    category: row.category,
+    tags: parseTags(row.tags_json),
+    access_count: row.access_count,
+  };
+
+  if (opts.includeValues) {
+    base.value = row.value;
+    return base;
+  }
+
+  base.value_preview = previewValue(row.value, opts.valuePreviewChars);
+  base.value_chars = row.value.length;
+  return base;
+}
+
 export const memoryStore = defineTool({
   name: "memory_store",
   description:
@@ -93,7 +144,8 @@ export const memorySearch = defineTool({
   name: "memory_search",
   description:
     "Search memories by keyword (searches key, value, and tags). Optionally filter by category. " +
-    "If query is empty, returns most recent memories. Results are sorted by relevance (access frequency + recency).",
+    "If query is empty, returns most recent memories. Results are sorted by relevance (access frequency + recency). " +
+    "By default, returns compact previews (not full values) to reduce token usage.",
   parameters: z.object({
     query: z.string().max(200).default("").describe("Search term (case-insensitive substring match). Empty returns recent memories."),
     category: z
@@ -101,6 +153,21 @@ export const memorySearch = defineTool({
       .optional()
       .describe("Filter by category"),
     limit: z.number().int().min(1).max(50).default(10),
+    includeValues: z
+      .boolean()
+      .default(false)
+      .describe("If true, include full memory values in results. Default false returns compact previews."),
+    valuePreviewChars: z
+      .number()
+      .int()
+      .min(0)
+      .max(2000)
+      .default(DEFAULT_VALUE_PREVIEW_CHARS)
+      .describe("Preview length used when includeValues=false."),
+    includeSystem: z
+      .boolean()
+      .default(false)
+      .describe("If true, include system-generated compaction/context-summary memories."),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -108,6 +175,9 @@ export const memorySearch = defineTool({
     const agentId = currentAgentId(ctx);
     const query = (args.query ?? "").trim();
     const pattern = `%${query}%`;
+    const includeValues = args.includeValues === true;
+    const valuePreviewChars = Math.max(0, args.valuePreviewChars ?? DEFAULT_VALUE_PREVIEW_CHARS);
+    const visibilityClause = args.includeSystem ? "" : `AND ${EXCLUDE_SYSTEM_MEMORIES_SQL}`;
 
     if (!query) {
       const rows = db.db
@@ -115,22 +185,16 @@ export const memorySearch = defineTool({
           `
           SELECT key, value, category, tags_json, created_at, updated_at, access_count
           FROM memories
-          WHERE agent_id = ?
+          WHERE agent_id = ? ${visibilityClause}
           ORDER BY updated_at DESC
           LIMIT ?
         `,
         )
-        .all(agentId, args.limit) as any[];
+        .all(agentId, args.limit) as MemorySearchRow[];
 
       if (rows.length === 0) return "No memories found.";
 
-      const results = rows.map((r) => ({
-        key: r.key,
-        value: r.value,
-        category: r.category,
-        tags: JSON.parse(r.tags_json || "[]"),
-        access_count: r.access_count,
-      }));
+      const results = rows.map((r) => formatMemorySearchResult(r, { includeValues, valuePreviewChars }));
 
       return JSON.stringify(results, null, 2);
     }
@@ -139,7 +203,7 @@ export const memorySearch = defineTool({
     const sql = `
       SELECT key, value, category, tags_json, created_at, updated_at, access_count
       FROM memories
-      WHERE agent_id = ? AND (key LIKE ? OR value LIKE ? OR tags_json LIKE ?) ${categoryClause}
+      WHERE agent_id = ? ${visibilityClause} AND (key LIKE ? OR value LIKE ? OR tags_json LIKE ?) ${categoryClause}
       ORDER BY access_count DESC, updated_at DESC
       LIMIT ?
     `;
@@ -148,17 +212,11 @@ export const memorySearch = defineTool({
       ? [agentId, pattern, pattern, pattern, args.category, args.limit]
       : [agentId, pattern, pattern, pattern, args.limit];
 
-    const rows = db.db.prepare(sql).all(...params) as any[];
+    const rows = db.db.prepare(sql).all(...params) as MemorySearchRow[];
 
     if (rows.length === 0) return `No memories found matching "${args.query}"`;
 
-    const results = rows.map((r) => ({
-      key: r.key,
-      value: r.value,
-      category: r.category,
-      tags: JSON.parse(r.tags_json || "[]"),
-      access_count: r.access_count,
-    }));
+    const results = rows.map((r) => formatMemorySearchResult(r, { includeValues, valuePreviewChars }));
 
     return JSON.stringify(results, null, 2);
   },

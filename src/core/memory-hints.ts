@@ -116,6 +116,10 @@ export function extractKeywords(text: string): string[] {
 
 const MAX_HINTS_PER_MESSAGE = 3;
 const MAX_MATCH_THRESHOLD = 5; // Skip keywords matching too many memories (too generic to be useful)
+const EXCLUDE_SYSTEM_MEMORIES_SQL =
+  "key NOT LIKE 'compaction:%' " +
+  "AND tags_json NOT LIKE '%\"compaction\"%' " +
+  "AND tags_json NOT LIKE '%\"context-summary\"%'";
 
 // Cache memory keys for a short period to avoid repeated DB queries within a burst of messages.
 let _memoryKeysCache: Map<string, { keys: string[]; ts: number }> | null = null;
@@ -128,7 +132,9 @@ function loadMemoryKeys(db: NexusDatabase, agentId: string): string[] {
   if (cached && now - cached.ts < MEMORY_KEYS_CACHE_TTL_MS) {
     return cached.keys;
   }
-  const rows = db.db.prepare("SELECT key FROM memories WHERE agent_id = ?").all(agentId) as { key: string }[];
+  const rows = db.db
+    .prepare(`SELECT key FROM memories WHERE agent_id = ? AND ${EXCLUDE_SYSTEM_MEMORIES_SQL}`)
+    .all(agentId) as { key: string }[];
   const keys = rows.map((r) => r.key.toLowerCase());
   _memoryKeysCache.set(agentId, { keys, ts: now });
   return keys;
@@ -185,7 +191,9 @@ export function generateMemoryHints(opts: {
   // For tags_json: keep plain substring (tags are short identifiers).
   const countStmt = db.db.prepare(
     `SELECT COUNT(*) as cnt FROM memories
-     WHERE agent_id = ? AND (
+     WHERE agent_id = ?
+       AND ${EXCLUDE_SYSTEM_MEMORIES_SQL}
+       AND (
        key = ? OR
        key LIKE ? ESCAPE '\\' OR
        key LIKE ? ESCAPE '\\' OR

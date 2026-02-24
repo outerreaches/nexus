@@ -6,6 +6,9 @@ import type { NexusDatabase } from "./database.js";
 
 const ANCHOR_ROLLOVER_MULTIPLIER = 2;
 const SHELL_INTERACTIVE_HISTORY_MAX_OUTPUT_CHARS = 1200;
+const MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS = 2000;
+const MEMORY_TOOL_HISTORY_MAX_VALUE_CHARS = 320;
+const MEMORY_SEARCH_HISTORY_MAX_ITEMS = 12;
 
 type HistoryEntry = {
   id: number;
@@ -112,6 +115,137 @@ function compactShellInteractiveHistoryContent(raw: string): string {
     out.outputOriginalChars = output.length;
   }
   return JSON.stringify(out);
+}
+
+function compactMemoryFieldValue(value: string): {
+  value: string;
+  compacted: boolean;
+  originalChars?: number;
+} {
+  const compacted = truncateMiddle(value, MEMORY_TOOL_HISTORY_MAX_VALUE_CHARS);
+  if (compacted === value) return { value, compacted: false };
+  return { value: compacted, compacted: true, originalChars: value.length };
+}
+
+function compactMemoryResultEntry(entry: unknown): unknown {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+  const obj = entry as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...obj };
+  let changed = false;
+  for (const key of ["value", "value_preview"]) {
+    if (typeof out[key] !== "string") continue;
+    const field = compactMemoryFieldValue(out[key] as string);
+    if (!field.compacted) continue;
+    out[key] = field.value;
+    out[`${key}_compacted_for_history`] = true;
+    out[`${key}_original_chars`] = field.originalChars;
+    changed = true;
+  }
+  if (changed) out.historyCompactedForTool = true;
+  return out;
+}
+
+function compactMemoryRecallHistoryContent(raw: string): string {
+  const trimmed = raw.trimStart();
+  if (!trimmed.startsWith("{")) {
+    return JSON.stringify({
+      historyCompactedForTool: true,
+      outputCompactedForHistory: true,
+      outputOriginalChars: raw.length,
+      outputPreview: truncateMiddle(raw, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return JSON.stringify({
+      historyCompactedForTool: true,
+      outputCompactedForHistory: true,
+      outputOriginalChars: raw.length,
+      outputPreview: truncateMiddle(raw, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+    });
+  }
+  const compacted = compactMemoryResultEntry(parsed);
+  const content = JSON.stringify(compacted);
+  if (content.length <= MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS) return content;
+  return JSON.stringify({
+    historyCompactedForTool: true,
+    outputCompactedForHistory: true,
+    outputOriginalChars: content.length,
+    outputPreview: truncateMiddle(content, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+  });
+}
+
+function compactMemorySearchHistoryContent(raw: string): string {
+  const trimmed = raw.trimStart();
+  if (!trimmed.startsWith("[")) {
+    return JSON.stringify([
+      {
+        historyCompactedForTool: true,
+        outputCompactedForHistory: true,
+        outputOriginalChars: raw.length,
+        outputPreview: truncateMiddle(raw, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+      },
+    ]);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return JSON.stringify([
+      {
+        historyCompactedForTool: true,
+        outputCompactedForHistory: true,
+        outputOriginalChars: raw.length,
+        outputPreview: truncateMiddle(raw, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+      },
+    ]);
+  }
+  if (!Array.isArray(parsed)) {
+    return JSON.stringify([
+      {
+        historyCompactedForTool: true,
+        outputCompactedForHistory: true,
+        outputOriginalChars: raw.length,
+        outputPreview: truncateMiddle(raw, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+      },
+    ]);
+  }
+
+  const limited = parsed.slice(0, MEMORY_SEARCH_HISTORY_MAX_ITEMS).map((entry) => compactMemoryResultEntry(entry)) as Array<
+    Record<string, unknown> | unknown
+  >;
+  let omitted = Math.max(0, parsed.length - MEMORY_SEARCH_HISTORY_MAX_ITEMS);
+  while (limited.length > 1 && JSON.stringify(limited).length > MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS) {
+    limited.pop();
+    omitted += 1;
+  }
+  if (omitted > 0) {
+    limited.push({
+      historyCompactedForTool: true,
+      omittedResults: omitted,
+      originalResultCount: parsed.length,
+    });
+  }
+  const content = JSON.stringify(limited);
+  if (content.length <= MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS) return content;
+
+  return JSON.stringify([
+    {
+      historyCompactedForTool: true,
+      outputCompactedForHistory: true,
+      outputOriginalChars: content.length,
+      outputPreview: truncateMiddle(content, MEMORY_TOOL_HISTORY_MAX_OUTPUT_CHARS),
+    },
+  ]);
+}
+
+function compactToolHistoryContent(toolName: string, content: string): string {
+  if (toolName === "shell_interactive") return compactShellInteractiveHistoryContent(content);
+  if (toolName === "memory_search") return compactMemorySearchHistoryContent(content);
+  if (toolName === "memory_recall") return compactMemoryRecallHistoryContent(content);
+  return content;
 }
 
 function sanitizeHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
@@ -226,9 +360,7 @@ export function appendMessage(params: {
   }
 
   if (params.message.role === "tool") {
-    const content = params.message.name === "shell_interactive"
-      ? compactShellInteractiveHistoryContent(params.message.content)
-      : params.message.content;
+    const content = compactToolHistoryContent(params.message.name, params.message.content);
     params.db.db
       .prepare(
         "INSERT INTO messages (session_id, role, content, name, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
