@@ -13,6 +13,7 @@ import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { getNodeById, type NodeRecord } from "../storage/nodes.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "../core/isolated-worker-types.js";
 import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
 import type { ModelRoutingMode } from "../llm/model-router.js";
@@ -32,9 +33,24 @@ const HARD_BLOCKED_CODER_TOOLS_READ_ONLY = [
   "shell_exec",
   "shell_interactive",
 ] as const;
+const NODE_PINNED_BLOCKED_TOOLS = [
+  "file_read",
+  "file_write",
+  "file_edit",
+  "file_edit_lines",
+  "file_patch",
+  "file_list",
+  "file_glob",
+  "code_search",
+  "code_symbols",
+  "code_diff",
+  "shell_exec",
+  "ha_deploy",
+] as const;
 
 type CoderTaskType = typeof CODER_TASK_TYPES[number];
 type CoderTaskTypeEnforcement = "soft" | "hard";
+type SpawnExecutionTarget = { target: "local" } | { target: "node"; nodeId: string };
 
 type CoderTaskPolicy = {
   taskType: CoderTaskType | null;
@@ -107,6 +123,16 @@ export const spawnAgent = defineTool({
       .max(20)
       .default([])
       .describe("Internal: run-scoped MCP grant IDs to inject for this worker."),
+    execution: z
+      .object({
+        target: z.enum(["local", "node"]).default("local"),
+        nodeId: z.string().min(1).max(128).optional(),
+      })
+      .optional()
+      .describe(
+        "Optional worker execution target. Use `{ target: \"node\", nodeId: \"<node-id>\" }` " +
+        "to run a shell-driven worker on a specific node via tmux (`shell_interactive`).",
+      ),
   }),
   execute: async (args, ctx) => {
     const spawnStartedAtMs = ctx.nowMs();
@@ -139,6 +165,23 @@ export const spawnAgent = defineTool({
     if (!registry) return "ERROR: tool registry not available";
 
     const db = ctx.db as NexusDatabase | undefined;
+    const executionResolution = resolveSpawnExecutionTarget({
+      requested: args.execution,
+      ctx,
+      db,
+    });
+    if ("error" in executionResolution) {
+      return executionResolution.error;
+    }
+    const executionTarget = executionResolution.target;
+    if (executionTarget.target === "node" && !preset.tools.includes("shell_interactive")) {
+      return `ERROR: preset "${preset.name}" does not support node execution because it lacks shell_interactive.`;
+    }
+    const executionPromptLines = buildExecutionPromptLines(executionTarget);
+    const executionBlockedToolNames =
+      executionTarget.target === "node"
+        ? [...NODE_PINNED_BLOCKED_TOOLS]
+        : [];
 
     // Load blackboard context if entry IDs provided
     let contextText = "";
@@ -257,6 +300,8 @@ export const spawnAgent = defineTool({
       "",
       ...coderTaskPolicy.promptLines,
       coderTaskPolicy.promptLines.length > 0 ? "" : undefined,
+      ...executionPromptLines,
+      executionPromptLines.length > 0 ? "" : undefined,
       "We have a large list of verified data sources available via data intake tools. Use them when possible.",
       `Blackboard title: ${blackboardTitle}`,
       "When writing your primary result to the blackboard, use the exact Blackboard title above.",
@@ -293,14 +338,30 @@ export const spawnAgent = defineTool({
       runId: runId ?? null,
       grantIds: mcpGrantIds,
     });
-    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(coderTaskPolicy.blockedToolNames));
+    const combinedBlockedToolNames = Array.from(
+      new Set<string>([...coderTaskPolicy.blockedToolNames, ...executionBlockedToolNames]),
+    );
+    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(combinedBlockedToolNames));
     const workerTools = mergeToolsByName(baseTools, grantedTools);
+    if (executionTarget.target === "node" && !workerTools.some((tool) => tool.name === "shell_interactive")) {
+      return "ERROR: node-target worker requires shell_interactive, but it is unavailable after policy filtering.";
+    }
     const workerAllowShellExec = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowShellExec ?? false);
     const workerAllowCodeWrite = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowCodeWrite ?? false);
+    if (executionTarget.target === "node" && !workerAllowShellExec) {
+      return "ERROR: node-target worker requires shell execution capability.";
+    }
 
     // Branch: isolated process vs in-process
     let workerResult: string;
-    if (preset.isolated) {
+    const forceInProcessForNode = executionTarget.target === "node";
+    if (forceInProcessForNode && preset.isolated) {
+      ctx.log(
+        `spawn_agent: forcing in-process execution for preset=${preset.name} ` +
+        `node=${executionTarget.nodeId} (isolated workers do not have node routing)`,
+      );
+    }
+    if (preset.isolated && !forceInProcessForNode) {
       workerResult = await runIsolated({
         ctx,
         preset,
@@ -316,7 +377,7 @@ export const spawnAgent = defineTool({
         tracker,
         blackboardTitle,
         mcpGrantIds,
-        blockedToolNames: coderTaskPolicy.blockedToolNames,
+        blockedToolNames: combinedBlockedToolNames,
         workerAllowShellExec,
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
@@ -339,6 +400,7 @@ export const spawnAgent = defineTool({
         workerAllowShellExec,
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
+        executionTarget,
       });
     }
 
@@ -352,6 +414,7 @@ export const spawnAgent = defineTool({
       parentRunId: effectiveParentRunId,
       sourceAgentId: agentId,
       workerResult,
+      executionTarget,
     });
 
     return attachBlackboardReference(ctx, workerResult, blackboardTitle, spawnStartedAtMs);
@@ -378,6 +441,7 @@ async function runInProcess(params: {
   workerAllowShellExec: boolean;
   workerAllowCodeWrite: boolean;
   taskType: CoderTaskType | null;
+  executionTarget: SpawnExecutionTarget;
 }): Promise<string> {
   const {
     ctx,
@@ -395,6 +459,7 @@ async function runInProcess(params: {
     workerAllowShellExec,
     workerAllowCodeWrite,
     taskType,
+    executionTarget,
   } = params;
   const log = ctx.log;
   const onLog = log
@@ -439,11 +504,12 @@ async function runInProcess(params: {
       }
       : undefined,
   };
+  const effectiveWorkerTools = applyExecutionToolOverrides(workerTools, executionTarget);
 
   // Create and run worker
   const runner = new AgentRunner({
     llm,
-    tools: workerTools,
+    tools: effectiveWorkerTools,
     toolCallCaps: preset.toolCallCaps,
     budget,
     toolContext: workerCtx,
@@ -479,6 +545,12 @@ async function runInProcess(params: {
     };
     if (taskType) {
       returnValue.taskType = taskType;
+    }
+    if (executionTarget.target === "node") {
+      returnValue.execution = {
+        target: "node",
+        nodeId: executionTarget.nodeId,
+      };
     }
     return JSON.stringify(returnValue);
   } catch (e) {
@@ -804,6 +876,84 @@ function mergeToolsByName(base: Tool[], extras: Tool[]): Tool[] {
   return [...byName.values()];
 }
 
+function applyExecutionToolOverrides(tools: Tool[], executionTarget: SpawnExecutionTarget): Tool[] {
+  if (executionTarget.target !== "node") return tools;
+  return tools.map((tool) => {
+    if (tool.name !== "shell_interactive") return tool;
+    return {
+      ...tool,
+      execute: async (args: unknown, ctx: ToolContext) => {
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+          return "ERROR: shell_interactive arguments must be an object.";
+        }
+        const patched = { ...(args as Record<string, unknown>) };
+        const target = typeof patched.target === "string" ? patched.target.trim().toLowerCase() : "";
+        if (target && target !== "node") {
+          return `ERROR: node-pinned worker requires shell_interactive target=node (nodeId=${executionTarget.nodeId}).`;
+        }
+        patched.target = "node";
+        patched.nodeId = executionTarget.nodeId;
+        return await tool.execute(patched, ctx);
+      },
+    };
+  });
+}
+
+function resolveSpawnExecutionTarget(params: {
+  requested: { target: "local" | "node"; nodeId?: string } | undefined;
+  ctx: ToolContext;
+  db: NexusDatabase | undefined;
+}): { target: SpawnExecutionTarget } | { error: string } {
+  const requested = params.requested;
+  const target = requested?.target ?? "local";
+  if (target === "local") {
+    return { target: { target: "local" } };
+  }
+  const nodeId = typeof requested?.nodeId === "string" ? requested.nodeId.trim() : "";
+  if (!nodeId) return { error: "ERROR: execution.nodeId is required when execution.target='node'." };
+  if (!params.ctx.nodeRouter) return { error: "ERROR: node routing transport is not available." };
+  if (!params.db) return { error: "ERROR: database is not available." };
+  const node = getNodeById(params.db, nodeId);
+  if (!node) return { error: `ERROR: node not found: ${nodeId}` };
+  const nodeValidation = validateNodeExecutionTarget(node);
+  if (nodeValidation) return { error: nodeValidation };
+  return { target: { target: "node", nodeId: node.id } };
+}
+
+function validateNodeExecutionTarget(node: NodeRecord): string | null {
+  if (node.backend !== "nexus") {
+    return `ERROR: node backend ${node.backend} does not support tmux shell workers.`;
+  }
+  if (node.status !== "online") {
+    return `ERROR: node ${node.id} is ${node.status}; node-target workers require an online node.`;
+  }
+  if (!nodeHasCapability(node, "system.run")) {
+    return `ERROR: node ${node.id} does not advertise system.run capability required for tmux shell control.`;
+  }
+  if (node.firewallMode !== "transparent") {
+    return (
+      `ERROR: node ${node.id} firewallMode=${node.firewallMode}; ` +
+      "shell_interactive requires transparent mode for interactive reads."
+    );
+  }
+  return null;
+}
+
+function nodeHasCapability(node: NodeRecord, capability: string): boolean {
+  return node.capabilities.includes("*") || node.capabilities.includes(capability);
+}
+
+function buildExecutionPromptLines(target: SpawnExecutionTarget): string[] {
+  if (target.target !== "node") return [];
+  return [
+    "## Node Execution",
+    `This run is pinned to remote node: ${target.nodeId}.`,
+    "Use shell_interactive for command execution. shell_interactive calls are auto-pinned to this node.",
+    "Local shell_exec and local file/code tools are disabled for this run.",
+    "Workflow reminder: open -> send -> read loops -> close. Always read after each send.",
+  ];
+}
+
 function filterToolsForPreset(
   allTools: ReturnType<ToolRegistry["list"]>,
   preset: AgentPreset,
@@ -993,6 +1143,7 @@ function queueSpawnRunReport(params: {
   presetName: string;
   task: string;
   taskType: CoderTaskType | null;
+  executionTarget: SpawnExecutionTarget;
   parent: ToolContext["request"] | null;
   sourceRunId: string | null;
   parentRunId: string | null;
@@ -1032,6 +1183,8 @@ function queueSpawnRunReport(params: {
   const body = [
     `preset=${params.presetName}`,
     `task_type=${params.taskType ?? "n/a"}`,
+    `execution_target=${params.executionTarget.target}`,
+    params.executionTarget.target === "node" ? `execution_node_id=${params.executionTarget.nodeId}` : null,
     `status=${status || "unknown"}`,
     `source_run_id=${params.sourceRunId ?? "n/a"}`,
     `parent_run_id=${params.parentRunId ?? "n/a"}`,
@@ -1059,6 +1212,8 @@ function queueSpawnRunReport(params: {
       metadata: {
         preset: params.presetName,
         taskType: params.taskType,
+        executionTarget: params.executionTarget.target,
+        executionNodeId: params.executionTarget.target === "node" ? params.executionTarget.nodeId : null,
         status,
         targetPreset: typeof parent.preset === "string" ? parent.preset : null,
       },

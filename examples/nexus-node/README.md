@@ -170,6 +170,7 @@ The script:
 - builds `dist/node-lite`
 - uploads a versioned release to the remote host
 - runs `--init` to bootstrap keys/state/env file
+- installs `tmux` when possible (best effort) so `nexus-shellctl` can be enabled later
 - installs and starts a `systemd` service (system scope if sudo is available; user scope fallback)
 
 For routine code-only upgrades on existing lite nodes (including legacy SCP-style installs), use:
@@ -219,6 +220,7 @@ Runtime policy mutation is command-gated. There is no gateway `policy.update` co
 - To enable it, add `nexus-shellctl` to `NEXUS_NODE_ALLOW_COMMANDS` (or `--allow`).
 - Supported actions: `open`, `send`, `read`, `list`, `interrupt`, `close`.
 - Session IDs must match `[A-Za-z0-9._-]` and are capped at 64 chars.
+- Gateway orchestration note: workers can be pinned to a node shell via `spawn_agent.execution = { target: "node", nodeId }`; this path requires node `online`, `backend=nexus`, capability `system.run`, and `firewallMode=transparent`.
 
 ### `NEXUS_NODE_ALLOW_COMMANDS` semantics
 

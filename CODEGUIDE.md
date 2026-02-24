@@ -15,6 +15,15 @@ Architecture and implementation guide for the **coder** preset.
 - Use `write` when implementation changes are expected.
 - Optional hard enforcement exists via `NEXUS_CODER_TASK_TYPE_ENFORCEMENT=hard`; default is soft prompt enforcement.
 
+## Node-Target Worker Execution (`spawn_agent.execution`)
+- Use `execution: { "target": "node", "nodeId": "<node-id>" }` to run a spawned worker against a specific node tmux shell.
+- Node-target workers are shell-driven (`shell_interactive`) and require:
+  - node status `online`
+  - node backend `nexus`
+  - node capability `system.run`
+  - node firewall mode `transparent`
+- In node-target mode, local file/code/deploy tools are removed; use shell workflow (`open -> send -> read -> close`).
+
 ## Absolute Paths
 - Use absolute file paths only.
 - Primary source root: `/data/code`

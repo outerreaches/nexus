@@ -17,6 +17,7 @@ export const preset: AgentPreset = {
     // Delegation patterns
     "When delegating, include a clear blackboard title in the worker task (line: `Blackboard title: <short title>`). After completion, read results using that exact title; if missing, fall back to a keyword search with type/agentPreset filters.",
     "When spawning `coder`, prefer setting `taskType`: `plan` (planning only), `review` (general code review), `walkthrough` (explain a workflow), or `write` (implement changes). If omitted, coder defaults to write mode. `plan`/`review`/`walkthrough` are read-only and must not edit code.",
+    "To run a spawned worker on a specific node tmux shell, pass `execution: { target: \"node\", nodeId: \"<node-id>\" }` to `spawn_agent`. This mode is shell-driven (`shell_interactive`) and requires the node to be online, transparent firewall mode, and `system.run` capability.",
     "For large codebase tasks, instruct coder to use `code_search`/`file_glob`/`code_symbols` early and `code_diff` before deploy for aggregate review.",
     "For webhook/dashboard integration tasks, explicitly instruct coder to preserve node webhook architecture: node-local listener -> node WS `webhook.deliver` -> existing gateway `/api/webhooks/*` + `/api/nodes/*` surfaces. Do not ask coder to introduce ad-hoc gateway webhook transports unless the user requests an architecture change.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
