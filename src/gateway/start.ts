@@ -55,7 +55,7 @@ import { createFederationTransportRouter } from "../federation/transport.js";
 import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
-import { getOrCreateSessionId } from "../storage/sessions.js";
+import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
 import { parseDurationToMs, parseStopCommandText, formatDurationMs } from "../control/stop-command.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
@@ -997,6 +997,37 @@ export async function startGateway(
     text: string;
     actorLabel?: string;
   }): Promise<string | null> => {
+    const persistControlTurn = (assistantText: string): string => {
+      const nowMs = Date.now();
+      try {
+        appendMessage({
+          db,
+          sessionId: params.sessionId,
+          message: {
+            role: "user",
+            content: params.text,
+          },
+          nowMs,
+        });
+        appendMessage({
+          db,
+          sessionId: params.sessionId,
+          message: {
+            role: "assistant",
+            content: assistantText,
+          },
+          nowMs: nowMs + 1,
+        });
+      } catch (err) {
+        log(
+          `stop_control: failed to persist control turn session=${params.sessionId} error=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      return assistantText;
+    };
+
     const parsed = parseStopCommandText(params.text);
     if (!parsed) return null;
     const actor = params.actorLabel ?? `${params.channel}:${params.channelKey}`;
@@ -1006,15 +1037,17 @@ export async function startGateway(
         sessionId: params.sessionId,
         reason: `stop:${actor}`,
       });
-      return summarizeStop({
+      return persistControlTurn(summarizeStop({
         scope: "session",
         sessionId: params.sessionId,
         result,
-      });
+      }));
     }
 
     if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
-      return `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, 1h, or 1d.`;
+      return persistControlTurn(
+        `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, 1h, or 1d.`,
+      );
     }
     const cooldownMs = parsed.cooldownMs ?? defaultStopAllCooldownMs;
     const result = await executeStop({
@@ -1023,12 +1056,12 @@ export async function startGateway(
       reason: `stopall:${actor}`,
       cooldownMs,
     });
-    return summarizeStop({
+    return persistControlTurn(summarizeStop({
       scope: "all",
       sessionId: null,
       cooldownMs,
       result,
-    });
+    }));
   };
 
   const http = await startHttpServer({

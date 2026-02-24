@@ -575,17 +575,69 @@ export class AgentService {
         });
       } catch (err) {
         if (this.isRunCancellationError(err, abortController.signal)) {
+          const cancellationOutput = this.cancellationMessage(abortController.signal);
+          if (params.ephemeralSessionSave !== "always_skip") {
+            const runNowMs = this.deps.toolContext.nowMs();
+            const cancellationMessages: ChatMessage[] = [
+              {
+                role: "user",
+                content: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
+              },
+              {
+                role: "assistant",
+                content: cancellationOutput,
+              },
+            ];
+            try {
+              for (const msg of cancellationMessages) {
+                appendMessage({ db: this.deps.db, sessionId: writeSessionId, message: msg, nowMs: runNowMs });
+              }
+            } catch (persistErr) {
+              onRunnerLog?.(
+                `cancel_persist_failed session=${writeSessionId} error=${
+                  persistErr instanceof Error ? persistErr.message : String(persistErr)
+                }`,
+              );
+            }
+
+            if (writeSessionId !== readSessionId) {
+              const summary = this.buildInternalEventSummary({
+                sourceChannel: params.channel,
+                output: cancellationOutput,
+                toolCallsUsed: 0,
+                newMessages: cancellationMessages,
+                maxChars: params.summaryMaxChars ?? 800,
+              });
+              if (summary) {
+                try {
+                  appendMessage({
+                    db: this.deps.db,
+                    sessionId: readSessionId,
+                    message: { role: "user", name: "system_report", content: summary },
+                    nowMs: runNowMs + 1,
+                  });
+                  onRunnerLog?.(`summary_injected target=${readSessionId} len=${summary.length}`);
+                } catch (persistErr) {
+                  onRunnerLog?.(
+                    `cancel_summary_persist_failed session=${readSessionId} error=${
+                      persistErr instanceof Error ? persistErr.message : String(persistErr)
+                    }`,
+                  );
+                }
+              }
+            }
+          }
           if (runId && this.deps.agentTracker) {
             this.deps.agentTracker.completeRun(runId, {
               status: "stopped",
-              outputPreview: this.cancellationMessage(abortController.signal),
+              outputPreview: cancellationOutput,
               endedAt: this.deps.toolContext.nowMs(),
             });
           }
           return {
             runId: runId ?? null,
             sessionId: writeSessionId,
-            output: this.cancellationMessage(abortController.signal),
+            output: cancellationOutput,
             status: "failed",
             toolCallsUsed: 0,
             iterationsUsed: 0,

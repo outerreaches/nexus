@@ -138,7 +138,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { getOrCreateSessionId } = await import("../storage/sessions.js");
+      const { appendMessage, getOrCreateSessionId } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
@@ -294,32 +294,58 @@ export async function runCli(argv: string[]): Promise<void> {
       const handleControlCommand = async (text: string): Promise<string | null> => {
         const parsed = parseStopCommandText(text);
         if (!parsed) return null;
+        const persistControlTurn = (sessionId: string, assistantText: string): string => {
+          const nowMs = Date.now();
+          try {
+            appendMessage({
+              db,
+              sessionId,
+              message: { role: "user", content: text },
+              nowMs,
+            });
+            appendMessage({
+              db,
+              sessionId,
+              message: { role: "assistant", content: assistantText },
+              nowMs: nowMs + 1,
+            });
+          } catch (err) {
+            log(`stop_control: failed to persist control turn: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return assistantText;
+        };
         const nowMs = Date.now();
+        const localSessionId = resolveSessionId(nowMs);
         if (parsed.kind === "stop") {
-          const sessionId = resolveSessionId(nowMs);
-          const cancelledRuns = agent.cancelSessionRuns(sessionId, "cli /stop");
-          const shellStop = await stopLocalInteractiveSessions({ stateDir: paths.stateDir, ownerSessionId: sessionId });
-          const processStop = await stopManagedProcesses(sessionId);
+          const cancelledRuns = agent.cancelSessionRuns(localSessionId, "cli /stop");
+          const shellStop = await stopLocalInteractiveSessions({
+            stateDir: paths.stateDir,
+            ownerSessionId: localSessionId,
+          });
+          const processStop = await stopManagedProcesses(localSessionId);
           const errors = [...shellStop.errors, ...processStop.errors];
-          return [
-            `STOP executed for session ${sessionId}.`,
+          return persistControlTurn(localSessionId, [
+            `STOP executed for session ${localSessionId}.`,
             `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
             ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
-          ].join("\n");
+          ].join("\n"));
         }
 
         if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
-          return `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, or 1h.`;
+          return persistControlTurn(
+            localSessionId,
+            `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, or 1h.`,
+          );
         }
         const cancelledRuns = agent.cancelAllRuns("cli /stopall");
         const shellStop = await stopLocalInteractiveSessions({ stateDir: paths.stateDir });
         const processStop = await stopManagedProcesses(null);
         const errors = [...shellStop.errors, ...processStop.errors];
-        return [
+        return persistControlTurn(localSessionId, [
           `STOP ALL executed. Cooldown ignored in local chat mode (${formatDurationMs(parsed.cooldownMs ?? 5 * 60_000)}).`,
           `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
           ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
-        ].join("\n");
+        ].join("\n"));
       };
 
       async function send(text: string): Promise<void> {
