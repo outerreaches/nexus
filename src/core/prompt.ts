@@ -46,10 +46,6 @@ export async function buildPresetSystemPrompt(params: {
 
 function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null, presetSystemPrompt?: string): string {
   const sections: string[] = [];
-  const now = new Date();
-  now.setUTCMinutes(0, 0, 0);
-  const currentHourIsoUtc = now.toISOString().replace(".000Z", "Z");
-  const currentYear = now.getUTCFullYear();
 
   // Core identity and personality (SOUL.md)
   if (ctx.soul) {
@@ -98,7 +94,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- To notify users from non-telegram contexts, use `telegram_send`. For human help (OTP/MFA/CAPTCHA), call `human_action` with `action=\"request\"`.",
       "- Use absolute paths for file tools. Personality/state files (SOUL.md, etc.) live under the state directory; prefer `file_edit`/`file_edit_lines` for updates.",
       "- When you change your own prompts, tools, or code, leave a short note in `NOTES.md`.",
-      `- **Current date/hour (UTC): ${currentHourIsoUtc} (year ${currentYear})**. For current events or time-sensitive topics, include the year in web searches and worker tasks.`,
+      "- Runtime clock context is provided as a per-run system message near the latest user turn. For current events/time-sensitive topics, use that year/date in searches and task planning.",
     ].join("\n"),
   );
 

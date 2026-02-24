@@ -248,6 +248,13 @@ function compactToolHistoryContent(toolName: string, content: string): string {
   return content;
 }
 
+function compactHistoryMessage(message: ChatMessage): ChatMessage {
+  if (message.role !== "tool") return message;
+  const compacted = compactToolHistoryContent(message.name, message.content);
+  if (compacted === message.content) return message;
+  return { ...message, content: compacted };
+}
+
 function sanitizeHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
   const out: HistoryEntry[] = [];
   let openToolCallIds = new Set<string>();
@@ -360,7 +367,6 @@ export function appendMessage(params: {
   }
 
   if (params.message.role === "tool") {
-    const content = compactToolHistoryContent(params.message.name, params.message.content);
     params.db.db
       .prepare(
         "INSERT INTO messages (session_id, role, content, name, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -368,7 +374,7 @@ export function appendMessage(params: {
       .run(
         params.sessionId,
         "tool",
-        content,
+        params.message.content,
         params.message.name,
         params.message.toolCallId,
         null,
@@ -398,6 +404,8 @@ export function loadRecentHistory(params: {
   maxMessages: number;
   nowMs?: number;
   anchorRolloverMessages?: number;
+  /** Compact high-volume tool payloads (shell_interactive/memory*) for prompt history. */
+  compactToolHistory?: boolean;
 }): ChatMessage[] {
   const nowMs = params.nowMs ?? Date.now();
   const activeWindow = Math.max(1, params.maxMessages);
@@ -474,5 +482,7 @@ export function loadRecentHistory(params: {
       .run(nextAnchorId, nowMs, params.sessionId);
   }
 
-  return sanitized.map((entry) => entry.message);
+  const messages = sanitized.map((entry) => entry.message);
+  if (params.compactToolHistory === false) return messages;
+  return messages.map(compactHistoryMessage);
 }

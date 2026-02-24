@@ -36,6 +36,17 @@ function clampNonNegativeInt(value: number): number {
   return Math.max(0, Math.floor(value));
 }
 
+function buildRuntimeClockSystemMessage(nowMs: number): string {
+  const now = new Date(nowMs);
+  const iso = now.toISOString();
+  return [
+    "Runtime clock (ephemeral, UTC):",
+    `- now: ${iso}`,
+    `- date: ${iso.slice(0, 10)}`,
+    `- year: ${now.getUTCFullYear()}`,
+  ].join("\n");
+}
+
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
@@ -209,6 +220,10 @@ export class AgentService {
         anchorRolloverMessages: this.deps.limits.anchorRolloverMessages,
         nowMs,
       });
+      const runHistory: ChatMessage[] = [];
+      for (const message of history) {
+        if (message.role !== "system") runHistory.push(message);
+      }
 
       // Resolve preset and filter tools
       const presetName = params.preset ?? this.deps.defaultPreset;
@@ -222,7 +237,7 @@ export class AgentService {
           agentId: params.agentId,
           promptFiles: preset.promptFiles,
           systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
-          includePresets: true,
+          includePresets: false,
         });
 
       const onRunnerLog = this.deps.onRunnerLog
@@ -238,7 +253,7 @@ export class AgentService {
       if (preset?.name === "orchestrator" || !preset) {
         const messageText = params.text;
         onRunnerLog?.(`memory_hint_check text_len=${messageText?.length ?? 0}`);
-        if (messageText && !hasRecentMemorySearch(history)) {
+        if (messageText && !hasRecentMemorySearch(runHistory)) {
           const keywords = extractKeywords(messageText);
           onRunnerLog?.(`memory_hint_keywords [${keywords.join(", ")}]`);
           if (keywords.length > 0) {
@@ -257,24 +272,32 @@ export class AgentService {
             onRunnerLog?.(`memory_hint_generated ${memoryHint ? 'YES' : 'NO'}`);
           }
         } else {
-          onRunnerLog?.(`memory_hint_skipped hasRecentSearch=${hasRecentMemorySearch(history)}`);
+          onRunnerLog?.(`memory_hint_skipped hasRecentSearch=${hasRecentMemorySearch(runHistory)}`);
         }
       }
 
       // Instead of changing the system prompt (which breaks the prefix cache),
-      // append the memory hint to the end of the history stack right before the user message.
+      // append ephemeral runtime hints right before the latest user message.
       if (memoryHint) {
         onRunnerLog?.(`memory_hint_injected length=${memoryHint.length}`);
-        history.push({
+        runHistory.push({
           role: "system",
           content: memoryHint,
+          cacheControl: { type: "ephemeral" },
         });
       }
+      const runtimeClockHint = buildRuntimeClockSystemMessage(nowMs);
+      runHistory.push({
+        role: "system",
+        content: runtimeClockHint,
+        cacheControl: { type: "ephemeral" },
+      });
+      onRunnerLog?.(`runtime_clock_injected length=${runtimeClockHint.length}`);
 
       const finalSystemPrompt = systemPrompt;
 
       onRunnerLog?.(
-        `history_scope source=${historyScope.source} channel=${historyScope.channel} key=${historyScope.channelKey} lane=${lane} messages=${history.length}`,
+        `history_scope source=${historyScope.source} channel=${historyScope.channel} key=${historyScope.channelKey} lane=${lane} stored_messages=${history.length} run_messages=${runHistory.length}`,
       );
 
       let llm: LLMClient = this.deps.llm;
@@ -347,7 +370,7 @@ export class AgentService {
       try {
         result = await runner.run({
           systemPrompt: finalSystemPrompt,
-          history: history.filter((m) => m.role !== "system"),
+          history: runHistory,
           userMessage: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
         });
       } catch (err) {

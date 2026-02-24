@@ -25,7 +25,7 @@ function assertToolMessage(message: ChatMessage | undefined): asserts message is
   assert.equal(message.role, "tool");
 }
 
-test("appendMessage compacts shell_interactive read payloads in persisted history", async () => {
+test("loadRecentHistory compacts shell_interactive read payloads by default while preserving stored raw output", async () => {
   await withDb((db) => {
     const nowMs = 1_700_000_000_000;
     const sessionId = getOrCreateSessionId({
@@ -69,6 +69,15 @@ test("appendMessage compacts shell_interactive read payloads in persisted histor
       },
     });
 
+    const rawRow = db.db
+      .prepare("SELECT content FROM messages WHERE session_id = ? AND role = 'tool' ORDER BY id DESC LIMIT 1")
+      .get(sessionId) as { content: string } | undefined;
+    assert.ok(rawRow);
+    const rawStored = JSON.parse(rawRow.content) as Record<string, unknown>;
+    assert.equal(rawStored.action, "read");
+    assert.equal(rawStored.output, originalOutput);
+    assert.equal(rawStored.outputCompactedForHistory, undefined);
+
     const history = loadRecentHistory({
       db,
       sessionId,
@@ -86,6 +95,19 @@ test("appendMessage compacts shell_interactive read payloads in persisted histor
     assert.equal(typeof parsed.output, "string");
     assert.ok((parsed.output as string).length < originalOutput.length);
     assert.match(parsed.output as string, /\[\.\.\.history-compacted .* chars\.\.\.\]/);
+
+    const uncompactHistory = loadRecentHistory({
+      db,
+      sessionId,
+      maxMessages: 20,
+      nowMs: nowMs + 10,
+      compactToolHistory: false,
+    });
+    const uncompactTool = uncompactHistory.find((m) => m.role === "tool");
+    assertToolMessage(uncompactTool);
+    const uncompactParsed = JSON.parse(uncompactTool.content) as Record<string, unknown>;
+    assert.equal(uncompactParsed.output, originalOutput);
+    assert.equal(uncompactParsed.outputCompactedForHistory, undefined);
   });
 });
 
@@ -141,7 +163,7 @@ test("appendMessage leaves non-shell tool payloads unchanged", async () => {
   });
 });
 
-test("appendMessage compacts memory_recall payload values in persisted history", async () => {
+test("loadRecentHistory compacts memory_recall payload values by default", async () => {
   await withDb((db) => {
     const nowMs = 1_700_000_000_200;
     const sessionId = getOrCreateSessionId({
@@ -202,7 +224,7 @@ test("appendMessage compacts memory_recall payload values in persisted history",
   });
 });
 
-test("appendMessage compacts memory_search payloads in persisted history", async () => {
+test("loadRecentHistory compacts memory_search payloads by default", async () => {
   await withDb((db) => {
     const nowMs = 1_700_000_000_300;
     const sessionId = getOrCreateSessionId({
