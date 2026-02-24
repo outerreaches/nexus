@@ -94,3 +94,38 @@ test("compactContext aggressive truncation compacts oversized user payloads when
   assert.doesNotMatch(content, /data:image\/png;base64/);
   assert.ok(content.length < 5000);
 });
+
+test("compactContext summary prompt requests tiered retention candidates", async () => {
+  let summarySystemPrompt = "";
+  const llm: LLMClient = {
+    async completeChat(params) {
+      summarySystemPrompt = typeof params.messages[0]?.content === "string" ? params.messages[0].content : "";
+      return { content: "summary-with-retention", toolCalls: [] };
+    },
+  };
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: "system-prompt" },
+    { role: "user", content: longText("U0", 400) },
+    { role: "assistant", content: longText("A0", 500) },
+    { role: "user", content: longText("U1", 400) },
+    { role: "assistant", content: longText("A1", 500) },
+    { role: "user", content: longText("U2", 400) },
+  ];
+
+  const result = await compactContext({
+    messages,
+    tools: [],
+    llm,
+    maxContextTokens: 220,
+    minRecentMessages: 3,
+  });
+
+  assert.equal(result.compacted, true);
+  assert.equal(result.summary, "summary-with-retention");
+  assert.match(summarySystemPrompt, /Retention candidates \(tiered\)/);
+  assert.match(summarySystemPrompt, /Tier A -> AGENTS\.md/);
+  assert.match(summarySystemPrompt, /Tier M -> MEMORY\.md/);
+  assert.match(summarySystemPrompt, /Tier B -> memory_store/);
+  assert.match(summarySystemPrompt, /Tier C -> NOTES\.md/);
+});

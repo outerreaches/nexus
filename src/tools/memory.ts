@@ -16,6 +16,20 @@ const EXCLUDE_SYSTEM_MEMORIES_SQL =
   "AND tags_json NOT LIKE '%\"compaction\"%' " +
   "AND tags_json NOT LIKE '%\"context-summary\"%'";
 const DEFAULT_VALUE_PREVIEW_CHARS = 220;
+const MIN_NORMALIZED_KEY_LENGTH = 3;
+const RESERVED_KEY_PREFIXES = ["compaction:"];
+const GENERIC_LOW_SIGNAL_KEYS = new Set([
+  "memory",
+  "note",
+  "notes",
+  "todo",
+  "tmp",
+  "temp",
+  "test",
+  "misc",
+  "info",
+  "item",
+]);
 
 type MemorySearchRow = {
   key: string;
@@ -33,6 +47,49 @@ function parseTags(raw: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function normalizeMemoryKey(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function normalizeMemoryValue(raw: string): string {
+  return raw.replace(/\r\n/g, "\n").trim();
+}
+
+function normalizeMemoryTags(tags: string[]): string[] {
+  const out = new Set<string>();
+  for (const tag of tags) {
+    const normalized = String(tag ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\r\n\t]+/g, " ")
+      .replace(/\s+/g, " ");
+    if (!normalized) continue;
+    out.add(normalized);
+  }
+  return [...out].sort();
+}
+
+function validateMemoryKey(key: string): string | null {
+  if (!key) return "memory key is empty after normalization";
+  if (key.length < MIN_NORMALIZED_KEY_LENGTH) {
+    return `memory key must be at least ${MIN_NORMALIZED_KEY_LENGTH} characters after normalization`;
+  }
+  if (RESERVED_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+    return `memory key "${key}" uses a reserved system prefix`;
+  }
+  if (GENERIC_LOW_SIGNAL_KEYS.has(key)) {
+    return `memory key "${key}" is too generic; use a more specific key`;
+  }
+  if (!/[a-z]/.test(key)) {
+    return "memory key must include at least one letter";
+  }
+  return null;
 }
 
 function previewValue(value: string, maxChars: number): string {
@@ -81,20 +138,73 @@ export const memoryStore = defineTool({
     const agentId = currentAgentId(ctx);
     const nowMs = ctx.nowMs();
 
+    const key = normalizeMemoryKey(args.key);
+    const value = normalizeMemoryValue(args.value);
+    const tags = normalizeMemoryTags(args.tags);
+    const validationError = validateMemoryKey(key);
+    if (validationError) return `ERROR: ${validationError}`;
+    if (!value) return "ERROR: memory value is empty after normalization";
+
     try {
+      const existingRows = db.db
+        .prepare(
+          `SELECT id, key, value, category, tags_json
+           FROM memories
+           WHERE agent_id = ? AND LOWER(key) = ?
+           ORDER BY updated_at DESC`,
+        )
+        .all(agentId, key) as Array<{
+          id: number;
+          key: string;
+          value: string;
+          category: "fact" | "observation" | "preference" | "plan";
+          tags_json: string | null;
+        }>;
+      const canonical = existingRows.find((row) => row.key === key) ?? existingRows[0];
+      const duplicateIds = existingRows
+        .filter((row) => row.id !== canonical?.id)
+        .map((row) => row.id);
+      const tagsJson = JSON.stringify(tags);
+
+      if (canonical) {
+        const normalizedExistingTags = normalizeMemoryTags(parseTags(canonical.tags_json));
+        const unchanged =
+          canonical.key === key &&
+          canonical.value === value &&
+          canonical.category === args.category &&
+          JSON.stringify(normalizedExistingTags) === tagsJson &&
+          duplicateIds.length === 0;
+        if (unchanged) {
+          return `OK: memory "${key}" unchanged`;
+        }
+
+        const tx = db.db.transaction(() => {
+          db.db
+            .prepare(
+              `UPDATE memories
+               SET key = ?, value = ?, category = ?, tags_json = ?, updated_at = ?
+               WHERE id = ?`,
+            )
+            .run(key, value, args.category, tagsJson, nowMs, canonical.id);
+          if (duplicateIds.length > 0) {
+            const deleteStmt = db.db.prepare("DELETE FROM memories WHERE id = ?");
+            for (const id of duplicateIds) deleteStmt.run(id);
+          }
+        });
+        tx();
+        return duplicateIds.length > 0
+          ? `OK: stored memory "${key}" [${args.category}] (deduplicated ${duplicateIds.length} older variant${duplicateIds.length === 1 ? "" : "s"})`
+          : `OK: stored memory "${key}" [${args.category}]`;
+      }
+
       db.db
         .prepare(
           `INSERT INTO memories (agent_id, key, value, category, tags_json, created_at, updated_at, accessed_at, access_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-           ON CONFLICT(agent_id, key) DO UPDATE SET
-             value = excluded.value,
-             category = excluded.category,
-             tags_json = excluded.tags_json,
-             updated_at = excluded.updated_at`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         )
-        .run(agentId, args.key, args.value, args.category, JSON.stringify(args.tags), nowMs, nowMs, nowMs);
+        .run(agentId, key, value, args.category, tagsJson, nowMs, nowMs, nowMs);
 
-      return `OK: stored memory "${args.key}" [${args.category}]`;
+      return `OK: stored memory "${key}" [${args.category}]`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -113,11 +223,18 @@ export const memoryRecall = defineTool({
     const agentId = currentAgentId(ctx);
     const nowMs = ctx.nowMs();
 
+    const normalizedKey = normalizeMemoryKey(args.key);
     const row = db.db
-      .prepare("SELECT * FROM memories WHERE agent_id = ? AND key = ?")
-      .get(agentId, args.key) as any;
+      .prepare(
+        `SELECT *
+         FROM memories
+         WHERE agent_id = ? AND (key = ? OR LOWER(key) = ?)
+         ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END, updated_at DESC
+         LIMIT 1`,
+      )
+      .get(agentId, normalizedKey, normalizedKey, normalizedKey) as any;
 
-    if (!row) return `NOT_FOUND: no memory with key "${args.key}"`;
+    if (!row) return `NOT_FOUND: no memory with key "${normalizedKey}"`;
 
     // Update access tracking
     db.db
@@ -233,11 +350,12 @@ export const memoryDelete = defineTool({
     if (!db) return "ERROR: database is not available";
     const agentId = currentAgentId(ctx);
 
+    const normalizedKey = normalizeMemoryKey(args.key);
     const result = db.db
-      .prepare("DELETE FROM memories WHERE agent_id = ? AND key = ?")
-      .run(agentId, args.key);
+      .prepare("DELETE FROM memories WHERE agent_id = ? AND LOWER(key) = ?")
+      .run(agentId, normalizedKey);
 
-    if (result.changes === 0) return `NOT_FOUND: no memory with key "${args.key}"`;
+    if (result.changes === 0) return `NOT_FOUND: no memory with key "${normalizedKey}"`;
     return "OK";
   },
 });

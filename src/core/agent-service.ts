@@ -61,6 +61,7 @@ function buildCompactionSummarySystemMessage(params: { summary: string; updatedA
     `- source: compaction summary memory (${iso})`,
     "- This summary covers earlier conversation context that may no longer be in recent history.",
     "- Validate critical details with tools before irreversible actions.",
+    "- If durable knowledge appears here, retain it via memory tiers: Tier A -> AGENTS.md, Tier M -> MEMORY.md, Tier B -> memory_store, Tier C -> NOTES.md.",
     "",
     truncateWithMarker(params.summary, COMPACTION_SUMMARY_HINT_MAX_CHARS),
   ].join("\n");
@@ -118,6 +119,10 @@ export class AgentService {
 
   private defaultLaneForChannel(channel: string): ExecutionLane {
     return channel === "telegram" || channel === "cli" ? "interactive" : "background";
+  }
+
+  private shouldRunMemoryHintsForChannel(channel: string): boolean {
+    return channel === "telegram" || channel === "cli";
   }
 
   private globalRuntimeLimits(): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
@@ -301,10 +306,12 @@ export class AgentService {
 
       // ── Memory hints: nudge agent about potentially relevant memories ──
       let memoryHint: string | null = null;
-      if (preset?.name === "orchestrator" || !preset) {
+      if ((preset?.name === "orchestrator" || !preset) && this.shouldRunMemoryHintsForChannel(params.channel)) {
         const messageText = params.text;
         onRunnerLog?.(`memory_hint_check text_len=${messageText?.length ?? 0}`);
-        if (messageText && !hasRecentMemorySearch(runHistory)) {
+        const recentMemorySearch = hasRecentMemorySearch(runHistory);
+        const internalMessage = messageText.includes("internal_callback_not_user_message");
+        if (messageText && !recentMemorySearch && !internalMessage) {
           const keywords = extractKeywords(messageText);
           onRunnerLog?.(`memory_hint_keywords [${keywords.join(", ")}]`);
           if (keywords.length > 0) {
@@ -323,8 +330,12 @@ export class AgentService {
             onRunnerLog?.(`memory_hint_generated ${memoryHint ? 'YES' : 'NO'}`);
           }
         } else {
-          onRunnerLog?.(`memory_hint_skipped hasRecentSearch=${hasRecentMemorySearch(runHistory)}`);
+          onRunnerLog?.(
+            `memory_hint_skipped hasRecentSearch=${recentMemorySearch} internal=${internalMessage} hasText=${messageText.length > 0}`,
+          );
         }
+      } else if (preset?.name === "orchestrator" || !preset) {
+        onRunnerLog?.(`memory_hint_skipped channel=${params.channel}`);
       }
 
       // Instead of changing the system prompt (which breaks the prefix cache),

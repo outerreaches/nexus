@@ -54,6 +54,56 @@ const STOPWORDS = new Set([
 
 const MIN_KEYWORD_LENGTH = 4;
 const MAX_KEYWORDS = 5;
+const MAX_KEYWORD_LENGTH = 80;
+const MAX_SEEN_KEYWORDS = 120;
+
+function rememberSeenKeyword(seenKeywords: Set<string>, keyword: string): void {
+  seenKeywords.add(keyword);
+  while (seenKeywords.size > MAX_SEEN_KEYWORDS) {
+    const oldest = seenKeywords.values().next().value;
+    if (!oldest) break;
+    seenKeywords.delete(oldest);
+  }
+}
+
+function looksLikeUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function looksLikeMachineToken(keyword: string): boolean {
+  const k = keyword.trim().toLowerCase();
+  if (!k) return true;
+  if (k.length < MIN_KEYWORD_LENGTH || k.length > MAX_KEYWORD_LENGTH) return true;
+  if (/[\r\n\t]/.test(k)) return true;
+  if (/[|;&<>]/.test(k)) return true;
+  if (k.includes("/") || k.includes("\\")) return true;
+  if (/\s/.test(k)) return true;
+  if (k.includes("_")) return true;
+  if (looksLikeUuid(k)) return true;
+  if (/^[0-9a-f]{16,}$/i.test(k)) return true;
+  if (/^(rr[bc]|proc)_[0-9a-f-]{8,}$/i.test(k)) return true;
+  if (k.includes("internal_callback_not_user_message")) return true;
+  if (k.includes("source_run_id") || k.includes("parent_run_id") || k.includes("source_agent_id")) return true;
+  if (/^\/home\/[^/]+\/\.nexus-node(?:\/|$)/.test(k)) return true;
+
+  const digits = (k.match(/\d/g) ?? []).length;
+  const letters = (k.match(/[a-z]/g) ?? []).length;
+  if (digits >= 6) return true;
+  if (digits >= 4 && digits >= letters) return true;
+
+  const underscoreCount = (k.match(/_/g) ?? []).length;
+  if (underscoreCount >= 3) return true;
+
+  return false;
+}
+
+function addKeywordCandidate(out: Set<string>, raw: string): void {
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) return;
+  if (STOPWORDS.has(normalized)) return;
+  if (looksLikeMachineToken(normalized)) return;
+  out.add(normalized);
+}
 
 /**
  * Extract meaningful keywords from user message text.
@@ -64,46 +114,42 @@ export function extractKeywords(text: string): string[] {
 
   // Quoted strings (double only to avoid apostrophe issues)
   for (const m of text.matchAll(/"([^"]{2,40})"/g)) {
-    keywords.add(m[1].trim().toLowerCase());
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // Backtick-wrapped terms (e.g. `docker`, `haproxy`)
   for (const m of text.matchAll(/`([^`]{2,40})`/g)) {
-    keywords.add(m[1].trim().toLowerCase());
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // File paths (e.g. /data/nexus, ~/scripts/deploy)
   for (const m of text.matchAll(/(?:~|\/)[a-zA-Z][\w./-]{2,}/g)) {
-    keywords.add(m[0].toLowerCase());
+    addKeywordCandidate(keywords, m[0]);
   }
 
   // Dotted identifiers (e.g. octoprint.local, node.js)
   for (const m of text.matchAll(/\b([a-zA-Z][\w]*(?:\.[a-zA-Z][\w]*)+)\b/g)) {
-    keywords.add(m[1].toLowerCase());
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // Hyphenated terms (e.g. ha-rollout, docker-compose)
   for (const m of text.matchAll(/\b([a-zA-Z][\w]*(?:-[a-zA-Z][\w]*)+)\b/g)) {
-    keywords.add(m[1].toLowerCase());
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // Capitalized words (likely proper nouns / product names)
   for (const m of text.matchAll(/\b([A-Z][a-zA-Z]{2,})\b/g)) {
-    const lower = m[1].toLowerCase();
-    if (!STOPWORDS.has(lower)) keywords.add(lower);
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // camelCase / PascalCase compound words (e.g. OctoPrint, startGateway)
   for (const m of text.matchAll(/\b([a-z]+[A-Z][a-zA-Z]*|[A-Z][a-z]+[A-Z][a-zA-Z]*)\b/g)) {
-    keywords.add(m[1].toLowerCase());
+    addKeywordCandidate(keywords, m[1]);
   }
 
-  // Remaining standalone words ≥ MIN_KEYWORD_LENGTH, filtered by stopwords
-  for (const m of text.matchAll(/\b([a-zA-Z][\w]{2,})\b/g)) {
-    const lower = m[1].toLowerCase();
-    if (!STOPWORDS.has(lower) && lower.length >= MIN_KEYWORD_LENGTH) {
-      keywords.add(lower);
-    }
+  // Remaining standalone words ≥ MIN_KEYWORD_LENGTH (letters/digits only, no underscores)
+  for (const m of text.matchAll(/\b([a-zA-Z][a-zA-Z0-9]{2,})\b/g)) {
+    addKeywordCandidate(keywords, m[1]);
   }
 
   // Return top keywords, preferring longer / more specific terms
@@ -170,9 +216,10 @@ export function generateMemoryHints(opts: {
   if (messageText) {
     const memoryKeys = loadMemoryKeys(db, agentId);
     if (memoryKeys.length > 0) {
-      const words = messageText.toLowerCase().match(/\b[a-z][\w]{2,}\b/g) ?? [];
+      const words = messageText.toLowerCase().match(/\b[a-z][a-z0-9]{2,}\b/g) ?? [];
       for (const word of words) {
         if (word.length < MIN_KEYWORD_LENGTH) continue;
+        if (looksLikeMachineToken(word)) continue;
         if (STOPWORDS.has(word) || boosted.has(word) || seenKeywords.has(word)) continue;
         const wordRegex = new RegExp(`\\b${word}\\b`, "i");
         if (memoryKeys.some((k) => wordRegex.test(k))) {
@@ -208,7 +255,6 @@ export function generateMemoryHints(opts: {
   const matches: MemoryHintMatch[] = [];
 
   for (const keyword of newKeywords) {
-    seenKeywords.add(keyword);
     const esc = keyword.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
     const row = countStmt.get(
       agentId,
@@ -221,6 +267,9 @@ export function generateMemoryHints(opts: {
       `% ${esc} %`,       // space-delimited in value
       `%${esc}%`,         // substring in tags (tags are short)
     ) as { cnt: number } | undefined;
+    if (row && row.cnt > 0) {
+      rememberSeenKeyword(seenKeywords, keyword);
+    }
     if (row && row.cnt > 0 && row.cnt <= MAX_MATCH_THRESHOLD) {
       matches.push({ keyword, count: row.cnt });
     }

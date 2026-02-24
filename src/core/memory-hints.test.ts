@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { memorySearch } from "../tools/memory.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
-import { generateMemoryHints } from "./memory-hints.js";
+import { extractKeywords, generateMemoryHints } from "./memory-hints.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-memory-hints-test-"));
@@ -75,6 +75,55 @@ test("generateMemoryHints ignores compaction/context-summary memories", async ()
 
     assert.ok(hint);
     assert.match(hint as string, /1 entry matches "docker"/);
+  });
+});
+
+test("extractKeywords filters machine/internal tokens and keeps user-facing terms", () => {
+  const text = [
+    "rrc66e211a1aa0488584e45f048665acac",
+    "internal_callback_not_user_message",
+    "/home/jetson/.nexus-node/",
+    "proc_c3d64207-ee8",
+    "process_notifier",
+    "webhooks",
+    "orchestrator",
+    "gateway",
+  ].join(" ");
+
+  const keywords = extractKeywords(text);
+  assert.equal(keywords.includes("orchestrator"), true);
+  assert.equal(keywords.includes("webhooks"), true);
+  assert.equal(keywords.includes("gateway"), true);
+  assert.equal(keywords.includes("internal_callback_not_user_message"), false);
+  assert.equal(keywords.includes("process_notifier"), false);
+  assert.equal(keywords.some((k) => k.includes("rrc66e211a1aa")), false);
+  assert.equal(keywords.some((k) => k.includes(".nexus-node")), false);
+});
+
+test("generateMemoryHints only remembers keywords that match memories", async () => {
+  await withDb((db) => {
+    const nowMs = 1_700_000_001_500;
+    insertMemory({
+      db,
+      agentId: "main",
+      key: "docker deployment notes",
+      value: "canary rollout first",
+      tags: ["deploy"],
+      nowMs,
+    });
+
+    const seenKeywords = new Set<string>();
+    const hint = generateMemoryHints({
+      db,
+      agentId: "main",
+      keywords: ["unmatchedterm", "docker"],
+      seenKeywords,
+      messageText: "unmatchedterm docker",
+    });
+
+    assert.ok(hint);
+    assert.equal(seenKeywords.has("docker"), true);
+    assert.equal(seenKeywords.has("unmatchedterm"), false);
   });
 });
 
