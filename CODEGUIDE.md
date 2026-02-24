@@ -39,7 +39,7 @@ Architecture and implementation guide for the **coder** preset.
 ### Presets and Prompts
 - `src/core/presets/*.ts`: tool allowlists, budgets, role behavior, model defaults.
 - `src/core/presets/coder.ts`: coder-specific hard rules.
-- Prompt/state markdown files live in `/data/nexus` (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `HEARTBEAT.md`, `NOTES.md`).
+- Prompt/state markdown files live in `/data/nexus` (`SOUL.md`, `AGENTS.md`, `USER.md`, `CODEGUIDE.md`, `MEMORY.md`, `HEARTBEAT.md`, `NOTES.md`).
 
 ### Tooling Layer
 - `src/tools/*.ts`: tool implementations.

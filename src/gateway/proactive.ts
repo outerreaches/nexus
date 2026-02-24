@@ -253,7 +253,7 @@ export function startProactiveHeartbeat(
         "- If you do ask, use `human_action` with `action=\"request\"` and a short, specific prompt, then stop.",
         "- Do NOT write to the blackboard during heartbeat ticks unless you discovered a new issue, made a change, or created a durable artifact that must persist. Never write \"reviewed\" or confirmation-only notes; if nothing substantive, respond with IDLE.",
         `- When given new standing instructions about heartbeat behavior, append them to \`${deps.stateDir}/HEARTBEAT.md\` using absolute paths.`,
-        `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: "${deps.stateDir}/NOTES.md", limit: 200 })\`.`,
+        `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`MEMORY.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: "${deps.stateDir}/NOTES.md", limit: 200 })\`.`,
       ];
       const text = textParts.join("\n");
 

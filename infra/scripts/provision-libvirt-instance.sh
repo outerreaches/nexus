@@ -812,7 +812,7 @@ fi
 # Initialize personalization files if needed (gateway startup is blocked until initialized).
 if [[ "$SKIP_INIT" != "1" ]]; then
   NEEDS_INIT=0
-  for f in SOUL.md AGENTS.md USER.md CODEGUIDE.md HEARTBEAT.md NOTES.md; do
+  for f in SOUL.md AGENTS.md USER.md CODEGUIDE.md MEMORY.md HEARTBEAT.md NOTES.md; do
     if [[ ! -s "$STATE_DIR/$f" ]]; then
       NEEDS_INIT=1
       break

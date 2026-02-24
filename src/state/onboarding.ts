@@ -15,12 +15,14 @@ import {
   AGENTS_FILENAME,
   USER_FILENAME,
   CODEGUIDE_FILENAME,
+  MEMORY_FILENAME,
   HEARTBEAT_FILENAME,
   NOTES_FILENAME,
   getDefaultSoulTemplate,
   getDefaultAgentsTemplate,
   getDefaultUserTemplate,
   getDefaultCodeguideTemplate,
+  getDefaultMemoryTemplate,
   getDefaultHeartbeatTemplate,
   getDefaultNotesTemplate,
   readPersonalizationFile,
@@ -300,6 +302,7 @@ export async function writeOnboardingFiles(
   await writeOrKeep(AGENTS_FILENAME, getDefaultAgentsTemplate());
   await writeOrKeep(USER_FILENAME, getDefaultUserTemplate(userProfile));
   await writeOrKeep(CODEGUIDE_FILENAME, getDefaultCodeguideTemplate(paths));
+  await writeOrKeep(MEMORY_FILENAME, getDefaultMemoryTemplate());
   await writeOrKeep(HEARTBEAT_FILENAME, getDefaultHeartbeatTemplate(paths.stateDir));
   await writeOrKeep(NOTES_FILENAME, getDefaultNotesTemplate());
 

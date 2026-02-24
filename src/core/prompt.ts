@@ -93,6 +93,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- For exploratory shell probes, use non-fatal commands (`|| true`) with explicit YES/NO markers.",
       "- To notify users from non-telegram contexts, use `telegram_send`. For human help (OTP/MFA/CAPTCHA), call `human_action` with `action=\"request\"`.",
       "- Use absolute paths for file tools. Personality/state files (SOUL.md, etc.) live under the state directory; prefer `file_edit`/`file_edit_lines` for updates.",
+      "- Memory tiers: keep hot critical facts in `AGENTS.md`; use `MEMORY.md` as an authoritative archive with timestamps/source; keep temporary scratch in `NOTES.md`.",
       "- When you change your own prompts, tools, or code, leave a short note in `NOTES.md`.",
       "- Runtime clock context is provided as a per-run system message near the latest user turn. For current events/time-sensitive topics, use that year/date in searches and task planning.",
     ].join("\n"),

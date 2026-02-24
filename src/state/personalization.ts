@@ -45,6 +45,7 @@ export const USER_FILENAME = "USER.md";
 
 export const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const CODEGUIDE_FILENAME = "CODEGUIDE.md";
+export const MEMORY_FILENAME = "MEMORY.md";
 export const NOTES_FILENAME = "NOTES.md";
 
 export const PERSONALIZATION_FILES = [
@@ -96,98 +97,69 @@ ${identity.avatar ? `- **Avatar**: ${identity.avatar}` : ""}
 export function getDefaultAgentsTemplate(): string {
   return `# AGENTS.md
 
-Operating instructions for the Nexus multi-agent system.
+Global orchestration rules and high-signal durable context.
 
-## Your Role: Orchestrator
+## Purpose
+- Keep this file short, current, and factual.
+- Treat this file as the canonical source for high-impact concrete facts the orchestrator must not hallucinate.
+- If a critical fact changes, update this file in the same run where you discover or verify it.
+- Keep this file as a **hot set** of the most frequently used critical facts; archive older authoritative facts in \`MEMORY.md\`.
+- Update this file as you learn.
 
-You are the **orchestrator agent**. Your job is to:
-1. Analyze the user's request
-2. For simple tasks: answer directly using your own tools (memory, skills, etc.)
-3. For complex tasks: delegate to specialized worker agents via \`spawn_agent\`
-4. Coordinate results from workers via the **Blackboard**
-5. Synthesize and deliver the final response to the user
+## Memory Tiers (Use This Split)
+1. **Tier A — Critical concrete facts (store in \`AGENTS.md\`)**
+   - Frequently used endpoints, identifiers, paths, constraints, and commands needed for safe execution.
+2. **Tier M — Authoritative archive (store in \`MEMORY.md\`)**
+   - Verified concrete facts that are important but not needed in the hot set every run.
+   - Use timestamps and provenance so facts can be trusted and audited.
+   - This file is intentionally not auto-injected in prompts; read it explicitly when needed.
+3. **Tier B — Long-lived but lower-risk context (store in memory system)**
+   - Preferences, recurring defaults, lightweight behavioral context.
+   - Use \`memory_store\` / \`memory_search\` / \`memory_recall\`.
+4. **Tier C — Working scratchpad (store in \`NOTES.md\`)**
+   - Drafts, temporary plans, investigation logs, and in-progress thoughts.
+   - \`NOTES.md\` is not authoritative for critical concrete facts.
 
-## Worker Agents
+## Critical Fact Workflow
+- Before using concrete values in commands or recommendations, check \`AGENTS.md\` first.
+- If \`AGENTS.md\` is missing or uncertain, check \`MEMORY.md\` next.
+- Never invent concrete identifiers, addresses, endpoints, or IDs.
+- For each critical fact, include:
+  - value
+  - \`captured_at\` (YYYY-MM-DD)
+  - \`last_verified\` (YYYY-MM-DD)
+  - \`source\` (tool/command/API)
+  - \`status\` (active/superseded/deprecated)
+- Remove or mark superseded values immediately to avoid stale lookups.
+- Document new critical facts as you discover them.
 
-Use \`spawn_agent\` to delegate to these specialists:
+## Critical Facts
 
-| Preset | Use When | Tools Available |
-|--------|----------|-----------------|
-| **coder** | Codebase analysis, direct code edits, debugging, rollout | file_ops, shell_exec, ha_deploy, web_fetch, image_analyze |
-| **researcher** | Web research, browsing, document analysis | web_search, web_fetch, data_intake_query, image_analyze, spawn_agent |
-| **trader** | Paper trading, portfolio management | paper_trade, portfolio_status, query_data, data_intake_query |
-| **analyst** | Data analysis, market research, structured reports | web_search, web_fetch, query_data, data_intake_query, image_analyze, spawn_agent |
-| **graphic-designer** | Visual concepting and image asset generation | image_generate, image_edit, read_from_blackboard, write_to_blackboard |
-| **intake-manager** | Data intake source operations | data_intake_source_add, data_intake_source_update, data_intake_source_delete, data_intake_run |
-| **credential-manager** | Credential vault management | credential_set, credential_generate, credential_list, credential_delete |
-| **mcp-manager** | MCP server/profile management and MCP delegation | mcp_manage (overview/server/profile/grant/delegate) |
+### Environment & Access
+- primary_environments:
+- key_endpoints:
+- critical_identifiers:
+- important_paths:
 
-Tool list note:
-- The runtime function-calling tool schema is authoritative.
-- Text tables are guidance, not an exhaustive/guaranteed list.
+### Active Work Domains
+- current_projects_or_systems:
+- key_integrations:
+- non_default_constraints:
 
-## Blackboard
+### Runbook Commands
+- health_check_command:
+- deploy_command:
+- rollback_or_recovery_command:
 
-Workers share data via the Blackboard (\`write_to_blackboard\` / \`read_from_blackboard\`):
-- Workers should write substantive results to the blackboard when asked or when it helps other agents; avoid trivial confirmations (especially during heartbeat ticks)
-- Pass blackboard entry IDs to workers via \`context\` parameter for input data
-- Binary content (images, PDFs) is stored as file path references, not inline data
-- Entry types: \`artifact\` (code/files), \`finding\` (research), \`note\` (misc), \`status\` (progress)
-- Keep blackboard \`content\` concise (target <= 12k chars, hard max 24k). For long outputs, write a concise summary and attach the full report as a file.
-- Hygiene: use \`blackboard_manage\` with \`action="delete"\` for specific IDs, \`action="clear"\` to reset scope, or \`action="prune"\` for age/TTL cleanup when changing tasks
+## Archive Pointer
+- Authoritative archive path: \`MEMORY.md\`
+- Keep this file compact by moving lower-frequency factual records to \`MEMORY.md\` with timestamps.
 
-## Rules
-- Keep changes minimal and reversible.
-- Store long-term plans/notes in \`NOTES.md\` rather than in chat history.
-- When modifying your own prompts or tools, leave a note explaining why.
-- Don't spawn agents for trivial tasks (simple questions, quick lookups), **except** for code-related requests — spawn a coder agent because they have extra codebase context.
-- When spawning \`coder\`, prefer setting \`taskType\`: \`plan\`, \`review\`, \`walkthrough\`, or \`write\` (defaults to \`write\` if omitted). Use \`plan/review/walkthrough\` for read-only analysis and \`write\` only when code changes are intended.
-- For node webhook/dashboard work, tell coder to preserve architecture: node-local webhook listener -> node WS \`webhook.deliver\` -> existing gateway \`/api/webhooks/*\` and \`/api/nodes/*\` APIs. Do not introduce ad-hoc gateway webhook transports unless explicitly requested.
-- When spawning workers, give them clear, specific tasks with all necessary context.
-- If a worker needs sub-agents, require explicit \`Blackboard title:\` lines for each sub-task, then have the parent worker read those exact results and synthesize one final output.
-
-## Code Change → Deploy Workflow
-
-For code changes:
-1. Spawn a coder to inspect patterns and apply direct edits using absolute paths under \`codeDir\`.
-2. Coder validates with \`npm run typecheck\` and \`npm run build\`.
-3. Coder executes \`ha_deploy\` with \`action="apply"\` (commit message + remote/branch as needed).
-4. Report rollout status (canary health, active slot, commit SHA) to the user.
-
-## Memory Strategy
-- Use \`memory_store\` / \`memory_recall\` / \`memory_search\` for persistent key-value memories across sessions.
-- Use \`NOTES.md\` for longer-form plans and scratchpad content.
-- A daily reflection run is scheduled automatically (\`SYS_REFLECTION_DAILY\`) to extract learnings from recent conversations.
-- Create skills (\`skill_create\`) for reusable playbooks you discover.
-- Clean up outdated memories and notes periodically.
-
-## Scheduling
-- Handle scheduling operations directly with \`job_manage\` (create/list/get/update/pause/resume/run_now/delete/runs/run_get/events).
-- Do **not** spawn sub-agents for job management or scheduler triage.
-- Do **not** query \`nexus.db\` directly for job state; use \`job_manage\` as the source of truth.
-- For recurring jobs, use \`job_manage\` action=\`create\` with \`cron\`; for one-shot jobs, use action=\`create\` with \`at\` (one-shot jobs are archived then removed after execution).
-- Prefer \`mode: "tool_call"\` for deterministic recurring actions; use \`agent_task\` only when reasoning is required each run.
-- Failed jobs notify you automatically for self-healing.
-- Heartbeat and scheduled orchestrator runs execute on a background lane; interactive chats should remain responsive while background work runs.
-- Background completion callbacks may arrive as \`RUN REPORT BATCH\` inputs; treat them as internal reports, stay silent for routine/idle outcomes, and only notify the user when action is needed.
-- Tool errors may include normalized tags like \`[ERROR_CLASS=... retry=...]\`; follow them (no blind retries for validation/not_found/capability mismatches, backoff for rate limits, single retry for transient failures).
-
-## Credentials & Secrets
-- Delegate credential vault operations to a \`credential-manager\` worker (\`credential_set\`, \`credential_generate\`, \`credential_list\`, \`credential_delete\`).
-- Use \`browser.type_secret\` for password fields instead of \`browser.type\`.
-- Use \`human_action\` with \`action="request"\` for OTP/MFA/CAPTCHA; operator responds via Telegram \`/act <ID> ...\`.
-
-## MCP Integrations
-- Keep MCP complexity delegated: use \`mcp_overview\` to inspect configured servers/profiles, then spawn an \`mcp-manager\` worker.
-- MCP workflows should pass blackboard IDs between workers rather than copying large payloads into prompts.
-- Prefer hidden/runtime MCP profiles to avoid bloating general orchestrator context.
-- MCP profiles are MCP-only by default. If non-MCP tools are required for a specific task, explicitly set \`allowNonMcpTools=true\` with only the minimum named tools.
-
-## Forbidden Patterns
-- Never run \`rm -rf\` without explicit user confirmation.
-- Never commit secrets or API keys to files.
-- Never ask the user to paste passwords into chat.
-- Never send user data to external services without consent.
+## Collaboration Rules
+- Delegate implementation tasks to worker presets and keep task prompts explicit.
+- Use blackboard for cross-agent handoff; keep entries concise and actionable.
+- Keep destructive actions confirmed by the user.
+- When changing prompts/tools/workflows, add a brief changelog entry in \`NOTES.md\`.
 `;
 }
 
@@ -254,7 +226,8 @@ Architecture and implementation guide for the **coder** preset.
 ### Presets and Prompts
 - \`src/core/presets/*.ts\`: tool allowlists, budgets, role behavior, model defaults.
 - \`src/core/presets/coder.ts\`: coder-specific hard rules.
-- Prompt/state markdown files live in \`${stateDirPath}\` (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`).
+- Prompt/state markdown files live in \`${stateDirPath}\` (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`MEMORY.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`).
+- \`MEMORY.md\` is an authoritative archive (manually read when concrete historical facts are needed).
 
 ### Tooling Layer
 - \`src/tools/*.ts\`: tool implementations.
@@ -414,7 +387,7 @@ Proactive task checklist reviewed on each heartbeat tick.
   > and an absolute \`${stateDirPath}/HEARTBEAT.md\` path. Only replace the entire file when explicitly requested,
   > using \`file_write\` with \`mode: "overwrite"\`.
   > This ensures instructions persist across restarts.
-  > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`NOTES.md\`),
+  > For state markdown files (\`SOUL.md\`, \`AGENTS.md\`, \`USER.md\`, \`CODEGUIDE.md\`, \`HEARTBEAT.md\`, \`MEMORY.md\`, \`NOTES.md\`),
   > always use absolute paths under \`stateDir\`. Example:
   > \`file_read({ path: "${stateDirPath}/NOTES.md", limit: 200 })\`
 
@@ -441,12 +414,57 @@ Proactive task checklist reviewed on each heartbeat tick.
 export function getDefaultNotesTemplate(): string {
   return `# NOTES
 
-Persistent scratchpad for Nexus across sessions.
+Persistent working notebook across sessions.
 
-## Active Items
+## What Belongs Here
+- Temporary plans, investigations, hypothesis logs, and execution scratch.
+- Medium-priority reminders that are useful but not critical for safe operations.
+
+## What Does NOT Belong Here
+- Canonical concrete facts that must be exact at execution time (critical endpoints, identifiers, policy constraints, production paths).
+- Critical runbook values required for safe execution.
+
+If a note becomes critical and frequently used, promote it to \`AGENTS.md\`.
+If a note becomes critical but lower-frequency, archive it in \`MEMORY.md\`.
+Use \`captured_at\`, \`last_verified\`, and \`source\` for promoted factual records.
+For non-critical reusable context, prefer \`memory_store\`.
+
+## Active Work
+- (none yet)
+
+## Investigations
+- (none yet)
+
+## Parking Lot
 - (none yet)
 
 ## Completed
+- (none yet)
+`;
+}
+
+export function getDefaultMemoryTemplate(): string {
+  return `# MEMORY.md
+
+Authoritative archive for verified concrete facts.
+
+This file is not auto-injected into prompts.
+Read it intentionally when tasks depend on exact historical values, then copy currently needed facts into \`AGENTS.md\`.
+
+## Record Format
+- key:
+  value:
+  scope:
+  captured_at: YYYY-MM-DD
+  last_verified: YYYY-MM-DD
+  source: tool/command/API
+  status: active|superseded|deprecated
+  notes:
+
+## Active Records
+- (none yet)
+
+## Superseded Records
 - (none yet)
 `;
 }

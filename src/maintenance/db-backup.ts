@@ -41,7 +41,7 @@ export type BackupStatus = {
   nextScheduledBackup: number | null;
 };
 
-const PERSONALIZATION_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "CODEGUIDE.md", "HEARTBEAT.md", "NOTES.md", "nexus.json"] as const;
+const PERSONALIZATION_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "CODEGUIDE.md", "MEMORY.md", "HEARTBEAT.md", "NOTES.md", "nexus.json"] as const;
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
