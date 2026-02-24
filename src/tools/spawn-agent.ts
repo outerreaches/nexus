@@ -285,7 +285,15 @@ export const spawnAgent = defineTool({
       }
       const parentTask = getParentTask(db, effectiveParentRunId);
       if (parentTask && normalizeTask(parentTask) === normalizeTask(args.task)) {
-        return "ERROR: refusing to spawn a sub-agent with the same task as the parent.";
+        const normalizedParentPreset = String(parentPresetName ?? "").trim().toLowerCase();
+        const normalizedChildPreset = preset.name.trim().toLowerCase();
+        if (normalizedParentPreset !== "" && normalizedParentPreset === normalizedChildPreset) {
+          return "ERROR: refusing to spawn a sub-agent with the same task and preset as the parent.";
+        }
+        ctx.log(
+          `spawn_agent: allowing same task text because preset changes ` +
+          `${normalizedParentPreset || "unknown"} -> ${normalizedChildPreset}`,
+        );
       }
     }
     const workerDepth = parentDepth + 1;

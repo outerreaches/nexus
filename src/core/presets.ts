@@ -138,7 +138,8 @@ export function formatPresetsForPrompt(filter?: string[]): string {
     lines.push(`- **${p.name}**: ${p.description}`);
   }
   lines.push("");
-  lines.push("For simple questions, answer directly without spawning agents.");
+  lines.push("For simple questions, answer directly without spawning agents unless the user explicitly asks for delegation.");
+  lines.push("If the user explicitly asks to spawn/delegate to a specific preset, do it unless blocked by policy or missing capabilities; if blocked, explain the constraint.");
   lines.push("For complex multi-step tasks, spawn the appropriate worker(s).");
   lines.push("Workers share data via the Blackboard — use `write_to_blackboard` / `read_from_blackboard`.");
   return lines.join("\n");
