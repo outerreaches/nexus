@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 
-import { AgentRunner } from "./agent-runner.js";
+import { AgentRunner, RunCancelledError } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContentPart } from "./types.js";
@@ -71,6 +72,18 @@ export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
   private readonly memoryHintsSeen: Map<string, Set<string>> = new Map();
+  private readonly activeRunCancels = new Map<
+    string,
+    {
+      runId: string | null;
+      sessionId: string;
+      channel: string;
+      channelKey: string;
+      agentId: string;
+      startedAt: number;
+      controller: AbortController;
+    }
+  >();
 
   constructor(
     private readonly deps: {
@@ -115,6 +128,54 @@ export class AgentService {
 
   getCircuitBreaker(): LlmCircuitBreaker | undefined {
     return this.deps.circuitBreaker;
+  }
+
+  cancelSessionRuns(sessionId: string, reason: string = "session stopped"): number {
+    const target = sessionId.trim();
+    if (!target) return 0;
+    return this.cancelMatchingRuns((entry) => entry.sessionId === target, reason);
+  }
+
+  cancelAllRuns(reason: string = "all sessions stopped"): number {
+    return this.cancelMatchingRuns(() => true, reason);
+  }
+
+  private cancelMatchingRuns(
+    predicate: (entry: {
+      runId: string | null;
+      sessionId: string;
+      channel: string;
+      channelKey: string;
+      agentId: string;
+      startedAt: number;
+      controller: AbortController;
+    }) => boolean,
+    reason: string,
+  ): number {
+    let cancelled = 0;
+    const text = reason.trim() || "stopped";
+    for (const entry of this.activeRunCancels.values()) {
+      if (!predicate(entry)) continue;
+      if (entry.controller.signal.aborted) continue;
+      entry.controller.abort(new Error(text));
+      cancelled += 1;
+    }
+    return cancelled;
+  }
+
+  private isRunCancellationError(err: unknown, signal: AbortSignal): boolean {
+    if (signal.aborted) return true;
+    if (err instanceof RunCancelledError) return true;
+    if (!(err instanceof Error)) return false;
+    if (err.name === "AbortError") return true;
+    return /run cancelled|aborted|abort/i.test(err.message);
+  }
+
+  private cancellationMessage(signal: AbortSignal): string {
+    const reason = signal.reason;
+    if (typeof reason === "string" && reason.trim().length > 0) return `Run stopped: ${reason.trim()}`;
+    if (reason instanceof Error && reason.message.trim().length > 0) return `Run stopped: ${reason.message.trim()}`;
+    return "Run stopped.";
   }
 
   private defaultLaneForChannel(channel: string): ExecutionLane {
@@ -397,6 +458,17 @@ export class AgentService {
         sessionId,
         task: params.text,
       });
+      const abortController = new AbortController();
+      const cancellationKey = runId ?? `runless:${crypto.randomUUID()}`;
+      this.activeRunCancels.set(cancellationKey, {
+        runId: runId ?? null,
+        sessionId,
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+        startedAt: nowMs,
+        controller: abortController,
+      });
 
       const toolContext: ToolContext = {
         ...this.deps.toolContext,
@@ -405,6 +477,7 @@ export class AgentService {
         modelRouter: this.deps.modelRouter,
         modelMode: runModelMode,
         runtimeLimits,
+        abortSignal: abortController.signal,
         request: {
           channel: params.channel,
           channelKey: params.channelKey,
@@ -426,6 +499,7 @@ export class AgentService {
         circuitBreaker: this.deps.circuitBreaker,
         trackCircuitBreaker,
         transientRetries: this.deps.transientRetries ?? 5,
+        abortSignal: abortController.signal,
       });
 
       let result: Awaited<ReturnType<AgentRunner["run"]>>;
@@ -436,6 +510,23 @@ export class AgentService {
           userMessage: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
         });
       } catch (err) {
+        if (this.isRunCancellationError(err, abortController.signal)) {
+          if (runId && this.deps.agentTracker) {
+            this.deps.agentTracker.completeRun(runId, {
+              status: "stopped",
+              outputPreview: this.cancellationMessage(abortController.signal),
+              endedAt: this.deps.toolContext.nowMs(),
+            });
+          }
+          return {
+            runId: runId ?? null,
+            sessionId,
+            output: this.cancellationMessage(abortController.signal),
+            status: "failed",
+            toolCallsUsed: 0,
+            iterationsUsed: 0,
+          };
+        }
         if (runId && this.deps.agentTracker) {
           this.deps.agentTracker.completeRun(runId, {
             status: "failed",
@@ -444,6 +535,8 @@ export class AgentService {
           });
         }
         throw err;
+      } finally {
+        this.activeRunCancels.delete(cancellationKey);
       }
 
       let shouldPersistHistory = true;

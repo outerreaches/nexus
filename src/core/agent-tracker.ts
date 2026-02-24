@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { NexusDatabase } from "../storage/database.js";
 
-export type AgentRunStatus = "running" | "complete" | "failed" | "budget_exhausted";
+export type AgentRunStatus = "running" | "complete" | "failed" | "budget_exhausted" | "stopped";
 
 export type AgentRunInfo = {
   runId: string;

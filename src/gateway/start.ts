@@ -55,8 +55,30 @@ import { createFederationTransportRouter } from "../federation/transport.js";
 import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
+import { getOrCreateSessionId } from "../storage/sessions.js";
+import { parseDurationToMs, parseStopCommandText, formatDurationMs } from "../control/stop-command.js";
+import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
+
+type IsolatedWorkerOwner = {
+  sessionId: string | null;
+  runId: string | null;
+  channel: string | null;
+  channelKey: string | null;
+  agentId: string | null;
+};
+
+type StopExecutionSummary = {
+  cancelledRuns: number;
+  terminatedWorkers: number;
+  localInteractiveClosed: number;
+  localInteractiveFailed: number;
+  remoteInteractiveClosed: number;
+  localProcessesStopped: number;
+  remoteProcessesCancelled: number;
+  errors: string[];
+};
 
 export async function startGateway(
   params: { configPath: string; port?: number; verbose: boolean; standby?: boolean; profile?: RuntimeProfile },
@@ -313,6 +335,7 @@ export async function startGateway(
 
   // Track isolated worker child processes for shutdown cleanup
   const isolatedWorkers = new Set<ChildProcess>();
+  const isolatedWorkerOwners = new Map<ChildProcess, IsolatedWorkerOwner>();
   const scheduleProcessRestart = (reason: string, delayMs: number = 2500) => {
     log(`restart: ${reason}`);
     setTimeout(() => {
@@ -335,6 +358,12 @@ export async function startGateway(
   const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
   const proactiveEnabled = envBool("NEXUS_PROACTIVE") ?? config.proactive.enabled;
   const proactiveNotifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? config.proactive.notifyTelegram;
+  const defaultStopAllCooldownMs = Math.max(
+    1_000,
+    envInt("NEXUS_STOPALL_COOLDOWN_MS")
+      ?? parseDurationToMs(process.env.NEXUS_STOPALL_COOLDOWN ?? "")
+      ?? 5 * 60_000,
+  );
   const telegramAllowAll = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
   const telegramAllowFromCount = config.channels.telegram.allowFrom?.length ?? 0;
   const telegramPairingEnabled = config.channels.telegram.pairing.enabled;
@@ -355,6 +384,14 @@ export async function startGateway(
     mcp,
     agentTracker,
     isolatedWorkers,
+    registerIsolatedWorker: (child: ChildProcess, owner: IsolatedWorkerOwner) => {
+      isolatedWorkers.add(child);
+      isolatedWorkerOwners.set(child, owner);
+    },
+    unregisterIsolatedWorker: (child: ChildProcess) => {
+      isolatedWorkers.delete(child);
+      isolatedWorkerOwners.delete(child);
+    },
     telegram: undefined as unknown,
     allowShellExec,
     allowCodeEdit,
@@ -654,6 +691,347 @@ export async function startGateway(
     return res;
   };
 
+  let stopAllSuppressedUntilMs = 0;
+  const getTickSuppression = (): { suppressed: boolean; reason?: string; retryAfterMs?: number } => {
+    const remainingMs = stopAllSuppressedUntilMs - Date.now();
+    if (remainingMs <= 0) {
+      return { suppressed: false };
+    }
+    return {
+      suppressed: true,
+      reason: "stopall_cooldown",
+      retryAfterMs: remainingMs,
+    };
+  };
+
+  const terminateIsolatedWorkers = (sessionId: string | null): number => {
+    let terminated = 0;
+    for (const child of [...isolatedWorkers]) {
+      const owner = isolatedWorkerOwners.get(child);
+      if (sessionId && owner?.sessionId !== sessionId) continue;
+      isolatedWorkers.delete(child);
+      isolatedWorkerOwners.delete(child);
+      try {
+        child.kill("SIGTERM");
+        terminated += 1;
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+      }, 1_500).unref?.();
+    }
+    return terminated;
+  };
+
+  type RunningProcessRow = {
+    id: string;
+    backend: string;
+    node_id: string | null;
+    node_execution_id: string | null;
+  };
+
+  const listRunningProcessRows = (sessionId: string | null): RunningProcessRow[] => {
+    if (sessionId) {
+      return db.db
+        .prepare(
+          `SELECT id, backend, node_id, node_execution_id
+           FROM process_runs
+           WHERE status = 'running' AND request_session_id = ?`,
+        )
+        .all(sessionId) as RunningProcessRow[];
+    }
+    return db.db
+      .prepare(
+        `SELECT id, backend, node_id, node_execution_id
+         FROM process_runs
+         WHERE status = 'running'`,
+      )
+      .all() as RunningProcessRow[];
+  };
+
+  const stopManagedProcesses = async (
+    sessionId: string | null,
+    reason: string,
+  ): Promise<{ local: number; remote: number; errors: string[] }> => {
+    const errors: string[] = [];
+    let local = 0;
+    let remote = 0;
+    const rows = listRunningProcessRows(sessionId);
+    const localIds = new Set<string>();
+    const remoteTargets = new Map<string, { nodeId: string; processId: string }>();
+    for (const row of rows) {
+      if (row.node_id && row.node_execution_id) {
+        const key = `${row.node_id}::${row.node_execution_id}`;
+        if (!remoteTargets.has(key)) {
+          remoteTargets.set(key, {
+            nodeId: row.node_id,
+            processId: row.node_execution_id,
+          });
+        }
+        continue;
+      }
+      if (row.backend === "local_child") {
+        localIds.add(row.id);
+      }
+    }
+
+    for (const processId of localIds) {
+      try {
+        await processManager.stop({
+          id: processId,
+          signal: "SIGTERM",
+          killAfterMs: 2_000,
+        });
+        local += 1;
+      } catch (err) {
+        errors.push(`local process ${processId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    for (const target of remoteTargets.values()) {
+      try {
+        const result = await nodeWsGateway.requestTransportOperation({
+          nodeId: target.nodeId,
+          method: "process.cancel",
+          params: {
+            processId: target.processId,
+            signal: "SIGTERM",
+            killAfterMs: 2_000,
+            reason,
+          },
+          timeoutMs: 20_000,
+        });
+        if (!result.ok) {
+          const message = result.error?.message ?? "unknown error";
+          errors.push(`remote process ${target.nodeId}/${target.processId}: ${message}`);
+          continue;
+        }
+        remote += 1;
+      } catch (err) {
+        errors.push(
+          `remote process ${target.nodeId}/${target.processId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    return { local, remote, errors };
+  };
+
+  const listOnlineNexusNodeIds = (): string[] => {
+    const rows = db.db
+      .prepare("SELECT id FROM nodes WHERE backend = 'nexus' AND status = 'online' ORDER BY id ASC")
+      .all() as { id: string }[];
+    return rows.map((row) => row.id);
+  };
+
+  const runShellCtlOnNode = async (nodeId: string, command: string): Promise<string> => {
+    const response = await nodeWsGateway.requestTransportOperation({
+      nodeId,
+      method: "tool.execute",
+      params: {
+        tool: "system.run",
+        args: {
+          command,
+          timeoutMs: 30_000,
+        },
+      },
+      timeoutMs: 40_000,
+    });
+    if (!response.ok) {
+      throw new Error(response.error?.message ?? "tool.execute failed");
+    }
+    const payload = response.payload;
+    if (typeof payload === "string") {
+      return payload;
+    }
+    if (payload && typeof payload === "object") {
+      const output = (payload as Record<string, unknown>).output;
+      if (typeof output === "string") return output;
+    }
+    return typeof payload === "undefined" ? "" : JSON.stringify(payload);
+  };
+
+  const stopRemoteInteractiveSessions = async (
+    sessionId: string | null,
+  ): Promise<{ closed: number; errors: string[] }> => {
+    let closed = 0;
+    const errors: string[] = [];
+    const nodeIds = listOnlineNexusNodeIds();
+    for (const nodeId of nodeIds) {
+      let listOutput = "";
+      try {
+        listOutput = await runShellCtlOnNode(nodeId, "nexus-shellctl list");
+      } catch (err) {
+        errors.push(`remote shell list ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      let parsedList: Record<string, unknown> | null = null;
+      try {
+        parsedList = JSON.parse(listOutput) as Record<string, unknown>;
+      } catch {
+        if (listOutput.trim() && !listOutput.trimStart().startsWith("ERROR:")) {
+          errors.push(`remote shell list ${nodeId}: non-JSON response`);
+        }
+        continue;
+      }
+      const sessions = Array.isArray(parsedList.sessions) ? parsedList.sessions : [];
+      for (const row of sessions) {
+        if (!row || typeof row !== "object") continue;
+        const sessionName = String((row as Record<string, unknown>).session ?? "").trim();
+        if (!sessionName) continue;
+        if (!/^[A-Za-z0-9._-]{1,64}$/.test(sessionName)) {
+          errors.push(`remote shell close ${nodeId}: invalid session id "${sessionName}"`);
+          continue;
+        }
+        if (sessionId) {
+          const ownerSessionId = String((row as Record<string, unknown>).ownerSessionId ?? "").trim();
+          if (!ownerSessionId || ownerSessionId !== sessionId) continue;
+        }
+        try {
+          await runShellCtlOnNode(nodeId, `nexus-shellctl close --session ${sessionName}`);
+          closed += 1;
+        } catch (err) {
+          errors.push(
+            `remote shell close ${nodeId}/${sessionName}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+    return { closed, errors };
+  };
+
+  const executeStop = async (params: {
+    scope: "session" | "all";
+    sessionId: string | null;
+    reason: string;
+    cooldownMs?: number;
+  }): Promise<StopExecutionSummary> => {
+    const sessionId = params.scope === "session" ? params.sessionId : null;
+    const cancelledRuns = params.scope === "session" && sessionId
+      ? agent.cancelSessionRuns(sessionId, params.reason)
+      : agent.cancelAllRuns(params.reason);
+    const terminatedWorkers = terminateIsolatedWorkers(sessionId);
+
+    let localInteractiveClosed = 0;
+    let localInteractiveFailed = 0;
+    const errors: string[] = [];
+    try {
+      const localInteractive = await stopLocalInteractiveSessions({
+        stateDir: paths.stateDir,
+        ownerSessionId: sessionId ?? null,
+      });
+      localInteractiveClosed = localInteractive.closed;
+      localInteractiveFailed = localInteractive.failed;
+      errors.push(...localInteractive.errors.map((entry) => `local shell ${entry}`));
+    } catch (err) {
+      errors.push(`local shell cleanup: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const remoteInteractive = await stopRemoteInteractiveSessions(sessionId);
+    errors.push(...remoteInteractive.errors);
+
+    const processStops = await stopManagedProcesses(sessionId, params.reason);
+    errors.push(...processStops.errors);
+
+    if (params.scope === "all" && params.cooldownMs && params.cooldownMs > 0) {
+      stopAllSuppressedUntilMs = Math.max(stopAllSuppressedUntilMs, Date.now() + params.cooldownMs);
+      log(
+        `stopall: scheduler/proactive suppressed for ${formatDurationMs(params.cooldownMs)} until ${new Date(stopAllSuppressedUntilMs).toISOString()}`,
+      );
+    }
+
+    return {
+      cancelledRuns,
+      terminatedWorkers,
+      localInteractiveClosed,
+      localInteractiveFailed,
+      remoteInteractiveClosed: remoteInteractive.closed,
+      localProcessesStopped: processStops.local,
+      remoteProcessesCancelled: processStops.remote,
+      errors,
+    };
+  };
+
+  const summarizeStop = (params: {
+    scope: "session" | "all";
+    sessionId: string | null;
+    cooldownMs?: number;
+    result: StopExecutionSummary;
+  }): string => {
+    const lines: string[] = [];
+    if (params.scope === "all") {
+      const cooldownText = params.cooldownMs ? formatDurationMs(params.cooldownMs) : formatDurationMs(defaultStopAllCooldownMs);
+      lines.push(`STOP ALL executed. Cooldown: ${cooldownText}.`);
+    } else {
+      lines.push(`STOP executed for session ${params.sessionId ?? "unknown"}.`);
+    }
+    lines.push(
+      [
+        `runs=${params.result.cancelledRuns}`,
+        `workers=${params.result.terminatedWorkers}`,
+        `local_shell=${params.result.localInteractiveClosed}`,
+        `remote_shell=${params.result.remoteInteractiveClosed}`,
+        `local_process=${params.result.localProcessesStopped}`,
+        `remote_process=${params.result.remoteProcessesCancelled}`,
+      ].join(" "),
+    );
+    if (params.result.localInteractiveFailed > 0) {
+      lines.push(`local_shell_failures=${params.result.localInteractiveFailed}`);
+    }
+    if (params.result.errors.length > 0) {
+      lines.push(`errors=${params.result.errors.length}`);
+      lines.push(...params.result.errors.slice(0, 5).map((entry) => `- ${entry}`));
+    }
+    return lines.join("\n");
+  };
+
+  const handleControlCommand = async (params: {
+    channel: string;
+    channelKey: string;
+    agentId: string;
+    sessionId: string;
+    text: string;
+    actorLabel?: string;
+  }): Promise<string | null> => {
+    const parsed = parseStopCommandText(params.text);
+    if (!parsed) return null;
+    const actor = params.actorLabel ?? `${params.channel}:${params.channelKey}`;
+    if (parsed.kind === "stop") {
+      const result = await executeStop({
+        scope: "session",
+        sessionId: params.sessionId,
+        reason: `stop:${actor}`,
+      });
+      return summarizeStop({
+        scope: "session",
+        sessionId: params.sessionId,
+        result,
+      });
+    }
+
+    if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
+      return `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, 1h, or 1d.`;
+    }
+    const cooldownMs = parsed.cooldownMs ?? defaultStopAllCooldownMs;
+    const result = await executeStop({
+      scope: "all",
+      sessionId: null,
+      reason: `stopall:${actor}`,
+      cooldownMs,
+    });
+    return summarizeStop({
+      scope: "all",
+      sessionId: null,
+      cooldownMs,
+      result,
+    });
+  };
+
   const http = await startHttpServer({
     port: effectivePort,
     stateDir: paths.stateDir,
@@ -786,6 +1164,11 @@ export async function startGateway(
           enabled: runReportBroker !== null,
         },
         proactive: getProactiveStatus(),
+        stopControl: {
+          stopAllCooldownUntil: stopAllSuppressedUntilMs > Date.now() ? stopAllSuppressedUntilMs : null,
+          stopAllCooldownRemainingMs: Math.max(0, stopAllSuppressedUntilMs - Date.now()),
+          defaultStopAllCooldownMs,
+        },
         mode: getMode(),
         activeLease: {
           key: leaseKey,
@@ -803,13 +1186,40 @@ export async function startGateway(
     agentTracker,
     nodeGateway: nodeWsGateway,
     mcp,
-    dispatchCliMessage: (params) =>
-      agent.handleUserMessage({
+    dispatchCliMessage: async (params) => {
+      const nowMs = Date.now();
+      const sessionId = getOrCreateSessionId({
+        db,
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+        nowMs,
+      });
+      const intercepted = await handleControlCommand({
+        channel: params.channel,
+        channelKey: params.channelKey,
+        agentId: params.agentId,
+        sessionId,
+        text: params.text,
+        actorLabel: `cli:${params.channelKey}`,
+      });
+      if (intercepted !== null) {
+        return {
+          runId: null,
+          sessionId,
+          output: intercepted,
+          status: "complete" as const,
+          toolCallsUsed: 0,
+          iterationsUsed: 0,
+        };
+      }
+      return await agent.handleUserMessage({
         channel: params.channel,
         channelKey: params.channelKey,
         agentId: params.agentId,
         text: params.text,
-      }),
+      });
+    },
     getModelMode: () => circuitBreaker.getEffectiveMode(),
     setModelMode: (mode) => {
       if (mode === "default" || mode === "local_only") {
@@ -830,7 +1240,23 @@ export async function startGateway(
   let processNotifier: ReturnType<typeof startProcessNotifier> = null;
 
   const startServices = async () => {
-    tg = await startTelegramBot({ config, agent, configPath: params.configPath, log, db, app: http.app });
+    tg = await startTelegramBot({
+      config,
+      agent,
+      configPath: params.configPath,
+      log,
+      db,
+      app: http.app,
+      onPreDispatchCommand: async (command) =>
+        await handleControlCommand({
+          channel: command.channel,
+          channelKey: command.channelKey,
+          agentId: command.agentId,
+          sessionId: command.sessionId,
+          text: command.text,
+          actorLabel: `telegram:${command.actorId}`,
+        }),
+    });
     if (!tg) log("telegram: disabled");
     if (tg) {
       toolContext.telegram = {
@@ -874,6 +1300,7 @@ export async function startGateway(
       agent,
       db,
       telegram: tg,
+      getTickSuppression,
       log,
     });
     if (!proactive) log("proactive: disabled");
@@ -883,6 +1310,7 @@ export async function startGateway(
       agent,
       db,
       log,
+      getTickSuppression,
       getTools: () => registry.list(),
       toolContext,
       workspaceDir: paths.workspaceDir,
@@ -1200,6 +1628,59 @@ export async function startGateway(
     return c.json({ mode: isStandby ? "standby" : "active" });
   });
 
+  http.app.post("/api/stopall", async (c) => {
+    let body: Record<string, unknown> = {};
+    try {
+      const parsed = await c.req.json();
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // empty or non-JSON body; use defaults
+    }
+
+    let cooldownMs = defaultStopAllCooldownMs;
+    const cooldownMsRaw = body.cooldownMs;
+    const cooldownRaw = typeof body.cooldown === "string" ? body.cooldown.trim() : "";
+    if (typeof cooldownMsRaw === "number" && Number.isFinite(cooldownMsRaw) && cooldownMsRaw > 0) {
+      cooldownMs = Math.max(1_000, Math.floor(cooldownMsRaw));
+    } else if (cooldownRaw) {
+      const parsed = parseDurationToMs(cooldownRaw);
+      if (parsed === null) {
+        return c.json(
+          {
+            ok: false,
+            error: `invalid cooldown value: ${cooldownRaw}`,
+            hint: "Use values like 30s, 5m, 1h, or 1d.",
+          },
+          400,
+        );
+      }
+      cooldownMs = parsed;
+    }
+
+    const result = await executeStop({
+      scope: "all",
+      sessionId: null,
+      reason: "api:/api/stopall",
+      cooldownMs,
+    });
+    return c.json({
+      ok: true,
+      cooldownMs,
+      cooldown: formatDurationMs(cooldownMs),
+      cooldownUntil: stopAllSuppressedUntilMs,
+      result,
+      summary: summarizeStop({
+        scope: "all",
+        sessionId: null,
+        cooldownMs,
+        result,
+      }),
+      timestamp: Date.now(),
+    });
+  });
+
   http.app.post("/api/proactive/pause", (c) => {
     if (proactive) {
       proactive.pause();
@@ -1310,6 +1791,7 @@ export async function startGateway(
       }
     }
     isolatedWorkers.clear();
+    isolatedWorkerOwners.clear();
 
     await deactivateServices("shutdown");
     circuitBreaker.dispose();

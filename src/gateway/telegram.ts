@@ -587,6 +587,15 @@ export async function startTelegramBot(deps: {
   configPath: string;
   db: NexusDatabase;
   app: Hono;
+  onPreDispatchCommand?: (params: {
+    channel: "telegram";
+    channelKey: string;
+    agentId: string;
+    sessionId: string;
+    text: string;
+    actorId: number;
+    nowMs: number;
+  }) => Promise<string | null>;
   log: (msg: string) => void;
 }): Promise<{
   stop: () => Promise<void>;
@@ -858,6 +867,30 @@ export async function startTelegramBot(deps: {
       if (isGroupChat(ctx) && tg.requireMentionInGroups) {
         if (!mentioned && !invoked) {
           deps.log(`telegram: ignore actor_id=${actorId} chat_id=${chatId} reason=require_mention`);
+          return;
+        }
+      }
+
+      if (deps.onPreDispatchCommand) {
+        const nowMs = Date.now();
+        const sessionId = getOrCreateSessionId({
+          db: deps.db,
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+          nowMs,
+        });
+        const intercepted = await deps.onPreDispatchCommand({
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+          sessionId,
+          text: rawInputText,
+          actorId,
+          nowMs,
+        });
+        if (intercepted !== null) {
+          await sendOutput(chatId, intercepted);
           return;
         }
       }

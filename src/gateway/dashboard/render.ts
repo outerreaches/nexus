@@ -213,9 +213,15 @@ export function renderDashboard(params: {
   </head>
   <body>
     <header>
-      <h1>Nexus Dashboard <span class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</span></h1>
+      <div class="header-row">
+        <h1>Nexus Dashboard</h1>
+        <div class="header-actions">
+          <span class="mode-pill ${modeClass}">${escapeHtml(modeLabel)}</span>
+          <button type="button" class="graph-btn btn-danger header-stopall" id="stop-all-btn">Stop All</button>
+          ${params.csrfToken ? `<form method="post" action="/auth/logout" class="form-inline compact"><button type="submit" class="graph-btn">Sign Out</button></form>` : ""}
+        </div>
+      </div>
       <div class="meta">Last updated: ${escapeHtml(updatedAt)}</div>
-      ${params.csrfToken ? `<form method="post" action="/auth/logout" class="form-inline compact"><button type="submit" class="graph-btn">Sign Out</button></form>` : ""}
     </header>
     <main>
       <section>
@@ -716,6 +722,7 @@ export function renderDashboard(params: {
       const nodeAuditActorInput = document.getElementById("node-audit-actor");
       const nodeAuditFetchBtn = document.getElementById("node-audit-fetch");
       const nodeAuditOlderBtn = document.getElementById("node-audit-older");
+      const stopAllBtn = document.getElementById("stop-all-btn");
       const csrfToken = ${csrfTokenJson};
 
       const withCsrfHeaders = (init = {}) => {
@@ -1694,6 +1701,39 @@ export function renderDashboard(params: {
           if (name) setActiveTab(name);
         });
       });
+
+      if (stopAllBtn) {
+        stopAllBtn.addEventListener("click", async () => {
+          const confirmed = window.confirm("Stop all sessions, processes, and agents now?");
+          if (!confirmed) return;
+          const raw = window.prompt(
+            "Cooldown before heartbeat and scheduler resume (examples: 30s, 5m, 1h). Leave blank for default.",
+            "5m",
+          );
+          if (raw === null) return;
+          const cooldown = raw.trim();
+          stopAllBtn.disabled = true;
+          try {
+            const res = await fetchWithAuth("/api/stopall", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+              },
+              body: JSON.stringify(cooldown ? { cooldown } : {}),
+            });
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok || payload.ok !== true) {
+              throw new Error(String(payload.error ?? "stopall request failed"));
+            }
+            window.alert(String(payload.summary ?? "Stop all executed."));
+            window.location.reload();
+          } catch (err) {
+            window.alert("Stop all failed: " + (err instanceof Error ? err.message : String(err)));
+          } finally {
+            stopAllBtn.disabled = false;
+          }
+        });
+      }
 
       if (logsRefreshBtn) {
         logsRefreshBtn.addEventListener("click", fetchLogs);

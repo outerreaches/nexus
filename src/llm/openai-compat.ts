@@ -19,6 +19,7 @@ export type LLMCompleteChatParams = {
   timeoutMode?: "default" | "extended";
   allowImageFallback?: boolean;
   onActivity?: () => void;
+  abortSignal?: AbortSignal;
 };
 
 export type LLMUsage = {
@@ -393,6 +394,22 @@ export class OpenAICompatClient implements LLMClient {
       log?.(`llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens}`);
 
       const controller = new AbortController();
+      const externalAbortSignal = params.abortSignal;
+      let externalAbortListener: (() => void) | null = null;
+      if (externalAbortSignal) {
+        const onExternalAbort = () => {
+          log?.(`llm_fetch_abort_external elapsed=${Date.now() - startMs}ms`);
+          controller.abort(externalAbortSignal.reason);
+        };
+        if (externalAbortSignal.aborted) {
+          onExternalAbort();
+        } else {
+          externalAbortSignal.addEventListener("abort", onExternalAbort, { once: true });
+          externalAbortListener = () => {
+            externalAbortSignal.removeEventListener("abort", onExternalAbort);
+          };
+        }
+      }
       let abortFired = false;
       const timeout = setTimeout(() => {
         abortFired = true;
@@ -467,6 +484,7 @@ export class OpenAICompatClient implements LLMClient {
         throw err;
       } finally {
         clearTimeout(timeout);
+        externalAbortListener?.();
       }
     }
   }

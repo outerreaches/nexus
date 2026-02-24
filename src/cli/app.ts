@@ -138,6 +138,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
+      const { getOrCreateSessionId } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
@@ -145,6 +146,8 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
       const { McpManager } = await import("../mcp/manager.js");
+      const { parseStopCommandText, formatDurationMs } = await import("../control/stop-command.js");
+      const { stopLocalInteractiveSessions } = await import("../tools/shell-interactive.js");
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
@@ -258,7 +261,73 @@ export async function runCli(argv: string[]): Promise<void> {
         },
       });
 
+      const resolveSessionId = (nowMs: number): string =>
+        getOrCreateSessionId({
+          db,
+          channel: "cli",
+          channelKey: "local",
+          agentId: String(opts.agent ?? "main"),
+          nowMs,
+        });
+
+      const stopManagedProcesses = async (sessionId: string | null): Promise<{ stopped: number; errors: string[] }> => {
+        const errors: string[] = [];
+        let stopped = 0;
+        const rows = sessionId
+          ? db.db
+            .prepare("SELECT id FROM process_runs WHERE status = 'running' AND request_session_id = ? AND backend = 'local_child'")
+            .all(sessionId) as { id: string }[]
+          : db.db
+            .prepare("SELECT id FROM process_runs WHERE status = 'running' AND backend = 'local_child'")
+            .all() as { id: string }[];
+        for (const row of rows) {
+          try {
+            await processManager.stop({ id: row.id, signal: "SIGTERM", killAfterMs: 2_000 });
+            stopped += 1;
+          } catch (err) {
+            errors.push(`process ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        return { stopped, errors };
+      };
+
+      const handleControlCommand = async (text: string): Promise<string | null> => {
+        const parsed = parseStopCommandText(text);
+        if (!parsed) return null;
+        const nowMs = Date.now();
+        if (parsed.kind === "stop") {
+          const sessionId = resolveSessionId(nowMs);
+          const cancelledRuns = agent.cancelSessionRuns(sessionId, "cli /stop");
+          const shellStop = await stopLocalInteractiveSessions({ stateDir: paths.stateDir, ownerSessionId: sessionId });
+          const processStop = await stopManagedProcesses(sessionId);
+          const errors = [...shellStop.errors, ...processStop.errors];
+          return [
+            `STOP executed for session ${sessionId}.`,
+            `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
+            ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
+          ].join("\n");
+        }
+
+        if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
+          return `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, or 1h.`;
+        }
+        const cancelledRuns = agent.cancelAllRuns("cli /stopall");
+        const shellStop = await stopLocalInteractiveSessions({ stateDir: paths.stateDir });
+        const processStop = await stopManagedProcesses(null);
+        const errors = [...shellStop.errors, ...processStop.errors];
+        return [
+          `STOP ALL executed. Cooldown ignored in local chat mode (${formatDurationMs(parsed.cooldownMs ?? 5 * 60_000)}).`,
+          `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
+          ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
+        ].join("\n");
+      };
+
       async function send(text: string): Promise<void> {
+        const intercepted = await handleControlCommand(text);
+        if (intercepted !== null) {
+          process.stdout.write(intercepted.trimEnd() + "\n");
+          return;
+        }
         const res = await agent.handleUserMessage({
           channel: "cli",
           channelKey: "local",

@@ -40,6 +40,8 @@ export type ToolContext = {
     parentRunId?: string;
     modelMode?: ModelRoutingMode;
   };
+  /** Abort signal for the current run (used by stop controls). */
+  abortSignal?: AbortSignal;
   /** Optional explicit node target for remote execution. */
   executionNode?: string;
   /** Optional execution preference. Undefined keeps existing local behavior. */
@@ -60,6 +62,19 @@ export type ToolContext = {
   log: (msg: string) => void;
   /** Active isolated worker child processes (for shutdown cleanup). */
   isolatedWorkers?: Set<ChildProcess>;
+  /** Register an isolated worker with ownership metadata for stop controls. */
+  registerIsolatedWorker?: (
+    child: ChildProcess,
+    owner: {
+      sessionId: string | null;
+      runId: string | null;
+      channel: string | null;
+      channelKey: string | null;
+      agentId: string | null;
+    },
+  ) => void;
+  /** Unregister an isolated worker from stop control tracking. */
+  unregisterIsolatedWorker?: (child: ChildProcess) => void;
 };
 
 export type ToolDefinition<TParams extends z.ZodTypeAny> = {

@@ -84,6 +84,20 @@ export function dashboardStyles(): string {
         background: linear-gradient(180deg, #0d120d 0%, #0a0a0a 100%);
         box-shadow: 0 2px 20px rgba(0, 255, 65, 0.1);
       }
+      .header-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-left: auto;
+      }
       h1 {
         margin: 0 0 8px;
         font-size: 28px;
@@ -102,9 +116,8 @@ export function dashboardStyles(): string {
         text-shadow: var(--glow);
       }
       .mode-pill {
-        float: right;
         display: inline-block;
-        margin-left: 12px;
+        margin-left: 0;
         font-size: 11px;
         letter-spacing: 2px;
         text-transform: uppercase;
@@ -126,6 +139,9 @@ export function dashboardStyles(): string {
       }
       .mode-pill.unknown {
         color: var(--muted);
+      }
+      .header-stopall {
+        white-space: nowrap;
       }
       .meta {
         color: var(--muted);

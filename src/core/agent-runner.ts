@@ -371,6 +371,25 @@ export type AgentResult = {
   iterationsUsed: number;
 };
 
+export class RunCancelledError extends Error {
+  constructor(message: string = "Run cancelled") {
+    super(message);
+    this.name = "RunCancelledError";
+  }
+}
+
+function abortReasonToText(reason: unknown): string | null {
+  if (typeof reason === "string" && reason.trim().length > 0) return reason.trim();
+  if (reason instanceof Error && reason.message.trim().length > 0) return reason.message.trim();
+  return null;
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "AbortError") return true;
+  return /aborted|abort/i.test(err.message);
+}
+
 export class AgentRunner {
   constructor(
     private readonly deps: {
@@ -385,6 +404,8 @@ export class AgentRunner {
       trackCircuitBreaker?: boolean;
       /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
       transientRetries?: number;
+      /** Abort signal used by stop controls to cancel this run. */
+      abortSignal?: AbortSignal;
     },
   ) { }
 
@@ -398,7 +419,14 @@ export class AgentRunner {
     this.deps.circuitBreaker?.recordFailure(err);
   }
 
+  private throwIfCancelled(): void {
+    if (!this.deps.abortSignal?.aborted) return;
+    const reason = abortReasonToText(this.deps.abortSignal.reason);
+    throw new RunCancelledError(reason ? `Run cancelled: ${reason}` : "Run cancelled");
+  }
+
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
+    this.throwIfCancelled();
     const baseMessages: ChatMessage[] = [{ role: "system", content: params.systemPrompt }, ...params.history];
     if (baseMessages.length > 0) {
       baseMessages[baseMessages.length - 1] = {
@@ -424,6 +452,7 @@ export class AgentRunner {
     const runStartedAtMs = this.deps.toolContext.nowMs();
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
+      this.throwIfCancelled();
       // ── Context compaction ─────────────────────────────────────────────
       if (maxContextTokens > 0) {
         const estimated = estimateTotalTokens(messages, this.deps.tools);
@@ -474,13 +503,18 @@ export class AgentRunner {
         const res = await this.deps.llm.completeChat({
           messages,
           tools: this.deps.tools,
+          abortSignal: this.deps.abortSignal,
         });
         this.recordCircuitSuccess();
+        this.throwIfCancelled();
         content = res.content;
         toolCalls = res.toolCalls;
         const usageLine = formatLlmUsage(res.usage);
         if (usageLine) this.deps.onLog?.(`llm_usage mode=default ${usageLine}`);
       } catch (err) {
+        if (this.deps.abortSignal?.aborted || isAbortLikeError(err)) {
+          throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM call");
+        }
         this.recordCircuitFailure(err);
         const isTimeout = isLlmTimeoutError(err);
         const isTransient = isTransientLlmError(err);
@@ -510,14 +544,18 @@ export class AgentRunner {
           for (let attempt = 1; attempt <= maxRetries; attempt++) {
             const backoffMs = Math.min(3_000 * attempt, 15_000);
             this.deps.onLog?.(`llm_transient_error: ${truncate(errMsg, 200)} — retry ${attempt}/${maxRetries} after ${backoffMs}ms`);
+            this.throwIfCancelled();
             await new Promise((r) => setTimeout(r, backoffMs));
+            this.throwIfCancelled();
             this.deps.onLog?.(`llm_call_retry iteration=${iteration} messages=${messages.length} mode=transient attempt=${attempt}`);
             try {
               const retry = await this.deps.llm.completeChat({
                 messages,
                 tools: this.deps.tools,
+                abortSignal: this.deps.abortSignal,
               });
               this.recordCircuitSuccess();
+              this.throwIfCancelled();
               content = retry.content;
               toolCalls = retry.toolCalls;
               const usageLine = formatLlmUsage(retry.usage);
@@ -526,6 +564,9 @@ export class AgentRunner {
               retrySucceeded = true;
               break;
             } catch (retryErr) {
+              if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {
+                throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM retry");
+              }
               this.recordCircuitFailure(retryErr);
               errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
               if (attempt === maxRetries || !isTransientLlmError(retryErr)) {
@@ -612,14 +653,19 @@ export class AgentRunner {
               messages: [...retryMessages, retryInstruction],
               tools: this.deps.tools,
               timeoutMode: "extended",
+              abortSignal: this.deps.abortSignal,
             });
             this.recordCircuitSuccess();
+            this.throwIfCancelled();
             content = retry.content;
             toolCalls = retry.toolCalls;
             const usageLine = formatLlmUsage(retry.usage);
             if (usageLine) this.deps.onLog?.(`llm_usage mode=extended ${usageLine}`);
             this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
           } catch (retryErr) {
+            if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {
+              throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM timeout recovery");
+            }
             this.recordCircuitFailure(retryErr);
             const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
             this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
@@ -878,6 +924,7 @@ export class AgentRunner {
       };
 
       for (let i = 0; i < toolCalls.length; i++) {
+        this.throwIfCancelled();
         const call = toolCalls[i];
         if (call.name === "spawn_agent") {
           let j = i;
@@ -951,6 +998,7 @@ export class AgentRunner {
             }
 
             const results = await Promise.all(executions.map((e) => e.promise));
+            this.throwIfCancelled();
             for (let idx = 0; idx < executions.length; idx++) {
               const entry = executions[idx];
               toolCallsUsed += 1;
@@ -1050,6 +1098,7 @@ export class AgentRunner {
             this.deps.toolContext.executionNode !== undefined ||
             this.deps.toolContext.executionMode === "remote" ||
             this.deps.toolContext.executionMode === "auto";
+          this.throwIfCancelled();
           if (wantsNodeRouting && this.deps.toolContext.nodeRouter) {
             result = await this.deps.toolContext.nodeRouter.routeToolExecution(
               tool,
@@ -1059,7 +1108,11 @@ export class AgentRunner {
           } else {
             result = await tool.execute(args, this.deps.toolContext);
           }
+          this.throwIfCancelled();
         } catch (err) {
+          if (this.deps.abortSignal?.aborted || isAbortLikeError(err)) {
+            throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during tool execution");
+          }
           const msg = err instanceof Error ? err.message : String(err);
           const code =
             err &&

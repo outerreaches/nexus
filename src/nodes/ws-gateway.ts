@@ -98,6 +98,7 @@ type PendingGatewayRequest = {
   method: string;
   createdAt: number;
   timeout: NodeJS.Timeout;
+  onSettle?: () => void;
   resolve: (response: ProtocolResponse) => void;
   reject: (error: NodeRoutingError) => void;
 };
@@ -220,6 +221,7 @@ export class NodeWebSocketGateway {
     args: unknown;
     ctx?: ToolContext;
     timeoutMs?: number;
+    abortSignal?: AbortSignal;
   }): Promise<string> {
     const routing: Record<string, unknown> = {};
     if (params.ctx?.firewallSession) {
@@ -241,6 +243,7 @@ export class NodeWebSocketGateway {
         ...(Object.keys(routing).length > 0 ? { routing } : {}),
       },
       timeoutMs: params.timeoutMs,
+      abortSignal: params.abortSignal ?? params.ctx?.abortSignal,
     });
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
@@ -257,6 +260,8 @@ export class NodeWebSocketGateway {
     timeoutMs?: number;
   }): Promise<string> {
     switch (params.remoteName) {
+      case "system.run":
+        return this.requestSystemRun(params);
       case "process.start":
         return this.requestProcessStart(params);
       case "process.status":
@@ -286,6 +291,7 @@ export class NodeWebSocketGateway {
           args: params.args,
           ctx: params.ctx,
           timeoutMs: params.timeoutMs,
+          abortSignal: params.ctx.abortSignal,
         });
     }
   }
@@ -295,12 +301,14 @@ export class NodeWebSocketGateway {
     method: string;
     params?: unknown;
     timeoutMs?: number;
+    abortSignal?: AbortSignal;
   }): Promise<NodeTransportOperationResult> {
     const response = await this.requestNode({
       nodeId: params.nodeId,
       method: params.method,
       params: params.params,
       timeoutMs: params.timeoutMs,
+      abortSignal: params.abortSignal,
     });
     if (response.ok) {
       return {
@@ -323,6 +331,7 @@ export class NodeWebSocketGateway {
     method: string;
     params?: unknown;
     timeoutMs?: number;
+    abortSignal?: AbortSignal;
   }): Promise<ProtocolResponse> {
     const target = this.resolveActiveNodeSocket(params.nodeId);
     if (!target) {
@@ -332,6 +341,10 @@ export class NodeWebSocketGateway {
     const requestId = randomUUID();
     const timeoutMs = Math.max(2_000, params.timeoutMs ?? this.requestTimeoutMs);
     return await new Promise<ProtocolResponse>((resolve, reject) => {
+      if (params.abortSignal?.aborted) {
+        reject(new NodeRoutingError("NODE_REQUEST_ABORTED", `Request aborted before send (${params.method}).`));
+        return;
+      }
       const timeout = setTimeout(() => {
         this.pendingGatewayRequests.delete(requestId);
         reject(
@@ -343,6 +356,24 @@ export class NodeWebSocketGateway {
       }, timeoutMs);
       timeout.unref?.();
 
+      let aborted = false;
+      let removeAbortListener: (() => void) | undefined;
+      const onAbort = () => {
+        if (aborted) return;
+        aborted = true;
+        const pending = this.pendingGatewayRequests.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingGatewayRequests.delete(requestId);
+          pending.onSettle?.();
+        }
+        reject(new NodeRoutingError("NODE_REQUEST_ABORTED", `Request aborted (${params.method}).`));
+      };
+      if (params.abortSignal) {
+        params.abortSignal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => params.abortSignal?.removeEventListener("abort", onAbort);
+      }
+
       this.pendingGatewayRequests.set(requestId, {
         id: requestId,
         nodeId: params.nodeId,
@@ -350,6 +381,7 @@ export class NodeWebSocketGateway {
         method: params.method,
         createdAt: Date.now(),
         timeout,
+        onSettle: removeAbortListener,
         resolve,
         reject,
       });
@@ -365,6 +397,7 @@ export class NodeWebSocketGateway {
         if (pending) {
           clearTimeout(pending.timeout);
           this.pendingGatewayRequests.delete(requestId);
+          pending.onSettle?.();
         }
         reject(
           new NodeRoutingError(
@@ -392,20 +425,21 @@ export class NodeWebSocketGateway {
     throw err;
   }
 
-  private async requestProcessStart(params: {
-    nodeId: string;
-    args: unknown;
+  private buildProcessStartRequest(params: {
+    argsObj: Record<string, unknown>;
     ctx: ToolContext;
-    timeoutMs?: number;
-  }): Promise<string> {
-    const argsObj = this.asObject(params.args);
-    const command = this.asString(argsObj.command);
+  }): {
+    requestParams: Record<string, unknown>;
+    command: string;
+    timeoutMs: number | undefined;
+  } {
+    const command = this.asString(params.argsObj.command);
     if (!command) {
       throw new NodeRoutingError("NODE_PROTOCOL_ERROR", "process_start requires a non-empty `command`.");
     }
-    const cwd = this.asString(argsObj.cwd) ?? undefined;
-    const timeout = this.asNumber(argsObj.timeoutMs ?? argsObj.timeout) ?? undefined;
-    const notifyObj = this.asObject(argsObj.notify);
+    const cwd = this.asString(params.argsObj.cwd) ?? undefined;
+    const timeout = this.asNumber(params.argsObj.timeoutMs ?? params.argsObj.timeout) ?? undefined;
+    const notifyObj = this.asObject(params.argsObj.notify);
     const notifyMode = this.asString(notifyObj.mode);
     const notifyChatId = this.asNumber(notifyObj.chatId);
     const notifyPreset = this.asString(notifyObj.preset);
@@ -438,11 +472,158 @@ export class NodeWebSocketGateway {
     if (Object.keys(routing).length > 0) {
       requestParams.routing = routing;
     }
+    return {
+      requestParams,
+      command,
+      timeoutMs: timeout,
+    };
+  }
+
+  private async requestSystemRun(params: {
+    nodeId: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const startRequest = this.buildProcessStartRequest({
+      argsObj,
+      ctx: params.ctx,
+    });
+    const startResponse = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.start",
+      params: startRequest.requestParams,
+      timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
+    });
+    this.throwOnRemoteError(startResponse, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to start remote process.`,
+    });
+    const startPayload = this.asObject(startResponse.payload);
+    const processId = this.asString(startPayload.processId) ?? this.asString(startPayload.id);
+    if (!processId) {
+      throw new NodeRoutingError("NODE_PROTOCOL_ERROR", `Node ${params.nodeId} process.start response missing processId.`);
+    }
+
+    let finalStatusPayload: Record<string, unknown> | null = null;
+    for (;;) {
+      if (params.ctx.abortSignal?.aborted) {
+        await this.cancelRemoteProcessBestEffort({
+          nodeId: params.nodeId,
+          processId,
+          reason: "run_cancelled",
+        });
+        throw new NodeRoutingError("NODE_REQUEST_ABORTED", "Remote system.run cancelled by run stop.");
+      }
+
+      const statusResponse = await this.requestNode({
+        nodeId: params.nodeId,
+        method: "process.status",
+        params: { processId },
+        timeoutMs: params.timeoutMs,
+        abortSignal: params.ctx.abortSignal,
+      });
+      this.throwOnRemoteError(statusResponse, {
+        code: "NODE_EXECUTION_FAILED",
+        message: `Node ${params.nodeId} failed to fetch process status.`,
+      });
+      finalStatusPayload = this.asObject(statusResponse.payload);
+      const status = this.asString(finalStatusPayload.status) ?? "";
+      if (status === "completed" || status === "failed" || status === "cancelled") break;
+      await this.waitForAbortableDelay(250, params.ctx.abortSignal);
+    }
+
+    const logsResponse = await this.requestNode({
+      nodeId: params.nodeId,
+      method: "process.logs",
+      params: { processId, maxChars: 50_000 },
+      timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
+    });
+    this.throwOnRemoteError(logsResponse, {
+      code: "NODE_EXECUTION_FAILED",
+      message: `Node ${params.nodeId} failed to fetch process logs.`,
+    });
+    const logsPayload = this.asObject(logsResponse.payload);
+    const logs = this.asString(logsPayload.logs) ?? this.normalizeStructuredResult(logsResponse.payload);
+
+    const finalStatus = this.asString(finalStatusPayload?.status) ?? "";
+    const exitCode = this.asNumber(finalStatusPayload?.exitCode);
+    const signal = this.asString(finalStatusPayload?.signal);
+    if (finalStatus === "completed" && (exitCode === null || exitCode === 0)) {
+      return logs;
+    }
+    if (finalStatus === "cancelled") {
+      return `ERROR: command cancelled (process=${processId})\n\n${logs}`;
+    }
+    const exitSummary = exitCode === null ? "exit=unknown" : `exit=${Math.floor(exitCode)}`;
+    const signalSummary = signal ? ` signal=${signal}` : "";
+    return `ERROR: command failed (${exitSummary}${signalSummary})\n\n${logs}`;
+  }
+
+  private async cancelRemoteProcessBestEffort(params: {
+    nodeId: string;
+    processId: string;
+    reason: string;
+  }): Promise<void> {
+    try {
+      await this.requestNode({
+        nodeId: params.nodeId,
+        method: "process.cancel",
+        params: {
+          processId: params.processId,
+          signal: "SIGTERM",
+          killAfterMs: 2_000,
+          reason: params.reason,
+        },
+        timeoutMs: 10_000,
+      });
+    } catch {
+      // Best-effort cancellation
+    }
+  }
+
+  private async waitForAbortableDelay(ms: number, abortSignal?: AbortSignal): Promise<void> {
+    if (!abortSignal) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    if (abortSignal.aborted) {
+      throw new NodeRoutingError("NODE_REQUEST_ABORTED", "Request cancelled.");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        abortSignal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      timer.unref?.();
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new NodeRoutingError("NODE_REQUEST_ABORTED", "Request cancelled."));
+      };
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private async requestProcessStart(params: {
+    nodeId: string;
+    args: unknown;
+    ctx: ToolContext;
+    timeoutMs?: number;
+  }): Promise<string> {
+    const argsObj = this.asObject(params.args);
+    const request = this.buildProcessStartRequest({
+      argsObj,
+      ctx: params.ctx,
+    });
     const response = await this.requestNode({
       nodeId: params.nodeId,
       method: "process.start",
-      params: requestParams,
+      params: request.requestParams,
       timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
     });
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
@@ -454,6 +635,7 @@ export class NodeWebSocketGateway {
   private async requestProcessStatus(params: {
     nodeId: string;
     args: unknown;
+    ctx: ToolContext;
     timeoutMs?: number;
   }): Promise<string> {
     const argsObj = this.asObject(params.args);
@@ -466,6 +648,7 @@ export class NodeWebSocketGateway {
       method: "process.status",
       params: { processId },
       timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
     });
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
@@ -477,6 +660,7 @@ export class NodeWebSocketGateway {
   private async requestProcessLogs(params: {
     nodeId: string;
     args: unknown;
+    ctx: ToolContext;
     timeoutMs?: number;
   }): Promise<string> {
     const argsObj = this.asObject(params.args);
@@ -493,6 +677,7 @@ export class NodeWebSocketGateway {
         ...(maxChars ? { maxChars } : {}),
       },
       timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
     });
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
@@ -506,6 +691,7 @@ export class NodeWebSocketGateway {
   private async requestProcessCancel(params: {
     nodeId: string;
     args: unknown;
+    ctx: ToolContext;
     timeoutMs?: number;
   }): Promise<string> {
     const argsObj = this.asObject(params.args);
@@ -526,6 +712,7 @@ export class NodeWebSocketGateway {
         reason,
       },
       timeoutMs: params.timeoutMs,
+      abortSignal: params.ctx.abortSignal,
     });
     this.throwOnRemoteError(response, {
       code: "NODE_EXECUTION_FAILED",
@@ -1220,6 +1407,7 @@ export class NodeWebSocketGateway {
 
     this.pendingGatewayRequests.delete(msg.id);
     clearTimeout(pending.timeout);
+    pending.onSettle?.();
     pending.resolve(msg);
   }
 
@@ -1820,6 +2008,7 @@ export class NodeWebSocketGateway {
       if (pending.sessionId !== sessionId) continue;
       clearTimeout(pending.timeout);
       this.pendingGatewayRequests.delete(requestId);
+      pending.onSettle?.();
       pending.reject(
         new NodeRoutingError(
           "NODE_SOCKET_UNAVAILABLE",
@@ -1833,6 +2022,7 @@ export class NodeWebSocketGateway {
     for (const [requestId, pending] of this.pendingGatewayRequests) {
       clearTimeout(pending.timeout);
       this.pendingGatewayRequests.delete(requestId);
+      pending.onSettle?.();
       pending.reject(
         new NodeRoutingError(
           "NODE_SOCKET_UNAVAILABLE",

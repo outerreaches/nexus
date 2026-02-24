@@ -111,11 +111,25 @@ type ShellCtlSessionMeta = {
   lastReadCursor: number;
   createdAt: number;
   updatedAt: number;
+  ownerSessionId?: string | null;
+  ownerRunId?: string | null;
+  ownerChannel?: string | null;
+  ownerChannelKey?: string | null;
+  ownerAgentId?: string | null;
 };
 
 type ParsedShellCtlCommand =
   | { action: "list" }
-  | { action: "open"; sessionId: string; cwd: string | null }
+  | {
+    action: "open";
+    sessionId: string;
+    cwd: string | null;
+    ownerSessionId: string | null;
+    ownerRunId: string | null;
+    ownerChannel: string | null;
+    ownerChannelKey: string | null;
+    ownerAgentId: string | null;
+  }
   | { action: "send"; sessionId: string; payload: string; enter: boolean }
   | { action: "read"; sessionId: string; cursor?: number; waitMs: number; idleMs: number; maxChars: number }
   | { action: "close"; sessionId: string }
@@ -2077,6 +2091,11 @@ class ReferenceNodeClient {
       const lastReadCursor = asNumber(parsed.lastReadCursor);
       const createdAt = asNumber(parsed.createdAt);
       const updatedAt = asNumber(parsed.updatedAt);
+      const ownerSessionId = asString(parsed.ownerSessionId);
+      const ownerRunId = asString(parsed.ownerRunId);
+      const ownerChannel = asString(parsed.ownerChannel);
+      const ownerChannelKey = asString(parsed.ownerChannelKey);
+      const ownerAgentId = asString(parsed.ownerAgentId);
       if (!parsedSessionId || !tmuxSession || !cwd || !logPath) return null;
       return {
         sessionId: parsedSessionId,
@@ -2086,6 +2105,11 @@ class ReferenceNodeClient {
         lastReadCursor: Math.max(0, Math.floor(lastReadCursor ?? 0)),
         createdAt: createdAt ?? Date.now(),
         updatedAt: updatedAt ?? Date.now(),
+        ownerSessionId: ownerSessionId ?? null,
+        ownerRunId: ownerRunId ?? null,
+        ownerChannel: ownerChannel ?? null,
+        ownerChannelKey: ownerChannelKey ?? null,
+        ownerAgentId: ownerAgentId ?? null,
       };
     } catch {
       return null;
@@ -2275,6 +2299,11 @@ class ReferenceNodeClient {
           logBytes: await this.shellCtlFileSize(meta.logPath),
           createdAt: meta.createdAt,
           updatedAt: meta.updatedAt,
+          ownerSessionId: meta.ownerSessionId ?? null,
+          ownerRunId: meta.ownerRunId ?? null,
+          ownerChannel: meta.ownerChannel ?? null,
+          ownerChannelKey: meta.ownerChannelKey ?? null,
+          ownerAgentId: meta.ownerAgentId ?? null,
         });
       }
       return JSON.stringify(
@@ -2356,6 +2385,11 @@ class ReferenceNodeClient {
         lastReadCursor: 0,
         createdAt: now,
         updatedAt: now,
+        ownerSessionId: parsed.ownerSessionId ?? null,
+        ownerRunId: parsed.ownerRunId ?? null,
+        ownerChannel: parsed.ownerChannel ?? null,
+        ownerChannelKey: parsed.ownerChannelKey ?? null,
+        ownerAgentId: parsed.ownerAgentId ?? null,
       });
       return JSON.stringify(
         {
@@ -5028,10 +5062,27 @@ function parseShellCtlCommand(command: string): ParsedShellCtlCommand {
   const flags = parseShellCtlFlags(args);
   const sessionId = parseShellCtlSessionId(flags.get("--session"));
   if (action === "open") {
-    ensureOnlyShellCtlFlags(flags, ["--session", "--cwd-b64"]);
+    ensureOnlyShellCtlFlags(flags, [
+      "--session",
+      "--cwd-b64",
+      "--owner-session",
+      "--owner-run",
+      "--owner-channel",
+      "--owner-channel-key",
+      "--owner-agent",
+    ]);
     const cwdB64 = flags.get("--cwd-b64");
     const cwd = cwdB64 ? decodeBase64Utf8OrThrow(cwdB64, "--cwd-b64") : null;
-    return { action: "open", sessionId, cwd };
+    return {
+      action: "open",
+      sessionId,
+      cwd,
+      ownerSessionId: asString(flags.get("--owner-session")),
+      ownerRunId: asString(flags.get("--owner-run")),
+      ownerChannel: asString(flags.get("--owner-channel")),
+      ownerChannelKey: asString(flags.get("--owner-channel-key")),
+      ownerAgentId: asString(flags.get("--owner-agent")),
+    };
   }
   if (action === "send") {
     ensureOnlyShellCtlFlags(flags, ["--session", "--payload-b64", "--enter"]);

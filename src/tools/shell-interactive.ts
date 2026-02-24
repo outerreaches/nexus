@@ -26,6 +26,11 @@ type SessionMeta = {
   lastReadCursor: number;
   createdAt: number;
   updatedAt: number;
+  ownerSessionId?: string | null;
+  ownerRunId?: string | null;
+  ownerChannel?: string | null;
+  ownerChannelKey?: string | null;
+  ownerAgentId?: string | null;
 };
 
 type TmuxResult = {
@@ -186,6 +191,11 @@ async function readSessionMeta(stateDir: string, sessionId: string): Promise<Ses
       : 0;
     const createdAt = typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now();
     const updatedAt = typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now();
+    const ownerSessionId = typeof parsed.ownerSessionId === "string" ? parsed.ownerSessionId : null;
+    const ownerRunId = typeof parsed.ownerRunId === "string" ? parsed.ownerRunId : null;
+    const ownerChannel = typeof parsed.ownerChannel === "string" ? parsed.ownerChannel : null;
+    const ownerChannelKey = typeof parsed.ownerChannelKey === "string" ? parsed.ownerChannelKey : null;
+    const ownerAgentId = typeof parsed.ownerAgentId === "string" ? parsed.ownerAgentId : null;
     if (!session || !tmuxSession || !cwd || !logPath) return null;
     return {
       sessionId: session,
@@ -195,6 +205,11 @@ async function readSessionMeta(stateDir: string, sessionId: string): Promise<Ses
       lastReadCursor,
       createdAt,
       updatedAt,
+      ownerSessionId,
+      ownerRunId,
+      ownerChannel,
+      ownerChannelKey,
+      ownerAgentId,
     };
   } catch {
     return null;
@@ -444,6 +459,11 @@ async function openLocalSession(params: {
     lastReadCursor: 0,
     createdAt: now,
     updatedAt: now,
+    ownerSessionId: params.ctx.request?.sessionId ?? null,
+    ownerRunId: params.ctx.request?.runId ?? null,
+    ownerChannel: params.ctx.request?.channel ?? null,
+    ownerChannelKey: params.ctx.request?.channelKey ?? null,
+    ownerAgentId: params.ctx.request?.agentId ?? null,
   };
   await writeSessionMeta(params.ctx.stateDir, meta);
 
@@ -630,6 +650,11 @@ async function listLocalSessions(ctx: ToolContext): Promise<string> {
       logBytes: await fileSize(meta.logPath),
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
+      ownerSessionId: meta.ownerSessionId ?? null,
+      ownerRunId: meta.ownerRunId ?? null,
+      ownerChannel: meta.ownerChannel ?? null,
+      ownerChannelKey: meta.ownerChannelKey ?? null,
+      ownerAgentId: meta.ownerAgentId ?? null,
     });
   }
   return formatJson({
@@ -639,6 +664,63 @@ async function listLocalSessions(ctx: ToolContext): Promise<string> {
     count: sessions.length,
     sessions,
   });
+}
+
+export async function stopLocalInteractiveSessions(params: {
+  stateDir: string;
+  ownerSessionId?: string | null;
+}): Promise<{
+  closed: number;
+  skipped: number;
+  failed: number;
+  closedSessions: string[];
+  errors: string[];
+}> {
+  await fs.mkdir(shellMetaDir(params.stateDir), { recursive: true });
+  const entries = await fs.readdir(shellMetaDir(params.stateDir));
+  const targetOwner = typeof params.ownerSessionId === "string" ? params.ownerSessionId.trim() : "";
+  const filterByOwner = targetOwner.length > 0;
+  let closed = 0;
+  let skipped = 0;
+  let failed = 0;
+  const closedSessions: string[] = [];
+  const errors: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    const sessionId = entry.slice(0, -5);
+    const meta = await readSessionMeta(params.stateDir, sessionId);
+    if (!meta) continue;
+    if (filterByOwner && (meta.ownerSessionId ?? "") !== targetOwner) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      const running = await tmuxHasSession(meta.tmuxSession);
+      if (running) {
+        await runTmux(["kill-session", "-t", meta.tmuxSession]);
+      }
+      await deleteSessionMeta(params.stateDir, sessionId);
+      try {
+        await fs.rm(meta.logPath, { force: true });
+      } catch {
+        // ignore
+      }
+      closed += 1;
+      closedSessions.push(sessionId);
+    } catch (err) {
+      failed += 1;
+      errors.push(`${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return {
+    closed,
+    skipped,
+    failed,
+    closedSessions,
+    errors,
+  };
 }
 
 export async function reapStaleSessions(stateDir: string): Promise<{ reaped: string[]; orphanLogs: string[] }> {
@@ -702,6 +784,11 @@ function buildNodeShellCommand(params: {
   waitMs: number;
   idleMs: number;
   maxChars: number;
+  ownerSessionId?: string | null;
+  ownerRunId?: string | null;
+  ownerChannel?: string | null;
+  ownerChannelKey?: string | null;
+  ownerAgentId?: string | null;
 }): { command?: string; error?: string } {
   const { action } = params;
   const sessionId = params.sessionId;
@@ -716,6 +803,23 @@ function buildNodeShellCommand(params: {
 
   if (action === "open" && typeof params.cwd === "string" && params.cwd.trim()) {
     tokens.push("--cwd-b64", encodeBase64(params.cwd));
+  }
+  if (action === "open") {
+    if (params.ownerSessionId && params.ownerSessionId.trim()) {
+      tokens.push("--owner-session", params.ownerSessionId.trim());
+    }
+    if (params.ownerRunId && params.ownerRunId.trim()) {
+      tokens.push("--owner-run", params.ownerRunId.trim());
+    }
+    if (params.ownerChannel && params.ownerChannel.trim()) {
+      tokens.push("--owner-channel", params.ownerChannel.trim());
+    }
+    if (params.ownerChannelKey && params.ownerChannelKey.trim()) {
+      tokens.push("--owner-channel-key", params.ownerChannelKey.trim());
+    }
+    if (params.ownerAgentId && params.ownerAgentId.trim()) {
+      tokens.push("--owner-agent", params.ownerAgentId.trim());
+    }
   }
   if (action === "send") {
     if (typeof params.input !== "string" || params.input.length === 0) {
@@ -749,6 +853,11 @@ async function executeOnNode(params: {
   maxChars: number;
   timeoutMs: number;
   ctx: ToolContext;
+  ownerSessionId?: string | null;
+  ownerRunId?: string | null;
+  ownerChannel?: string | null;
+  ownerChannelKey?: string | null;
+  ownerAgentId?: string | null;
 }): Promise<string> {
   const db = params.ctx.db as NexusDatabase | undefined;
   if (!db) return "ERROR: database is not available";
@@ -767,6 +876,11 @@ async function executeOnNode(params: {
     waitMs: params.waitMs,
     idleMs: params.idleMs,
     maxChars: params.maxChars,
+    ownerSessionId: params.ownerSessionId,
+    ownerRunId: params.ownerRunId,
+    ownerChannel: params.ownerChannel,
+    ownerChannelKey: params.ownerChannelKey,
+    ownerAgentId: params.ownerAgentId,
   });
   if (built.error) return `ERROR: ${built.error}`;
   const command = built.command ?? "";
@@ -864,6 +978,11 @@ export const shellInteractive = defineTool({
         maxChars: args.maxChars,
         timeoutMs: args.timeoutMs,
         ctx,
+        ownerSessionId: ctx.request?.sessionId ?? null,
+        ownerRunId: ctx.request?.runId ?? null,
+        ownerChannel: ctx.request?.channel ?? null,
+        ownerChannelKey: ctx.request?.channelKey ?? null,
+        ownerAgentId: ctx.request?.agentId ?? null,
       });
     }
 

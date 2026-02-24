@@ -112,6 +112,11 @@ export type JobSchedulerDeps = {
   agent: AgentService;
   db: NexusDatabase;
   log: (msg: string) => void;
+  getTickSuppression?: () => {
+    suppressed: boolean;
+    reason?: string;
+    retryAfterMs?: number;
+  };
   getTools: () => Tool[];
   toolContext: ToolContext;
   workspaceDir: string;
@@ -696,6 +701,18 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
 
   const tick = async () => {
     if (stopped) return;
+    const suppression = deps.getTickSuppression?.();
+    if (suppression?.suppressed) {
+      const retryAfterMs = Math.max(
+        1_000,
+        Math.floor(suppression.retryAfterMs ?? tickIntervalMs),
+      );
+      deps.log(
+        `scheduler: skip tick reason=${suppression.reason ?? "suppressed"} next=${Math.round(retryAfterMs / 1000)}s`,
+      );
+      scheduleNext(retryAfterMs);
+      return;
+    }
     if (running) {
       deps.log("scheduler: skip tick (still running)");
       scheduleNext(tickIntervalMs);

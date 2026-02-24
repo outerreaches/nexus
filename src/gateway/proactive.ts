@@ -12,6 +12,11 @@ export type ProactiveDeps = {
   telegram?: {
     sendOutput: (chatId: number, text: string) => Promise<void>;
   } | null;
+  getTickSuppression?: () => {
+    suppressed: boolean;
+    reason?: string;
+    retryAfterMs?: number;
+  };
   log: (msg: string) => void;
 };
 
@@ -174,6 +179,17 @@ export function startProactiveHeartbeat(
     if (paused) {
       deps.log(`proactive: tick_skip reason=paused next=${Math.round(nextDelayMs / 1000)}s`);
       scheduleNext(nextDelayMs);
+      return;
+    }
+    const suppression = deps.getTickSuppression?.();
+    if (suppression?.suppressed) {
+      const retryAfterMs = Math.max(1_000, Math.floor(suppression.retryAfterMs ?? nextDelayMs));
+      deps.log(
+        `proactive: tick_skip reason=${suppression.reason ?? "suppressed"} next=${Math.round(retryAfterMs / 1000)}s`,
+      );
+      lastTickAt = Date.now();
+      lastStatus = "skipped";
+      scheduleNext(retryAfterMs);
       return;
     }
     if (running) {

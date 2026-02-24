@@ -586,14 +586,65 @@ async function runIsolated(params: {
 
     // Track active worker for shutdown cleanup
     ctx.isolatedWorkers?.add(child);
+    ctx.registerIsolatedWorker?.(child, {
+      sessionId: ctx.request?.sessionId ?? null,
+      runId: ctx.request?.runId ?? null,
+      channel: ctx.request?.channel ?? null,
+      channelKey: ctx.request?.channelKey ?? null,
+      agentId: ctx.request?.agentId ?? null,
+    });
 
     let resolved = false;
     const finish = (resultJson: string) => {
       if (resolved) return;
       resolved = true;
       ctx.isolatedWorkers?.delete(child);
+      ctx.unregisterIsolatedWorker?.(child);
+      if (ctx.abortSignal && abortListener) {
+        ctx.abortSignal.removeEventListener("abort", abortListener);
+      }
       resolve(attachBlackboardTitle(resultJson, blackboardTitle));
     };
+
+    let abortListener: (() => void) | null = null;
+    if (ctx.abortSignal) {
+      abortListener = () => {
+        if (resolved) return;
+        logWorker("cancel requested, terminating worker");
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        setTimeout(() => {
+          if (resolved) return;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
+        }, 1_500).unref?.();
+        if (runId && tracker) {
+          tracker.completeRun(runId, {
+            status: "stopped",
+            outputPreview: "Run stopped: worker cancelled",
+            endedAt: ctx.nowMs(),
+          });
+        }
+        finish(JSON.stringify({
+          status: "failed",
+          output: "ERROR: worker run cancelled",
+          toolCallsUsed: 0,
+          iterationsUsed: 0,
+          deployApplied: false,
+        }));
+      };
+      if (ctx.abortSignal.aborted) {
+        abortListener();
+        return;
+      }
+      ctx.abortSignal.addEventListener("abort", abortListener, { once: true });
+    }
 
     // Timeout handler
     const timer = setTimeout(() => {
@@ -655,6 +706,7 @@ async function runIsolated(params: {
     child.on("exit", (code, signal) => {
       clearTimeout(timer);
       ctx.isolatedWorkers?.delete(child);
+      ctx.unregisterIsolatedWorker?.(child);
       if (!resolved) {
         const reason = signal ? `killed by ${signal}` : `exited with code ${code}`;
         logWorker(`crashed: ${reason}`);

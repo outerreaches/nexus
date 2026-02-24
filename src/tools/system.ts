@@ -92,6 +92,7 @@ export const shellExec = defineTool({
   }),
   execute: async ({ command, timeoutMs }, ctx) => {
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";
+    if (ctx.abortSignal?.aborted) return "ERROR: run cancelled";
 
     // Block mutating git commands that target the code repository.
     // Read-only commands (status, log, diff, show) are allowed.
@@ -101,8 +102,12 @@ export const shellExec = defineTool({
     }
 
     return await new Promise((resolve) => {
-      exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, signal: ctx.abortSignal }, (err, stdout, stderr) => {
         if (err) {
+          if (ctx.abortSignal?.aborted) {
+            resolve("ERROR: run cancelled");
+            return;
+          }
           const anyErr = err as any;
           const isTimeout =
             Boolean(anyErr?.killed) &&
