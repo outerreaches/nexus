@@ -80,6 +80,8 @@ export type ToolContext = {
 export type ToolDefinition<TParams extends z.ZodTypeAny> = {
   name: string;
   description: string;
+  /** When true, AgentRunner may route this tool through nodeRouter in remote execution mode. */
+  nodeRoutable?: boolean;
   parameters: TParams;
   execute: (args: z.infer<TParams>, ctx: ToolContext) => Promise<string>;
 };
@@ -87,6 +89,8 @@ export type ToolDefinition<TParams extends z.ZodTypeAny> = {
 export type Tool = {
   name: string;
   description: string;
+  /** When true, AgentRunner may route this tool through nodeRouter in remote execution mode. */
+  nodeRoutable?: boolean;
   jsonSchema: Record<string, unknown>;
   execute: (args: unknown, ctx: ToolContext) => Promise<string>;
 };
@@ -100,6 +104,7 @@ export function defineTool<TParams extends z.ZodTypeAny>(def: ToolDefinition<TPa
   return {
     name: def.name,
     description: def.description,
+    nodeRoutable: def.nodeRoutable === true,
     jsonSchema,
     execute: async (args: unknown, ctx: ToolContext) => {
       const parsed = def.parameters.parse(args) as z.infer<TParams>;

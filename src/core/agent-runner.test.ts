@@ -190,3 +190,128 @@ test("AgentRunner fails when repeated final output remains empty", async () => {
   assert.match(result.output, /empty final response/i);
   assert.equal(result.iterationsUsed, 2);
 });
+
+test("AgentRunner does not auto-route shell_interactive even in remote execution mode", async () => {
+  let step = 0;
+  let localShellInteractiveCalls = 0;
+  let routedCalls = 0;
+
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step === 0) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-shell-interactive",
+              name: "shell_interactive",
+              arguments: JSON.stringify({ action: "list", target: "node", nodeId: "jetson-nano-001" }),
+            },
+          ],
+        };
+      }
+      return { content: "done", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_interactive",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          localShellInteractiveCalls += 1;
+          return JSON.stringify({ ok: true, action: "list", count: 0 });
+        },
+      },
+    ],
+    budget: { maxIterations: 4, maxToolCalls: 8 },
+    toolContext: {
+      ...makeToolContext(),
+      executionNode: "jetson-nano-001",
+      executionMode: "remote",
+      nodeRouter: {
+        routeToolExecution: async () => {
+          routedCalls += 1;
+          return "routed";
+        },
+      },
+    },
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "test shell_interactive routing",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(localShellInteractiveCalls, 1);
+  assert.equal(routedCalls, 0);
+});
+
+test("AgentRunner auto-routes shell_exec in remote execution mode", async () => {
+  let step = 0;
+  let localShellExecCalls = 0;
+  let routedCalls = 0;
+
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step === 0) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-shell-exec",
+              name: "shell_exec",
+              arguments: JSON.stringify({ command: "echo test" }),
+            },
+          ],
+        };
+      }
+      return { content: "done", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_exec",
+        description: "test",
+        nodeRoutable: true,
+        jsonSchema: {},
+        execute: async () => {
+          localShellExecCalls += 1;
+          return "local";
+        },
+      },
+    ],
+    budget: { maxIterations: 4, maxToolCalls: 8 },
+    toolContext: {
+      ...makeToolContext(),
+      executionNode: "jetson-nano-001",
+      executionMode: "remote",
+      nodeRouter: {
+        routeToolExecution: async () => {
+          routedCalls += 1;
+          return "routed";
+        },
+      },
+    },
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "test shell_exec routing",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(localShellExecCalls, 0);
+  assert.equal(routedCalls, 1);
+});

@@ -74,6 +74,7 @@ export const shellExec = defineTool({
   name: "shell_exec",
   description:
     "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_start.",
+  nodeRoutable: true,
   parameters: z.object({
     command: z.string(),
     timeoutMs: z.number().int().positive().default(60_000),

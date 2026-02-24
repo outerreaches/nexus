@@ -12,6 +12,7 @@ export const processStart = defineTool({
   name: "process_start",
   description:
     "Start a persistent background daemon (server, watcher) and return an id. For periodic/scheduled tasks, use job_create instead.",
+  nodeRoutable: true,
   parameters: z.object({
     command: z.string().min(1).max(4000),
     cwd: z.string().max(2000).optional().describe("Working directory (defaults to stateDir)"),
@@ -148,6 +149,7 @@ export const processList = defineTool({
 export const processStatus = defineTool({
   name: "process_status",
   description: "Get status for a process started via process_start.",
+  nodeRoutable: true,
   parameters: z.object({
     id: z.string().min(1).max(32),
   }),
@@ -163,6 +165,7 @@ export const processStatus = defineTool({
 export const processStop = defineTool({
   name: "process_stop",
   description: "Stop a running process started via process_start.",
+  nodeRoutable: true,
   parameters: z.object({
     id: z.string().min(1).max(32),
     signal: z.enum(["SIGTERM", "SIGINT", "SIGKILL"]).default("SIGTERM"),
@@ -184,6 +187,7 @@ export const processStop = defineTool({
 export const processLogs = defineTool({
   name: "process_logs",
   description: "Tail logs for a process started via process_start.",
+  nodeRoutable: true,
   parameters: z.object({
     id: z.string().min(1).max(32),
     maxChars: z.number().int().min(200).max(50_000).default(8000),

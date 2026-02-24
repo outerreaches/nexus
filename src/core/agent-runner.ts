@@ -1130,10 +1130,11 @@ export class AgentRunner {
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         let result: string;
         try {
-          const wantsNodeRouting =
+          const hasNodeRoutingContext =
             this.deps.toolContext.executionNode !== undefined ||
             this.deps.toolContext.executionMode === "remote" ||
             this.deps.toolContext.executionMode === "auto";
+          const wantsNodeRouting = hasNodeRoutingContext && tool.nodeRoutable === true;
           this.throwIfCancelled();
           if (wantsNodeRouting && this.deps.toolContext.nodeRouter) {
             result = await this.deps.toolContext.nodeRouter.routeToolExecution(
