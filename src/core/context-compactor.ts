@@ -89,7 +89,7 @@ function findCompactionBoundary(messages: ChatMessage[], minRecentMessages: numb
   let count = 0;
   let boundary = messages.length;
   for (let i = messages.length - 1; i >= 1; i--) {
-    count++;
+    if (messages[i]?.role !== "system") count++;
     if (count >= minRecentMessages && messages[i]?.role === "user") {
       boundary = i;
       break;
@@ -294,8 +294,26 @@ function aggressiveTruncate(messages: ChatMessage[], targetTokens: number): Chat
   const ratio = targetTokens / current;
   // Calculate max chars per tool result based on how much we need to shrink
   const maxToolResultChars = Math.max(200, Math.floor(2000 * ratio));
+  const maxUserPayloadChars = Math.max(240, Math.floor(1800 * ratio));
+  const maxUserRenderedChars = Math.max(200, Math.floor(maxUserPayloadChars * 0.9));
 
   return messages.map((m): ChatMessage => {
+    if (m.role === "user") {
+      const payloadChars = estimateUserContentPayloadChars(m.content);
+      if (payloadChars > maxUserPayloadChars) {
+        const rendered = renderUserContentForText(m.content, { includeImageUrls: false });
+        const compacted =
+          rendered.length > maxUserRenderedChars
+            ? rendered.slice(0, maxUserRenderedChars) + `\n…(truncated, original ${rendered.length} chars)`
+            : rendered;
+        return {
+          ...m,
+          content:
+            `${compacted}\n` +
+            `…(user content compacted for context, original payload ${payloadChars} chars)`,
+        };
+      }
+    }
     if (m.role === "tool" && m.content.length > maxToolResultChars) {
       return {
         ...m,

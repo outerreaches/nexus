@@ -318,6 +318,7 @@ Architecture and implementation guide for the **coder** preset.
   - gateway-facing node tools: \`src/tools/nodes.ts\`
 - Webhook architecture invariants:
   - Node-local webhook ingress belongs on the node listener (\`NEXUS_NODE_WEBHOOK_*\` / \`--webhook-port\` + \`--webhook-path\`), not a new gateway route.
+  - Enable/disable switch is \`NEXUS_NODE_WEBHOOK_PORT\`: \`>0\` enables listener; \`0\` or unset disables. \`reference-node-lite\` also accepts \`NEXUS_NODE_LITE_WEBHOOK_PORT\` as an alias when \`NEXUS_NODE_WEBHOOK_PORT\` is not set.
   - Node forwards webhook events to gateway over the node websocket session (\`webhook.deliver\`), and gateway processes them via existing APIs/routes.
   - Dashboard integrations should read/write through existing gateway APIs (\`/api/webhooks/*\`, \`/api/nodes/*\`); do not add a parallel ad-hoc HTTP webhook transport unless explicitly requested.
 - For new node-exposed operations:

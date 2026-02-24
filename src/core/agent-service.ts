@@ -47,6 +47,25 @@ function buildRuntimeClockSystemMessage(nowMs: number): string {
   ].join("\n");
 }
 
+const COMPACTION_SUMMARY_HINT_MAX_CHARS = 2400;
+
+function truncateWithMarker(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n…(+${text.length - maxChars} chars)`;
+}
+
+function buildCompactionSummarySystemMessage(params: { summary: string; updatedAt: number }): string {
+  const iso = params.updatedAt > 0 ? new Date(params.updatedAt).toISOString() : "unknown";
+  return [
+    "Historical context note (auto-loaded):",
+    `- source: compaction summary memory (${iso})`,
+    "- This summary covers earlier conversation context that may no longer be in recent history.",
+    "- Validate critical details with tools before irreversible actions.",
+    "",
+    truncateWithMarker(params.summary, COMPACTION_SUMMARY_HINT_MAX_CHARS),
+  ].join("\n");
+}
+
 export class AgentService {
   private readonly interactiveSemaphore: Semaphore;
   private readonly backgroundSemaphore: Semaphore;
@@ -117,6 +136,25 @@ export class AgentService {
       maxToolCalls: Math.min(global.maxToolCalls, clampPositiveInt(presetToolCalls ?? global.maxToolCalls)),
       maxIterations: Math.min(global.maxIterations, clampPositiveInt(presetIterations ?? global.maxIterations)),
       maxContextTokens: global.maxContextTokens,
+    };
+  }
+
+  private loadLatestCompactionSummary(agentId: string, sessionId: string): { summary: string; updatedAt: number } | null {
+    const row = this.deps.db.db
+      .prepare(
+        `SELECT value, updated_at
+         FROM memories
+         WHERE agent_id = ? AND key LIKE ?
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .get(agentId, `compaction:${sessionId}:%`) as { value: string; updated_at: number } | undefined;
+    if (!row || typeof row.value !== "string") return null;
+    const summary = row.value.trim();
+    if (!summary) return null;
+    return {
+      summary,
+      updatedAt: typeof row.updated_at === "number" ? row.updated_at : 0,
     };
   }
 
@@ -247,6 +285,19 @@ export class AgentService {
           );
         }
         : undefined;
+
+      if (preset?.name === "orchestrator" || !preset) {
+        const compaction = this.loadLatestCompactionSummary(params.agentId, sessionId);
+        if (compaction) {
+          const compactionHint = buildCompactionSummarySystemMessage(compaction);
+          runHistory.push({
+            role: "system",
+            content: compactionHint,
+            cacheControl: { type: "ephemeral" },
+          });
+          onRunnerLog?.(`compaction_summary_injected length=${compactionHint.length}`);
+        }
+      }
 
       // ── Memory hints: nudge agent about potentially relevant memories ──
       let memoryHint: string | null = null;
