@@ -52,6 +52,7 @@ export class AgentService {
       stateDir: string;
       limits: {
         maxMessages: number;
+        anchorRolloverMessages?: number;
         maxToolCalls: number;
         maxIterations: number;
         maxConcurrent: number;
@@ -205,6 +206,7 @@ export class AgentService {
         db: this.deps.db,
         sessionId,
         maxMessages: this.deps.limits.maxMessages,
+        anchorRolloverMessages: this.deps.limits.anchorRolloverMessages,
         nowMs,
       });
 
