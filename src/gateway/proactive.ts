@@ -250,7 +250,7 @@ export function startProactiveHeartbeat(
         "- It is OK to idle if there is nothing going on.",
         "- Avoid long research loops. Prefer one small, high-value action per tick.",
         "- Only ask the operator for action if you are blocked on a specific step (OTP/MFA/CAPTCHA/etc).",
-        "- If you do ask, use `human_request` with a short, specific prompt and then stop.",
+        "- If you do ask, use `human_action` with `action=\"request\"` and a short, specific prompt, then stop.",
         "- Do NOT write to the blackboard during heartbeat ticks unless you discovered a new issue, made a change, or created a durable artifact that must persist. Never write \"reviewed\" or confirmation-only notes; if nothing substantive, respond with IDLE.",
         `- When given new standing instructions about heartbeat behavior, append them to \`${deps.stateDir}/HEARTBEAT.md\` using absolute paths.`,
         `- For \`HEARTBEAT.md\`, \`NOTES.md\`, \`AGENTS.md\`, \`SOUL.md\`, \`USER.md\`, and \`CODEGUIDE.md\`, always call file tools with absolute paths under \`${deps.stateDir}\`. Example: \`file_read({ path: "${deps.stateDir}/NOTES.md", limit: 200 })\`.`,

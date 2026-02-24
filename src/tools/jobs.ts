@@ -470,3 +470,131 @@ export const jobEvents = defineTool({
     return JSON.stringify(rows, null, 2);
   },
 });
+
+export const jobManage = defineTool({
+  name: "job_manage",
+  description:
+    "Unified scheduler management tool. Action can create/list/get/update/pause/resume/run_now/delete jobs, list runs/events, or fetch a specific run.",
+  parameters: z.object({
+    action: z
+      .enum(["create", "list", "get", "update", "pause", "resume", "run_now", "delete", "runs", "run_get", "events"])
+      .default("list"),
+    id: z.string().min(1).max(32).optional(),
+    runId: z.string().min(1).max(32).optional(),
+    name: z.string().min(1).max(120).optional(),
+    cron: z.string().min(1).max(120).optional(),
+    at: z.union([z.number().int().min(0), z.string().min(1)]).optional(),
+    timezone: z.string().max(64).optional(),
+    enabled: z.boolean().optional(),
+    mode: z.enum(["agent_task", "script", "tool_call"]).optional(),
+    task: z.string().max(4000).optional(),
+    contextMode: z.enum(["full", "delta", "none"]).optional(),
+    command: z.string().optional(),
+    tool: z.string().optional(),
+    args: z.record(z.any()).optional(),
+    nextRunAtMs: z.number().int().min(0).optional(),
+    includeDisabled: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }).superRefine((value, issueCtx) => {
+    const requiresId = new Set(["get", "update", "pause", "resume", "run_now", "delete", "runs", "events"]);
+    if (requiresId.has(value.action) && !value.id) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `id is required when action='${value.action}'`,
+        path: ["id"],
+      });
+    }
+    if (value.action === "run_get" && !value.runId) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "runId is required when action='run_get'",
+        path: ["runId"],
+      });
+    }
+    if (value.action === "create" && !value.name) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "name is required when action='create'",
+        path: ["name"],
+      });
+    }
+  }),
+  execute: async (args, ctx) => {
+    switch (args.action) {
+      case "create":
+        return jobCreate.execute(
+          {
+            name: args.name ?? "",
+            ...(args.cron !== undefined ? { cron: args.cron } : {}),
+            ...(args.at !== undefined ? { at: args.at } : {}),
+            ...(args.timezone !== undefined ? { timezone: args.timezone } : {}),
+            ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
+            ...(args.mode !== undefined ? { mode: args.mode } : {}),
+            ...(args.task !== undefined ? { task: args.task } : {}),
+            ...(args.contextMode !== undefined ? { contextMode: args.contextMode } : {}),
+            ...(args.command !== undefined ? { command: args.command } : {}),
+            ...(args.tool !== undefined ? { tool: args.tool } : {}),
+            ...(args.args !== undefined ? { args: args.args } : {}),
+          },
+          ctx,
+        );
+      case "list":
+        return jobList.execute(
+          {
+            ...(args.includeDisabled !== undefined ? { includeDisabled: args.includeDisabled } : {}),
+            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          },
+          ctx,
+        );
+      case "get":
+        return jobGet.execute({ id: args.id ?? "" }, ctx);
+      case "update":
+        return jobUpdate.execute(
+          {
+            id: args.id ?? "",
+            ...(args.name !== undefined ? { name: args.name } : {}),
+            ...(args.cron !== undefined ? { cron: args.cron } : {}),
+            ...(args.at !== undefined ? { at: args.at } : {}),
+            ...(args.timezone !== undefined ? { timezone: args.timezone } : {}),
+            ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
+            ...(args.task !== undefined ? { task: args.task } : {}),
+            ...(args.mode !== undefined ? { mode: args.mode } : {}),
+            ...(args.command !== undefined ? { command: args.command } : {}),
+            ...(args.tool !== undefined ? { tool: args.tool } : {}),
+            ...(args.args !== undefined ? { args: args.args } : {}),
+            ...(args.contextMode !== undefined ? { contextMode: args.contextMode } : {}),
+            ...(args.nextRunAtMs !== undefined ? { nextRunAtMs: args.nextRunAtMs } : {}),
+          },
+          ctx,
+        );
+      case "pause":
+        return jobPause.execute({ id: args.id ?? "" }, ctx);
+      case "resume":
+        return jobResume.execute({ id: args.id ?? "" }, ctx);
+      case "run_now":
+        return jobRunNow.execute({ id: args.id ?? "" }, ctx);
+      case "delete":
+        return jobDelete.execute({ id: args.id ?? "" }, ctx);
+      case "runs":
+        return jobRuns.execute(
+          {
+            id: args.id ?? "",
+            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          },
+          ctx,
+        );
+      case "run_get":
+        return jobRunGet.execute({ runId: args.runId ?? "" }, ctx);
+      case "events":
+        return jobEvents.execute(
+          {
+            id: args.id ?? "",
+            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          },
+          ctx,
+        );
+      default:
+        return `ERROR: unsupported action '${args.action}'`;
+    }
+  },
+});

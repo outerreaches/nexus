@@ -111,10 +111,19 @@ async function resolveTelegramChatId(argsChatId: number | undefined, ctx: ToolCt
 export const telegramSend = defineTool({
   name: "telegram_send",
   description:
-    "Send a Telegram message proactively. If chatId is omitted, uses the current telegram chat (if applicable) or the most recent telegram chat for this agent. Only sends to allowlisted user ids.",
+    "Send Telegram output (text or file). If chatId is omitted, uses the current telegram chat (if applicable) or the most recent telegram chat for this agent. Only sends to allowlisted user ids.",
   parameters: z.object({
-    text: z.string().min(1).max(20_000),
+    text: z.string().min(1).max(20_000).optional().describe("Text message to send, or caption when path is set"),
+    path: z.string().min(1).optional().describe("Optional file path to send (absolute or repo-relative)"),
+    caption: z.string().max(1024).optional().describe("Optional file caption (used only when path is set)"),
     chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
+  }).superRefine((value, issueCtx) => {
+    if (value.text || value.path) return;
+    issueCtx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either text or path is required",
+      path: ["text"],
+    });
   }),
   execute: async (args, ctx) => {
     const toolCtx = ctx as ToolCtx;
@@ -132,8 +141,34 @@ export const telegramSend = defineTool({
     const allowed = isTelegramUserAllowed(db, { userId: chatId, staticAllowFrom: tg.allowFrom ?? [], allowAll: Boolean(tg.allowAll) });
     if (!allowed) return "ERROR: chatId is not allowlisted";
 
+    if (args.path) {
+      let filePath: string;
+      try {
+        filePath = await resolveTelegramFilePath(args.path, toolCtx);
+      } catch (err) {
+        return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      const textCaption = args.text && args.text.length > 1024 ? args.text.slice(0, 1024) : args.text;
+      const caption = args.caption ?? textCaption;
+      const captionNote = args.text && args.text.length > 1024 && !args.caption
+        ? " (caption truncated from text)"
+        : "";
+
+      try {
+        if (caption) {
+          await tg.sendFile(chatId, filePath, { caption });
+        } else {
+          await tg.sendFile(chatId, filePath);
+        }
+        return `OK: sent ${path.basename(filePath)} to chat ${chatId}${captionNote}`;
+      } catch (err) {
+        return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+
     try {
-      await tg.sendOutput(chatId, args.text);
+      await tg.sendOutput(chatId, args.text ?? "");
       return "OK";
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
@@ -144,39 +179,20 @@ export const telegramSend = defineTool({
 export const telegramSendFile = defineTool({
   name: "telegram_send_file",
   description:
-    "Send a file to Telegram. If chatId is omitted, uses the current telegram chat (if applicable) or most recent telegram chat for this agent. Supports images and documents.",
+    "Deprecated compatibility alias for telegram_send(path=...). Sends a file to Telegram.",
   parameters: z.object({
     path: z.string().min(1).describe("Absolute or repo-relative path to a file"),
     caption: z.string().max(1024).optional().describe("Optional Telegram caption"),
     chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
   }),
   execute: async (args, ctx) => {
-    const toolCtx = ctx as ToolCtx;
-    const db = toolCtx.db as NexusDatabase | undefined;
-    if (!db) return "ERROR: database is not available";
-
-    const tg = toolCtx.telegram as TelegramCtx | undefined;
-    if (!tg) return "ERROR: telegram is not configured";
-
-    const chatId = await resolveTelegramChatId(args.chatId, toolCtx, db);
-    if (!chatId) return "ERROR: missing chatId (no active/recent telegram chat found)";
-    if (chatId <= 0) return "ERROR: only private-chat chatIds are supported for telegram_send_file";
-
-    const allowed = isTelegramUserAllowed(db, { userId: chatId, staticAllowFrom: tg.allowFrom ?? [], allowAll: Boolean(tg.allowAll) });
-    if (!allowed) return "ERROR: chatId is not allowlisted";
-
-    let filePath: string;
-    try {
-      filePath = await resolveTelegramFilePath(args.path, toolCtx);
-    } catch (err) {
-      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
-    }
-
-    try {
-      await tg.sendFile(chatId, filePath, { caption: args.caption });
-      return `OK: sent ${path.basename(filePath)} to chat ${chatId}`;
-    } catch (err) {
-      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
-    }
+    return telegramSend.execute(
+      {
+        path: args.path,
+        ...(args.caption ? { caption: args.caption } : {}),
+        ...(args.chatId ? { chatId: args.chatId } : {}),
+      },
+      ctx,
+    );
   },
 });

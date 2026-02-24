@@ -5,6 +5,7 @@ import { renderUserContentForStorage } from "../core/message-content.js";
 import type { NexusDatabase } from "./database.js";
 
 const ANCHOR_ROLLOVER_MULTIPLIER = 2;
+const SHELL_INTERACTIVE_HISTORY_MAX_OUTPUT_CHARS = 1200;
 
 type HistoryEntry = {
   id: number;
@@ -70,6 +71,47 @@ function normalizeToolCalls(raw: unknown): ToolCall[] | undefined {
     out.push({ id, name, arguments: normalizeToolCallArguments(argsRaw) });
   }
   return out.length > 0 ? out : undefined;
+}
+
+function truncateMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const half = Math.floor(maxChars / 2);
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, half)}\n\n[...history-compacted ${omitted.toLocaleString()} chars...]\n\n${text.slice(-half)}`;
+}
+
+function compactShellInteractiveHistoryContent(raw: string): string {
+  const trimmed = raw.trimStart();
+  if (!trimmed.startsWith("{")) return raw;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return raw;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.action !== "read") {
+    return JSON.stringify(obj);
+  }
+
+  if (typeof obj.output !== "string") {
+    return JSON.stringify(obj);
+  }
+
+  const output = obj.output;
+  const compacted = truncateMiddle(output, SHELL_INTERACTIVE_HISTORY_MAX_OUTPUT_CHARS);
+  const out: Record<string, unknown> = {
+    ...obj,
+    output: compacted,
+  };
+  if (compacted !== output) {
+    out.outputCompactedForHistory = true;
+    out.outputOriginalChars = output.length;
+  }
+  return JSON.stringify(out);
 }
 
 function sanitizeHistoryEntries(entries: HistoryEntry[]): HistoryEntry[] {
@@ -184,6 +226,9 @@ export function appendMessage(params: {
   }
 
   if (params.message.role === "tool") {
+    const content = params.message.name === "shell_interactive"
+      ? compactShellInteractiveHistoryContent(params.message.content)
+      : params.message.content;
     params.db.db
       .prepare(
         "INSERT INTO messages (session_id, role, content, name, tool_call_id, tool_calls_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -191,7 +236,7 @@ export function appendMessage(params: {
       .run(
         params.sessionId,
         "tool",
-        params.message.content,
+        content,
         params.message.name,
         params.message.toolCallId,
         null,

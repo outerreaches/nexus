@@ -1143,3 +1143,223 @@ export const nodeProcessStop = defineTool({
     }
   },
 });
+
+export const nodeManage = defineTool({
+  name: "node_manage",
+  description:
+    "Unified node operations for node registry, system/process control, and file transfer.",
+  parameters: z.object({
+    action: z
+      .enum([
+        "list",
+        "get",
+        "delete",
+        "set_status",
+        "system_run",
+        "system_which",
+        "process_start",
+        "process_status",
+        "process_logs",
+        "process_stop",
+        "file_pull",
+        "file_push",
+      ])
+      .default("list"),
+    id: z.string().min(1).max(128).optional(),
+    status: z.enum(["pending", "approved", "blocked", "offline", "online"]).optional(),
+    backend: z.enum(["nexus", "openclaw"]).optional(),
+    limit: z.number().int().min(1).max(500).optional(),
+    command: z.string().min(1).max(4000).optional(),
+    cwd: z.string().max(2000).optional(),
+    timeoutMs: z.number().int().positive().max(300_000).optional(),
+    processId: z.string().min(1).max(128).optional(),
+    maxChars: z.number().int().min(200).max(50_000).optional(),
+    signal: z.enum(["SIGTERM", "SIGINT", "SIGKILL"]).optional(),
+    killAfterMs: z.number().int().min(0).max(60_000).optional(),
+    reason: z.string().min(1).max(200).optional(),
+    localPath: z.string().min(1).max(4096).optional(),
+    remotePath: z.string().min(1).max(4096).optional(),
+    overwrite: z.boolean().optional(),
+    maxBytes: z.number().int().positive().max(50 * 1024 * 1024).optional(),
+    notify: z
+      .object({
+        mode: z.enum(["never", "on_failure", "on_exit"]).optional(),
+        chatId: z.number().int().positive().optional(),
+        preset: z.string().min(1).max(64).optional(),
+      })
+      .optional(),
+    security: remoteSecuritySchema,
+  }).superRefine((value, issueCtx) => {
+    const requiresId = new Set([
+      "get",
+      "delete",
+      "set_status",
+      "system_run",
+      "system_which",
+      "process_start",
+      "process_status",
+      "process_logs",
+      "process_stop",
+      "file_pull",
+      "file_push",
+    ]);
+    if (requiresId.has(value.action) && !value.id) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `id is required when action='${value.action}'`,
+        path: ["id"],
+      });
+    }
+    if (value.action === "set_status" && !value.status) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "status is required when action='set_status'",
+        path: ["status"],
+      });
+    }
+    if (value.action === "system_run" && !value.command) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command is required when action='system_run'",
+        path: ["command"],
+      });
+    }
+    if (value.action === "system_which" && !value.command) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command is required when action='system_which'",
+        path: ["command"],
+      });
+    }
+    if (value.action === "process_start" && !value.command) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "command is required when action='process_start'",
+        path: ["command"],
+      });
+    }
+    if ((value.action === "process_status" || value.action === "process_logs" || value.action === "process_stop") && !value.processId) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `processId is required when action='${value.action}'`,
+        path: ["processId"],
+      });
+    }
+    if (value.action === "file_pull" && !value.remotePath) {
+      issueCtx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "remotePath is required when action='file_pull'",
+        path: ["remotePath"],
+      });
+    }
+    if (value.action === "file_push") {
+      if (!value.remotePath) {
+        issueCtx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "remotePath is required when action='file_push'",
+          path: ["remotePath"],
+        });
+      }
+      if (!value.localPath) {
+        issueCtx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "localPath is required when action='file_push'",
+          path: ["localPath"],
+        });
+      }
+    }
+  }),
+  execute: async (args, ctx) => {
+    switch (args.action) {
+      case "list":
+        return nodeList.execute(
+          {
+            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+            ...(args.status !== undefined ? { status: args.status } : {}),
+            ...(args.backend !== undefined ? { backend: args.backend } : {}),
+          },
+          ctx,
+        );
+      case "get":
+        return nodeGet.execute({ id: args.id ?? "" }, ctx);
+      case "delete":
+        return nodeDelete.execute({ id: args.id ?? "" }, ctx);
+      case "set_status":
+        return nodeSetStatus.execute({ id: args.id ?? "", status: args.status ?? "pending" }, ctx);
+      case "system_run":
+        return nodeSystemRun.execute(
+          {
+            id: args.id ?? "",
+            command: args.command ?? "",
+            ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+            ...(args.security ? { security: args.security } : {}),
+          },
+          ctx,
+        );
+      case "system_which":
+        return nodeSystemWhich.execute({ id: args.id ?? "", command: args.command ?? "" }, ctx);
+      case "process_start":
+        return nodeProcessStart.execute(
+          {
+            id: args.id ?? "",
+            command: args.command ?? "",
+            ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+            ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+            ...(args.security ? { security: args.security } : {}),
+            ...(args.notify ? { notify: args.notify } : {}),
+          },
+          ctx,
+        );
+      case "process_status":
+        return nodeProcessStatus.execute({ id: args.id ?? "", processId: args.processId ?? "" }, ctx);
+      case "process_logs":
+        return nodeProcessLogs.execute(
+          {
+            id: args.id ?? "",
+            processId: args.processId ?? "",
+            ...(args.maxChars !== undefined ? { maxChars: args.maxChars } : {}),
+          },
+          ctx,
+        );
+      case "process_stop":
+        return nodeProcessStop.execute(
+          {
+            id: args.id ?? "",
+            processId: args.processId ?? "",
+            ...(args.signal !== undefined ? { signal: args.signal } : {}),
+            ...(args.killAfterMs !== undefined ? { killAfterMs: args.killAfterMs } : {}),
+            ...(args.reason !== undefined ? { reason: args.reason } : {}),
+          },
+          ctx,
+        );
+      case "file_pull":
+        return nodeFilePull.execute(
+          {
+            id: args.id ?? "",
+            remotePath: args.remotePath ?? "",
+            ...(args.localPath !== undefined ? { localPath: args.localPath } : {}),
+            ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
+            ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}),
+            ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+            ...(args.security ? { security: args.security } : {}),
+          },
+          ctx,
+        );
+      case "file_push":
+        return nodeFilePush.execute(
+          {
+            id: args.id ?? "",
+            localPath: args.localPath ?? "",
+            remotePath: args.remotePath ?? "",
+            ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
+            ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}),
+            ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+            ...(args.security ? { security: args.security } : {}),
+          },
+          ctx,
+        );
+      default:
+        return `ERROR: unsupported action '${args.action}'`;
+    }
+  },
+});

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { defineTool } from "../core/tools.js";
+import { defineTool, type Tool } from "../core/tools.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { McpManager } from "../mcp/manager.js";
 import { getPreset } from "../core/presets.js";
@@ -791,5 +791,61 @@ export const mcpDelegate = defineTool({
       }
       await reloadRegistry(ctx);
     }
+  },
+});
+
+const MCP_MANAGE_ACTIONS = [
+  "overview",
+  "server_list",
+  "server_add",
+  "server_update",
+  "server_probe",
+  "server_activate",
+  "server_deactivate",
+  "server_remove",
+  "profile_list",
+  "profile_create",
+  "profile_update",
+  "profile_delete",
+  "grant_issue",
+  "grant_list",
+  "grant_revoke",
+  "delegate",
+] as const;
+
+type McpManageAction = typeof MCP_MANAGE_ACTIONS[number];
+
+const MCP_MANAGE_DISPATCH: Record<McpManageAction, Tool> = {
+  overview: mcpOverview,
+  server_list: mcpServerList,
+  server_add: mcpServerAdd,
+  server_update: mcpServerUpdate,
+  server_probe: mcpServerProbe,
+  server_activate: mcpServerActivate,
+  server_deactivate: mcpServerDeactivate,
+  server_remove: mcpServerRemove,
+  profile_list: mcpProfileList,
+  profile_create: mcpProfileCreate,
+  profile_update: mcpProfileUpdate,
+  profile_delete: mcpProfileDelete,
+  grant_issue: mcpGrantIssue,
+  grant_list: mcpGrantList,
+  grant_revoke: mcpGrantRevoke,
+  delegate: mcpDelegate,
+};
+
+export const mcpManage = defineTool({
+  name: "mcp_manage",
+  description:
+    "Unified MCP management tool. Choose an action to inspect/update servers, profiles, grants, or run delegate workflows. " +
+    "Action arguments use the same shape as the legacy mcp_* tool for that action.",
+  parameters: z.object({
+    action: z.enum(MCP_MANAGE_ACTIONS).default("overview"),
+    args: z.record(z.unknown()).default({}).describe("Action-specific arguments (same as the corresponding legacy mcp_* tool)."),
+  }),
+  execute: async (args, ctx) => {
+    const target = MCP_MANAGE_DISPATCH[args.action];
+    if (!target) return `ERROR: unsupported action '${args.action}'`;
+    return target.execute(args.args, ctx);
   },
 });

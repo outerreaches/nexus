@@ -423,8 +423,8 @@ NEXUS_NODE_ENV_FILE=~/nexus-node-host/.env /path/to/Nexus/examples/nexus-node/ru
 Current Telegram behavior for MCP screenshots:
 
 - By default, Nexus filters non-text MCP payloads (images/blobs) to avoid context compaction: bytes are persisted under the gateway `stateDir/mcp-artifacts/...` and omitted from tool output.
-- Screenshot calls include `savedPath` (gateway-local). Use `telegram_send_file` with that path to deliver the image.
-- Automatic Telegram attachment is still not implicit; the agent must call `telegram_send_file` (or explicitly reference the saved path).
+- Screenshot calls include `savedPath` (gateway-local). Use `telegram_send` with `path` set to that file to deliver the image.
+- Automatic Telegram attachment is still not implicit; the agent must call `telegram_send` with `path` (or explicitly reference the saved path).
 - To disable filtering (not recommended; can cause truncation/compaction issues), set `NEXUS_MCP_FILTER_NON_TEXT=0` on the gateway.
 
 ## Node file transfer (`file.pull` / `file.push`)

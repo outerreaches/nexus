@@ -23,6 +23,7 @@ type SessionMeta = {
   tmuxSession: string;
   cwd: string;
   logPath: string;
+  lastReadCursor: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -173,6 +174,9 @@ async function readSessionMeta(stateDir: string, sessionId: string): Promise<Ses
     const tmuxSession = typeof parsed.tmuxSession === "string" ? parsed.tmuxSession : "";
     const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
     const logPath = typeof parsed.logPath === "string" ? parsed.logPath : "";
+    const lastReadCursor = typeof parsed.lastReadCursor === "number" && Number.isFinite(parsed.lastReadCursor)
+      ? Math.max(0, Math.floor(parsed.lastReadCursor))
+      : 0;
     const createdAt = typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now();
     const updatedAt = typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now();
     if (!session || !tmuxSession || !cwd || !logPath) return null;
@@ -181,6 +185,7 @@ async function readSessionMeta(stateDir: string, sessionId: string): Promise<Ses
       tmuxSession,
       cwd,
       logPath,
+      lastReadCursor,
       createdAt,
       updatedAt,
     };
@@ -333,6 +338,10 @@ async function openLocalSession(params: {
 
   const existingMeta = await readSessionMeta(params.ctx.stateDir, params.sessionId);
   if (existingMeta && (await tmuxHasSession(existingMeta.tmuxSession))) {
+    const cursor = await fileSize(existingMeta.logPath);
+    existingMeta.lastReadCursor = cursor;
+    existingMeta.updatedAt = Date.now();
+    await writeSessionMeta(params.ctx.stateDir, existingMeta);
     return formatJson({
       ok: true,
       target: "local",
@@ -340,7 +349,7 @@ async function openLocalSession(params: {
       session: params.sessionId,
       existed: true,
       cwd: existingMeta.cwd,
-      cursor: await fileSize(existingMeta.logPath),
+      cursor,
     });
   }
 
@@ -368,6 +377,7 @@ async function openLocalSession(params: {
     tmuxSession,
     cwd: resolvedCwd,
     logPath,
+    lastReadCursor: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -414,6 +424,8 @@ async function sendLocalInput(params: {
     }
   }
 
+  const cursor = await fileSize(meta.logPath);
+  meta.lastReadCursor = cursor;
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
 
@@ -423,13 +435,13 @@ async function sendLocalInput(params: {
     action: "send",
     session: params.sessionId,
     enter: params.enter,
-    cursor: await fileSize(meta.logPath),
+    cursor,
   });
 }
 
 async function readLocalOutput(params: {
   sessionId: string;
-  cursor: number;
+  cursor?: number;
   waitMs: number;
   idleMs: number;
   maxChars: number;
@@ -437,15 +449,19 @@ async function readLocalOutput(params: {
 }): Promise<string> {
   const meta = await readSessionMeta(params.ctx.stateDir, params.sessionId);
   if (!meta) return `ERROR: interactive session not found: ${params.sessionId}`;
+  const cursor = typeof params.cursor === "number" && Number.isFinite(params.cursor)
+    ? Math.max(0, Math.floor(params.cursor))
+    : meta.lastReadCursor;
 
   const read = await readTimedOutput({
     logPath: meta.logPath,
-    cursor: params.cursor,
+    cursor,
     waitMs: params.waitMs,
     idleMs: params.idleMs,
     maxChars: params.maxChars,
   });
   const running = await tmuxHasSession(meta.tmuxSession);
+  meta.lastReadCursor = read.nextCursor;
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
 
@@ -454,6 +470,7 @@ async function readLocalOutput(params: {
     target: "local",
     action: "read",
     session: params.sessionId,
+    cursorUsed: cursor,
     output: read.output,
     nextCursor: read.nextCursor,
     totalBytes: read.totalBytes,
@@ -604,7 +621,7 @@ function buildNodeShellCommand(params: {
   cwd?: string;
   input?: string;
   enter: boolean;
-  cursor: number;
+  cursor?: number;
   waitMs: number;
   idleMs: number;
   maxChars: number;
@@ -631,7 +648,9 @@ function buildNodeShellCommand(params: {
     tokens.push("--enter", params.enter ? "1" : "0");
   }
   if (action === "read") {
-    tokens.push("--cursor", String(Math.max(0, Math.floor(params.cursor))));
+    if (typeof params.cursor === "number" && Number.isFinite(params.cursor)) {
+      tokens.push("--cursor", String(Math.max(0, Math.floor(params.cursor))));
+    }
     tokens.push("--wait-ms", String(Math.max(0, Math.floor(params.waitMs))));
     tokens.push("--idle-ms", String(Math.max(50, Math.floor(params.idleMs))));
     tokens.push("--max-chars", String(Math.max(128, Math.floor(params.maxChars))));
@@ -647,7 +666,7 @@ async function executeOnNode(params: {
   cwd?: string;
   input?: string;
   enter: boolean;
-  cursor: number;
+  cursor?: number;
   waitMs: number;
   idleMs: number;
   maxChars: number;
@@ -719,7 +738,7 @@ export const shellInteractive = defineTool({
     "Manage interactive tmux shell sessions locally or on connected Nexus nodes.",
     "Workflow: open → send+read cycles → close.",
     "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
-    "read returns output since the given cursor; pass the nextCursor from the previous read/send response. Use waitMs to block until output appears.",
+    "read returns output since the given cursor; pass nextCursor from the previous read/send response. If cursor is omitted, it resumes from the session's last read cursor.",
     "Defaults to local (target=local). Use target=node only when the task specifically requires running on a remote node (e.g. node-local files, GPU, node-specific services). Node shells require nodeId, nexus-shellctl allowlisted, and firewallMode=transparent.",
   ].join(" "),
   parameters: z.object({
@@ -730,10 +749,10 @@ export const shellInteractive = defineTool({
     cwd: z.string().max(2000).optional(),
     input: z.string().max(20_000).optional(),
     enter: z.boolean().default(true),
-    cursor: z.number().int().min(0).default(0),
+    cursor: z.number().int().min(0).optional(),
     waitMs: z.number().int().min(0).max(5_000).default(1_500),
     idleMs: z.number().int().min(50).max(1_000).default(200),
-    maxChars: z.number().int().min(128).max(12_000).default(4_000),
+    maxChars: z.number().int().min(128).max(4_000).default(1_500),
     timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   }),
   execute: async (args, ctx) => {

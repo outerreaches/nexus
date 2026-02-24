@@ -108,6 +108,7 @@ type ShellCtlSessionMeta = {
   tmuxSession: string;
   cwd: string;
   logPath: string;
+  lastReadCursor: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -116,7 +117,7 @@ type ParsedShellCtlCommand =
   | { action: "list" }
   | { action: "open"; sessionId: string; cwd: string | null }
   | { action: "send"; sessionId: string; payload: string; enter: boolean }
-  | { action: "read"; sessionId: string; cursor: number; waitMs: number; idleMs: number; maxChars: number }
+  | { action: "read"; sessionId: string; cursor?: number; waitMs: number; idleMs: number; maxChars: number }
   | { action: "close"; sessionId: string }
   | { action: "interrupt"; sessionId: string };
 
@@ -2073,6 +2074,7 @@ class ReferenceNodeClient {
       const tmuxSession = asString(parsed.tmuxSession);
       const cwd = asString(parsed.cwd);
       const logPath = asString(parsed.logPath);
+      const lastReadCursor = asNumber(parsed.lastReadCursor);
       const createdAt = asNumber(parsed.createdAt);
       const updatedAt = asNumber(parsed.updatedAt);
       if (!parsedSessionId || !tmuxSession || !cwd || !logPath) return null;
@@ -2081,6 +2083,7 @@ class ReferenceNodeClient {
         tmuxSession,
         cwd,
         logPath,
+        lastReadCursor: Math.max(0, Math.floor(lastReadCursor ?? 0)),
         createdAt: createdAt ?? Date.now(),
         updatedAt: updatedAt ?? Date.now(),
       };
@@ -2242,6 +2245,10 @@ class ReferenceNodeClient {
 
       const existingMeta = await this.shellCtlLoadMeta(parsed.sessionId);
       if (existingMeta && (await this.shellCtlHasSession(existingMeta.tmuxSession))) {
+        const cursor = await this.shellCtlFileSize(existingMeta.logPath);
+        existingMeta.lastReadCursor = cursor;
+        existingMeta.updatedAt = Date.now();
+        await this.shellCtlSaveMeta(existingMeta);
         return JSON.stringify(
           {
             ok: true,
@@ -2249,7 +2256,7 @@ class ReferenceNodeClient {
             session: parsed.sessionId,
             existed: true,
             cwd: existingMeta.cwd,
-            cursor: await this.shellCtlFileSize(existingMeta.logPath),
+            cursor,
           },
           null,
           2,
@@ -2296,6 +2303,7 @@ class ReferenceNodeClient {
         tmuxSession,
         cwd,
         logPath,
+        lastReadCursor: 0,
         createdAt: now,
         updatedAt: now,
       });
@@ -2335,6 +2343,8 @@ class ReferenceNodeClient {
           throw new NodeToolError("NODE_EXECUTION_FAILED", `failed to send Enter key: ${truncateOutput(detail || "unknown error", 500)}`);
         }
       }
+      const cursor = await this.shellCtlFileSize(meta.logPath);
+      meta.lastReadCursor = cursor;
       meta.updatedAt = Date.now();
       await this.shellCtlSaveMeta(meta);
       return JSON.stringify(
@@ -2343,7 +2353,7 @@ class ReferenceNodeClient {
           action: "send",
           session: parsed.sessionId,
           enter: parsed.enter,
-          cursor: await this.shellCtlFileSize(meta.logPath),
+          cursor,
         },
         null,
         2,
@@ -2355,14 +2365,18 @@ class ReferenceNodeClient {
       if (!meta) {
         throw new NodeToolError("INVALID_REQUEST", `interactive session not found: ${parsed.sessionId}`);
       }
+      const cursor = typeof parsed.cursor === "number" && Number.isFinite(parsed.cursor)
+        ? Math.max(0, Math.floor(parsed.cursor))
+        : meta.lastReadCursor;
       const read = await this.shellCtlReadTimedOutput({
         logPath: meta.logPath,
-        cursor: parsed.cursor,
+        cursor,
         waitMs: parsed.waitMs,
         idleMs: parsed.idleMs,
         maxChars: parsed.maxChars,
       });
       const running = await this.shellCtlHasSession(meta.tmuxSession);
+      meta.lastReadCursor = read.nextCursor;
       meta.updatedAt = Date.now();
       await this.shellCtlSaveMeta(meta);
       return JSON.stringify(
@@ -2370,6 +2384,7 @@ class ReferenceNodeClient {
           ok: true,
           action: "read",
           session: parsed.sessionId,
+          cursorUsed: cursor,
           output: read.output,
           nextCursor: read.nextCursor,
           totalBytes: read.totalBytes,
@@ -4991,7 +5006,7 @@ function parseShellCtlCommand(command: string): ParsedShellCtlCommand {
     const waitRaw = flags.get("--wait-ms");
     const idleRaw = flags.get("--idle-ms");
     const maxCharsRaw = flags.get("--max-chars");
-    const cursor = cursorRaw ? Math.max(0, parseShellCtlInteger(cursorRaw, "--cursor")) : 0;
+    const cursor = cursorRaw ? Math.max(0, parseShellCtlInteger(cursorRaw, "--cursor")) : undefined;
     const waitMs = waitRaw ? Math.max(0, Math.min(SHELLCTL_MAX_WAIT_MS, parseShellCtlInteger(waitRaw, "--wait-ms"))) : 1_500;
     const idleMs = idleRaw ? Math.max(50, Math.min(SHELLCTL_MAX_IDLE_MS, parseShellCtlInteger(idleRaw, "--idle-ms"))) : 200;
     const maxChars = maxCharsRaw ? Math.max(128, Math.min(SHELLCTL_MAX_CHARS, parseShellCtlInteger(maxCharsRaw, "--max-chars"))) : 4_000;
