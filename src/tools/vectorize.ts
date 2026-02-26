@@ -250,7 +250,7 @@ async function vectorizeWithQuiver(params: {
   endpoint: string;
   model: string;
   prompt: string;
-  imageCandidates: ReadonlyArray<Record<string, unknown>>;
+  image: { url: string } | { base64: string };
   timeoutMs: number;
   maxOutputTokens?: number;
   temperature?: number;
@@ -269,54 +269,40 @@ async function vectorizeWithQuiver(params: {
   if (typeof params.presencePenalty === "number") basePayload.presence_penalty = params.presencePenalty;
   if (typeof params.instructions === "string" && params.instructions.trim()) basePayload.instructions = params.instructions.trim();
 
-  const imageCandidates = params.imageCandidates.length > 0 ? params.imageCandidates : [{ url: "" }];
-  const payloadCandidates = imageCandidates.map((image) => ({
+  const payload: Record<string, unknown> = {
     ...basePayload,
-    image,
-  }));
+    image: params.image,
+  };
 
-  let lastErr = "";
-  for (let i = 0; i < payloadCandidates.length; i += 1) {
-    const payload = payloadCandidates[i]!;
-    const res = await fetchWithTimeout({
-      url: params.endpoint,
-      timeoutMs: params.timeoutMs,
-      init: {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${params.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
+  const res = await fetchWithTimeout({
+    url: params.endpoint,
+    timeoutMs: params.timeoutMs,
+    init: {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        "Content-Type": "application/json",
       },
-    });
+      body: JSON.stringify(payload),
+    },
+  });
 
-    const bodyText = await res.text();
-    if (!res.ok) {
-      const detail = truncateForError(bodyText || `${res.status} ${res.statusText}`);
-      lastErr = `Quiver vectorization API error (${res.status}): ${detail}`;
-      // If the request shape is rejected, try next payload form.
-      if ((res.status === 400 || res.status === 404 || res.status === 422) && i < payloadCandidates.length - 1) {
-        continue;
-      }
-      throw new Error(lastErr);
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = bodyText ? JSON.parse(bodyText) : {};
-    } catch {
-      throw new Error(`Quiver vectorization API returned non-JSON output: ${truncateForError(bodyText)}`);
-    }
-
-    const extracted = extractVectorizedSvg(parsed);
-    if (extracted) return extracted;
-    lastErr = `Quiver vectorization API response did not include SVG output: ${truncateForError(bodyText)}`;
-    if (i < payloadCandidates.length - 1) continue;
-    throw new Error(lastErr);
+  const bodyText = await res.text();
+  if (!res.ok) {
+    const detail = truncateForError(bodyText || `${res.status} ${res.statusText}`);
+    throw new Error(`Quiver vectorization API error (${res.status}): ${detail}`);
   }
 
-  throw new Error(lastErr || "Quiver vectorization request failed");
+  let parsed: unknown;
+  try {
+    parsed = bodyText ? JSON.parse(bodyText) : {};
+  } catch {
+    throw new Error(`Quiver vectorization API returned non-JSON output: ${truncateForError(bodyText)}`);
+  }
+
+  const extracted = extractVectorizedSvg(parsed);
+  if (extracted) return extracted;
+  throw new Error(`Quiver vectorization API response did not include SVG output: ${truncateForError(bodyText)}`);
 }
 
 export const vectorize = defineTool({
@@ -415,7 +401,7 @@ export const vectorize = defineTool({
       DEFAULT_MODEL;
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
 
-    let imageCandidates: ReadonlyArray<Record<string, unknown>>;
+    let image: { url: string } | { base64: string };
     let sourceLabel: string;
     let inputSizeBytes: number | null = null;
 
@@ -425,7 +411,7 @@ export const vectorize = defineTool({
         if (!/^https?:\/\//i.test(trimmed)) {
           return "ERROR: inputUrl must be a valid HTTP or HTTPS URL";
         }
-        imageCandidates = [{ url: trimmed }];
+        image = { url: trimmed };
         sourceLabel = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
       } else {
         let absolutePath: string;
@@ -465,13 +451,7 @@ export const vectorize = defineTool({
           return `ERROR: unsupported input image mime (${mimeType}). Supported: ${[...SUPPORTED_INPUT_MIME_TYPES].join(", ")}`;
         }
 
-        const base64 = bytes.toString("base64");
-        const dataUrl = `data:${mimeType};base64,${base64}`;
-        // Quiver vectorize expects a top-level `image` object (URL or encoded content).
-        imageCandidates = [
-          { url: dataUrl },
-          { base64, mime_type: mimeType },
-        ];
+        image = { base64: bytes.toString("base64") };
         inputSizeBytes = bytes.length;
       }
     } catch (err) {
@@ -485,7 +465,7 @@ export const vectorize = defineTool({
         endpoint,
         model: selectedModel,
         prompt: args.prompt,
-        imageCandidates,
+        image,
         timeoutMs,
         maxOutputTokens: args.maxOutputTokens,
         temperature: args.temperature,
