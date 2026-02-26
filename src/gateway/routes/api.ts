@@ -111,9 +111,38 @@ const FEDERATION_SESSION_HEARTBEAT_TTL_MS = 10 * 60_000;
 const FEDERATION_INGRESS_MAX_BODY_BYTES = parseEnvByteLimit("NEXUS_FEDERATION_INGRESS_MAX_BODY_BYTES", 256 * 1024);
 const FEDERATION_WEBHOOK_MAX_BODY_BYTES = parseEnvByteLimit("NEXUS_FEDERATION_WEBHOOK_MAX_BODY_BYTES", 256 * 1024);
 const SECRET_PROVIDER_STATIC_MATERIAL_KEY_PATTERN = /(token|secret|password|api[_-]?key|client[_-]?secret|access[_-]?key)/i;
+const STANDBY_API_MUTATION_ALLOWLIST = new Set([
+  "/api/activate",
+  "/api/deactivate",
+  "/api/mode",
+  "/api/ha/event",
+]);
 
 export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
   app.get("/status", async (c) => c.json(await deps.getStatus()));
+  app.use("/api/*", async (c, next) => {
+    if (!deps.isStandby?.()) {
+      await next();
+      return;
+    }
+    if (!isMutatingApiMethod(c.req.method)) {
+      await next();
+      return;
+    }
+    const path = normalizePathname(c.req.path);
+    if (STANDBY_API_MUTATION_ALLOWLIST.has(path)) {
+      await next();
+      return;
+    }
+    return c.json(
+      {
+        error: "standby instance rejects mutating API requests",
+        mode: "standby",
+        path,
+      },
+      503,
+    );
+  });
   const monetizationControlPlaneLocked = deps.runtimeProfile === "monetization";
   const writeFederationAudit = (
     params: {
@@ -2683,6 +2712,18 @@ async function readJsonBodyLimited(
       error: "invalid JSON body",
     };
   }
+}
+
+function isMutatingApiMethod(method: string): boolean {
+  const normalized = method.trim().toUpperCase();
+  return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
+}
+
+function normalizePathname(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "/";
+  if (trimmed.length > 1 && trimmed.endsWith("/")) return trimmed.slice(0, -1);
+  return trimmed;
 }
 
 function parseBooleanQuery(value: string | undefined, defaultValue: boolean): boolean {

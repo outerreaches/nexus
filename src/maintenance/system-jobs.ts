@@ -97,22 +97,13 @@ export function ensureSystemJobs(params: { db: NexusDatabase; nowMs: number; sta
   const { db, nowMs, log = () => {} } = params;
 
   for (const job of systemJobs(params.stateDir)) {
-    const existing = db.db.prepare("SELECT id, enabled FROM jobs WHERE id = ?").get(job.id) as
-      | { id: string; enabled: number }
-      | undefined;
-
-    if (existing) {
-      log(`system-jobs: ${job.id} already exists (enabled=${existing.enabled})`);
-      continue;
-    }
-
     const schedule = parseCron(job.cron);
     const tz = validateTimeZone(job.timezone);
     const nextRunAt = nextCronTimeMs({ schedule, afterMs: nowMs, timeZone: tz });
 
-    db.db
+    const res = db.db
       .prepare(
-        `INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at)
+        `INSERT OR IGNORE INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
@@ -128,6 +119,10 @@ export function ensureSystemJobs(params: { db: NexusDatabase; nowMs: number; sta
         nowMs,
       );
 
-    log(`system-jobs: created ${job.id} (next_run_at=${new Date(nextRunAt).toISOString()})`);
+    if (res.changes > 0) {
+      log(`system-jobs: created ${job.id} (next_run_at=${new Date(nextRunAt).toISOString()})`);
+    } else {
+      log(`system-jobs: ${job.id} already exists`);
+    }
   }
 }

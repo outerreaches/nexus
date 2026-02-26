@@ -24,6 +24,7 @@ export type GatewayHttpDeps = {
   runtimeProfile?: string;
   getFederationBreakglassState?: () => { globalDisable: boolean };
   setFederationGlobalDisable?: (disabled: boolean) => { globalDisable: boolean };
+  isStandby?: () => boolean;
   db?: NexusDatabase;
   processManager?: ProcessManager;
   agentTracker?: AgentTracker;

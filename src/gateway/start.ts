@@ -1075,6 +1075,7 @@ export async function startGateway(
     federationAllowInsecureTransportDev: config.federation.transport.allowInsecureSignedOnlyDev,
     federationAllowInsecureWebhookHttpDev: config.federation.webhooks.allowInsecureHttpDev,
     runtimeProfile: config.runtime.profile,
+    isStandby: () => isStandby,
     getFederationBreakglassState: () => ({
       globalDisable: federationGlobalDisabled,
     }),
@@ -1440,6 +1441,11 @@ export async function startGateway(
     scheduler = null;
     proactive?.stop();
     proactive = null;
+    try {
+      await browser.stop();
+    } catch (err) {
+      log(`browser: stop failed during standby transition: ${err instanceof Error ? err.message : String(err)}`);
+    }
     await tg?.stop();
     tg = null;
     toolContext.telegram = undefined as unknown;

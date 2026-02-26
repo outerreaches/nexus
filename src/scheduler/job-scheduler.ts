@@ -142,6 +142,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const tickIntervalMs = Math.max(2_000, envInt("NEXUS_SCHEDULER_TICK_MS") ?? deps.config.scheduler.tickIntervalMs);
   const maxRunsPerTick = Math.max(1, envInt("NEXUS_SCHEDULER_MAX_RUNS_PER_TICK") ?? deps.config.scheduler.maxRunsPerTick);
   const leaseTtlMs = Math.max(5_000, envInt("NEXUS_SCHEDULER_LEASE_TTL_MS") ?? deps.config.scheduler.leaseTtlMs);
+  const leaseRenewMs = Math.max(1_000, Math.floor(leaseTtlMs / 3));
   const maxConsecutiveFailures = Math.max(
     1,
     envInt("NEXUS_SCHEDULER_MAX_CONSECUTIVE_FAILURES") ?? deps.config.scheduler.maxConsecutiveFailures,
@@ -213,6 +214,17 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       deps.db.db.prepare("DELETE FROM job_leases WHERE job_id = ? AND lease_id = ?").run(jobId, leaseId);
     } catch {
       // ignore
+    }
+  };
+
+  const renewLease = (jobId: string, nowMs: number): boolean => {
+    try {
+      const res = deps.db.db
+        .prepare("UPDATE job_leases SET leased_until = ?, updated_at = ? WHERE job_id = ? AND lease_id = ?")
+        .run(nowMs + leaseTtlMs, nowMs, jobId, leaseId);
+      return res.changes > 0;
+    } catch {
+      return false;
     }
   };
 
@@ -546,6 +558,16 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       nowMs: startedAt,
     });
 
+    let leaseRenewTimer: NodeJS.Timeout | null = setInterval(() => {
+      const renewed = renewLease(job.id, Date.now());
+      if (!renewed) {
+        deps.log(`scheduler: lease renewal failed job=${job.id} run=${runId}`);
+      }
+    }, leaseRenewMs);
+    if (typeof leaseRenewTimer.unref === "function") {
+      leaseRenewTimer.unref();
+    }
+
     try {
       const res = await executeJobLogic(job, runId, scheduledFor);
 
@@ -696,6 +718,11 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         { status: "exception", output, paused: shouldPause },
         endedAt,
       );
+    } finally {
+      if (leaseRenewTimer) {
+        clearInterval(leaseRenewTimer);
+        leaseRenewTimer = null;
+      }
     }
   };
 
@@ -782,7 +809,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=disabled`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} leaseRenewMs=${leaseRenewMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=disabled`,
   );
 
   // Start shortly after boot.
