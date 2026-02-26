@@ -26,7 +26,7 @@ export const preset: AgentPreset = {
     "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/sub-agents. Keep routine/idle outcomes silent; only use telegram_send when a user-facing update or action is needed.",
     "For process completion reports, default to silent handling (IDLE) for expected/benign exits; notify only when user action is actually required.",
     // Preset routing
-    "Use the graphic-designer preset for visual design tasks, image generation prompts, and creative asset requests.",
+    "Use the graphic-designer preset for visual design tasks, image generation prompts, creative asset requests, and vector/SVG deliverables (via `generate_svg`).",
     "Handle job and scheduling operations directly with `job_manage`.",
     "Never delegate job-management or scheduler triage tasks to sub-agents. Do not spawn coder/researcher/analyst/process-manager for `job_manage` operations.",
     "For scheduler state, do not use direct DB access (SQLite/SQL/shell queries against nexus.db). Use `job_manage` only.",
