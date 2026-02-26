@@ -41,6 +41,37 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
 
     CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);
 
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content,
+      content='messages',
+      content_rowid='id'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+
+    CREATE TABLE IF NOT EXISTS session_nudges (
+      session_id TEXT PRIMARY KEY,
+      user_turn_count INTEGER NOT NULL DEFAULT 0,
+      last_memory_action_turn INTEGER NOT NULL DEFAULT 0,
+      last_memory_nudge_turn INTEGER NOT NULL DEFAULT 0,
+      skill_iterations_since_action INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(session_id) REFERENCES sessions(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_nudges_updated ON session_nudges(updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS paper_trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at INTEGER NOT NULL,
@@ -1304,6 +1335,20 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     db.exec("CREATE INDEX IF NOT EXISTS idx_nodes_trust_status ON nodes(trust_level, status);");
   } catch {
     // already exists
+  }
+
+  try {
+    const messagesCount = (
+      db.prepare("SELECT COUNT(*) AS cnt FROM messages").get() as { cnt: number } | undefined
+    )?.cnt ?? 0;
+    const ftsCount = (
+      db.prepare("SELECT COUNT(*) AS cnt FROM messages_fts").get() as { cnt: number } | undefined
+    )?.cnt ?? 0;
+    if (messagesCount > 0 && ftsCount === 0) {
+      db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');");
+    }
+  } catch {
+    // best-effort backfill only
   }
 
   return {

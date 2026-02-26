@@ -457,6 +457,7 @@ export async function startGateway(
     agentTracker,
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
+    nudges: config.nudges,
     limits: {
       maxMessages: 20,
       anchorRolloverMessages: 40,

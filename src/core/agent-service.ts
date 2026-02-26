@@ -9,6 +9,7 @@ import type { ChatMessage, ChatUserContentPart } from "./types.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
+import { beginSessionTurnNudges, completeSessionTurnNudges } from "../storage/nudges.js";
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
 import { extractKeywords, generateMemoryHints, hasRecentMemorySearch } from "./memory-hints.js";
@@ -17,6 +18,12 @@ import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 
 type ExecutionLane = "interactive" | "background";
+type NudgeConfig = {
+  enabled: boolean;
+  channels: string[];
+  memoryTurnInterval: number;
+  skillIterationInterval: number;
+};
 
 type HistoryScope =
   | {
@@ -51,6 +58,42 @@ function buildRuntimeClockSystemMessage(nowMs: number): string {
 function buildRuntimeChannelSystemMessage(params: { channel: string }): string {
   const channel = params.channel.trim() || "unknown";
   return `Runtime note (ephemeral): current inbound channel is ${channel}; provide your final user-facing response for this channel unless a tool explicitly sends output elsewhere.`;
+}
+
+function buildMemoryRetentionNudgeSystemMessage(params: { turnCount: number; interval: number }): string {
+  return [
+    "Memory retention nudge (ephemeral):",
+    `- This session reached turn ${params.turnCount} (interval=${params.interval}).`,
+    "- If this run surfaces durable facts/preferences/plans, store them with memory_store using specific keys.",
+    "- Skip storing transient scratch details.",
+  ].join("\n");
+}
+
+function buildSkillNudgeSystemMessage(params: { iterationInterval: number }): string {
+  return [
+    "Skill capture nudge (ephemeral):",
+    `- Multiple iterations elapsed without a new skill action (interval=${params.iterationInterval}).`,
+    "- If you are repeating a stable workflow, capture it using skill_create or update it with skill_update.",
+    "- Keep skills concise and reusable; do not store one-off task details.",
+  ].join("\n");
+}
+
+function collectToolNames(messages: ChatMessage[]): Set<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.toolCalls)) {
+      for (const call of message.toolCalls) {
+        const name = call.name.trim();
+        if (name) names.add(name);
+      }
+      continue;
+    }
+    if (message.role === "tool" && typeof message.name === "string") {
+      const name = message.name.trim();
+      if (name) names.add(name);
+    }
+  }
+  return names;
 }
 
 const COMPACTION_SUMMARY_HINT_MAX_CHARS = 2400;
@@ -115,6 +158,8 @@ export class AgentService {
       defaultPreset?: string;
       /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
       transientRetries?: number;
+      /** Optional proactive nudges (memory/skill) injected per session cadence. */
+      nudges?: NudgeConfig;
     },
   ) {
     const interactiveMax = Math.max(1, deps.limits.maxConcurrentInteractive ?? deps.limits.maxConcurrent);
@@ -193,6 +238,14 @@ export class AgentService {
 
   private shouldInjectRuntimeChannelHint(channel: string): boolean {
     return channel === "telegram" || channel === "cli";
+  }
+
+  private shouldRunNudgesForChannel(channel: string): boolean {
+    const nudges = this.deps.nudges;
+    if (!nudges?.enabled) return false;
+    const target = channel.trim().toLowerCase();
+    if (!target) return false;
+    return nudges.channels.some((allowed) => allowed.trim().toLowerCase() === target);
   }
 
   private globalRuntimeLimits(): { maxToolCalls: number; maxIterations: number; maxContextTokens: number } {
@@ -404,6 +457,53 @@ export class AgentService {
         }
         : undefined;
 
+      const nudgesEnabledForChannel = this.shouldRunNudgesForChannel(params.channel);
+      let nudgeTurnCount: number | null = null;
+      let memoryNudgeDue = false;
+      let skillNudgeDue = false;
+      if (nudgesEnabledForChannel && this.deps.nudges) {
+        try {
+          const nudgeTurn = beginSessionTurnNudges({
+            db: this.deps.db,
+            sessionId: readSessionId,
+            nowMs,
+            memoryTurnInterval: this.deps.nudges.memoryTurnInterval,
+            skillIterationInterval: this.deps.nudges.skillIterationInterval,
+          });
+          nudgeTurnCount = nudgeTurn.state.userTurnCount;
+          memoryNudgeDue = nudgeTurn.memoryNudgeDue;
+          skillNudgeDue = nudgeTurn.skillNudgeDue;
+          onRunnerLog?.(
+            `nudges_begin session=${readSessionId} turn=${nudgeTurn.state.userTurnCount} memory_due=${memoryNudgeDue} skill_due=${skillNudgeDue}`,
+          );
+        } catch (err) {
+          onRunnerLog?.(`nudges_begin_failed error=${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      const finalizeTurnNudges = (args: { iterationsUsed: number; messages: ChatMessage[] }): void => {
+        if (!nudgesEnabledForChannel || !this.deps.nudges || nudgeTurnCount === null) return;
+        try {
+          const toolNames = collectToolNames(args.messages);
+          const memoryActionUsed = toolNames.has("memory_store") || toolNames.has("memory_delete");
+          const skillActionUsed = toolNames.has("skill_create") || toolNames.has("skill_update");
+          const next = completeSessionTurnNudges({
+            db: this.deps.db,
+            sessionId: readSessionId,
+            nowMs: this.deps.toolContext.nowMs(),
+            userTurnCount: nudgeTurnCount,
+            iterationsUsed: args.iterationsUsed,
+            memoryActionUsed,
+            skillActionUsed,
+          });
+          onRunnerLog?.(
+            `nudges_complete session=${readSessionId} memory_action=${memoryActionUsed} skill_action=${skillActionUsed} iterations=${args.iterationsUsed} skill_iterations_since_action=${next.skillIterationsSinceAction}`,
+          );
+        } catch (err) {
+          onRunnerLog?.(`nudges_complete_failed error=${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
       const shouldInjectCompactionSummary = !preset || preset.name === "orchestrator" || preset.name === "coder";
       if (shouldInjectCompactionSummary) {
         const compaction = this.loadLatestCompactionSummary(params.agentId, readSessionId);
@@ -461,6 +561,29 @@ export class AgentService {
           content: memoryHint,
           cacheControl: { type: "ephemeral" },
         });
+      }
+      if (memoryNudgeDue && this.deps.nudges && nudgeTurnCount !== null) {
+        const memoryNudge = buildMemoryRetentionNudgeSystemMessage({
+          turnCount: nudgeTurnCount,
+          interval: this.deps.nudges.memoryTurnInterval,
+        });
+        runHistory.push({
+          role: "system",
+          content: memoryNudge,
+          cacheControl: { type: "ephemeral" },
+        });
+        onRunnerLog?.(`memory_nudge_injected turn=${nudgeTurnCount} length=${memoryNudge.length}`);
+      }
+      if (skillNudgeDue && this.deps.nudges) {
+        const skillNudge = buildSkillNudgeSystemMessage({
+          iterationInterval: this.deps.nudges.skillIterationInterval,
+        });
+        runHistory.push({
+          role: "system",
+          content: skillNudge,
+          cacheControl: { type: "ephemeral" },
+        });
+        onRunnerLog?.(`skill_nudge_injected length=${skillNudge.length}`);
       }
       if (this.shouldInjectRuntimeChannelHint(params.channel)) {
         const runtimeChannelHint = buildRuntimeChannelSystemMessage({
@@ -576,18 +699,18 @@ export class AgentService {
       } catch (err) {
         if (this.isRunCancellationError(err, abortController.signal)) {
           const cancellationOutput = this.cancellationMessage(abortController.signal);
+          const cancellationMessages: ChatMessage[] = [
+            {
+              role: "user",
+              content: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
+            },
+            {
+              role: "assistant",
+              content: cancellationOutput,
+            },
+          ];
           if (params.ephemeralSessionSave !== "always_skip") {
             const runNowMs = this.deps.toolContext.nowMs();
-            const cancellationMessages: ChatMessage[] = [
-              {
-                role: "user",
-                content: params.contentParts && params.contentParts.length > 0 ? params.contentParts : params.text,
-              },
-              {
-                role: "assistant",
-                content: cancellationOutput,
-              },
-            ];
             try {
               for (const msg of cancellationMessages) {
                 appendMessage({ db: this.deps.db, sessionId: writeSessionId, message: msg, nowMs: runNowMs });
@@ -627,6 +750,7 @@ export class AgentService {
               }
             }
           }
+          finalizeTurnNudges({ iterationsUsed: 0, messages: cancellationMessages });
           if (runId && this.deps.agentTracker) {
             this.deps.agentTracker.completeRun(runId, {
               status: "stopped",
@@ -650,6 +774,7 @@ export class AgentService {
             endedAt: this.deps.toolContext.nowMs(),
           });
         }
+        finalizeTurnNudges({ iterationsUsed: 0, messages: [] });
         throw err;
       } finally {
         this.activeRunCancels.delete(cancellationKey);
@@ -669,6 +794,7 @@ export class AgentService {
       } else if (params.ephemeralSessionSave === "always_skip") {
         shouldPersistHistory = false;
       }
+      finalizeTurnNudges({ iterationsUsed: result.iterationsUsed, messages: result.newMessages as ChatMessage[] });
 
       const runNowMs = this.deps.toolContext.nowMs();
       if (shouldPersistHistory) {

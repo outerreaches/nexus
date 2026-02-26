@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
+import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
 import { getNodeById, type NodeRecord } from "../storage/nodes.js";
 import type {
   ParentMessage,
@@ -340,13 +342,20 @@ export const spawnAgent = defineTool({
 
     // Start run tracking BEFORE execution (so DB row exists for isolated workers)
     const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
+    const workerSessionId = resolveWorkerSessionId({
+      db,
+      parent,
+      agentId,
+      presetName: preset.name,
+      nowMs: ctx.nowMs(),
+    });
     const runId = tracker?.startRun({
       parentRunId: effectiveParentRunId,
       agentId,
       preset: preset.name,
       channel: parent?.channel ?? "worker",
       channelKey: parent?.channelKey ?? "worker",
-      sessionId: parent?.sessionId ?? "unknown",
+      sessionId: workerSessionId,
       task: args.task,
     });
 
@@ -393,6 +402,7 @@ export const spawnAgent = defineTool({
         modelMode: workerModelMode,
         tracker,
         blackboardTitle,
+        workerSessionId,
         mcpGrantIds,
         blockedToolNames: combinedBlockedToolNames,
         workerAllowShellExec,
@@ -415,6 +425,7 @@ export const spawnAgent = defineTool({
         workerTools,
         tracker,
         blackboardTitle,
+        workerSessionId,
         workerAllowShellExec,
         workerAllowCodeWrite,
         taskType: coderTaskPolicy.taskType,
@@ -456,6 +467,7 @@ async function runInProcess(params: {
   workerTools: ReturnType<ToolRegistry["list"]>;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
+  workerSessionId: string;
   workerAllowShellExec: boolean;
   workerAllowCodeWrite: boolean;
   taskType: CoderTaskType | null;
@@ -474,6 +486,7 @@ async function runInProcess(params: {
     workerTools,
     tracker,
     blackboardTitle,
+    workerSessionId,
     workerAllowShellExec,
     workerAllowCodeWrite,
     taskType,
@@ -516,6 +529,7 @@ async function runInProcess(params: {
         ...ctx.request,
         agentId: `${ctx.request.agentId}:${preset.name}`,
         preset: preset.name,
+        sessionId: workerSessionId,
         runId: runId ?? undefined,
         parentRunId: parentRunId ?? undefined,
         modelMode,
@@ -561,6 +575,16 @@ async function runInProcess(params: {
       });
     }
 
+    persistWorkerTranscript({
+      db: ctx.db as NexusDatabase | undefined,
+      sessionId: workerSessionId,
+      nowMs: ctx.nowMs(),
+      messages: result.newMessages as ChatMessage[],
+      fallbackTask: task,
+      fallbackOutput: result.output,
+      log: ctx.log,
+    });
+
     // Return structured result to orchestrator
     const returnValue: Record<string, unknown> = {
       status: result.status,
@@ -569,6 +593,7 @@ async function runInProcess(params: {
       iterationsUsed: result.iterationsUsed,
       deployApplied: didRunApplyDeploy(result.newMessages),
       blackboardTitle,
+      sessionId: workerSessionId,
     };
     if (taskType) {
       returnValue.taskType = taskType;
@@ -610,6 +635,7 @@ async function runIsolated(params: {
   modelMode: ModelRoutingMode;
   tracker: AgentTracker | undefined;
   blackboardTitle: string;
+  workerSessionId: string;
   mcpGrantIds: string[];
   blockedToolNames: string[];
   workerAllowShellExec: boolean;
@@ -632,6 +658,7 @@ async function runIsolated(params: {
     modelMode,
     tracker,
     blackboardTitle,
+    workerSessionId,
     mcpGrantIds,
     blockedToolNames,
     workerAllowShellExec,
@@ -734,12 +761,23 @@ async function runIsolated(params: {
             endedAt: ctx.nowMs(),
           });
         }
+        const output = "ERROR: worker run cancelled";
+        persistWorkerTranscript({
+          db: ctx.db as NexusDatabase | undefined,
+          sessionId: workerSessionId,
+          nowMs: ctx.nowMs(),
+          messages: [],
+          fallbackTask: task,
+          fallbackOutput: output,
+          log: ctx.log,
+        });
         finish(JSON.stringify({
           status: "failed",
-          output: "ERROR: worker run cancelled",
+          output,
           toolCallsUsed: 0,
           iterationsUsed: 0,
           deployApplied: false,
+          sessionId: workerSessionId,
         }));
       };
       if (ctx.abortSignal.aborted) {
@@ -760,12 +798,23 @@ async function runIsolated(params: {
           endedAt: ctx.nowMs(),
         });
       }
+      const output = "ERROR: worker process timed out";
+      persistWorkerTranscript({
+        db: ctx.db as NexusDatabase | undefined,
+        sessionId: workerSessionId,
+        nowMs: ctx.nowMs(),
+        messages: [],
+        fallbackTask: task,
+        fallbackOutput: output,
+        log: ctx.log,
+      });
       finish(JSON.stringify({
         status: "failed",
-        output: "ERROR: worker process timed out",
+        output,
         toolCallsUsed: 0,
         iterationsUsed: 0,
         deployApplied: false,
+        sessionId: workerSessionId,
       }));
     }, timeoutMs);
 
@@ -794,7 +843,14 @@ async function runIsolated(params: {
             endedAt: ctx.nowMs(),
           });
         }
-        finish(JSON.stringify(msg.result));
+        finish(JSON.stringify({
+          status: msg.result.status,
+          output: msg.result.output,
+          toolCallsUsed: msg.result.toolCallsUsed,
+          iterationsUsed: msg.result.iterationsUsed,
+          deployApplied: msg.result.deployApplied,
+          sessionId: workerSessionId,
+        }));
       } else if (msg.type === "error") {
         clearTimeout(timer);
         if (runId && tracker) {
@@ -804,12 +860,23 @@ async function runIsolated(params: {
             endedAt: ctx.nowMs(),
           });
         }
+        const output = `ERROR: worker process failed: ${msg.error}`;
+        persistWorkerTranscript({
+          db: ctx.db as NexusDatabase | undefined,
+          sessionId: workerSessionId,
+          nowMs: ctx.nowMs(),
+          messages: [],
+          fallbackTask: task,
+          fallbackOutput: output,
+          log: ctx.log,
+        });
         finish(JSON.stringify({
           status: "failed",
-          output: `ERROR: worker process failed: ${msg.error}`,
+          output,
           toolCallsUsed: 0,
           iterationsUsed: 0,
           deployApplied: false,
+          sessionId: workerSessionId,
         }));
       }
     });
@@ -829,12 +896,23 @@ async function runIsolated(params: {
             endedAt: ctx.nowMs(),
           });
         }
+        const output = `ERROR: worker process ${reason}`;
+        persistWorkerTranscript({
+          db: ctx.db as NexusDatabase | undefined,
+          sessionId: workerSessionId,
+          nowMs: ctx.nowMs(),
+          messages: [],
+          fallbackTask: task,
+          fallbackOutput: output,
+          log: ctx.log,
+        });
         finish(JSON.stringify({
           status: "failed",
-          output: `ERROR: worker process ${reason}`,
+          output,
           toolCallsUsed: 0,
           iterationsUsed: 0,
           deployApplied: false,
+          sessionId: workerSessionId,
         }));
       }
     });
@@ -867,7 +945,7 @@ async function runIsolated(params: {
       parentRunId: effectiveParentRunId,
       runId,
       agentId,
-      sessionId: ctx.request?.sessionId ?? "unknown",
+      sessionId: workerSessionId,
       channel: ctx.request?.channel ?? "worker",
       channelKey: ctx.request?.channelKey ?? "worker",
       modelMode,
@@ -1242,6 +1320,78 @@ function buildCoderTaskPromptLines(params: {
   }
 
   return lines;
+}
+
+function resolveWorkerSessionId(params: {
+  db: NexusDatabase | undefined;
+  parent: ToolContext["request"] | undefined;
+  agentId: string;
+  presetName: string;
+  nowMs: number;
+}): string {
+  if (!params.db) {
+    return params.parent?.sessionId ?? `worker:${params.presetName}:${crypto.randomUUID()}`;
+  }
+  const parentRunId = typeof params.parent?.runId === "string" ? params.parent.runId.trim() : "";
+  const parentSessionId = typeof params.parent?.sessionId === "string" ? params.parent.sessionId.trim() : "";
+  const channel = "agent";
+  const channelKeyParts = [
+    "spawn",
+    parentRunId ? `parent-run:${parentRunId}` : parentSessionId ? `parent-session:${parentSessionId}` : "root",
+    `preset:${params.presetName}`,
+    crypto.randomUUID().slice(0, 12),
+  ];
+  const channelKey = channelKeyParts.join(":");
+  return getOrCreateSessionId({
+    db: params.db,
+    channel,
+    channelKey,
+    agentId: params.agentId,
+    nowMs: params.nowMs,
+  });
+}
+
+function persistWorkerTranscript(params: {
+  db: NexusDatabase | undefined;
+  sessionId: string;
+  nowMs: number;
+  messages: ChatMessage[];
+  fallbackTask: string;
+  fallbackOutput: string;
+  log?: (line: string) => void;
+}): void {
+  if (!params.db) return;
+  const sessionId = params.sessionId.trim();
+  if (!sessionId) return;
+  try {
+    if (params.messages.length > 0) {
+      let idx = 0;
+      for (const message of params.messages) {
+        appendMessage({
+          db: params.db,
+          sessionId,
+          message,
+          nowMs: params.nowMs + idx,
+        });
+        idx += 1;
+      }
+      return;
+    }
+    appendMessage({
+      db: params.db,
+      sessionId,
+      message: { role: "user", content: params.fallbackTask },
+      nowMs: params.nowMs,
+    });
+    appendMessage({
+      db: params.db,
+      sessionId,
+      message: { role: "assistant", content: params.fallbackOutput },
+      nowMs: params.nowMs + 1,
+    });
+  } catch (err) {
+    params.log?.(`spawn_agent: worker transcript persist failed session=${sessionId} err=${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function envInt(name: string): number | null {

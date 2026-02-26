@@ -144,6 +144,14 @@
     "contextMode": "delta"
   },
 
+  // ── Nudges ───────────────────────────────────────────────────────────────
+  "nudges": {
+    "enabled": true,
+    "channels": ["cli", "telegram"],
+    "memoryTurnInterval": 10,
+    "skillIterationInterval": 20
+  },
+
   // ── Maintenance ──────────────────────────────────────────────────────────
   "maintenance": {
     "enabled": true,

@@ -8,6 +8,8 @@
 // cross-session recall.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import crypto from "node:crypto";
+
 import type { ChatMessage } from "./types.js";
 import type { Tool } from "./tools.js";
 import type { LLMClient } from "../llm/openai-compat.js";
@@ -71,6 +73,11 @@ export type CompactionResult = {
   messagesRemoved: number;
   tokensBefore: number;
   tokensAfter: number;
+};
+
+export type RetentionCandidate = {
+  tier: "A" | "M" | "B" | "C";
+  text: string;
 };
 
 /**
@@ -256,6 +263,55 @@ function messagesToText(messages: ChatMessage[], maxCharsPerMessage: number = 1_
 function truncateStr(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + `…(+${s.length - max} chars)`;
+}
+
+const RETENTION_SECTION_RE = /retention candidates\s*\(tiered\)/i;
+const RETENTION_CANDIDATE_RE = /^\s*[-*]\s*(?:tier\s*)?([ambc])\s*(?:->|:|[-–—])\s*(.+?)\s*$/i;
+
+function normalizeRetentionText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function isLowSignalRetentionText(text: string): boolean {
+  const normalized = normalizeRetentionText(text).toLowerCase();
+  if (!normalized) return true;
+  if (normalized === "none") return true;
+  if (normalized === "- none") return true;
+  if (normalized === "n/a") return true;
+  if (normalized.includes("no retention candidates")) return true;
+  return false;
+}
+
+function stableRetentionKey(sessionId: string, text: string): string {
+  const hash = crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
+  return `retention:${sessionId}:${hash}`;
+}
+
+/**
+ * Parse tiered retention candidate bullets from a compaction summary.
+ */
+export function extractTieredRetentionCandidates(summary: string, maxCandidates: number = 24): RetentionCandidate[] {
+  const text = summary.trim();
+  if (!text) return [];
+
+  const lines = text.split(/\r?\n/);
+  const sectionStart = lines.findIndex((line) => RETENTION_SECTION_RE.test(line));
+  const candidateLines = sectionStart >= 0 ? lines.slice(sectionStart + 1) : lines;
+  const out: RetentionCandidate[] = [];
+
+  for (const line of candidateLines) {
+    if (out.length >= maxCandidates) break;
+    const m = line.match(RETENTION_CANDIDATE_RE);
+    if (!m) continue;
+    const tierRaw = (m[1] ?? "").trim().toUpperCase();
+    const tier = tierRaw === "A" || tierRaw === "M" || tierRaw === "B" || tierRaw === "C" ? tierRaw : null;
+    if (!tier) continue;
+    const candidateText = normalizeRetentionText(m[2] ?? "");
+    if (isLowSignalRetentionText(candidateText)) continue;
+    out.push({ tier, text: candidateText });
+  }
+
+  return out;
 }
 
 /**
@@ -497,4 +553,62 @@ export function storeCompactionSummary(params: {
   } catch {
     // Non-critical — don't fail the run if memory store fails
   }
+}
+
+/**
+ * Parse and persist Tier B retention candidates from compaction summaries.
+ * Tier A/M/C are intentionally excluded from auto-write because they target files
+ * or higher-trust memory layers that should remain explicit/manual.
+ */
+export function storeCompactionRetentionCandidates(params: {
+  db: NexusDatabase;
+  agentId: string;
+  sessionId: string;
+  summary: string;
+  nowMs: number;
+  onLog?: (line: string) => void;
+}): { detected: number; stored: number } {
+  const candidates = extractTieredRetentionCandidates(params.summary);
+  if (candidates.length === 0) return { detected: 0, stored: 0 };
+
+  const tierB = candidates.filter((candidate) => candidate.tier === "B");
+  if (tierB.length === 0) return { detected: candidates.length, stored: 0 };
+
+  let stored = 0;
+  const upsert = params.db.db.prepare(
+    `INSERT INTO memories (agent_id, key, value, category, tags_json, created_at, updated_at, accessed_at, access_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+     ON CONFLICT(agent_id, key) DO UPDATE SET
+       value = excluded.value,
+       category = excluded.category,
+       tags_json = excluded.tags_json,
+       updated_at = excluded.updated_at`,
+  );
+  const tagsJson = JSON.stringify(["retention-pass", "tier-b", "source:compaction"]);
+
+  for (const candidate of tierB) {
+    const value = candidate.text.trim();
+    if (isLowSignalRetentionText(value)) continue;
+    const key = stableRetentionKey(params.sessionId, value.toLowerCase());
+    try {
+      upsert.run(
+        params.agentId,
+        key,
+        value,
+        "observation",
+        tagsJson,
+        params.nowMs,
+        params.nowMs,
+        params.nowMs,
+      );
+      stored += 1;
+    } catch (err) {
+      params.onLog?.(`retention_pass_store_failed key=${key} err=${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return {
+    detected: candidates.length,
+    stored,
+  };
 }

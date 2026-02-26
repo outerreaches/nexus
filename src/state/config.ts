@@ -59,6 +59,15 @@ const SchedulerSchema = z
   })
   .default({});
 
+const NudgesSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    channels: z.array(z.string().min(1)).default(["cli", "telegram"]),
+    memoryTurnInterval: z.number().int().min(0).default(10),
+    skillIterationInterval: z.number().int().min(0).default(20),
+  })
+  .default({});
+
 const MaintenanceSchema = z
   .object({
     enabled: z.boolean().default(true),
@@ -227,6 +236,7 @@ export const ConfigSchema = z.object({
     .default({ telegram: {} }),
   proactive: ProactiveSchema,
   scheduler: SchedulerSchema,
+  nudges: NudgesSchema,
   maintenance: MaintenanceSchema,
   permissions: z
     .object({
@@ -343,6 +353,12 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           notifyAgentOnFailure: true,
           notifyCooldownMs: 300000,
           contextMode: "delta",
+        },
+        nudges: {
+          enabled: true,
+          channels: ["cli", "telegram"],
+          memoryTurnInterval: 10,
+          skillIterationInterval: 20,
         },
         maintenance: {
           enabled: true,

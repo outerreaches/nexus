@@ -3,7 +3,12 @@ import type { ChatMessage, ChatUserContent } from "./types.js";
 import { OpenAICompatClient, type LLMClient, type LLMUsage } from "../llm/openai-compat.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { createHash } from "node:crypto";
-import { estimateTotalTokens, compactContext, storeCompactionSummary } from "./context-compactor.js";
+import {
+  estimateTotalTokens,
+  compactContext,
+  storeCompactionRetentionCandidates,
+  storeCompactionSummary,
+} from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ToolCall } from "./types.js";
 
@@ -491,13 +496,27 @@ export class AgentRunner {
                 const agentId = this.deps.toolContext.request?.agentId ?? "main";
                 const sessionId = this.deps.toolContext.request?.sessionId;
                 if (db && sessionId) {
+                  const nowMs = this.deps.toolContext.nowMs();
                   storeCompactionSummary({
                     db,
                     agentId,
                     sessionId,
                     summary: result.summary,
-                    nowMs: this.deps.toolContext.nowMs(),
+                    nowMs,
                   });
+                  const retention = storeCompactionRetentionCandidates({
+                    db,
+                    agentId,
+                    sessionId,
+                    summary: result.summary,
+                    nowMs,
+                    onLog: this.deps.onLog,
+                  });
+                  if (retention.detected > 0) {
+                    this.deps.onLog?.(
+                      `retention_pass: detected=${retention.detected} stored=${retention.stored} session=${sessionId}`,
+                    );
+                  }
                 }
               }
             }

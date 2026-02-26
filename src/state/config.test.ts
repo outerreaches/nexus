@@ -17,6 +17,10 @@ test("config federation defaults are safe/off", () => {
   assert.equal(parsed.federation.outbox.maxBatch, 20);
   assert.equal(parsed.federation.outbox.requestTimeoutMs, 10000);
   assert.deepEqual(parsed.federation.peers, []);
+  assert.equal(parsed.nudges.enabled, true);
+  assert.deepEqual(parsed.nudges.channels, ["cli", "telegram"]);
+  assert.equal(parsed.nudges.memoryTurnInterval, 10);
+  assert.equal(parsed.nudges.skillIterationInterval, 20);
 });
 
 test("config federation peer endpoint must be a URL", () => {

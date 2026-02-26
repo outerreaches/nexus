@@ -142,6 +142,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ModelRouter } = await import("../llm/model-router.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
+      const { AgentTracker } = await import("../core/agent-tracker.js");
       const { BrowserManager } = await import("../browser/manager.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
@@ -210,6 +211,7 @@ export async function runCli(argv: string[]): Promise<void> {
       await mcp.init();
       const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
       await registry.init();
+      const agentTracker = new AgentTracker({ db });
 
       const processManager = new ProcessManager({ stateDir: paths.stateDir, db });
       const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
@@ -227,6 +229,7 @@ export async function runCli(argv: string[]): Promise<void> {
         registry,
         processManager,
         mcp,
+        agentTracker,
         allowShellExec: config.permissions.allowShellExec || process.env.NEXUS_ALLOW_SHELL_EXEC === "1",
         allowCodeEdit: config.permissions.allowCodeEdit,
         allowCodeWrite: config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1",
@@ -250,7 +253,9 @@ export async function runCli(argv: string[]): Promise<void> {
         toolContext,
         db,
         stateDir: paths.stateDir,
+        agentTracker,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
+        nudges: config.nudges,
         limits: {
           maxMessages: 20,
           anchorRolloverMessages: 40,

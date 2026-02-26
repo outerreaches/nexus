@@ -10,6 +10,7 @@ import "../env.js";
 import path from "node:path";
 
 import { openDatabase } from "../storage/database.js";
+import { appendMessage } from "../storage/sessions.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
 import { ModelRouter } from "../llm/model-router.js";
 import { ToolRegistry } from "./tool-registry.js";
@@ -251,6 +252,23 @@ process.on("message", async (msg: ParentMessage) => {
         outputPreview: result.output.trim().slice(0, 240),
         endedAt: Date.now(),
       });
+    }
+
+    // Persist worker conversation into the worker-owned session so parent/session_search
+    // can recall scoped sub-agent history without relying on oversized IPC payloads.
+    try {
+      let idx = 0;
+      for (const message of result.newMessages) {
+        appendMessage({
+          db,
+          sessionId: cfg.sessionId,
+          message,
+          nowMs: Date.now() + idx,
+        });
+        idx += 1;
+      }
+    } catch (persistErr) {
+      log(`worker transcript persist failed: ${persistErr instanceof Error ? persistErr.message : String(persistErr)}`);
     }
 
     send({

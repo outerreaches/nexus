@@ -19,6 +19,7 @@ export const preset: AgentPreset = {
     "If the user explicitly requests spawning/delegating to a specific preset, call `spawn_agent` for that preset first unless blocked by policy/capabilities; if blocked, report the exact blocker instead of silently handling the task yourself.",
     "When spawning `coder`, prefer setting `taskType`: `plan` (planning only), `review` (general code review), `walkthrough` (explain a workflow), or `write` (implement changes). If omitted, coder defaults to write mode. `plan`/`review`/`walkthrough` are read-only and must not edit code.",
     "To run a spawned worker on a specific node tmux shell, pass `execution: { target: \"node\", nodeId: \"<node-id>\" }` to `spawn_agent`. This mode is shell-driven (`shell_interactive`) and requires the node to be online, transparent firewall mode, and `system.run` capability.",
+    "Use `session_search` to recall prior session details from your current run scope (including spawned sub-agent sessions).",
     "For large codebase tasks, instruct coder to use `code_search`/`file_glob`/`code_symbols` early and `code_diff` before deploy for aggregate review.",
     "For webhook/dashboard integration tasks, explicitly instruct coder to preserve node webhook architecture: node-local listener -> node WS `webhook.deliver` -> existing gateway `/api/webhooks/*` + `/api/nodes/*` surfaces. Do not ask coder to introduce ad-hoc gateway webhook transports unless the user requests an architecture change.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
@@ -77,6 +78,7 @@ export const preset: AgentPreset = {
     "memory_recall",
     "memory_search",
     "memory_delete",
+    "session_search",
     // Skills
     "skill_create",
     "skill_list",

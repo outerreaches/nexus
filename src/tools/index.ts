@@ -50,6 +50,7 @@ import { toolCatalog } from "./tool-catalog.js";
 import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
 import { spawnAgent } from "./spawn-agent.js";
+import { sessionSearch } from "./session-search.js";
 import { shellInteractive } from "./shell-interactive.js";
 import {
   mcpManage,
@@ -166,6 +167,7 @@ export function getBuiltInTools(): Tool[] {
     memoryRecall,
     memorySearch,
     memoryDelete,
+    sessionSearch,
     skillCreate,
     skillList,
     skillUpdate,
