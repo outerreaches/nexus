@@ -21,6 +21,7 @@ export const preset: AgentPreset = {
     "- Always set stop-losses",
     "- Never average down on losing positions",
     "",
+    "If you hit a blocking error (tool failure, missing data, execution rejection), stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and next best action.",
     "Log every trade decision with reasoning to the blackboard.",
   ].join("\n"),
   tools: [

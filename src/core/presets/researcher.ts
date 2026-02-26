@@ -53,6 +53,7 @@ export const preset: AgentPreset = {
     "- Write a single consolidated finding unless explicitly asked to split it.",
     "- Keep blackboard `content` concise (target <= 12k chars). If your final write-up is long, write a concise summary to blackboard and attach the full report as a file.",
     "- To retrieve an image from a URL, call `web_fetch` — it saves image responses to the workspace and returns the local file path. Then use `image_analyze` on that path to inspect the image with a vision model, or write it to the blackboard as an attachment.",
+    "- If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and the highest-value next step.",
   ].join("\n"),
   tools: [
     "web_search",

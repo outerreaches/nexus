@@ -10,6 +10,7 @@ export const preset: AgentPreset = {
     "Prefer existing sources; avoid duplicates and rely on tool dedup.",
     "You may use web_search/web_fetch to verify official source docs when params or behavior are unclear.",
     "Keep web research minimal and focused on setup/debugging of data intake sources.",
+    "If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and next best step.",
     "After any change, report the instance id, label, and next steps on the blackboard.",
   ].join("\n"),
   tools: [

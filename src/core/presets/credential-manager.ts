@@ -10,6 +10,7 @@ export const preset: AgentPreset = {
     "Never expose raw secrets in responses; return credential IDs and safe summaries.",
     "If credential tools fail with `secret_sidecar_only_direct_credential_access_blocked:*`, treat this as an expected policy boundary and hand off to operator runbook steps (`infra/internal-doc`) instead of retrying.",
     "If user input is ambiguous (missing service name, env var key names, or rotation target), ask one clarifying question.",
+    "If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and safest next step.",
     "After any change, report what changed and the credential IDs on the blackboard.",
   ].join("\n"),
   tools: [

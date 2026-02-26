@@ -250,7 +250,7 @@ async function vectorizeWithQuiver(params: {
   endpoint: string;
   model: string;
   prompt: string;
-  imageRef: string;
+  imageCandidates: ReadonlyArray<Record<string, unknown>>;
   timeoutMs: number;
   maxOutputTokens?: number;
   temperature?: number;
@@ -269,16 +269,11 @@ async function vectorizeWithQuiver(params: {
   if (typeof params.presencePenalty === "number") basePayload.presence_penalty = params.presencePenalty;
   if (typeof params.instructions === "string" && params.instructions.trim()) basePayload.instructions = params.instructions.trim();
 
-  const payloadCandidates: Record<string, unknown>[] = [
-    {
-      ...basePayload,
-      references: [{ image_url: { url: params.imageRef } }],
-    },
-    {
-      ...basePayload,
-      references: [{ image_url: params.imageRef }],
-    },
-  ];
+  const imageCandidates = params.imageCandidates.length > 0 ? params.imageCandidates : [{ url: "" }];
+  const payloadCandidates = imageCandidates.map((image) => ({
+    ...basePayload,
+    image,
+  }));
 
   let lastErr = "";
   for (let i = 0; i < payloadCandidates.length; i += 1) {
@@ -420,7 +415,7 @@ export const vectorize = defineTool({
       DEFAULT_MODEL;
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
 
-    let imageRef: string;
+    let imageCandidates: ReadonlyArray<Record<string, unknown>>;
     let sourceLabel: string;
     let inputSizeBytes: number | null = null;
 
@@ -430,7 +425,7 @@ export const vectorize = defineTool({
         if (!/^https?:\/\//i.test(trimmed)) {
           return "ERROR: inputUrl must be a valid HTTP or HTTPS URL";
         }
-        imageRef = trimmed;
+        imageCandidates = [{ url: trimmed }];
         sourceLabel = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
       } else {
         let absolutePath: string;
@@ -470,7 +465,13 @@ export const vectorize = defineTool({
           return `ERROR: unsupported input image mime (${mimeType}). Supported: ${[...SUPPORTED_INPUT_MIME_TYPES].join(", ")}`;
         }
 
-        imageRef = `data:${mimeType};base64,${bytes.toString("base64")}`;
+        const base64 = bytes.toString("base64");
+        const dataUrl = `data:${mimeType};base64,${base64}`;
+        // Quiver vectorize expects a top-level `image` object (URL or encoded content).
+        imageCandidates = [
+          { url: dataUrl },
+          { base64, mime_type: mimeType },
+        ];
         inputSizeBytes = bytes.length;
       }
     } catch (err) {
@@ -484,7 +485,7 @@ export const vectorize = defineTool({
         endpoint,
         model: selectedModel,
         prompt: args.prompt,
-        imageRef,
+        imageCandidates,
         timeoutMs,
         maxOutputTokens: args.maxOutputTokens,
         temperature: args.temperature,

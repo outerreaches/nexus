@@ -13,6 +13,7 @@ export const preset: AgentPreset = {
     "- Avoid repetition: infer what has already been checked from the task text and do NOT repeat the same checks unless needed for verification.",
     "- When you need logs, call `process_logs` once with a reasonable tail (e.g. 8k-12k chars).",
     "- Keep outputs concise and user-ready; do not include internal planning.",
+    "- If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and the highest-value next step.",
     "",
     "## Common Workflows",
     "1) Inventory: `process_list` -> pick most recent/running.",

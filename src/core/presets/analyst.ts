@@ -25,6 +25,7 @@ export const preset: AgentPreset = {
     "If delegating, include a distinct `Blackboard title:` line in each sub-agent task and keep scopes non-overlapping.",
     "After each sub-agent completes, read its blackboard result (exact title or returned blackboard entry ID) and synthesize a single final report.",
     "Avoid recursive loops: do not spawn a worker with substantially the same scope/task as yourself.",
+    "If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and the most useful next step.",
     "When finished, write your analysis to the blackboard.",
   ].join("\n"),
   tools: [

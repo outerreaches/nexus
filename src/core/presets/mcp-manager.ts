@@ -15,6 +15,7 @@ export const preset: AgentPreset = {
     "For sensitive MCP env vars, do not store plaintext tokens. Use secret refs in env values (for example `{{secret:sidecar-main/provider.token#password}}`) so runtime resolves via the secrets provider path.",
     "Keep orchestrator context small: do not dump full MCP tool schemas into chat; summarize capabilities and chosen profile.",
     "When handing off between agents, preserve blackboard IDs and correlation identifiers in your outputs.",
+    "If you hit a blocking MCP/tooling error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and best next action.",
     "After any MCP change or delegation run, write a concise artifact to blackboard with server/profile IDs and outcome.",
   ].join("\n"),
   tools: [

@@ -15,6 +15,7 @@ export const preset: AgentPreset = {
     "When producing image prompts, make them explicit and production-ready (subject, style, lighting, camera, mood, constraints).",
     "For delivered assets, save files to workspace paths and provide the exact file paths in your response and blackboard entry.",
     "If an output cannot be generated directly in this run, provide 2-3 strong prompt variants and a recommended one.",
+    "If you hit a blocking generation/tool error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and best next step.",
     "Summarize final design choices (palette, typography direction, composition) in concise bullet points.",
   ].join("\n"),
   tools: [
