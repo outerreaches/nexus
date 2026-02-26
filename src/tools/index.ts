@@ -9,22 +9,10 @@ import { processList, processLogs, processStart, processStatus, processStop } fr
 import {
   nodeManage,
   nodeAuditQuery,
-  nodeDelete,
-  nodeFilePull,
-  nodeFilePush,
-  nodeGet,
   nodeMcpCall,
   nodeMcpList,
   nodeMcpResources,
-  nodeList,
-  nodeProcessLogs,
-  nodeProcessStart,
-  nodeProcessStatus,
-  nodeProcessStop,
-  nodeSetStatus,
   nodeSymbolsList,
-  nodeSystemRun,
-  nodeSystemWhich,
 } from "./nodes.js";
 import { webFetch } from "./web.js";
 import { webSearch } from "./web-search.js";
@@ -42,7 +30,6 @@ import { telegramSend } from "./telegram-send.js";
 import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
 import { skillCreate, skillList, skillUpdate } from "./skills.js";
 import { writeToBlackboard, readFromBlackboard, blackboardManage } from "./blackboard.js";
-import { toolCatalog } from "./tool-catalog.js";
 import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
 import { spawnAgent } from "./spawn-agent.js";
@@ -90,23 +77,11 @@ export function getBuiltInTools(): Tool[] {
     processStatus,
     processLogs,
     processStop,
-    nodeList,
-    nodeGet,
-    nodeFilePull,
-    nodeFilePush,
     nodeMcpList,
     nodeMcpCall,
     nodeMcpResources,
-    nodeDelete,
-    nodeSetStatus,
     nodeSymbolsList,
     nodeAuditQuery,
-    nodeSystemRun,
-    nodeSystemWhich,
-    nodeProcessStart,
-    nodeProcessStatus,
-    nodeProcessLogs,
-    nodeProcessStop,
     nodeManage,
     browserTool,
     queryData,
@@ -127,7 +102,6 @@ export function getBuiltInTools(): Tool[] {
     writeToBlackboard,
     readFromBlackboard,
     blackboardManage,
-    toolCatalog,
     dataIntakeListSources,
     dataIntakeRun,
     dataIntakeQuery,

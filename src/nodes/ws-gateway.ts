@@ -1699,7 +1699,7 @@ export class NodeWebSocketGateway {
         nowMs,
       });
       this.deps.log(
-        `nodes/ws: pairing required node=${nodeId} fingerprint=${fingerprint} sender=${msg.sender}. Approve with node_set_status status=approved.`,
+        `nodes/ws: pairing required node=${nodeId} fingerprint=${fingerprint} sender=${msg.sender}. Approve with node_manage action=set_status id=${nodeId} status=approved.`,
       );
       this.sendErrorResponse(
         ws,
@@ -1749,7 +1749,7 @@ export class NodeWebSocketGateway {
         ws,
         msg.id,
         "PAIRING_PENDING",
-        `Node ${nodeId} is pending approval. Approve with node_set_status status=approved.`,
+        `Node ${nodeId} is pending approval. Approve with node_manage action=set_status id=${nodeId} status=approved.`,
         false,
       );
       this.closeForAuthFailure(ws, "pairing pending");
