@@ -392,6 +392,24 @@ async function readTimedOutput(params: {
   };
 }
 
+async function listOtherSessions(stateDir: string, excludeSessionId: string): Promise<Array<{ session: string; cwd: string; running: boolean }>> {
+  try {
+    const names = await fs.readdir(shellMetaDir(stateDir));
+    const others: Array<{ session: string; cwd: string; running: boolean }> = [];
+    for (const entry of names) {
+      if (!entry.endsWith(".json")) continue;
+      const sid = entry.slice(0, -5);
+      if (sid === excludeSessionId) continue;
+      const meta = await readSessionMeta(stateDir, sid);
+      if (!meta) continue;
+      others.push({ session: sid, cwd: meta.cwd, running: await tmuxHasSession(meta.tmuxSession) });
+    }
+    return others;
+  } catch {
+    return [];
+  }
+}
+
 async function openLocalSession(params: {
   sessionId: string;
   cwd: string | undefined;
@@ -421,6 +439,7 @@ async function openLocalSession(params: {
     existingMeta.lastReadCursor = cursor;
     existingMeta.updatedAt = Date.now();
     await writeSessionMeta(params.ctx.stateDir, existingMeta);
+    const otherSessions = await listOtherSessions(params.ctx.stateDir, params.sessionId);
     return formatJson({
       ok: true,
       target: "local",
@@ -429,6 +448,7 @@ async function openLocalSession(params: {
       existed: true,
       cwd: existingMeta.cwd,
       cursor,
+      ...(otherSessions.length > 0 ? { otherSessions } : {}),
     });
   }
 
@@ -467,6 +487,7 @@ async function openLocalSession(params: {
   };
   await writeSessionMeta(params.ctx.stateDir, meta);
 
+  const otherSessions = await listOtherSessions(params.ctx.stateDir, params.sessionId);
   return formatJson({
     ok: true,
     target: "local",
@@ -475,6 +496,7 @@ async function openLocalSession(params: {
     existed: false,
     cwd: resolvedCwd,
     cursor: 0,
+    ...(otherSessions.length > 0 ? { otherSessions } : {}),
   });
 }
 
@@ -927,7 +949,8 @@ export const shellInteractive = defineTool({
   name: "shell_interactive",
   description: [
     "Manage interactive tmux shell sessions locally or on connected Nexus nodes.",
-    "Workflow: open → send+read cycles → close.",
+    "Workflow: open → send+read cycles → close. Use action=list to see all existing sessions before opening a new one (avoids duplicates).",
+    "open returns an otherSessions array when other sessions exist, showing their name, cwd, and running status — prefer reusing a relevant session over creating a new one.",
     "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
     "Do not use sleep commands as a waiting strategy. For long-running/background tasks, use process tools (`process_start` / `process_status` / `process_logs` or node_manage process actions) instead of blocking an interactive foreground shell.",
     "read returns output since the given cursor; pass nextCursor from the previous read/send response. If cursor is omitted, it resumes from the session's last read cursor.",

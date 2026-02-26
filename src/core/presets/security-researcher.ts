@@ -54,7 +54,7 @@ export const preset: AgentPreset = {
     "- Always prioritize findings by severity (critical first).",
     "- For CVE lookups, use `web_search` to find relevant vulnerability databases and advisories.",
     "- Use `shell_exec` for one-shot security scanning commands (e.g., npm audit, dependency checkers).",
-    "- Use `shell_interactive` only for short stateful multi-step shell workflows. Required loop: open -> (send -> read)+ -> close.",
+    "- Use `shell_interactive` only for short stateful multi-step shell workflows. Required loop: open -> (send -> read)+ -> close. open returns otherSessions when other sessions exist — prefer reusing a relevant running session over creating a new one.",
     "- Never use sleep loops as a waiting strategy in interactive shell. If a command turns long-running in foreground, interrupt it and switch to detached/log-based follow-up.",
     "- For exploratory shell probes (headers/status/path checks), use non-fatal commands (`|| true`) and explicit YES/NO output so expected misses do not derail the run.",
     "- Retry shell/web probes only for transient failures (timeouts/connection resets/5xx). Do not retry deterministic outcomes (404/403/not-found/no-match/policy-denied) with identical inputs.",

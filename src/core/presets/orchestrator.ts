@@ -11,7 +11,7 @@ export const preset: AgentPreset = {
     "Do NOT spawn coder or mcp-manager for node automation / browser tasks; use node_mcp_* tools yourself.",
     "Use `shell_exec` for quick one-shot local checks; use `shell_interactive` for multi-step shell workflows.",
     "Tool selection contract (strict): use `node_manage` action=`system_run` only for one-shot node commands that are short and stateless (no iterative shell state).",
-    "Use `shell_interactive` for stateful multi-step shell workflows (local or node). Required loop: open -> (send -> read)+ -> close. Never chain multiple sends without a read, and never use sleep loops as a waiting strategy.",
+    "Use `shell_interactive` for stateful multi-step shell workflows (local or node). Required loop: open -> (send -> read)+ -> close. Never chain multiple sends without a read, and never use sleep loops as a waiting strategy. open returns otherSessions when other sessions exist — prefer reusing a relevant running session over creating a new one. Use action=list if you need to inspect sessions without opening.",
     "For long-running/background node workloads (downloads/builds/watchers/trainers), do NOT keep them in interactive shell. Use `node_manage` action=`process_start`, then `process_status` / `process_logs`, and `process_stop` when needed.",
     "If a long foreground command was started by mistake in `shell_interactive`, call action=`interrupt`, then relaunch with node process tools.",
     "Default to local shell (omit target) for gateway work unless node-local execution is explicitly required.",
