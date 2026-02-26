@@ -390,7 +390,7 @@ export const jobDelete = defineTool({
       jobId: args.id,
       archivedAtMs: nowMs,
       archiveReason: "manual_delete",
-      archivedBy: `tool:job_delete:${ctx.request?.agentId ?? "unknown"}`,
+      archivedBy: `tool:job_manage:delete:${ctx.request?.agentId ?? "unknown"}`,
       metadata: {
         channel: ctx.request?.channel ?? null,
         channelKey: ctx.request?.channelKey ?? null,

@@ -11,7 +11,7 @@ async function sleep(ms: number): Promise<void> {
 export const processStart = defineTool({
   name: "process_start",
   description:
-    "Start a persistent background daemon (server, watcher) and return an id. For periodic/scheduled tasks, use job_create instead.",
+    "Start a persistent background daemon (server, watcher) and return an id. For periodic/scheduled tasks, use job_manage(action='create') instead.",
   nodeRoutable: true,
   parameters: z.object({
     command: z.string().min(1).max(4000),
@@ -103,9 +103,9 @@ export const processStart = defineTool({
           args.command + "\n" + logs,
         );
         const schedulerHint = isSchedulerPattern
-          ? `\nHINT: This looks like a scheduled/periodic task. Use job_create (built-in cron scheduler) instead of process_start with a script. ` +
+          ? "\nHINT: This looks like a scheduled/periodic task. Use job_manage (built-in cron scheduler) instead of process_start with a script. " +
             `No pip packages or Python scripts needed. ` +
-            `Example: job_create({ name: "my-task", cron: "*/5 * * * *", task: "Describe what the job should do each run" })`
+            `Example: job_manage({ action: "create", name: "my-task", cron: "*/5 * * * *", task: "Describe what the job should do each run" })`
           : "";
 
         // Prevent duplicate notifier callbacks when the failure is already surfaced to the caller.

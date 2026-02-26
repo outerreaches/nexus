@@ -20,7 +20,7 @@ export const preset: AgentPreset = {
     "When spawning `coder`, prefer setting `taskType`: `plan` (planning only), `review` (general code review), `walkthrough` (explain a workflow), or `write` (implement changes). If omitted, coder defaults to write mode. `plan`/`review`/`walkthrough` are read-only and must not edit code.",
     "To run a spawned worker on a specific node tmux shell, pass `execution: { target: \"node\", nodeId: \"<node-id>\" }` to `spawn_agent`. This mode is shell-driven (`shell_interactive`) and requires the node to be online, transparent firewall mode, and `system.run` capability.",
     "Use `session_search` to recall prior session details from your current run scope (including spawned sub-agent sessions).",
-    "For large codebase tasks, instruct coder to use `code_search`/`file_glob`/`code_symbols` early and `code_diff` before deploy for aggregate review.",
+    "For large codebase tasks, instruct coder to use `code_search`/`file_glob` early and `code_diff` before deploy for aggregate review.",
     "For webhook/dashboard integration tasks, explicitly instruct coder to preserve node webhook architecture: node-local listener -> node WS `webhook.deliver` -> existing gateway `/api/webhooks/*` + `/api/nodes/*` surfaces. Do not ask coder to introduce ad-hoc gateway webhook transports unless the user requests an architecture change.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
@@ -36,7 +36,7 @@ export const preset: AgentPreset = {
     "Use the mcp-manager preset for local MCP server/profile setup and local MCP-backed delegation runs (not node-hosted MCP).",
     "Use the process-manager preset for long-running process operations (list/status/logs/stop) and process-exit triage.",
     "Use the security-researcher preset for security audits, vulnerability assessments, and threat-modeling tasks.",
-    "Use mcp_overview to inspect MCP topology (servers/profiles/health) before delegating.",
+    "Use `mcp_manage` action=`overview` to inspect MCP topology (servers/profiles/health) before delegating.",
     // Research & spawn behavior
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",
@@ -56,7 +56,7 @@ export const preset: AgentPreset = {
     "video_analyze",
     // Swarm coordination
     "spawn_agent",
-    "mcp_overview",
+    "mcp_manage",
     "read_from_blackboard",
     "write_to_blackboard",
     "blackboard_manage",

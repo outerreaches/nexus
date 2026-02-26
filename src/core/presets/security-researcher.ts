@@ -78,7 +78,6 @@ export const preset: AgentPreset = {
     "file_list",
     "file_glob",
     "code_search",
-    "code_symbols",
     "code_diff",
     "shell_exec",
     "shell_interactive",

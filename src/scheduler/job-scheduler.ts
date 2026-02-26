@@ -268,7 +268,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       "",
       "Instructions:",
       "- Diagnose root cause and fix the job.",
-      "- If scheduling tools are needed, use job tools directly (`job_list`, `job_get`, `job_update`, etc.).",
+      "- If scheduling tools are needed, use `job_manage` with the appropriate action (`list`, `get`, `update`, etc.).",
       "- Prefer small, reversible changes.",
       "- If you are blocked on OTP/MFA/CAPTCHA/etc, use human_action with action=\"request\".",
       "- If the job is unsafe to retry automatically, pause it.",
@@ -733,7 +733,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         if (nextRunAt) {
           deps.db.db.prepare("UPDATE jobs SET next_run_at = ?, updated_at = ? WHERE id = ?").run(nextRunAt, nowMs, job.id);
         } else {
-          // Disable invalid jobs; agent can fix via job_update.
+          // Disable invalid jobs; agent can fix via job_manage(action='update').
           deps.db.db.prepare("UPDATE jobs SET enabled = 0, updated_at = ? WHERE id = ?").run(nowMs, job.id);
           insertEvent({
             jobId: job.id,

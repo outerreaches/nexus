@@ -702,12 +702,12 @@ export const mcpDelegate = defineTool({
       if (!db) return "ERROR: database unavailable";
       if (!registry) return "ERROR: tool registry unavailable";
       if (!getPreset(args.preset)) return `ERROR: target preset '${args.preset}' not found`;
-      if (args.preset === "orchestrator") return "ERROR: mcp_delegate cannot target orchestrator";
+      if (args.preset === "orchestrator") return "ERROR: mcp_manage(action='delegate') cannot target orchestrator";
 
       let profile = args.profile ? getMcpProfile(db, args.profile) : null;
 
       if (!profile) {
-        if (!args.serverId) return "ERROR: mcp_delegate requires either `profile` or `serverId`.";
+        if (!args.serverId) return "ERROR: mcp_manage(action='delegate') requires either `profile` or `serverId`.";
         const server = getMcpServer(db, args.serverId);
         if (!server) return `ERROR: MCP server not found: ${args.serverId}`;
         const toolNames = (args.toolNames && args.toolNames.length > 0)
@@ -795,7 +795,7 @@ export const mcpDelegate = defineTool({
       const spawnSummary = summarizeSpawnAgentResult(spawnResult);
       if (!spawnSummary.ok) {
         const detail = truncateDetail(firstLine(spawnSummary.output || spawnResult), 280);
-        return `ERROR: mcp_delegate worker failed (status=${spawnSummary.status || "failed"}): ${detail}`;
+        return `ERROR: mcp_manage(action='delegate') worker failed (status=${spawnSummary.status || "failed"}): ${detail}`;
       }
 
       return JSON.stringify({
@@ -822,7 +822,7 @@ export const mcpDelegate = defineTool({
         try {
           await manager.deactivateServer(serverIdForCleanup);
         } catch (err) {
-          ctx.log(`mcp_delegate cleanup deactivate failed: ${err instanceof Error ? err.message : String(err)}`);
+          ctx.log(`mcp_manage delegate cleanup deactivate failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       if (db && profileIdForCleanup && args.cleanupPolicy === "deactivate_and_delete_ephemeral_profile") {

@@ -193,7 +193,7 @@ Architecture and implementation guide for the **coder** preset.
 - Make focused code changes in the Nexus codebase.
 - Preserve existing architecture and behavior unless the task explicitly requires redesign.
 - Finish end-to-end: edit, validate, deploy (\`ha_deploy\`), then hand off.
-- Spend minimal budget on navigation: use structured code discovery tools first (\`code_search\`, \`file_glob\`, \`code_symbols\`).
+- Spend minimal budget on navigation: use structured code discovery tools first (\`code_search\`, \`file_glob\`).
 
 ## Coder Task Types (\`spawn_agent.taskType\`)
 - \`taskType\` is recommended when spawning a coder, but not required.
@@ -243,7 +243,7 @@ Architecture and implementation guide for the **coder** preset.
 ### Tooling Layer
 - \`src/tools/*.ts\`: tool implementations.
 - \`src/tools/file-ops.ts\`: absolute-path file tools with root restrictions and write guards.
-- \`src/tools/code-intel.ts\`: code navigation/diff tools (\`code_search\`, \`file_glob\`, \`code_symbols\`, \`code_diff\`).
+- \`src/tools/code-intel.ts\`: code navigation/diff tools (\`code_search\`, \`file_glob\`, \`code_diff\`).
 - \`src/tools/system.ts\`: \`shell_exec\` plus mutating-git block on code repo.
 - \`src/tools/ha-deploy.ts\`: deploy trigger/status tool.
 
@@ -383,7 +383,6 @@ Architecture and implementation guide for the **coder** preset.
 1. Discover relevant files/symbols first:
    - \`file_glob\` for path discovery
    - \`code_search\` for cross-file text lookup
-   - \`code_symbols\` for exports/definitions/references
 2. Read relevant files (\`file_read\` with line numbers when needed; use \`search\` mode for focused in-file lookup).
 3. Make minimal edits (\`file_edit_lines\` preferred for precise changes; use \`file_patch\` for multi-hunk unified diffs).
 4. Validate:

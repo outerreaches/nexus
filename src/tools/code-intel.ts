@@ -11,20 +11,12 @@ import { resolveWithinRoots } from "./path-utils.js";
 const execFileAsync = promisify(execFile);
 
 const ABSOLUTE_PATH_ERROR = "ERROR: full absolute `path` is required.";
-const DEFAULT_CODE_GLOBS = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs"] as const;
 
 type CodeToolContext = {
   workspaceDir: string;
   stateDir: string;
   codeDir: string;
   allowCodeEdit?: boolean;
-};
-
-type ParsedRgLine = {
-  file: string;
-  line: number;
-  column: number;
-  text: string;
 };
 
 type CodeSearchResult = {
@@ -63,10 +55,6 @@ function resolveAbsolutePath(params: {
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
-}
-
-function escapeRegExp(input: string): string {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeDisplayPath(rootPath: string, rawPath: string): string {
@@ -120,23 +108,6 @@ async function runCommand(params: {
       stderr: anyErr.stderr ?? "",
     };
   }
-}
-
-function parsePlainRgOutput(stdout: string, rootPath: string): ParsedRgLine[] {
-  const out: ParsedRgLine[] = [];
-  const lines = stdout.split(/\r?\n/);
-  for (const raw of lines) {
-    if (!raw.trim()) continue;
-    const match = raw.match(/^(.*?):(\d+):(\d+):(.*)$/);
-    if (!match) continue;
-    const file = normalizeDisplayPath(rootPath, match[1] ?? "");
-    const line = Number(match[2] ?? 0);
-    const column = Number(match[3] ?? 0);
-    const text = (match[4] ?? "").replace(/\r?\n$/, "");
-    if (!file || !Number.isFinite(line) || !Number.isFinite(column)) continue;
-    out.push({ file, line, column, text });
-  }
-  return out;
 }
 
 function parseCodeSearchJson(params: {
@@ -198,48 +169,6 @@ function parseCodeSearchJson(params: {
   }
 
   return { results, truncated, totalEvents };
-}
-
-function ensureCodeGlobs(includeGlobs: string[] | undefined): string[] {
-  if (Array.isArray(includeGlobs) && includeGlobs.length > 0) {
-    return includeGlobs;
-  }
-  return [...DEFAULT_CODE_GLOBS];
-}
-
-function parseExportSymbols(text: string): Array<{ symbol: string; kind: string }> {
-  const out: Array<{ symbol: string; kind: string }> = [];
-
-  const declaration = text.match(/export\s+(?:default\s+)?(?:async\s+)?(function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/);
-  if (declaration) {
-    out.push({ symbol: declaration[2] ?? "", kind: declaration[1] ?? "declaration" });
-  }
-
-  const defaultIdentifier = text.match(/export\s+default\s+([A-Za-z_$][\w$]*)/);
-  if (defaultIdentifier) {
-    out.push({ symbol: defaultIdentifier[1] ?? "", kind: "default" });
-  }
-
-  const braceExport = text.match(/export\s*\{([^}]*)\}/);
-  if (braceExport?.[1]) {
-    const names = braceExport[1]
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-    for (const name of names) {
-      const aliasMatch = name.match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/i);
-      if (!aliasMatch) continue;
-      out.push({ symbol: aliasMatch[2] ?? aliasMatch[1] ?? "", kind: "re_export" });
-    }
-  }
-
-  const dedup = new Map<string, { symbol: string; kind: string }>();
-  for (const item of out) {
-    if (!item.symbol) continue;
-    const key = `${item.symbol}::${item.kind}`;
-    if (!dedup.has(key)) dedup.set(key, item);
-  }
-  return Array.from(dedup.values());
 }
 
 export const codeSearch = defineTool({
@@ -382,191 +311,6 @@ export const fileGlob = defineTool({
   },
 });
 
-export const codeSymbols = defineTool({
-  name: "code_symbols",
-  description:
-    "Symbol-oriented code navigation for JS/TS: list exports, find definitions, and find references.",
-  parameters: z.object({
-    action: z.enum(["list_exports", "find_definition", "find_references"]),
-    path: z.string().describe("Absolute path to a file or directory."),
-    symbol: z.string().min(1).optional().describe("Symbol name (required for find_* actions)."),
-    includeGlobs: z.array(z.string().min(1)).max(40).optional().describe("Optional include globs for file filtering."),
-    excludeGlobs: z.array(z.string().min(1)).max(40).optional().describe("Optional exclude globs for file filtering."),
-    maxResults: z.number().int().min(1).max(2_000).default(200),
-  }),
-  execute: async ({ action, path: inputPath, symbol, includeGlobs, excludeGlobs, maxResults }, ctx) => {
-    const resolved = resolveAbsolutePath({ ctx, inputPath });
-    if (!resolved.ok) return resolved.error;
-    const fullPath = resolved.fullPath;
-
-    let stat;
-    try {
-      stat = await fs.stat(fullPath);
-    } catch (err) {
-      return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
-    }
-    const rootPath = stat.isDirectory() ? fullPath : path.dirname(fullPath);
-
-    const globs = ensureCodeGlobs(includeGlobs);
-    const globArgs: string[] = [];
-    for (const glob of globs) globArgs.push("-g", glob);
-    if (Array.isArray(excludeGlobs)) {
-      for (const glob of excludeGlobs) globArgs.push("-g", `!${glob}`);
-    }
-
-    if (action !== "list_exports") {
-      const normalized = symbol?.trim() ?? "";
-      if (!normalized) {
-        return "ERROR: symbol is required for find_definition and find_references.";
-      }
-    }
-
-    if (action === "list_exports") {
-      const args = [
-        "--line-number",
-        "--column",
-        "--no-heading",
-        "--color",
-        "never",
-        "--with-filename",
-        ...globArgs,
-        "^\\s*export\\s+",
-        fullPath,
-      ];
-      const run = await runCommand({
-        binary: "rg",
-        args,
-        allowCodeOne: true,
-      });
-      if (!run.ok) return run.error;
-
-      const parsed = parsePlainRgOutput(run.stdout, rootPath);
-      const symbols: Array<{ file: string; line: number; column: number; symbol: string; kind: string; snippet: string }> = [];
-      for (const match of parsed) {
-        const extracted = parseExportSymbols(match.text);
-        for (const item of extracted) {
-          symbols.push({
-            file: match.file,
-            line: match.line,
-            column: match.column,
-            symbol: item.symbol,
-            kind: item.kind,
-            snippet: truncate(match.text.trim(), 240),
-          });
-          if (symbols.length >= maxResults) break;
-        }
-        if (symbols.length >= maxResults) break;
-      }
-
-      return JSON.stringify(
-        {
-          ok: true,
-          action,
-          path: fullPath,
-          returned: symbols.length,
-          truncated: symbols.length >= maxResults,
-          symbols,
-        },
-        null,
-        2,
-      );
-    }
-
-    if (action === "find_definition") {
-      const name = symbol!.trim();
-      const escaped = escapeRegExp(name);
-      const pattern =
-        `^\\s*(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:function|class|interface|type|enum|const|let|var)\\s+${escaped}\\b` +
-        `|^\\s*${escaped}\\s*=\\s*(?:async\\s*)?\\(`;
-
-      const args = [
-        "--line-number",
-        "--column",
-        "--no-heading",
-        "--color",
-        "never",
-        "--with-filename",
-        ...globArgs,
-        pattern,
-        fullPath,
-      ];
-      const run = await runCommand({
-        binary: "rg",
-        args,
-        allowCodeOne: true,
-      });
-      if (!run.ok) return run.error;
-
-      const parsed = parsePlainRgOutput(run.stdout, rootPath);
-      const results = parsed.slice(0, maxResults).map((match) => ({
-        file: match.file,
-        line: match.line,
-        column: match.column,
-        symbol: name,
-        snippet: truncate(match.text.trim(), 240),
-      }));
-
-      return JSON.stringify(
-        {
-          ok: true,
-          action,
-          symbol: name,
-          path: fullPath,
-          returned: results.length,
-          truncated: parsed.length > maxResults,
-          results,
-        },
-        null,
-        2,
-      );
-    }
-
-    const name = symbol!.trim();
-    const args = [
-      "--line-number",
-      "--column",
-      "--no-heading",
-      "--color",
-      "never",
-      "--with-filename",
-      "-F",
-      "-w",
-      ...globArgs,
-      name,
-      fullPath,
-    ];
-    const run = await runCommand({
-      binary: "rg",
-      args,
-      allowCodeOne: true,
-    });
-    if (!run.ok) return run.error;
-
-    const parsed = parsePlainRgOutput(run.stdout, rootPath);
-    const results = parsed.slice(0, maxResults).map((match) => ({
-      file: match.file,
-      line: match.line,
-      column: match.column,
-      symbol: name,
-      snippet: truncate(match.text.trim(), 240),
-    }));
-
-    return JSON.stringify(
-      {
-        ok: true,
-        action,
-        symbol: name,
-        path: fullPath,
-        returned: results.length,
-        truncated: parsed.length > maxResults,
-        results,
-      },
-      null,
-      2,
-    );
-  },
-});
-
 export const codeDiff = defineTool({
   name: "code_diff",
   description:
@@ -577,10 +321,17 @@ export const codeDiff = defineTool({
     staged: z.boolean().default(false).describe("Use staged diff (--cached)."),
     contextLines: z.number().int().min(0).max(20).default(3),
     maxChars: z.number().int().min(1_000).max(120_000).default(30_000),
+    maxFileEntries: z
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .default(1_000)
+      .describe("Maximum changed/untracked file paths to include in the response lists."),
     includeUntracked: z.boolean().default(true),
     filesOnly: z.boolean().default(false),
   }),
-  execute: async ({ path: inputPath, staged, contextLines, maxChars, includeUntracked, filesOnly }, ctx) => {
+  execute: async ({ path: inputPath, staged, contextLines, maxChars, maxFileEntries, includeUntracked, filesOnly }, ctx) => {
     const resolvedRoot = inputPath
       ? resolveAbsolutePath({ ctx, inputPath })
       : { ok: true as const, fullPath: ctx.codeDir };
@@ -627,7 +378,9 @@ export const codeDiff = defineTool({
       }
     }
 
+    let untrackedAll: string[] = [];
     let untracked: string[] = [];
+    let untrackedTruncated = false;
     if (includeUntracked) {
       const untrackedCmd = await runCommand({
         binary: "git",
@@ -635,29 +388,39 @@ export const codeDiff = defineTool({
         allowCodeOne: true,
       });
       if (!untrackedCmd.ok) return untrackedCmd.error;
-      untracked = (untrackedCmd.stdout ?? "")
+      untrackedAll = (untrackedCmd.stdout ?? "")
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean);
+      untrackedTruncated = untrackedAll.length > maxFileEntries;
+      untracked = untrackedTruncated ? untrackedAll.slice(0, maxFileEntries) : untrackedAll;
     }
 
-    const changedFiles = (nameOnly.stdout ?? "")
+    const changedFilesAll = (nameOnly.stdout ?? "")
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
+    const changedFilesTruncated = changedFilesAll.length > maxFileEntries;
+    const changedFiles = changedFilesTruncated ? changedFilesAll.slice(0, maxFileEntries) : changedFilesAll;
+    const payloadTruncated = truncated || changedFilesTruncated || untrackedTruncated;
 
     return JSON.stringify(
       {
         ok: true,
         path: rootPath,
         staged,
-        changedFileCount: changedFiles.length,
+        changedFileCount: changedFilesAll.length,
+        changedFilesReturned: changedFiles.length,
+        changedFilesTruncated,
         changedFiles,
+        untrackedCount: untrackedAll.length,
+        untrackedReturned: untracked.length,
+        untrackedTruncated,
         untracked,
         stat: (stat.stdout ?? "").trim(),
         filesOnly,
         diff: filesOnly ? null : diffText,
-        truncated,
+        truncated: payloadTruncated,
       },
       null,
       2,

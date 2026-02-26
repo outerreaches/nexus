@@ -50,7 +50,6 @@ const NODE_PINNED_BLOCKED_TOOLS = [
   "file_list",
   "file_glob",
   "code_search",
-  "code_symbols",
   "code_diff",
   "shell_exec",
   "ha_deploy",

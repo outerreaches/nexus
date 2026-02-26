@@ -180,24 +180,3 @@ export const telegramSend = defineTool({
     }
   },
 });
-
-export const telegramSendFile = defineTool({
-  name: "telegram_send_file",
-  description:
-    "Deprecated compatibility alias for telegram_send(path=...). Sends a file to Telegram.",
-  parameters: z.object({
-    path: z.string().min(1).describe("Absolute or repo-relative path to a file"),
-    caption: z.string().max(1024).optional().describe("Optional Telegram caption"),
-    chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
-  }),
-  execute: async (args, ctx) => {
-    return telegramSend.execute(
-      {
-        path: args.path,
-        ...(args.caption ? { caption: args.caption } : {}),
-        ...(args.chatId ? { chatId: args.chatId } : {}),
-      },
-      ctx,
-    );
-  },
-});

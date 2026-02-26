@@ -184,23 +184,6 @@ function summarizeStructuredToolOutput(name: string, content: string): string {
     return truncateStr(content, 1_400);
   }
 
-  if (name === "code_symbols") {
-    const parsed = parseJsonMaybe(content) as { symbols?: unknown[]; results?: unknown[] } | null;
-    const rows = Array.isArray(parsed?.symbols) ? parsed?.symbols : Array.isArray(parsed?.results) ? parsed?.results : [];
-    if (rows.length > 0) {
-      const preview = rows.slice(0, 40).map((row) => {
-        const item = row as Record<string, unknown>;
-        const symbol = typeof item.symbol === "string" ? item.symbol : "?";
-        const file = typeof item.file === "string" ? item.file : "?";
-        const line = typeof item.line === "number" ? item.line : "?";
-        const kind = typeof item.kind === "string" ? item.kind : "symbol";
-        return `${symbol} (${kind}) @ ${file}:${line}`;
-      });
-      return `symbols:\n${preview.join("\n")}`;
-    }
-    return truncateStr(content, 1_400);
-  }
-
   if (name === "file_glob") {
     const parsed = parseJsonMaybe(content) as { files?: unknown[] } | null;
     const files = Array.isArray(parsed?.files) ? parsed?.files as string[] : [];

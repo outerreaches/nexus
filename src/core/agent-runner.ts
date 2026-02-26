@@ -848,7 +848,7 @@ export class AgentRunner {
               `Tool '${call.name}' has failed ${next} times with identical arguments. ` +
               `${remaining} more identical failure(s) will abort this run.\n` +
               `You MUST change your approach: use different arguments, a different tool, or diagnose the error first.\n` +
-              `For periodic/scheduled tasks, prefer job_create over process_start with scripts.\n` +
+              "For periodic/scheduled tasks, prefer job_manage(action='create') over process_start with scripts.\n" +
               `---`;
             toolResultMsg.content += escalation;
           }
