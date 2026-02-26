@@ -131,6 +131,19 @@ function formatLlmUsage(usage?: LLMUsage): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function updatePromptEstimateMultiplier(current: number, actualPromptTokens: number, estimatedPromptTokens: number): number {
+  if (!Number.isFinite(actualPromptTokens) || actualPromptTokens <= 0) return current;
+  if (!Number.isFinite(estimatedPromptTokens) || estimatedPromptTokens <= 0) return current;
+  const observedRatio = actualPromptTokens / estimatedPromptTokens;
+  const boundedRatio = clampNumber(observedRatio, 0.75, 2.5);
+  // EWMA update so one noisy response does not swing compaction policy.
+  return clampNumber(current * 0.75 + boundedRatio * 0.25, 0.8, 2.5);
+}
+
 function isLlmTimeoutError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return /LLM request timed out/i.test(err.message);
@@ -457,13 +470,40 @@ export class AgentRunner {
     const softCompactionThreshold = 0.65;
     const hardCompactionThreshold = 0.85;
     let softCompactionAttempted = false;
+    let promptEstimateMultiplier = 1;
     const runStartedAtMs = this.deps.toolContext.nowMs();
+
+    const logUsageAndCalibrate = (
+      mode: "default" | "transient_retry" | "extended",
+      usage: LLMUsage | undefined,
+      estimateRaw: number,
+      estimateCalibrated: number,
+    ): void => {
+      const usageLine = formatLlmUsage(usage);
+      if (usageLine) this.deps.onLog?.(`llm_usage mode=${mode} ${usageLine}`);
+      const actualPrompt = usage?.promptTokens;
+      if (typeof actualPrompt !== "number" || actualPrompt <= 0) return;
+      const prevMultiplier = promptEstimateMultiplier;
+      const rawRatio = actualPrompt / Math.max(1, estimateRaw);
+      const calibratedRatio = actualPrompt / Math.max(1, estimateCalibrated);
+      promptEstimateMultiplier = updatePromptEstimateMultiplier(
+        promptEstimateMultiplier,
+        actualPrompt,
+        estimateRaw,
+      );
+      this.deps.onLog?.(
+        `llm_prompt_estimate mode=${mode} raw=${estimateRaw} calibrated=${estimateCalibrated} ` +
+        `actual=${actualPrompt} ratio_raw=${rawRatio.toFixed(2)} ratio_cal=${calibratedRatio.toFixed(2)} ` +
+        `multiplier=${prevMultiplier.toFixed(2)}->${promptEstimateMultiplier.toFixed(2)}`,
+      );
+    };
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       this.throwIfCancelled();
       // ── Context compaction ─────────────────────────────────────────────
       if (maxContextTokens > 0) {
-        const estimated = estimateTotalTokens(messages, this.deps.tools);
+        const estimatedRaw = estimateTotalTokens(messages, this.deps.tools);
+        const estimated = Math.ceil(estimatedRaw * promptEstimateMultiplier);
         const shouldHardCompact = estimated > maxContextTokens * hardCompactionThreshold;
         const shouldSoftCompact =
           !softCompactionAttempted && estimated > maxContextTokens * softCompactionThreshold;
@@ -471,8 +511,9 @@ export class AgentRunner {
           const mode = shouldHardCompact ? "hard" : "soft";
           if (shouldSoftCompact) softCompactionAttempted = true;
           this.deps.onLog?.(
-            `compaction: mode=${mode} estimated=${estimated} limit=${maxContextTokens} ` +
-            `threshold=${Math.round((shouldHardCompact ? hardCompactionThreshold : softCompactionThreshold) * 100)}%`,
+            `compaction: mode=${mode} estimated=${estimated} raw=${estimatedRaw} limit=${maxContextTokens} ` +
+            `threshold=${Math.round((shouldHardCompact ? hardCompactionThreshold : softCompactionThreshold) * 100)}% ` +
+            `factor=${promptEstimateMultiplier.toFixed(2)}`,
           );
           try {
             const result = await compactContext({
@@ -480,6 +521,8 @@ export class AgentRunner {
               tools: this.deps.tools,
               llm: this.deps.llm,
               maxContextTokens,
+              mode,
+              estimationFactor: promptEstimateMultiplier,
               minRecentMessages: shouldHardCompact ? 10 : 14,
               onLog: this.deps.onLog,
             });
@@ -528,7 +571,12 @@ export class AgentRunner {
 
       let content: string | null = null;
       let toolCalls: import("./types.js").ToolCall[] = [];
-      this.deps.onLog?.(`llm_call iteration=${iteration} messages=${messages.length} tool_calls_used=${toolCallsUsed}`);
+      const promptEstimateRaw = estimateTotalTokens(messages, this.deps.tools);
+      const promptEstimateCalibrated = Math.ceil(promptEstimateRaw * promptEstimateMultiplier);
+      this.deps.onLog?.(
+        `llm_call iteration=${iteration} messages=${messages.length} tool_calls_used=${toolCallsUsed} ` +
+        `est_prompt=${promptEstimateCalibrated} est_prompt_raw=${promptEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+      );
       try {
         const res = await this.deps.llm.completeChat({
           messages,
@@ -539,8 +587,7 @@ export class AgentRunner {
         this.throwIfCancelled();
         content = res.content;
         toolCalls = res.toolCalls;
-        const usageLine = formatLlmUsage(res.usage);
-        if (usageLine) this.deps.onLog?.(`llm_usage mode=default ${usageLine}`);
+        logUsageAndCalibrate("default", res.usage, promptEstimateRaw, promptEstimateCalibrated);
       } catch (err) {
         if (this.deps.abortSignal?.aborted || isAbortLikeError(err)) {
           throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM call");
@@ -577,7 +624,12 @@ export class AgentRunner {
             this.throwIfCancelled();
             await new Promise((r) => setTimeout(r, backoffMs));
             this.throwIfCancelled();
-            this.deps.onLog?.(`llm_call_retry iteration=${iteration} messages=${messages.length} mode=transient attempt=${attempt}`);
+            const retryEstimateRaw = estimateTotalTokens(messages, this.deps.tools);
+            const retryEstimateCalibrated = Math.ceil(retryEstimateRaw * promptEstimateMultiplier);
+            this.deps.onLog?.(
+              `llm_call_retry iteration=${iteration} messages=${messages.length} mode=transient attempt=${attempt} ` +
+              `est_prompt=${retryEstimateCalibrated} est_prompt_raw=${retryEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+            );
             try {
               const retry = await this.deps.llm.completeChat({
                 messages,
@@ -588,8 +640,7 @@ export class AgentRunner {
               this.throwIfCancelled();
               content = retry.content;
               toolCalls = retry.toolCalls;
-              const usageLine = formatLlmUsage(retry.usage);
-              if (usageLine) this.deps.onLog?.(`llm_usage mode=transient_retry ${usageLine}`);
+              logUsageAndCalibrate("transient_retry", retry.usage, retryEstimateRaw, retryEstimateCalibrated);
               this.deps.onLog?.(`llm_transient_recovery: succeeded on attempt ${attempt}`);
               retrySucceeded = true;
               break;
@@ -639,6 +690,8 @@ export class AgentRunner {
                 tools: this.deps.tools,
                 llm: this.deps.llm,
                 maxContextTokens,
+                mode: "hard",
+                estimationFactor: promptEstimateMultiplier,
                 minRecentMessages: 8,
                 onLog: this.deps.onLog,
               });
@@ -677,7 +730,12 @@ export class AgentRunner {
             ].join("\n"),
           };
 
-          this.deps.onLog?.(`llm_call_retry iteration=${iteration} messages=${retryMessages.length + 1} mode=extended`);
+          const extendedEstimateRaw = estimateTotalTokens([...retryMessages, retryInstruction], this.deps.tools);
+          const extendedEstimateCalibrated = Math.ceil(extendedEstimateRaw * promptEstimateMultiplier);
+          this.deps.onLog?.(
+            `llm_call_retry iteration=${iteration} messages=${retryMessages.length + 1} mode=extended ` +
+            `est_prompt=${extendedEstimateCalibrated} est_prompt_raw=${extendedEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+          );
           try {
             const retry = await this.deps.llm.completeChat({
               messages: [...retryMessages, retryInstruction],
@@ -689,8 +747,7 @@ export class AgentRunner {
             this.throwIfCancelled();
             content = retry.content;
             toolCalls = retry.toolCalls;
-            const usageLine = formatLlmUsage(retry.usage);
-            if (usageLine) this.deps.onLog?.(`llm_usage mode=extended ${usageLine}`);
+            logUsageAndCalibrate("extended", retry.usage, extendedEstimateRaw, extendedEstimateCalibrated);
             this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
           } catch (retryErr) {
             if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {

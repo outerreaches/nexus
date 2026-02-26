@@ -16,14 +16,12 @@ import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "./message-content.js";
 
+const COMPACTION_SUMMARY_PREFIX = "## Conversation Summary (compacted)";
+const PINNED_CONTEXT_PREFIX = "## Pinned Context (always keep)";
+
 // ─── Token estimation ────────────────────────────────────────────────────────
 
 export const CHARS_PER_TOKEN = 3.5; // mixed English/code content estimate
-
-/** Estimate token count for a single string. */
-function estimateStringTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
-}
 
 /** Estimate tokens for the tool definitions (JSON schemas + descriptions). */
 export function estimateToolTokens(tools: Tool[]): number {
@@ -92,20 +90,48 @@ function findCompactionBoundary(messages: ChatMessage[], minRecentMessages: numb
   // messages[0] is always the system prompt
   if (messages.length <= minRecentMessages + 1) return -1;
 
-  // Walk backwards from end, counting non-system messages
+  // Preferred boundary: start on a user turn.
   let count = 0;
-  let boundary = messages.length;
   for (let i = messages.length - 1; i >= 1; i--) {
     if (messages[i]?.role !== "system") count++;
     if (count >= minRecentMessages && messages[i]?.role === "user") {
-      boundary = i;
+      if (i > 2) return i;
       break;
     }
   }
 
-  // Nothing to compact if boundary is at or near the start
-  if (boundary <= 2) return -1;
-  return boundary;
+  // Fallback: allow assistant/tool boundary when a long tool chain has no
+  // nearby user turn. Normalize to avoid splitting tool-call/result blocks.
+  count = 0;
+  let candidate = -1;
+  for (let i = messages.length - 1; i >= 1; i--) {
+    if (messages[i]?.role !== "system") count++;
+    if (count >= minRecentMessages) {
+      candidate = i;
+      break;
+    }
+  }
+  if (candidate <= 2) return -1;
+  return normalizeBoundaryToTurn(messages, candidate);
+}
+
+function normalizeBoundaryToTurn(messages: ChatMessage[], boundary: number): number {
+  let idx = boundary;
+  // If boundary lands in tool results, keep the triggering assistant/tool block.
+  while (idx > 1) {
+    const current = messages[idx];
+    if (!current || current.role !== "tool") break;
+    idx -= 1;
+  }
+  // If this is a tool-calling assistant and there's an initiating user right
+  // before it, keep that user with the block for coherence.
+  const normalized = messages[idx];
+  if (idx > 1 && normalized?.role === "assistant" && normalized.toolCalls?.length) {
+    if (messages[idx - 1]?.role === "user") idx -= 1;
+  }
+  // Keep runtime system hints attached to the recent block.
+  while (idx > 1 && messages[idx - 1]?.role === "system") idx -= 1;
+  return idx > 2 ? idx : -1;
 }
 
 function parseJsonMaybe(raw: string): unknown | null {
@@ -116,6 +142,33 @@ function parseJsonMaybe(raw: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+const ESC_CHAR = String.fromCharCode(27);
+const BEL_CHAR = String.fromCharCode(7);
+const ANSI_ESCAPE_RE = new RegExp(`${ESC_CHAR}\\[[0-?]*[ -/]*[@-~]`, "g");
+const ANSI_OSC_RE = new RegExp(`${ESC_CHAR}\\][^${BEL_CHAR}]*(?:${BEL_CHAR}|${ESC_CHAR}\\\\)`, "g");
+
+function stripAsciiControlChars(input: string): string {
+  if (!input) return input;
+  let out = "";
+  for (let i = 0; i < input.length; i += 1) {
+    const code = input.charCodeAt(i);
+    if ((code >= 0 && code <= 8) || (code >= 11 && code <= 31) || code === 127) {
+      continue;
+    }
+    out += input[i]!;
+  }
+  return out;
+}
+
+function sanitizeToolOutputForCompaction(raw: string): string {
+  if (!raw) return raw;
+  const sanitized = raw
+    .replace(ANSI_OSC_RE, "")
+    .replace(ANSI_ESCAPE_RE, "")
+    .replace(/\r/g, "");
+  return stripAsciiControlChars(sanitized).replace(/\n{4,}/g, "\n\n\n");
 }
 
 function extractCodeStructure(raw: string, maxLines: number = 60): string {
@@ -160,16 +213,17 @@ function extractCodeStructure(raw: string, maxLines: number = 60): string {
 }
 
 function summarizeStructuredToolOutput(name: string, content: string): string {
+  const normalizedContent = sanitizeToolOutputForCompaction(content);
   if (name === "file_read") {
-    const structure = extractCodeStructure(content, 80);
+    const structure = extractCodeStructure(normalizedContent, 80);
     if (structure) {
       return `structural excerpt:\n${truncateStr(structure, 2_400)}`;
     }
-    return truncateStr(content, 1_600);
+    return truncateStr(normalizedContent, 1_600);
   }
 
   if (name === "code_search") {
-    const parsed = parseJsonMaybe(content) as { results?: Array<Record<string, unknown>> } | null;
+    const parsed = parseJsonMaybe(normalizedContent) as { results?: Array<Record<string, unknown>> } | null;
     const rows = Array.isArray(parsed?.results) ? parsed?.results ?? [] : [];
     if (rows.length > 0) {
       const preview = rows.slice(0, 30).map((row) => {
@@ -181,22 +235,22 @@ function summarizeStructuredToolOutput(name: string, content: string): string {
       });
       return `search hits:\n${preview.join("\n")}`;
     }
-    return truncateStr(content, 1_400);
+    return truncateStr(normalizedContent, 1_400);
   }
 
   if (name === "file_glob") {
-    const parsed = parseJsonMaybe(content) as { files?: unknown[] } | null;
+    const parsed = parseJsonMaybe(normalizedContent) as { files?: unknown[] } | null;
     const files = Array.isArray(parsed?.files) ? parsed?.files as string[] : [];
     if (files.length > 0) {
       const preview = files.slice(0, 80).join("\n");
       const overflow = files.length - Math.min(files.length, 80);
       return overflow > 0 ? `glob files:\n${preview}\n…(+${overflow} files)` : `glob files:\n${preview}`;
     }
-    return truncateStr(content, 1_200);
+    return truncateStr(normalizedContent, 1_200);
   }
 
   if (name === "code_diff") {
-    const parsed = parseJsonMaybe(content) as { changedFiles?: unknown[]; stat?: unknown } | null;
+    const parsed = parseJsonMaybe(normalizedContent) as { changedFiles?: unknown[]; stat?: unknown } | null;
     const changed = Array.isArray(parsed?.changedFiles) ? parsed?.changedFiles as string[] : [];
     const stat = typeof parsed?.stat === "string" ? parsed.stat : "";
     const lines: string[] = [];
@@ -207,14 +261,14 @@ function summarizeStructuredToolOutput(name: string, content: string): string {
       lines.push(`stat: ${truncateStr(stat.replace(/\r?\n/g, " | "), 600)}`);
     }
     if (lines.length > 0) return lines.join("\n");
-    return truncateStr(content, 1_200);
+    return truncateStr(normalizedContent, 1_200);
   }
 
   if (name === "shell_exec" || name === "shell_interactive") {
-    return truncateStr(content, 1_000);
+    return truncateStr(normalizedContent, 1_000);
   }
 
-  return truncateStr(content, 800);
+  return truncateStr(normalizedContent, 800);
 }
 
 /**
@@ -297,6 +351,150 @@ export function extractTieredRetentionCandidates(summary: string, maxCandidates:
   return out;
 }
 
+function isCompactionSummaryMessage(message: ChatMessage): message is Extract<ChatMessage, { role: "system" }> {
+  return message.role === "system" && message.content.startsWith(COMPACTION_SUMMARY_PREFIX);
+}
+
+function isPinnedContextMessage(message: ChatMessage): message is Extract<ChatMessage, { role: "system" }> {
+  return message.role === "system" && message.content.startsWith(PINNED_CONTEXT_PREFIX);
+}
+
+function isAutoCompactionSystemMessage(message: ChatMessage): boolean {
+  return isCompactionSummaryMessage(message) || isPinnedContextMessage(message);
+}
+
+function extractLatestPinnedContext(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 1; i--) {
+    const msg = messages[i];
+    if (!msg || !isPinnedContextMessage(msg)) continue;
+    const content = msg.content.slice(PINNED_CONTEXT_PREFIX.length).trim();
+    if (content) return content;
+  }
+  return null;
+}
+
+function extractSectionBullets(summary: string, headings: RegExp[]): string[] {
+  const lines = summary.split(/\r?\n/);
+  const out: string[] = [];
+  let active = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (/^#{1,6}\s+/.test(line)) {
+      active = headings.some((re) => re.test(line));
+      continue;
+    }
+    if (!active) continue;
+    const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+    if (!bulletMatch) {
+      // Stop at plain text once section body ended.
+      if (out.length > 0) break;
+      continue;
+    }
+    const text = normalizeRetentionText(bulletMatch[1] ?? "");
+    if (isLowSignalRetentionText(text)) continue;
+    out.push(text);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+function heuristicPinnedFromMessages(messages: ChatMessage[]): string {
+  const userPrompts: string[] = [];
+  const constraints = new Set<string>();
+  const handles = new Set<string>();
+  const decisions = new Set<string>();
+
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      const text = renderUserContentForText(msg.content, { includeImageUrls: false }).trim();
+      if (text) userPrompts.push(text);
+      const lines = text.split(/\r?\n/);
+      for (const line of lines) {
+        if (/(must|do not|don't|never|without|required|no fallback|read[- ]only|sidecar)/i.test(line)) {
+          constraints.add(normalizeRetentionText(line));
+        }
+        if (/^let'?s\s+/i.test(line)) decisions.add(normalizeRetentionText(line));
+      }
+      continue;
+    }
+    if (msg.role === "tool") {
+      const normalized = sanitizeToolOutputForCompaction(msg.content);
+      const handleLine = normalized.match(
+        /\b(session|nextCursor|cursor|nodeId|jobId|processId|deliveryId)\b[^,\n]{0,120}/i,
+      );
+      if (handleLine?.[0]) handles.add(normalizeRetentionText(handleLine[0]));
+      continue;
+    }
+    if (msg.role === "assistant" && typeof msg.content === "string") {
+      for (const line of msg.content.split(/\r?\n/)) {
+        if (/^(decision|chosen|selected|plan|next step)/i.test(line.trim())) {
+          decisions.add(normalizeRetentionText(line));
+        }
+      }
+    }
+  }
+
+  const latestGoal = userPrompts.length > 0 ? normalizeRetentionText(userPrompts[userPrompts.length - 1] ?? "") : "";
+  const lines: string[] = [];
+  if (latestGoal) lines.push(`- Goal: ${truncateStr(latestGoal, 280)}`);
+  if (constraints.size > 0) {
+    for (const item of Array.from(constraints).slice(0, 4)) {
+      lines.push(`- Constraint: ${truncateStr(item, 220)}`);
+    }
+  }
+  if (decisions.size > 0) {
+    for (const item of Array.from(decisions).slice(0, 4)) {
+      lines.push(`- Decision: ${truncateStr(item, 220)}`);
+    }
+  }
+  if (handles.size > 0) {
+    for (const item of Array.from(handles).slice(0, 4)) {
+      lines.push(`- Active handle: ${truncateStr(item, 200)}`);
+    }
+  }
+  if (lines.length === 0) {
+    lines.push("- Goal: Continue current user task with the latest constraints and unresolved items.");
+  }
+  return truncateStr(lines.join("\n"), 1_800);
+}
+
+function buildPinnedContext(summary: string, oldMessages: ChatMessage[], priorPinned: string | null): string {
+  const goalItems = extractSectionBullets(summary, [/goals?\b/i, /task\b/i]);
+  const constraintItems = extractSectionBullets(summary, [/constraints?\b/i, /must keep\b/i, /non-negotiable\b/i]);
+  const decisionItems = extractSectionBullets(summary, [/decisions?\b/i]);
+  const stateItems = extractSectionBullets(summary, [/active execution state\b/i, /\bstate\b/i, /\bhandles?\b/i]);
+  const openItems = extractSectionBullets(summary, [/open items?\b/i, /next steps?\b/i]);
+
+  const lines: string[] = [];
+  for (const item of goalItems.slice(0, 2)) lines.push(`- Goal: ${item}`);
+  for (const item of constraintItems.slice(0, 4)) lines.push(`- Constraint: ${item}`);
+  for (const item of decisionItems.slice(0, 4)) lines.push(`- Decision: ${item}`);
+  for (const item of stateItems.slice(0, 4)) lines.push(`- Active state: ${item}`);
+  for (const item of openItems.slice(0, 4)) lines.push(`- Open item: ${item}`);
+
+  if (priorPinned) {
+    const priorLines = priorPinned
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^-\s+/.test(line))
+      .slice(0, 4);
+    for (const line of priorLines) lines.push(line);
+  }
+
+  const deduped = Array.from(
+    new Set(lines.map((line) => normalizeRetentionText(line)).filter((line) => !isLowSignalRetentionText(line))),
+  ).slice(0, 14);
+
+  if (deduped.length === 0) return heuristicPinnedFromMessages(oldMessages);
+  return truncateStr(deduped.join("\n"), 1_900);
+}
+
+function normalizeEstimationFactor(factor: number | undefined): number {
+  if (typeof factor !== "number" || !Number.isFinite(factor)) return 1;
+  return Math.min(2.5, Math.max(0.8, factor));
+}
+
 /**
  * Compact messages using the LLM to generate a summary of older messages.
  * Falls back to heuristic compaction if the LLM call fails.
@@ -306,63 +504,90 @@ export async function compactContext(params: {
   tools: Tool[];
   llm: LLMClient;
   maxContextTokens: number;
+  mode?: "soft" | "hard";
+  estimationFactor?: number;
   /** Minimum recent messages to preserve (default: 10) */
   minRecentMessages?: number;
   onLog?: (msg: string) => void;
 }): Promise<CompactionResult> {
   const { messages, tools, llm, maxContextTokens } = params;
   const minRecent = params.minRecentMessages ?? 10;
-  const tokensBefore = estimateTotalTokens(messages, tools);
-  const toolTokens = estimateToolTokens(tools);
+  const mode = params.mode ?? "soft";
+  const estimationFactor = normalizeEstimationFactor(params.estimationFactor);
+  const estimateTotal = (msgs: ChatMessage[]): number => Math.ceil(estimateTotalTokens(msgs, tools) * estimationFactor);
+  const estimateMessages = (msgs: ChatMessage[]): number => Math.ceil(estimateMessageTokens(msgs) * estimationFactor);
+  const toolTokens = Math.ceil(estimateToolTokens(tools) * estimationFactor);
+  const tokensBefore = estimateTotal(messages);
 
-  // Target: leave 20% headroom for the model's response
-  const targetMessageTokens = Math.floor(maxContextTokens * 0.75) - toolTokens;
+  // Hard mode leaves more response headroom to avoid repeated near-limit retries.
+  const targetHeadroom = mode === "hard" ? 0.7 : 0.75;
+  const targetMessageTokens = Math.max(64, Math.floor(maxContextTokens * targetHeadroom) - toolTokens);
 
-  if (estimateMessageTokens(messages) <= targetMessageTokens) {
+  if (estimateMessages(messages) <= targetMessageTokens) {
     return { messages, compacted: false, summary: null, messagesRemoved: 0, tokensBefore, tokensAfter: tokensBefore };
   }
 
-  params.onLog?.(`compaction: triggered (estimated ${tokensBefore} tokens, limit ${maxContextTokens})`);
+  params.onLog?.(
+    `compaction: triggered (estimated ${tokensBefore} tokens, limit ${maxContextTokens}, mode=${mode}, factor=${estimationFactor.toFixed(2)})`,
+  );
 
   const boundary = findCompactionBoundary(messages, minRecent);
   if (boundary < 0) {
     // Can't compact further — try aggressive truncation of tool results instead
     params.onLog?.("compaction: cannot find boundary, using aggressive truncation");
     const truncated = aggressiveTruncate(messages, targetMessageTokens);
-    const tokensAfter = estimateTotalTokens(truncated, tools);
+    const tokensAfter = estimateTotal(truncated);
     return { messages: truncated, compacted: true, summary: null, messagesRemoved: 0, tokensBefore, tokensAfter };
   }
 
   const systemMessage = messages[0]!; // system prompt
-  const oldMessages = messages.slice(1, boundary);
-  const recentMessages = messages.slice(boundary);
+  const priorPinned = extractLatestPinnedContext(messages);
+  const oldMessagesRaw = messages.slice(1, boundary);
+  const recentMessages = messages.slice(boundary).filter((m) => !isAutoCompactionSystemMessage(m));
+  const oldMessages = oldMessagesRaw.filter((m) => !isAutoCompactionSystemMessage(m));
 
   params.onLog?.(`compaction: summarizing ${oldMessages.length} old messages, keeping ${recentMessages.length} recent`);
 
   // Generate summary
   let summary: string;
   try {
-    summary = await generateSummary(llm, oldMessages);
+    summary = await generateSummary(llm, oldMessages, priorPinned);
   } catch (err) {
     params.onLog?.(`compaction: LLM summary failed (${err instanceof Error ? err.message : String(err)}), using heuristic`);
     summary = heuristicSummary(oldMessages);
   }
 
+  const pinnedContext = buildPinnedContext(summary, oldMessages, priorPinned);
+  const pinnedMessage: ChatMessage = {
+    role: "system",
+    content: `${PINNED_CONTEXT_PREFIX}\n\n${pinnedContext}`,
+  };
+
   // Build compacted message array
   const summaryMessage: ChatMessage = {
     role: "system",
-    content: `## Conversation Summary (compacted)\n\nThe following is a summary of earlier conversation that was compacted to save context space:\n\n${summary}`,
+    content: `${COMPACTION_SUMMARY_PREFIX}\n\nThe following is a summary of earlier conversation that was compacted to save context space:\n\n${summary}`,
   };
 
-  const compactedMessages: ChatMessage[] = [systemMessage, summaryMessage, ...recentMessages];
-  let tokensAfter = estimateTotalTokens(compactedMessages, tools);
+  const compactedMessages: ChatMessage[] = [systemMessage, pinnedMessage, summaryMessage, ...recentMessages];
+  let tokensAfter = estimateTotal(compactedMessages);
 
-  // If still over budget, do aggressive truncation on recent messages
-  if (tokensAfter > maxContextTokens * 0.85) {
-    params.onLog?.("compaction: still over budget after summary, truncating tool results");
-    const truncatedRecent = aggressiveTruncate(recentMessages, targetMessageTokens - estimateMessageTokens([systemMessage, summaryMessage]));
-    const result = [systemMessage, summaryMessage, ...truncatedRecent];
-    tokensAfter = estimateTotalTokens(result, tools);
+  const reductionRatio = tokensAfter / Math.max(tokensBefore, 1);
+  const overBudgetThreshold = mode === "hard" ? 0.72 : 0.85;
+  const weakReduction = mode === "hard" ? reductionRatio > 0.9 : false;
+
+  // If still over budget (or in hard mode reduction is weak), truncate recent payload.
+  if (tokensAfter > maxContextTokens * overBudgetThreshold || weakReduction) {
+    params.onLog?.(
+      weakReduction
+        ? "compaction: weak reduction after summary in hard mode, truncating recent payload"
+        : "compaction: still over budget after summary, truncating tool results",
+    );
+    const fixedTokens = estimateMessages([systemMessage, pinnedMessage, summaryMessage]);
+    const availableRecentTokens = Math.max(320, targetMessageTokens - fixedTokens);
+    const truncatedRecent = aggressiveTruncate(recentMessages, availableRecentTokens);
+    const result = [systemMessage, pinnedMessage, summaryMessage, ...truncatedRecent];
+    tokensAfter = estimateTotal(result);
     return { messages: result, compacted: true, summary, messagesRemoved: oldMessages.length, tokensBefore, tokensAfter };
   }
 
@@ -380,7 +605,7 @@ export async function compactContext(params: {
  * Use the LLM to generate a concise summary of conversation messages.
  * Uses a minimal context (no tools) to keep the summarization call small.
  */
-async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise<string> {
+async function generateSummary(llm: LLMClient, messages: ChatMessage[], priorPinned: string | null): Promise<string> {
   const conversationText = messagesToText(messages, 1_100);
 
   // Cap the text we send for summarization to ~30k chars (~8k tokens)
@@ -388,6 +613,7 @@ async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise
   const textForSummary = conversationText.length > maxSummarizationChars
     ? conversationText.slice(0, maxSummarizationChars) + "\n\n…(earlier messages truncated)"
     : conversationText;
+  const priorPinnedText = priorPinned ? truncateStr(priorPinned, 2_000) : "";
 
   const result = await llm.completeChat({
     messages: [
@@ -395,27 +621,40 @@ async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise
         role: "system",
         content: [
           "You are a context compaction assistant. Your job is to create a concise summary of a conversation.",
-          "Focus on:",
-          "- Key decisions made and their reasoning",
-          "- Important facts, data, or findings discovered",
-          "- Current state of any ongoing tasks",
-          "- Action items or next steps mentioned",
-          "- User preferences or instructions that should persist",
+          "Output MUST use markdown sections in this order:",
+          "## Goals and task",
+          "## Constraints (must keep)",
+          "## Decisions",
+          "## Active execution state",
+          "## Open items and next steps",
+          "## Retention candidates (tiered)",
+          "",
+          "Each section should contain bullet points. If unknown, write \"- none\".",
+          "Focus on concrete details, not narration.",
           "- Durable memory-retention candidates using this tiered model:",
           "  - Tier A -> AGENTS.md (critical, frequently used concrete execution facts)",
           "  - Tier M -> MEMORY.md (verified concrete facts with timestamps/source, lower-frequency)",
           "  - Tier B -> memory_store (durable but lower-risk context like preferences/defaults)",
           "  - Tier C -> NOTES.md (working scratch, temporary plans/investigation state)",
           "",
-          "Be concise but preserve critical information. Use bullet points.",
+          "Carry forward relevant facts from prior pinned context only if still consistent.",
+          "Do not duplicate stale/contradictory items.",
+          "",
+          "Be concise but preserve critical information.",
           "Do NOT include pleasantries, repetitive information, or tool call details unless the result was important.",
-          "End with a short section titled \"Retention candidates (tiered)\". If none, write \"- none\".",
           "Keep your summary under 1500 words.",
         ].join("\n"),
       },
       {
         role: "user",
-        content: `Summarize this conversation:\n\n${textForSummary}`,
+        content: [
+          "Summarize this conversation history.",
+          "",
+          priorPinnedText ? `Prior pinned context (carry forward if still true):\n${priorPinnedText}\n` : "",
+          `Conversation:\n${textForSummary}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
       },
     ],
     tools: [],
@@ -430,28 +669,43 @@ async function generateSummary(llm: LLMClient, messages: ChatMessage[]): Promise
  * Extracts user messages and assistant conclusions.
  */
 function heuristicSummary(messages: ChatMessage[]): string {
-  const points: string[] = [];
+  const userPoints: string[] = [];
+  const assistantPoints: string[] = [];
 
   for (const m of messages) {
     if (m.role === "user") {
       const text = renderUserContentForText(m.content, { includeImageUrls: false });
       if (text.length <= 10) continue;
       const preview = text.slice(0, 200).replace(/\n/g, " ").trim();
-      points.push(`- User: ${preview}`);
+      userPoints.push(preview);
     } else if (m.role === "assistant" && m.content && !m.toolCalls?.length) {
       // Only include final assistant messages (not tool-calling ones)
       const preview = m.content.slice(0, 300).replace(/\n/g, " ").trim();
       if (preview.length > 20) {
-        points.push(`- Assistant: ${preview}`);
+        assistantPoints.push(preview);
       }
     }
   }
 
-  // Cap at ~20 points
-  const capped = points.slice(0, 20);
-  return capped.length > 0
-    ? capped.join("\n")
-    : "Earlier conversation was compacted. No significant content extracted.";
+  const latestUser = userPoints.length > 0 ? userPoints[userPoints.length - 1] : "";
+  const latestAssistant = assistantPoints.length > 0 ? assistantPoints[assistantPoints.length - 1] : "";
+
+  const lines: string[] = [
+    "## Goals and task",
+    latestUser ? `- ${latestUser}` : "- none",
+    "## Constraints (must keep)",
+    "- none",
+    "## Decisions",
+    latestAssistant ? `- ${latestAssistant}` : "- none",
+    "## Active execution state",
+    "- none",
+    "## Open items and next steps",
+    "- none",
+    "## Retention candidates (tiered)",
+    "- none",
+  ];
+
+  return lines.join("\n");
 }
 
 /**
@@ -462,7 +716,7 @@ function aggressiveTruncate(messages: ChatMessage[], targetTokens: number): Chat
   const current = estimateMessageTokens(messages);
   if (current <= targetTokens) return messages;
 
-  const ratio = targetTokens / current;
+  const ratio = Math.max(0.05, targetTokens / current);
   // Calculate max chars per tool result based on how much we need to shrink
   const maxToolResultChars = Math.max(200, Math.floor(2000 * ratio));
   const maxUserPayloadChars = Math.max(240, Math.floor(1800 * ratio));
@@ -486,9 +740,10 @@ function aggressiveTruncate(messages: ChatMessage[], targetTokens: number): Chat
       }
     }
     if (m.role === "tool" && m.content.length > maxToolResultChars) {
+      const normalized = sanitizeToolOutputForCompaction(m.content);
       return {
         ...m,
-        content: m.content.slice(0, maxToolResultChars) + `\n…(truncated, original ${m.content.length} chars)`,
+        content: normalized.slice(0, maxToolResultChars) + `\n…(truncated, original ${m.content.length} chars)`,
       };
     }
     if (m.role === "assistant" && m.content && m.content.length > 4000) {

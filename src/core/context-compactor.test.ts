@@ -146,6 +146,132 @@ test("compactContext summary prompt requests tiered retention candidates", async
   assert.match(summarySystemPrompt, /Tier C -> NOTES\.md/);
 });
 
+test("compactContext adds pinned context message and avoids duplicate auto-summary blocks", async () => {
+  let summaryCalls = 0;
+  const llm: LLMClient = {
+    async completeChat() {
+      summaryCalls += 1;
+      return {
+        content: [
+          "## Goals and task",
+          "- finish the migration",
+          "## Constraints (must keep)",
+          "- no insecure fallback storage",
+          "## Decisions",
+          "- keep sidecar secret references unchanged",
+          "## Active execution state",
+          "- session=pytorch-check",
+          "## Open items and next steps",
+          "- verify compaction behavior under load",
+          "## Retention candidates (tiered)",
+          "- Tier B -> prefer sidecar-only credential flow",
+        ].join("\n"),
+        toolCalls: [],
+      };
+    },
+  };
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: "system-prompt" },
+    { role: "user", content: longText("U0", 400) },
+    { role: "assistant", content: longText("A0", 500) },
+    { role: "user", content: longText("U1", 400) },
+    { role: "assistant", content: longText("A1", 500) },
+    { role: "user", content: longText("U2", 400) },
+  ];
+
+  const first = await compactContext({
+    messages,
+    tools: [],
+    llm,
+    maxContextTokens: 220,
+    minRecentMessages: 3,
+  });
+
+  assert.equal(first.compacted, true);
+  assert.equal(summaryCalls, 1);
+  const firstPinnedCount = first.messages.filter(
+    (m) => m.role === "system" && m.content.startsWith("## Pinned Context (always keep)"),
+  ).length;
+  const firstSummaryCount = first.messages.filter(
+    (m) => m.role === "system" && m.content.startsWith("## Conversation Summary (compacted)"),
+  ).length;
+  assert.equal(firstPinnedCount, 1);
+  assert.equal(firstSummaryCount, 1);
+
+  const second = await compactContext({
+    messages: first.messages,
+    tools: [],
+    llm,
+    maxContextTokens: 220,
+    minRecentMessages: 3,
+  });
+
+  assert.equal(second.compacted, true);
+  assert.equal(summaryCalls, 2);
+  const secondPinnedCount = second.messages.filter(
+    (m) => m.role === "system" && m.content.startsWith("## Pinned Context (always keep)"),
+  ).length;
+  const secondSummaryCount = second.messages.filter(
+    (m) => m.role === "system" && m.content.startsWith("## Conversation Summary (compacted)"),
+  ).length;
+  assert.equal(secondPinnedCount, 1);
+  assert.equal(secondSummaryCount, 1);
+});
+
+test("compactContext falls back to non-user boundary for long tool chains", async () => {
+  let summaryCalls = 0;
+  let summaryUserPrompt = "";
+  const llm: LLMClient = {
+    async completeChat(params) {
+      summaryCalls += 1;
+      summaryUserPrompt = typeof params.messages[1]?.content === "string" ? params.messages[1].content : "";
+      return {
+        content: [
+          "## Goals and task",
+          "- investigate shell output",
+          "## Constraints (must keep)",
+          "- none",
+          "## Decisions",
+          "- none",
+          "## Active execution state",
+          "- session=pytorch-check",
+          "## Open items and next steps",
+          "- continue reading with cursor",
+          "## Retention candidates (tiered)",
+          "- none",
+        ].join("\n"),
+        toolCalls: [],
+      };
+    },
+  };
+
+  const ansiPayload = "\u001b[38;5;197mHELLO\u001b[0m\n".repeat(600);
+  const messages: ChatMessage[] = [
+    { role: "system", content: "system-prompt" },
+    { role: "user", content: "check the long-running shell session" },
+    { role: "assistant", content: null, toolCalls: [{ id: "tc1", name: "shell_interactive", arguments: "{}" }] },
+    { role: "tool", name: "shell_interactive", toolCallId: "tc1", content: ansiPayload },
+    { role: "assistant", content: null, toolCalls: [{ id: "tc2", name: "shell_interactive", arguments: "{}" }] },
+    { role: "tool", name: "shell_interactive", toolCallId: "tc2", content: ansiPayload },
+    { role: "assistant", content: null, toolCalls: [{ id: "tc3", name: "shell_interactive", arguments: "{}" }] },
+    { role: "tool", name: "shell_interactive", toolCallId: "tc3", content: ansiPayload },
+  ];
+
+  const result = await compactContext({
+    messages,
+    tools: [],
+    llm,
+    maxContextTokens: 300,
+    minRecentMessages: 3,
+  });
+
+  assert.equal(result.compacted, true);
+  assert.equal(summaryCalls, 1);
+  assert.ok(result.messagesRemoved > 0);
+  assert.equal(summaryUserPrompt.includes("\u001b["), false);
+});
+
 test("extractTieredRetentionCandidates parses tiered bullets and drops low-signal lines", () => {
   const summary = [
     "Some summary text",

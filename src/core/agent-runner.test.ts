@@ -315,3 +315,35 @@ test("AgentRunner auto-routes shell_exec in remote execution mode", async () => 
   assert.equal(localShellExecCalls, 0);
   assert.equal(routedCalls, 1);
 });
+
+test("AgentRunner logs prompt estimate calibration when usage is available", async () => {
+  const logs: string[] = [];
+  const llm: LLMClient = {
+    completeChat: async () => ({
+      content: "done",
+      toolCalls: [],
+      usage: {
+        promptTokens: 100,
+        completionTokens: 10,
+        totalTokens: 110,
+      },
+    }),
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 2, maxToolCalls: 4, maxContextTokens: 200 },
+    toolContext: makeToolContext(),
+    onLog: (line) => logs.push(line),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "hello",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(logs.some((line) => line.includes("llm_prompt_estimate mode=default")), true);
+});
