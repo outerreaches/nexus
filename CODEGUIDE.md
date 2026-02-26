@@ -113,7 +113,7 @@ Architecture and implementation guide for the **coder** preset.
      ```
   6. Always include `"fallback": { "provider": "local" }` for resilience.
   7. Validate via typecheck + build, then deploy with `ha_deploy`.
-- **Image provider decoupling**: Presets can specify `imageProvider` to route image tool API calls to a different provider than the agent's reasoning model. Example: `imageProvider: "openrouter"` on the `graphic-designer` preset sends image generation through OpenRouter while reasoning uses the default provider. This field is consumed by `src/tools/image-generate.ts` and `src/tools/image-edit.ts`.
+- **Tool-vs-agent LLM separation**: Agent reasoning models are selected via `llm.routing`, while generation/analysis tools use `llm.toolRouting` (with optional preset/agent overrides) so tool models/providers are independent from worker reasoning routes. Image/video tools still support preset fallbacks (`imageModel`/`imageProvider`, `videoModel`/`videoProvider`) when `llm.toolRouting` is not configured.
 
 ### New Agent Preset Pattern
 1. Create/update preset file in `src/core/presets/<name>.ts` with:

@@ -76,10 +76,28 @@
         "coder": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "trader": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "analyst": { "primary": { "provider": "openrouter", "model": "google/gemini-3.1-pro-preview" }, "fallback": { "provider": "local" } },
-        "graphic-designer": { "primary": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" } }
+        "graphic-designer": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } }
       },
       "byAgent": {},
       "localProvider": "local"
+    },
+    "toolRouting": {
+      "default": {
+        "image_generate": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" },
+        "image_edit": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" },
+        "video_analyze": { "provider": "openrouter", "model": "google/gemini-2.5-flash-lite" },
+        "generate_svg": { "provider": "quiver", "model": "arrow-preview" },
+        "vectorize": { "provider": "quiver", "model": "arrow-preview" }
+      },
+      "byPreset": {
+        "graphic-designer": {
+          "image_generate": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" },
+          "image_edit": { "provider": "openrouter", "model": "google/gemini-3-pro-image-preview" },
+          "generate_svg": { "provider": "quiver", "model": "arrow-preview" },
+          "vectorize": { "provider": "quiver", "model": "arrow-preview" }
+        }
+      },
+      "byAgent": {}
     },
     "transientRetries": 5
   },

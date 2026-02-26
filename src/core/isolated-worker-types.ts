@@ -1,4 +1,5 @@
 import type { ModelRouterConfig, SerializableOpenAICompatConfig } from "../llm/model-router.js";
+import type { LlmToolRouting } from "../state/config.js";
 
 // IPC message types for process-isolated worker agents
 
@@ -22,6 +23,8 @@ export type WorkerConfig = {
   // Optional serialized model-router config so isolated workers can route
   // provider-specific tool calls (e.g., imageProvider overrides).
   modelRouterConfig?: ModelRouterConfig;
+  // Optional tool-specific routing config (separate from agent reasoning routing).
+  llmToolRouting?: LlmToolRouting;
   // Permissions
   allowShellExec: boolean;
   allowCodeEdit: boolean;

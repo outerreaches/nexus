@@ -645,6 +645,7 @@ async function runIsolated(params: {
   const logWorker = (line: string) => log?.(`worker[${preset.name}] ${line}`);
   const runtimeLimits = resolveRuntimeLimits(ctx);
   const modelRouterConfig = ctx.modelRouter?.exportConfig();
+  const llmToolRouting = ctx.llmToolRouting;
 
   let llmConfig = ctx.llmConfig;
   if (ctx.modelRouter) {
@@ -854,6 +855,7 @@ async function runIsolated(params: {
       dbPath: path.join(ctx.stateDir, "nexus.db"),
       llmConfig,
       modelRouterConfig,
+      llmToolRouting,
       allowShellExec: workerAllowShellExec,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: workerAllowCodeWrite,

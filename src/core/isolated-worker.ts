@@ -145,6 +145,7 @@ process.on("message", async (msg: ParentMessage) => {
       llm,
       llmConfig: cfg.llmConfig,
       modelRouter,
+      llmToolRouting: cfg.llmToolRouting,
       modelMode: cfg.modelMode,
       db,
       browser: undefined, // Workers do NOT get a browser instance

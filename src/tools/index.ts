@@ -32,6 +32,7 @@ import { imageAnalyze } from "./image-analyze.js";
 import { imageGenerate } from "./image-generate.js";
 import { imageEdit } from "./image-edit.js";
 import { generateSvg } from "./generate-svg.js";
+import { vectorize } from "./vectorize.js";
 import { videoAnalyze } from "./video-analyze.js";
 import { langextractExtract } from "./langextract.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
@@ -102,6 +103,7 @@ export function getBuiltInTools(): Tool[] {
     imageGenerate,
     imageEdit,
     generateSvg,
+    vectorize,
     videoAnalyze,
     langextractExtract,
     shellExec,

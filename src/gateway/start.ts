@@ -376,6 +376,7 @@ export async function startGateway(
     llmConfig,
     circuitBreaker,
     modelRouter,
+    llmToolRouting: config.llm.toolRouting,
     modelMode: startupRoute.mode,
     db,
     browser,

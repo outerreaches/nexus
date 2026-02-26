@@ -178,6 +178,23 @@ const LlmRoutingSchema = z
   })
   .default({});
 
+const LlmToolRouteTargetSchema = z
+  .object({
+    provider: z.string().min(1).optional().describe("Tool-specific provider name (for tools that support provider routing)."),
+    model: EnvString.optional().describe("Tool-specific model override."),
+    endpoint: EnvString.optional().describe("Optional API endpoint override for direct-provider tools."),
+    providerOrder: z.array(z.string().min(1)).optional().describe("Optional provider ordering hint (tool-specific)."),
+  })
+  .default({});
+
+const LlmToolRoutingSchema = z
+  .object({
+    default: z.record(LlmToolRouteTargetSchema).default({}),
+    byPreset: z.record(z.record(LlmToolRouteTargetSchema)).default({}),
+    byAgent: z.record(z.record(LlmToolRouteTargetSchema)).default({}),
+  })
+  .default({});
+
 const SecretsSchema = z
   .object({
     /** Map env var names to {{secret:provider/path#field}} references or plain values. */
@@ -198,10 +215,11 @@ export const ConfigSchema = z.object({
       openaiCompat: OpenAICompatProviderSchema,
       providers: z.record(OpenAICompatProviderSchema).default({}),
       routing: LlmRoutingSchema,
+      toolRouting: LlmToolRoutingSchema,
       /** Max retries for transient LLM errors (429, 5xx, network). Default 5. */
       transientRetries: z.number().int().min(0).max(20).default(5),
     })
-    .default({ openaiCompat: {}, providers: {}, routing: {} }),
+    .default({ openaiCompat: {}, providers: {}, routing: {}, toolRouting: {} }),
   channels: z
     .object({
       telegram: TelegramChannelSchema,
@@ -228,6 +246,8 @@ export const ConfigSchema = z.object({
 });
 
 export type NexusConfig = z.infer<typeof ConfigSchema>;
+export type LlmToolRouting = z.infer<typeof LlmToolRoutingSchema>;
+export type LlmToolRouteTarget = z.infer<typeof LlmToolRouteTargetSchema>;
 
 export async function loadConfig(configPath: string = getDefaultConfigPath()): Promise<NexusConfig> {
   const raw = await fs.readFile(configPath, "utf8");
@@ -291,6 +311,11 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
             byPreset: {},
             byAgent: {},
             localProvider: "local",
+          },
+          toolRouting: {
+            default: {},
+            byPreset: {},
+            byAgent: {},
           },
         },
         permissions: {

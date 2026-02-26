@@ -4,13 +4,12 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import { defineTool } from "../core/tools.js";
-import { getPreset } from "../core/presets.js";
+import { defineTool, type ToolContext } from "../core/tools.js";
 import { requestOpenAICompatChatCompletion, type OpenAICompatConfig } from "../llm/openai-compat.js";
-import type { ModelRouter } from "../llm/model-router.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import { resolveWithinRoots } from "./path-utils.js";
+import { resolveLegacyImageDefaults, resolveOpenAiToolProviderConfig, resolveToolRoute } from "./tool-routing.js";
 
 const FILE_ROOTS = ["workspace", "state", "code"] as const;
 type FileRoot = (typeof FILE_ROOTS)[number];
@@ -82,16 +81,20 @@ function resolveTimeoutMs(override?: number): number {
   return Math.max(10_000, envInt("NEXUS_LLM_IMAGE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
 }
 
-function resolveDefaultImageModel(ctx: { request?: { preset?: string } }, llm: OpenAICompatConfig): { model: string; imageProvider?: string } {
-  const presetName = ctx.request?.preset?.trim();
-  if (presetName) {
-    const preset = getPreset(presetName);
-    const presetModel = preset?.imageModel?.trim();
-    if (presetModel) return { model: presetModel, imageProvider: preset?.imageProvider?.trim() || undefined };
-  }
-  const envModel = (process.env.NEXUS_IMAGE_MODEL ?? "").trim();
-  if (envModel) return { model: envModel };
-  return { model: llm.model };
+function resolveDefaultImageModel(
+  ctx: Pick<ToolContext, "request" | "llmToolRouting">,
+  llm: OpenAICompatConfig,
+): { model: string; imageProvider?: string } {
+  const configuredRoute = resolveToolRoute(ctx, "image_generate");
+  const legacy = resolveLegacyImageDefaults(ctx, llm);
+  return {
+    model:
+      (typeof configuredRoute?.target.model === "string" ? configuredRoute.target.model.trim() : "") ||
+      legacy.model,
+    imageProvider:
+      (typeof configuredRoute?.target.provider === "string" ? configuredRoute.target.provider.trim() : "") ||
+      legacy.provider,
+  };
 }
 
 function shouldFallbackFromError(err: unknown): boolean {
@@ -472,22 +475,16 @@ export const imageGenerate = defineTool({
     let baseLlmConfig = ctx.llmConfig;
     let routeProvider = "default";
     if (resolved.imageProvider) {
-      const router = ctx.modelRouter as ModelRouter | undefined;
-      if (!router) {
-        return `ERROR: image provider '${resolved.imageProvider}' requested, but model router is unavailable`;
+      const routed = resolveOpenAiToolProviderConfig({
+        ctx,
+        provider: resolved.imageProvider,
+        syntheticAgentId: "__image_tool__",
+      });
+      if ("error" in routed) {
+        return `ERROR: ${routed.error}`;
       }
-      try {
-        const imageRoute = router.resolve({
-          // Use a synthetic agent id so byAgent routing does not override explicit image provider selection.
-          agentId: "__image_tool__",
-          mode: "default",
-          presetLlm: { primary: { provider: resolved.imageProvider } },
-        });
-        baseLlmConfig = imageRoute.primary;
-        routeProvider = imageRoute.primaryProvider;
-      } catch (err) {
-        return `ERROR: image provider '${resolved.imageProvider}' route failed: ${err instanceof Error ? err.message : String(err)}`;
-      }
+      baseLlmConfig = routed.config;
+      routeProvider = routed.providerName;
     }
 
     const primary = {

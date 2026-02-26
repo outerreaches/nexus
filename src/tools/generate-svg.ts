@@ -8,6 +8,7 @@ import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getSecret } from "../secrets/resolve-env.js";
 import { resolveWithinRoots } from "./path-utils.js";
+import { resolveToolRoute } from "./tool-routing.js";
 
 const FILE_ROOTS = ["workspace", "state", "code"] as const;
 type FileRoot = (typeof FILE_ROOTS)[number];
@@ -126,6 +127,7 @@ async function fetchWithTimeout(params: {
 
 async function generateSvgsWithQuiver(params: {
   apiKey: string;
+  endpoint: string;
   prompt: string;
   model: string;
   n: number;
@@ -149,7 +151,7 @@ async function generateSvgsWithQuiver(params: {
   if (typeof params.instructions === "string" && params.instructions.trim()) payload.instructions = params.instructions.trim();
 
   const res = await fetchWithTimeout({
-    url: QUIVER_SVG_ENDPOINT,
+    url: params.endpoint,
     timeoutMs: params.timeoutMs,
     init: {
       method: "POST",
@@ -255,12 +257,28 @@ export const generateSvg = defineTool({
     }
 
     const timeoutMs = resolveTimeoutMs(args.timeoutMs);
-    const selectedModel = args.model?.trim() || (process.env.NEXUS_SVG_MODEL ?? "").trim() || DEFAULT_MODEL;
+    const configuredRoute = resolveToolRoute(ctx, "generate_svg");
+    const configuredProvider = typeof configuredRoute?.target.provider === "string"
+      ? configuredRoute.target.provider.trim().toLowerCase()
+      : "";
+    if (configuredProvider && configuredProvider !== "quiver") {
+      return `ERROR: generate_svg only supports provider='quiver' (received '${configuredProvider}')`;
+    }
+    const configuredEndpoint = typeof configuredRoute?.target.endpoint === "string"
+      ? configuredRoute.target.endpoint.trim()
+      : "";
+    const endpoint = configuredEndpoint || (process.env.NEXUS_QUIVER_SVG_ENDPOINT ?? "").trim() || QUIVER_SVG_ENDPOINT;
+    const selectedModel =
+      args.model?.trim() ||
+      (typeof configuredRoute?.target.model === "string" ? configuredRoute.target.model.trim() : "") ||
+      (process.env.NEXUS_SVG_MODEL ?? "").trim() ||
+      DEFAULT_MODEL;
 
     let generation: { svgs: GeneratedSvg[]; responseId: string | null };
     try {
       generation = await generateSvgsWithQuiver({
         apiKey,
+        endpoint,
         prompt: args.prompt,
         instructions: args.instructions,
         model: selectedModel,

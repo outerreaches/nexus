@@ -3,12 +3,11 @@ import path from "node:path";
 
 import { z } from "zod";
 
-import { defineTool } from "../core/tools.js";
-import { getPreset } from "../core/presets.js";
+import { defineTool, type ToolContext } from "../core/tools.js";
 import { requestOpenAICompatChatCompletion, type OpenAICompatConfig } from "../llm/openai-compat.js";
-import type { ModelRouter } from "../llm/model-router.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { resolveWithinRoots } from "./path-utils.js";
+import { resolveLegacyVideoDefaults, resolveOpenAiToolProviderConfig, resolveToolRoute } from "./tool-routing.js";
 
 const FILE_ROOTS = ["workspace", "state", "code"] as const;
 type FileRoot = (typeof FILE_ROOTS)[number];
@@ -181,26 +180,23 @@ async function resolveVideoFromBlackboard(params: {
 // ---------------------------------------------------------------------------
 
 function resolveDefaultVideoModel(
-  ctx: { request?: { preset?: string } },
+  ctx: Pick<ToolContext, "request" | "llmToolRouting">,
   llm: OpenAICompatConfig,
 ): { model: string; videoProvider?: string; videoProviderOrder?: string[] } {
-  const presetName = ctx.request?.preset?.trim();
-  if (presetName) {
-    const preset = getPreset(presetName);
-    const presetModel = (preset as Record<string, unknown> | undefined)?.videoModel;
-    if (typeof presetModel === "string" && presetModel.trim()) {
-      const videoProvider = (preset as Record<string, unknown> | undefined)?.videoProvider;
-      const videoProviderOrder = (preset as Record<string, unknown> | undefined)?.videoProviderOrder;
-      return {
-        model: presetModel.trim(),
-        videoProvider: typeof videoProvider === "string" ? videoProvider.trim() || undefined : undefined,
-        videoProviderOrder: Array.isArray(videoProviderOrder) ? videoProviderOrder.filter((s): s is string => typeof s === "string" && s.trim().length > 0) : undefined,
-      };
-    }
-  }
-  const envModel = (process.env.NEXUS_VIDEO_MODEL ?? "").trim();
-  if (envModel) return { model: envModel };
-  return { model: llm.model };
+  const configuredRoute = resolveToolRoute(ctx, "video_analyze");
+  const legacy = resolveLegacyVideoDefaults(ctx, llm);
+  const routeOrder = Array.isArray(configuredRoute?.target.providerOrder)
+    ? configuredRoute.target.providerOrder.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : undefined;
+  return {
+    model:
+      (typeof configuredRoute?.target.model === "string" ? configuredRoute.target.model.trim() : "") ||
+      legacy.model,
+    videoProvider:
+      (typeof configuredRoute?.target.provider === "string" ? configuredRoute.target.provider.trim() : "") ||
+      legacy.provider,
+    videoProviderOrder: routeOrder && routeOrder.length > 0 ? routeOrder : legacy.providerOrder,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -248,21 +244,16 @@ export const videoAnalyze = defineTool({
       let baseLlmConfig = ctx.llmConfig;
       let routeProvider = "default";
       if (resolved.videoProvider) {
-        const router = ctx.modelRouter as ModelRouter | undefined;
-        if (!router) {
-          return `ERROR: video provider '${resolved.videoProvider}' requested, but model router is unavailable`;
+        const routed = resolveOpenAiToolProviderConfig({
+          ctx,
+          provider: resolved.videoProvider,
+          syntheticAgentId: "__video_tool__",
+        });
+        if ("error" in routed) {
+          return `ERROR: ${routed.error}`;
         }
-        try {
-          const videoRoute = router.resolve({
-            agentId: "__video_tool__",
-            mode: "default",
-            presetLlm: { primary: { provider: resolved.videoProvider } },
-          });
-          baseLlmConfig = videoRoute.primary;
-          routeProvider = videoRoute.primaryProvider;
-        } catch (err) {
-          return `ERROR: video provider '${resolved.videoProvider}' route failed: ${err instanceof Error ? err.message : String(err)}`;
-        }
+        baseLlmConfig = routed.config;
+        routeProvider = routed.providerName;
       }
 
       const llm: OpenAICompatConfig = { ...baseLlmConfig, model: resolved.model };
