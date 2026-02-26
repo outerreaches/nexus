@@ -3,7 +3,7 @@ import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
 import { startSecretSidecar } from "../secrets/sidecar.js";
-import { getSecret, resolveEnvSecrets } from "../secrets/resolve-env.js";
+import { getSecret } from "../secrets/resolve-env.js";
 
 const RUNTIME_PROFILES = [
   "standard",
@@ -616,139 +616,6 @@ export async function runCli(argv: string[]): Promise<void> {
             stateDir: paths.stateDir,
             workspaceDir: paths.workspaceDir,
             codeDir: paths.codeDir,
-          },
-          null,
-          2,
-        ) + "\n",
-      );
-    });
-
-  const gmail = program.command("gmail").description("Gmail API integration (OAuth2)");
-
-  gmail
-    .command("auth")
-    .description("Authorize Gmail access (stores tokens in state dir)")
-    .option("--listen <host>", "Callback listen host (use 0.0.0.0 inside Docker)", "127.0.0.1")
-    .option("--port <port>", "Callback listen port", (v) => Number(v), 18790)
-    .option("--callback-path <path>", "Callback path", "/oauth2callback")
-    .option("--redirect-host <host>", "Host to use in redirect URI", "127.0.0.1")
-    .option("--timeout-ms <ms>", "Time to wait for callback", (v) => Number(v), 5 * 60_000)
-    .action(async (opts) => {
-      const options = program.opts<{ config: string }>();
-      const { ensureConfigExists, loadConfig } = await import("../state/config.js");
-      const { bootstrapState } = await import("../state/bootstrap.js");
-      const { resolveRuntimePaths } = await import("../state/paths.js");
-      const { buildGoogleAuthUrl, createOauthState, exchangeCodeForTokens, runLocalhostOauthCallback, saveGmailTokens } =
-        await import("../gmail/auth.js");
-
-      await ensureConfigExists(options.config);
-      const config = await loadConfig(options.config);
-      await bootstrapState(config);
-      const paths = await resolveRuntimePaths(config);
-
-      const { openDatabase } = await import("../storage/database.js");
-      const db = await openDatabase(paths.dbPath);
-      const envSecretKeys = Object.keys(config.secrets?.env ?? {});
-      if (envSecretKeys.length > 0) {
-        await resolveEnvSecrets({ db, stateDir: paths.stateDir, env: config.secrets.env, log: () => { } });
-      }
-
-      const clientId = (getSecret("GOOGLE_CLIENT_ID") ?? "").trim();
-      const clientSecret = (getSecret("GOOGLE_CLIENT_SECRET") ?? "").trim();
-      if (!clientId || !clientSecret) {
-        db.close();
-        process.stderr.write("ERROR: missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in config.secrets.env\n");
-        process.exitCode = 1;
-        return;
-      }
-
-      const listenHost = String(opts.listen ?? "127.0.0.1");
-      const listenPort = Number(opts.port ?? 18790);
-      const callbackPath = String(opts.callbackPath ?? "/oauth2callback");
-      const redirectHost = String(opts.redirectHost ?? "localhost");
-      const timeoutMs = Number(opts.timeoutMs ?? 5 * 60_000);
-
-      if (!Number.isFinite(listenPort) || listenPort <= 0 || listenPort > 65535) {
-        process.stderr.write(`ERROR: invalid port: ${String(opts.port)}\n`);
-        process.exitCode = 1;
-        return;
-      }
-      if (!callbackPath.startsWith("/")) {
-        process.stderr.write('ERROR: callback-path must start with "/" (e.g. /oauth2callback)\n');
-        process.exitCode = 1;
-        return;
-      }
-
-      const redirectUri = `http://${redirectHost}:${listenPort}${callbackPath}`;
-      const oauth = { clientId, clientSecret, redirectUri };
-      const state = createOauthState();
-      const scopes = [
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/gmail.readonly",
-      ];
-
-      const waitForCode = runLocalhostOauthCallback({
-        listenHost,
-        listenPort,
-        callbackPath,
-        expectedState: state,
-        timeoutMs,
-        log: (line) => process.stderr.write(`[nexus] ${line}\n`),
-      });
-
-      const url = buildGoogleAuthUrl({ oauth, scopes, state });
-      process.stdout.write("Open this URL in your browser to authorize Gmail:\n");
-      process.stdout.write(url + "\n");
-      process.stdout.write(`Redirect URI: ${redirectUri}\n`);
-
-      const code = await waitForCode;
-      const tokenSet = await exchangeCodeForTokens({ oauth, code, timeoutMs: 30_000 });
-      const expiryDate = typeof tokenSet.expires_in === "number" ? Date.now() + tokenSet.expires_in * 1000 : undefined;
-      await saveGmailTokens(paths.stateDir, {
-        access_token: tokenSet.access_token,
-        refresh_token: tokenSet.refresh_token,
-        scope: tokenSet.scope,
-        token_type: tokenSet.token_type,
-        expiry_date: expiryDate,
-      });
-
-      process.stdout.write("OK: Gmail authorized\n");
-    });
-
-  gmail
-    .command("status")
-    .description("Show Gmail auth status (token presence/expiry)")
-    .action(async () => {
-      const options = program.opts<{ config: string }>();
-      const { ensureConfigExists, loadConfig } = await import("../state/config.js");
-      const { bootstrapState } = await import("../state/bootstrap.js");
-      const { resolveRuntimePaths } = await import("../state/paths.js");
-      const { getGmailTokenPath, loadGmailTokens } = await import("../gmail/auth.js");
-
-      await ensureConfigExists(options.config);
-      const config = await loadConfig(options.config);
-      await bootstrapState(config);
-      const paths = await resolveRuntimePaths(config);
-
-      const tokens = await loadGmailTokens(paths.stateDir);
-      if (!tokens) {
-        process.stdout.write("Gmail: not authorized (run `nexus gmail auth`)\n");
-        return;
-      }
-
-      const expiryIso =
-        typeof tokens.expiry_date === "number" && tokens.expiry_date > 0 ? new Date(tokens.expiry_date).toISOString() : null;
-
-      process.stdout.write(
-        JSON.stringify(
-          {
-            tokenPath: getGmailTokenPath(paths.stateDir),
-            hasRefreshToken: Boolean(tokens.refresh_token),
-            scope: tokens.scope ?? null,
-            tokenType: tokens.token_type ?? null,
-            expiryDate: tokens.expiry_date ?? null,
-            expiryIso,
-            updatedAt: tokens.updated_at ?? null,
           },
           null,
           2,

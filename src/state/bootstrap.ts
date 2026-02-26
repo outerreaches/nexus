@@ -73,10 +73,6 @@ def query_data(instrument: str, currency: str = "usd") -> Any:
         return data.get("price", data)
     except Exception:
         return out
-
-
-def gmail_send(to: str, subject: str, text: str) -> str:
-    return _call_tool("gmail_send", {"to": to, "subject": subject, "text": text})
 `;
 
 export async function bootstrapState(config: NexusConfig): Promise<void> {

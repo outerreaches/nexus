@@ -34,11 +34,8 @@ import { imageEdit } from "./image-edit.js";
 import { generateSvg } from "./generate-svg.js";
 import { vectorize } from "./vectorize.js";
 import { videoAnalyze } from "./video-analyze.js";
-import { langextractExtract } from "./langextract.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
-import { gatewayRestart } from "./lifecycle.js";
 import { haDeploy } from "./ha-deploy.js";
-import { gmailGetMessage, gmailProfile, gmailSearch, gmailSend } from "./gmail.js";
 import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
 import { humanAction, humanRequest, humanStatus } from "./human-actions.js";
 import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobManage, jobPause, jobResume, jobRunGet, jobRunNow, jobRuns, jobUpdate } from "./jobs.js";
@@ -106,7 +103,6 @@ export function getBuiltInTools(): Tool[] {
     generateSvg,
     vectorize,
     videoAnalyze,
-    langextractExtract,
     shellExec,
     shellInteractive,
     processStart,
@@ -134,14 +130,9 @@ export function getBuiltInTools(): Tool[] {
     nodeManage,
     browserTool,
     queryData,
-    gatewayRestart,
     haDeploy,
     paperTrade,
     portfolioStatus,
-    gmailProfile,
-    gmailSearch,
-    gmailGetMessage,
-    gmailSend,
     credentialSet,
     credentialGenerate,
     credentialList,
