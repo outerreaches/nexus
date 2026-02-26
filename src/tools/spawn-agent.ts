@@ -1226,8 +1226,9 @@ function buildExecutionPromptLines(target: SpawnExecutionTarget): string[] {
     `This run is pinned to remote node: ${target.nodeId}.`,
     "Use shell_interactive for command execution. shell_interactive calls are auto-pinned to this node.",
     "Local shell_exec and local file/code tools are disabled for this run.",
+    "Use shell_interactive only for short stateful iterative workflows. For long-running/background work, do not keep a foreground shell blocked.",
     `When spawning child agents from this run, keep execution pinned to nodeId="${target.nodeId}" unless your preset explicitly allows escape.`,
-    "Workflow reminder: open -> send -> read loops -> close. Always read after each send.",
+    "Workflow reminder: open -> send -> read loops -> close. Always read after each send, never use sleep loops for waiting, and interrupt accidental long foreground runs.",
   ];
 }
 

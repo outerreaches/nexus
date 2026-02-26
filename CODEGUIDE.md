@@ -24,6 +24,17 @@ Architecture and implementation guide for the **coder** preset.
   - node firewall mode `transparent`
 - In node-target mode, local file/code/deploy tools are removed; use shell workflow (`open -> send -> read -> close`).
 
+## Execution Mode Selection (Strict)
+- Use one-shot execution for short stateless commands:
+  - local: `shell_exec`
+  - node: `node_manage` action=`system_run`
+- Use `shell_interactive` for short stateful multi-step workflows (`open -> send -> read -> close`).
+- Use process tools for long-running/background tasks:
+  - local: `process_start` -> `process_status` / `process_logs` -> `process_stop`
+  - node: `node_manage` action=`process_start|process_status|process_logs|process_stop`
+- Never use sleep loops as a waiting strategy in interactive shell.
+- If a long foreground command was started accidentally in interactive shell, interrupt it and relaunch via process tools.
+
 ## Absolute Paths
 - Use absolute file paths only.
 - Primary source root: `/data/code`

@@ -929,6 +929,7 @@ export const shellInteractive = defineTool({
     "Manage interactive tmux shell sessions locally or on connected Nexus nodes.",
     "Workflow: open → send+read cycles → close.",
     "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
+    "Do not use sleep commands as a waiting strategy. For long-running/background tasks, use process tools (`process_start` / `process_status` / `process_logs` or node_manage process actions) instead of blocking an interactive foreground shell.",
     "read returns output since the given cursor; pass nextCursor from the previous read/send response. If cursor is omitted, it resumes from the session's last read cursor.",
     "Defaults to local (target=local). Use target=node only when the task specifically requires running on a remote node (e.g. node-local files, GPU, node-specific services). Node shells require nodeId, nexus-shellctl allowlisted, and firewallMode=transparent.",
   ].join(" "),
