@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import { getPreset } from "../core/presets.js";
-import type { OpenAICompatConfig } from "../llm/openai-compat.js";
+import { requestOpenAICompatChatCompletion, type OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { ModelRouter } from "../llm/model-router.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { resolveWithinRoots } from "./path-utils.js";
@@ -26,11 +26,6 @@ const SUPPORTED_VIDEO_MIME_TYPES = new Set([
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function joinUrl(baseUrl: string, suffix: string): string {
-  const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(suffix, normalized).toString();
-}
 
 function envInt(name: string, fallback: number): number {
   const raw = (process.env[name] ?? "").trim();
@@ -64,21 +59,6 @@ function resolveTimeoutMs(override?: number): number {
     return Math.floor(override);
   }
   return Math.max(10_000, envInt("NEXUS_LLM_VIDEO_TIMEOUT_MS", DEFAULT_TIMEOUT_MS));
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`LLM request timed out after ${timeoutMs}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function formatBytes(bytes: number): string {
@@ -347,7 +327,6 @@ export const videoAnalyze = defineTool({
       }
 
       // ── Send to LLM ────────────────────────────────────────────────
-      const apiUrl = joinUrl(llm.baseUrl, "chat/completions");
       const payload: Record<string, unknown> = {
         model: llm.model,
         messages: [
@@ -365,24 +344,11 @@ export const videoAnalyze = defineTool({
         payload.provider = { order: providerOrder };
       }
 
-      const res = await fetchWithTimeout(
-        apiUrl,
-        {
-          method: "POST",
-          headers: {
-            ...(llm.apiKey ? { Authorization: `Bearer ${llm.apiKey}` } : {}),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-        },
+      const json = await requestOpenAICompatChatCompletion({
+        llm,
+        payload,
         timeoutMs,
-      );
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        return `ERROR: video_analyze route=${routeUsed}: LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`;
-      }
-
-      const json = (await res.json()) as Record<string, unknown>;
+      });
       const choice = (json.choices as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined;
       const message = choice?.message as Record<string, unknown> | undefined;
 

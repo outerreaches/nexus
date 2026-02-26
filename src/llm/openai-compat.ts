@@ -8,6 +8,7 @@ export type OpenAICompatConfig = {
   apiKey?: string;
   model: string;
   maxTokens?: number;
+  stream?: boolean;
   stripCacheControl?: boolean;
   onLog?: (line: string) => void;
 };
@@ -217,6 +218,320 @@ function joinUrl(baseUrl: string, path: string): string {
   return new URL(path, normalizedBase).toString();
 }
 
+function isFireworksBaseUrl(baseUrl: string): boolean {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return false;
+  try {
+    const host = new URL(trimmed).hostname.toLowerCase();
+    return host === "api.fireworks.ai" || host.endsWith(".fireworks.ai");
+  } catch {
+    return trimmed.toLowerCase().includes("fireworks.ai");
+  }
+}
+
+function resolveChatCompletionStreaming(config: OpenAICompatConfig, payload: Record<string, unknown>): boolean {
+  if (typeof payload.stream === "boolean") return payload.stream;
+  if (typeof config.stream === "boolean") return config.stream;
+  return isFireworksBaseUrl(config.baseUrl);
+}
+
+function parseSseDataEvents(rawBody: string): string[] {
+  const events: string[] = [];
+  let current = "";
+  for (const line of rawBody.split(/\r?\n/)) {
+    if (line.length === 0) {
+      const trimmed = current.trim();
+      if (trimmed.length > 0) events.push(trimmed);
+      current = "";
+      continue;
+    }
+    if (line.startsWith(":")) continue;
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice("data:".length).trimStart();
+    current = current.length > 0 ? `${current}\n${payload}` : payload;
+  }
+  const tail = current.trim();
+  if (tail.length > 0) events.push(tail);
+  return events;
+}
+
+type StreamToolCallAccumulator = {
+  id?: string;
+  name?: string;
+  arguments: string;
+};
+
+function appendStreamContentChunks(out: Array<string | Record<string, unknown>>, raw: unknown): void {
+  if (typeof raw === "string") {
+    out.push(raw);
+    return;
+  }
+  if (Array.isArray(raw)) {
+    for (const part of raw) {
+      if (typeof part === "string") {
+        out.push(part);
+      } else if (isRecord(part)) {
+        out.push(part);
+      }
+    }
+    return;
+  }
+  if (isRecord(raw)) {
+    if (typeof raw.text === "string") {
+      out.push(raw.text);
+      return;
+    }
+    out.push(raw);
+  }
+}
+
+function mergeStreamToolCallDelta(target: Map<number, StreamToolCallAccumulator>, raw: unknown): void {
+  if (!Array.isArray(raw)) return;
+  for (let i = 0; i < raw.length; i += 1) {
+    const entry = raw[i];
+    if (!isRecord(entry)) continue;
+    const index = typeof entry.index === "number" && Number.isFinite(entry.index) ? Math.floor(entry.index) : i;
+    const acc = target.get(index) ?? { arguments: "" };
+    if (typeof entry.id === "string" && entry.id.trim().length > 0) acc.id = entry.id;
+    const fn = isRecord(entry.function) ? entry.function : undefined;
+    if (fn && typeof fn.name === "string" && fn.name.trim().length > 0) acc.name = fn.name;
+    if (fn && typeof fn.arguments === "string") {
+      acc.arguments += fn.arguments;
+    } else if (typeof entry.arguments === "string") {
+      acc.arguments += entry.arguments;
+    }
+    target.set(index, acc);
+  }
+}
+
+function collapseStreamContent(chunks: Array<string | Record<string, unknown>>): unknown {
+  if (chunks.length === 0) return null;
+  if (chunks.every((chunk) => typeof chunk === "string")) {
+    return (chunks as string[]).join("");
+  }
+
+  const parts: Record<string, unknown>[] = [];
+  let textBuffer = "";
+  const flushText = () => {
+    if (!textBuffer) return;
+    parts.push({ type: "text", text: textBuffer });
+    textBuffer = "";
+  };
+
+  for (const chunk of chunks) {
+    if (typeof chunk === "string") {
+      textBuffer += chunk;
+      continue;
+    }
+    flushText();
+    parts.push(chunk);
+  }
+  flushText();
+
+  if (parts.length === 1 && parts[0]?.type === "text" && typeof parts[0]?.text === "string") {
+    return parts[0].text;
+  }
+  return parts;
+}
+
+function buildToolCallsFromStream(acc: Map<number, StreamToolCallAccumulator>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const sorted = [...acc.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [index, entry] of sorted) {
+    if (!entry.name) continue;
+    out.push({
+      id: entry.id ?? `call_${index}`,
+      type: "function",
+      function: {
+        name: entry.name,
+        arguments: entry.arguments || "{}",
+      },
+    });
+  }
+  return out;
+}
+
+function mergeFinalAndStreamMessage(params: {
+  finalMessage: Record<string, unknown> | null;
+  streamMessage: Record<string, unknown>;
+}): Record<string, unknown> {
+  if (!params.finalMessage) return params.streamMessage;
+  const merged: Record<string, unknown> = {
+    ...params.streamMessage,
+    ...params.finalMessage,
+  };
+  if (!Object.prototype.hasOwnProperty.call(params.finalMessage, "tool_calls")) {
+    const streamToolCalls = params.streamMessage.tool_calls;
+    if (Array.isArray(streamToolCalls) && streamToolCalls.length > 0) {
+      merged.tool_calls = streamToolCalls;
+    }
+  }
+  if (
+    (!Object.prototype.hasOwnProperty.call(params.finalMessage, "content") ||
+      params.finalMessage.content === null ||
+      params.finalMessage.content === "") &&
+    params.streamMessage.content
+  ) {
+    merged.content = params.streamMessage.content;
+  }
+  if (!Object.prototype.hasOwnProperty.call(merged, "role")) merged.role = "assistant";
+  return merged;
+}
+
+function parseStreamedChatCompletionBody(rawBody: string): Record<string, unknown> {
+  const dataEvents = parseSseDataEvents(rawBody);
+  const contentChunks: Array<string | Record<string, unknown>> = [];
+  const toolCallAccumulator = new Map<number, StreamToolCallAccumulator>();
+  let usage: unknown;
+  let finishReason: unknown;
+  let responseId: string | undefined;
+  let responseModel: string | undefined;
+  let responseObject: string | undefined;
+  let finalMessage: Record<string, unknown> | null = null;
+
+  for (const payload of dataEvents) {
+    if (!payload || payload === "[DONE]") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+
+    if (!responseId && typeof parsed.id === "string") responseId = parsed.id;
+    if (!responseModel && typeof parsed.model === "string") responseModel = parsed.model;
+    if (!responseObject && typeof parsed.object === "string") responseObject = parsed.object;
+    if (parsed.usage !== undefined) usage = parsed.usage;
+
+    const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+    for (const choice of choices) {
+      if (!isRecord(choice)) continue;
+      if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+        finishReason = choice.finish_reason;
+      }
+      if (isRecord(choice.message)) {
+        finalMessage = choice.message;
+      }
+      const delta = isRecord(choice.delta) ? choice.delta : undefined;
+      if (!delta) continue;
+      appendStreamContentChunks(contentChunks, delta.content);
+      mergeStreamToolCallDelta(toolCallAccumulator, delta.tool_calls);
+    }
+  }
+
+  const streamMessage: Record<string, unknown> = {
+    role: "assistant",
+    content: collapseStreamContent(contentChunks),
+  };
+  const streamToolCalls = buildToolCallsFromStream(toolCallAccumulator);
+  if (streamToolCalls.length > 0) streamMessage.tool_calls = streamToolCalls;
+
+  const message = mergeFinalAndStreamMessage({
+    finalMessage,
+    streamMessage,
+  });
+  const choice: Record<string, unknown> = { index: 0, message };
+  if (finishReason !== undefined) choice.finish_reason = finishReason;
+
+  const out: Record<string, unknown> = {
+    choices: [choice],
+  };
+  if (responseId) out.id = responseId;
+  if (responseModel) out.model = responseModel;
+  if (responseObject) out.object = responseObject;
+  if (usage !== undefined) out.usage = usage;
+  return out;
+}
+
+export function parseChatCompletionResponseBody(bodyText: string, stream: boolean): Record<string, unknown> {
+  if (!stream) {
+    return JSON.parse(bodyText) as Record<string, unknown>;
+  }
+  return parseStreamedChatCompletionBody(bodyText);
+}
+
+export async function requestOpenAICompatChatCompletion(params: {
+  llm: OpenAICompatConfig;
+  payload: Record<string, unknown>;
+  timeoutMs: number;
+  abortSignal?: AbortSignal;
+  onActivity?: () => void;
+  onLog?: (line: string) => void;
+}): Promise<Record<string, unknown>> {
+  const url = joinUrl(params.llm.baseUrl, "chat/completions");
+  const controller = new AbortController();
+  const startMs = Date.now();
+  const stream = resolveChatCompletionStreaming(params.llm, params.payload);
+  const requestPayload: Record<string, unknown> = {
+    ...params.payload,
+    ...(stream ? { stream: true } : {}),
+  };
+
+  let externalAbortListener: (() => void) | null = null;
+  if (params.abortSignal) {
+    const onExternalAbort = () => {
+      params.onLog?.(`llm_fetch_abort_external elapsed=${Date.now() - startMs}ms`);
+      controller.abort(params.abortSignal?.reason);
+    };
+    if (params.abortSignal.aborted) {
+      onExternalAbort();
+    } else {
+      params.abortSignal.addEventListener("abort", onExternalAbort, { once: true });
+      externalAbortListener = () => {
+        params.abortSignal?.removeEventListener("abort", onExternalAbort);
+      };
+    }
+  }
+
+  let abortFired = false;
+  const timeout = setTimeout(() => {
+    abortFired = true;
+    controller.abort();
+  }, params.timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...(params.llm.apiKey ? { Authorization: `Bearer ${params.llm.apiKey}` } : {}),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+    }
+
+    clearTimeout(timeout);
+    const bodyInactivityMs = Math.max(
+      1_000,
+      envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
+    );
+    const bodyText = await readBodyWithInactivityTimeout({
+      body: res.body,
+      controller,
+      inactivityMs: bodyInactivityMs,
+      onActivity: params.onActivity,
+      onLog: params.onLog,
+      startMs,
+    });
+    return parseChatCompletionResponseBody(bodyText, stream);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      const mode = abortFired ? `after ${params.timeoutMs}ms` : "(external abort)";
+      throw new Error(`LLM request timed out ${mode}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+    externalAbortListener?.();
+  }
+}
+
 function estimateCharsForMessage(message: ChatMessage): number {
   if (message.role === "assistant") {
     const contentChars = typeof message.content === "string" ? message.content.length : 0;
@@ -392,8 +707,20 @@ export class OpenAICompatClient implements LLMClient {
       });
       const estimatedTokens = estimateRequestTokens(activeMessages, params.tools);
       const startMs = Date.now();
+      const requestPayload: Record<string, unknown> = {
+        model: this.config.model,
+        tools,
+        tool_choice: "auto",
+        temperature: params.temperature ?? 0.2,
+        max_tokens: this.config.maxTokens ?? 16384,
+        messages: toOpenAIMessages(activeMessages, this.config.stripCacheControl),
+      };
+      const stream = resolveChatCompletionStreaming(this.config, requestPayload);
+      if (stream) requestPayload.stream = true;
 
-      log?.(`llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens}`);
+      log?.(
+        `llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens} stream=${stream ? "yes" : "no"}`,
+      );
 
       const controller = new AbortController();
       const externalAbortSignal = params.abortSignal;
@@ -425,14 +752,7 @@ export class OpenAICompatClient implements LLMClient {
             ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            model: this.config.model,
-            tools,
-            tool_choice: "auto",
-            temperature: params.temperature ?? 0.2,
-            max_tokens: this.config.maxTokens ?? 16384,
-            messages: toOpenAIMessages(activeMessages, this.config.stripCacheControl),
-          }),
+          body: JSON.stringify(requestPayload),
           signal: controller.signal,
         });
         const headersElapsed = Date.now() - startMs;
@@ -466,14 +786,17 @@ export class OpenAICompatClient implements LLMClient {
           onLog: log,
           startMs,
         });
-        const json = JSON.parse(bodyText) as any;
+        const json = parseChatCompletionResponseBody(bodyText, stream) as Record<string, unknown>;
         const totalElapsed = Date.now() - startMs;
         log?.(`llm_fetch_complete elapsed=${totalElapsed}ms headers_at=${headersElapsed}ms body_read=${totalElapsed - headersElapsed}ms`);
 
-        const message = json?.choices?.[0]?.message as any;
+        const choices = Array.isArray(json.choices) ? json.choices : [];
+        const firstChoice = choices[0];
+        const choiceRecord = isRecord(firstChoice) ? firstChoice : undefined;
+        const message = isRecord(choiceRecord?.message) ? choiceRecord.message : undefined;
         const content = normalizeAssistantContent(message?.content);
         const toolCalls = normalizeToolCalls(message?.tool_calls);
-        const usage = normalizeUsage(json?.usage);
+        const usage = normalizeUsage(json.usage);
         if (!content && toolCalls.length === 0) {
           const completion = typeof usage?.completionTokens === "number" ? usage.completionTokens : "n/a";
           const total = typeof usage?.totalTokens === "number" ? usage.totalTokens : "n/a";

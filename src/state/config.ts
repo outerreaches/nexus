@@ -150,6 +150,7 @@ const OpenAICompatProviderSchema = z
     apiKey: EnvString.optional(),
     model: EnvString.default("moonshotai/kimi-k2.5"),
     maxTokens: z.number().int().positive().optional().describe("Max output tokens per LLM call. Defaults to 16384 if omitted."),
+    stream: z.boolean().optional().describe("When true, force streaming chat-completions transport for this provider."),
     stripCacheControl: z.boolean().default(false).describe("Strip cache_control fields from messages. Required for providers that reject extra fields (e.g. Fireworks)."),
   })
   .default({});

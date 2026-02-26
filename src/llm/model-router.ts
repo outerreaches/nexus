@@ -13,6 +13,7 @@ export type SerializableOpenAICompatConfig = {
   apiKey?: string;
   model: string;
   maxTokens?: number;
+  stream?: boolean;
   stripCacheControl?: boolean;
 };
 
@@ -145,6 +146,7 @@ function sanitizeConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig
     apiKey: cfg.apiKey,
     model: cfg.model,
     maxTokens: cfg.maxTokens,
+    stream: cfg.stream,
     stripCacheControl: cfg.stripCacheControl,
   };
 }

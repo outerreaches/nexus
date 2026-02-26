@@ -41,6 +41,7 @@
       "baseUrl": "https://api.fireworks.ai/inference/v1",
       "apiKey": "${FIREWORKS_API_KEY}",
       "model": "accounts/fireworks/models/kimi-k2p5",
+      "stream": true,
       "stripCacheControl": true
     },
     "providers": {

@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import { getPreset } from "../core/presets.js";
-import type { OpenAICompatConfig } from "../llm/openai-compat.js";
+import { requestOpenAICompatChatCompletion, type OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { ModelRouter } from "../llm/model-router.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
@@ -26,11 +26,6 @@ type TelegramCtx = {
 
 function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   return (ctx.db as NexusDatabase | undefined) ?? null;
-}
-
-function joinUrl(baseUrl: string, suffix: string): string {
-  const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(suffix, normalized).toString();
 }
 
 function envInt(name: string, fallback: number): number {
@@ -307,7 +302,6 @@ async function generateImagesWithConfig(params: {
   aspectRatio?: string;
   timeoutMs: number;
 }): Promise<ImageGenerationResult> {
-  const url = joinUrl(params.llm.baseUrl, "chat/completions");
   const model = params.model.trim();
   const payload: Record<string, unknown> = {
     model,
@@ -319,24 +313,11 @@ async function generateImagesWithConfig(params: {
   if (params.aspectRatio) imageConfig.aspect_ratio = params.aspectRatio;
   if (Object.keys(imageConfig).length > 0) payload.image_config = imageConfig;
 
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: {
-        ...(params.llm.apiKey ? { Authorization: `Bearer ${params.llm.apiKey}` } : {}),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    },
-    params.timeoutMs,
-  );
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`LLM request failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
-  }
-
-  const json = (await res.json()) as Record<string, unknown>;
+  const json = await requestOpenAICompatChatCompletion({
+    llm: params.llm,
+    payload,
+    timeoutMs: params.timeoutMs,
+  });
   const choice = (json.choices as unknown[] | undefined)?.[0] as Record<string, unknown> | undefined;
   const message = choice?.message as Record<string, unknown> | undefined;
   const text = normalizeTextContent((message as Record<string, unknown> | undefined)?.content);
