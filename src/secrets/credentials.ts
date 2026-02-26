@@ -42,11 +42,6 @@ function getVaultKey(): Buffer | null {
 }
 
 function resolveCredentialStorePath(stateDir: string): string {
-  const explicitFile = (process.env.NEXUS_CREDENTIALS_STORE_PATH ?? "").trim();
-  if (explicitFile) {
-    throw new Error("NEXUS_CREDENTIALS_STORE_PATH is not supported. Use NEXUS_CREDENTIALS_STORE_DIR.");
-  }
-
   const explicitDir = (process.env.NEXUS_CREDENTIALS_STORE_DIR ?? "").trim();
   if (explicitDir) {
     if (!path.isAbsolute(explicitDir)) {

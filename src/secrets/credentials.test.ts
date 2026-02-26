@@ -248,26 +248,10 @@ test("credentials store path honors NEXUS_CREDENTIALS_STORE_DIR override", async
   await withEnv(
     {
       NEXUS_CREDENTIALS_STORE_DIR: "/tmp/nexus-secrets",
-      NEXUS_CREDENTIALS_STORE_PATH: undefined,
     },
     async () => {
       const p = getCredentialStorePath("/data/nexus");
       assert.equal(p, "/tmp/nexus-secrets/credentials.json");
-    },
-  );
-});
-
-test("credentials store path disallows explicit file override", async () => {
-  await withEnv(
-    {
-      NEXUS_CREDENTIALS_STORE_PATH: "/tmp/credentials.json",
-      NEXUS_CREDENTIALS_STORE_DIR: undefined,
-    },
-    async () => {
-      assert.throws(
-        () => getCredentialStorePath("/data/nexus"),
-        /NEXUS_CREDENTIALS_STORE_PATH is not supported/,
-      );
     },
   );
 });

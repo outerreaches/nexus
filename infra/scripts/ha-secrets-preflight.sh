@@ -208,11 +208,7 @@ fi
 STORE_PATH="${STORE_DIR%/}/credentials.json"
 
 # Honor env overrides when present.
-env_store_path="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_PATH" "$SIDECAR_ENV_FILE")"
 env_store_dir="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_DIR" "$SIDECAR_ENV_FILE")"
-if [[ -n "$env_store_path" ]]; then
-  fail "NEXUS_CREDENTIALS_STORE_PATH is not supported. Use NEXUS_CREDENTIALS_STORE_DIR."
-fi
 if [[ -n "$env_store_dir" ]]; then
   STORE_DIR="$env_store_dir"
   STORE_PATH="${STORE_DIR%/}/credentials.json"
