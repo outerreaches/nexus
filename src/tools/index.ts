@@ -36,7 +36,6 @@ import { vectorize } from "./vectorize.js";
 import { videoAnalyze } from "./video-analyze.js";
 import { paperTrade, portfolioStatus } from "./trading.js";
 import { haDeploy } from "./ha-deploy.js";
-import { credentialDelete, credentialGenerate, credentialList, credentialSet } from "./credentials.js";
 import { humanAction, humanRequest, humanStatus } from "./human-actions.js";
 import { jobCreate, jobDelete, jobEvents, jobGet, jobList, jobManage, jobPause, jobResume, jobRunGet, jobRunNow, jobRuns, jobUpdate } from "./jobs.js";
 import { telegramSend, telegramSendFile } from "./telegram-send.js";
@@ -133,10 +132,6 @@ export function getBuiltInTools(): Tool[] {
     haDeploy,
     paperTrade,
     portfolioStatus,
-    credentialSet,
-    credentialGenerate,
-    credentialList,
-    credentialDelete,
     humanAction,
     humanRequest,
     humanStatus,

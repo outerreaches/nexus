@@ -12,7 +12,6 @@ import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { upsertSecretProviderProfile } from "../storage/secrets.js";
 import { getOrCreateSessionId } from "../storage/sessions.js";
 import { setSecretBrokerRequestInvokerForTests } from "../secrets/broker.js";
-import { upsertCredential } from "../secrets/credentials.js";
 import type { GatewayHttpDeps } from "./http.js";
 import { registerApiRoutes } from "./routes/api.js";
 
@@ -168,8 +167,8 @@ test("cli chat routes create writable sessions and block read-only sessions", as
   );
 });
 
-test("breakglass controls toggle global disable and support pause/revoke actions", async () => {
-  await withDb(async (_db, app, stateDir) => {
+test("breakglass controls toggle global disable and support pause actions", async () => {
+  await withDb(async (_db, app) => {
     const breakglassInitial = await app.request("http://localhost/api/federation/breakglass");
     assert.equal(breakglassInitial.status, 200);
     const breakglassInitialBody = await breakglassInitial.json() as { state: { globalDisable: boolean } };
@@ -220,28 +219,6 @@ test("breakglass controls toggle global disable and support pause/revoke actions
       }),
     });
     assert.equal(submitRes.status, 503);
-
-    await withEnv(
-      {
-        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
-        NEXUS_CREDENTIALS_KEY: "federation-api-breakglass-key",
-      },
-      async () => {
-        await upsertCredential({
-          stateDir,
-          id: "cred-revoke-1",
-          note: "revoke-me",
-        });
-      },
-    );
-    const revokeRes = await app.request("http://localhost/api/federation/breakglass/revoke_credential", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        id: "cred-revoke-1",
-      }),
-    });
-    assert.equal(revokeRes.status, 409);
   });
 });
 

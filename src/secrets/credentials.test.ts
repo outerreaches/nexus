@@ -99,6 +99,31 @@ test("credential plaintext entries are rejected on read", async () => {
   );
 });
 
+test("credential store parse errors fail closed", async () => {
+  await withEnv(
+    {
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      NEXUS_CREDENTIALS_KEY: "parse-fail-key",
+    },
+    async () => {
+      await withTempStateDir(async (stateDir) => {
+        const storePath = getCredentialStorePath(stateDir);
+        await fs.mkdir(path.dirname(storePath), { recursive: true });
+        await fs.writeFile(storePath, "{not-json", "utf8");
+        await assert.rejects(
+          () =>
+            upsertCredential({
+              stateDir,
+              id: "cred-parse-fail",
+              password: "secret",
+            }),
+          /credential_store_parse_failed/,
+        );
+      });
+    },
+  );
+});
+
 test("credential writes are encrypted when vault key is configured", async () => {
   await withEnv(
     {
@@ -232,16 +257,16 @@ test("credentials store path honors NEXUS_CREDENTIALS_STORE_DIR override", async
   );
 });
 
-test("credentials store path rejects non-absolute override path", async () => {
+test("credentials store path disallows explicit file override", async () => {
   await withEnv(
     {
-      NEXUS_CREDENTIALS_STORE_PATH: "relative/credentials.json",
+      NEXUS_CREDENTIALS_STORE_PATH: "/tmp/credentials.json",
       NEXUS_CREDENTIALS_STORE_DIR: undefined,
     },
     async () => {
       assert.throws(
         () => getCredentialStorePath("/data/nexus"),
-        /NEXUS_CREDENTIALS_STORE_PATH must be an absolute path/,
+        /NEXUS_CREDENTIALS_STORE_PATH is not supported/,
       );
     },
   );

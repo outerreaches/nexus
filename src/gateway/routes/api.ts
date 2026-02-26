@@ -92,7 +92,6 @@ import {
 } from "../../federation/webhook.js";
 import { ingestWebhookIngressEvent } from "../../federation/webhook-ingress.js";
 import { validateSecretBrokerProfile } from "../../secrets/broker.js";
-import { deleteCredential } from "../../secrets/credentials.js";
 import { containsRawSecretMaterial } from "../../secrets/policy.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../../secrets/provider.js";
 
@@ -240,46 +239,6 @@ export function registerApiRoutes(app: Hono, deps: GatewayHttpDeps): void {
       nowMs,
     });
     return c.json({ ok: true, peer: getFederationPeerById(deps.db, peerId), timestamp: nowMs });
-  });
-
-  app.post("/api/federation/breakglass/revoke_credential", async (c) => {
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "invalid JSON body" }, 400);
-    }
-    const payload = asObject(body);
-    const id = parseUnknownText(payload.id, 200);
-    if (!id) return c.json({ error: "id is required" }, 400);
-    const nowMs = Date.now();
-    let revoked = false;
-    try {
-      revoked = await deleteCredential({
-        stateDir: deps.stateDir,
-        id,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("secret_sidecar_only_direct_credential_access_blocked")) {
-        return c.json(
-          {
-            error: "direct credential revoke is blocked on gateway; use infra/scripts/ha-secretctl.sh delete <id>",
-          },
-          409,
-        );
-      }
-      throw err;
-    }
-    if (!revoked) return c.json({ error: "credential not found" }, 404);
-    writeFederationAudit({
-      eventType: "control.breakglass.revoke_credential",
-      decision: "info",
-      actor: "instance:gateway",
-      details: { id },
-      nowMs,
-    });
-    return c.json({ ok: true, revoked: id, timestamp: nowMs });
   });
 
   app.get("/api/secrets/providers", async (c) => {

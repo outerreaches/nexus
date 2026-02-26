@@ -1,5 +1,4 @@
 import { preset as analyst } from "./presets/analyst.js";
-import { preset as credentialManager } from "./presets/credential-manager.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as intakeManager } from "./presets/intake-manager.js";
@@ -83,7 +82,6 @@ const PRESETS: Record<string, AgentPreset> = {
   "security-researcher": securityResearcher,
   trader,
   analyst,
-  "credential-manager": credentialManager,
   "graphic-designer": graphicDesigner,
   "intake-manager": intakeManager,
   "mcp-manager": mcpManager,

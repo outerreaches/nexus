@@ -22,7 +22,6 @@ WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 STATE_DIR="${STATE_DIR:-/data/nexus}"
 STORE_DIR="${STORE_DIR:-/data/nexus-secrets}"
 STORE_PATH="${STORE_PATH:-${STORE_DIR}/credentials.json}"
-STORE_PATH_EXPLICIT=0
 
 AUTO_FIX=0
 AUTO_GENERATE_CREDENTIALS_KEY=0
@@ -41,7 +40,6 @@ Options:
   --env-file <path>                      Legacy alias; sets all env files to this path
   --state-dir <path>                     State directory (default: ${STATE_DIR})
   --store-dir <path>                     Credential store directory (default: ${STORE_DIR})
-  --store-path <path>                    Credential store file path (default: ${STORE_PATH})
   --auto-fix                             Apply safe env fixes (HA key alignment/default usernames)
   --auto-generate-credentials-key        Generate NEXUS_CREDENTIALS_KEY when missing and store is absent
   --require-http-api-key                 Require NEXUS_HTTP_API_KEY to be present
@@ -155,9 +153,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --store-path)
-      STORE_PATH="$2"
-      STORE_PATH_EXPLICIT=1
-      shift 2
+      fail "--store-path is not supported. Use --store-dir."
       ;;
     --auto-fix)
       AUTO_FIX=1
@@ -209,17 +205,15 @@ if [[ ! -f "$WATCHDOG_ENV_FILE" ]]; then
   fi
 fi
 
-if [[ "$STORE_PATH_EXPLICIT" != "1" ]]; then
-  STORE_PATH="${STORE_DIR%/}/credentials.json"
-fi
+STORE_PATH="${STORE_DIR%/}/credentials.json"
 
 # Honor env overrides when present.
 env_store_path="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_PATH" "$SIDECAR_ENV_FILE")"
 env_store_dir="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_DIR" "$SIDECAR_ENV_FILE")"
 if [[ -n "$env_store_path" ]]; then
-  STORE_PATH="$env_store_path"
-  STORE_DIR="$(dirname "$STORE_PATH")"
-elif [[ -n "$env_store_dir" ]]; then
+  fail "NEXUS_CREDENTIALS_STORE_PATH is not supported. Use NEXUS_CREDENTIALS_STORE_DIR."
+fi
+if [[ -n "$env_store_dir" ]]; then
   STORE_DIR="$env_store_dir"
   STORE_PATH="${STORE_DIR%/}/credentials.json"
 fi
