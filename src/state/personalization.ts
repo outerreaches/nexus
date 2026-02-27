@@ -458,6 +458,8 @@ Proactive task checklist reviewed on each heartbeat tick.
 ## Daily Tasks
 - [ ] Review recent session history for unfinished work
 - [ ] Review job health (run \`job_manage\` action=\`list\` and check disabled/failed jobs)
+- [ ] Before deleting any job, confirm UTC schedule timestamps and never delete jobs with \`next_run_at\` in the future.
+- [ ] For one-shot jobs (\`scheduleKind=one_shot\` or \`cron=@once\`), be extra conservative: if \`next_run_at > now(UTC)\`, leave the job in place.
 
 ## Weekly Tasks
 - [ ] Clean up outdated notes and memories

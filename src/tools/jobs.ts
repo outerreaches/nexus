@@ -64,6 +64,57 @@ function getOneShotAtMs(spec: unknown): number | null {
   return Math.max(0, Math.floor(value));
 }
 
+function parseJobSpec(specJson: unknown): Record<string, unknown> {
+  if (typeof specJson !== "string" || !specJson.trim()) return {};
+  try {
+    const parsed = JSON.parse(specJson);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function toUtcIso(ts: number | null): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "null";
+  return new Date(Math.floor(ts)).toISOString();
+}
+
+function isOneShotJob(cron: string, spec: Record<string, unknown>): boolean {
+  if (isOneShotCron(cron)) return true;
+  if (spec.scheduleKind === "one_shot") return true;
+  return getOneShotAtMs(spec) !== null;
+}
+
+function isHeartbeatChannel(channel: unknown, channelKey: unknown): boolean {
+  if (typeof channel === "string" && channel.trim().toLowerCase() === "heartbeat") return true;
+  if (typeof channelKey === "string" && channelKey.trim().toLowerCase().startsWith("heartbeat")) return true;
+  return false;
+}
+
+function getNextRunAtMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+
+function heartbeatDeleteGuard(params: {
+  nowMs: number;
+  cron: string;
+  nextRunAtMs: number | null;
+  spec: Record<string, unknown>;
+}): { blocked: boolean; reason: string | null; oneShot: boolean } {
+  const oneShot = isOneShotJob(params.cron, params.spec);
+  const oneShotAtMs = getOneShotAtMs(params.spec);
+  const effectiveNextRunAtMs = params.nextRunAtMs ?? oneShotAtMs;
+  if (typeof effectiveNextRunAtMs === "number" && effectiveNextRunAtMs > params.nowMs) {
+    const reason = oneShot
+      ? `blocked heartbeat delete for future one-shot job: now_utc=${toUtcIso(params.nowMs)} next_run_utc=${toUtcIso(effectiveNextRunAtMs)}`
+      : `blocked heartbeat delete for future scheduled job: now_utc=${toUtcIso(params.nowMs)} next_run_utc=${toUtcIso(effectiveNextRunAtMs)}`;
+    return { blocked: true, reason, oneShot };
+  }
+  return { blocked: false, reason: null, oneShot };
+}
+
 export const jobCreate = defineTool({
   name: "job_create",
   description:
@@ -378,6 +429,12 @@ export const jobDelete = defineTool({
     const nowMs = ctx.nowMs();
     const row = db.db.prepare("SELECT * FROM jobs WHERE id = ?").get(args.id) as any;
     if (!row) return "ERROR: not found";
+
+    const requestChannel = ctx.request?.channel ?? null;
+    const requestChannelKey = ctx.request?.channelKey ?? null;
+    const requestSessionId = ctx.request?.sessionId ?? null;
+    const requestAgentId = ctx.request?.agentId ?? "unknown";
+
     const linked = db.db
       .prepare("SELECT id, source_id, label FROM data_intake_sources WHERE job_id = ? LIMIT 1")
       .get(args.id) as { id: string; source_id: string; label: string | null } | undefined;
@@ -385,16 +442,45 @@ export const jobDelete = defineTool({
       const label = linked.label ?? linked.source_id;
       return `ERROR: job is linked to data intake source '${label}' (instance ${linked.id}). Delete the source instead.`;
     }
+
+    const spec = parseJobSpec(row.spec_json);
+    const cron = String(row.cron ?? "");
+    const nextRunAtMs = getNextRunAtMs(row.next_run_at);
+    const fromHeartbeat = isHeartbeatChannel(requestChannel, requestChannelKey);
+    if (fromHeartbeat) {
+      const guard = heartbeatDeleteGuard({ nowMs, cron, nextRunAtMs, spec });
+      if (guard.blocked) {
+        const reason = guard.reason ?? "blocked heartbeat delete";
+        ctx.log(
+          `job_delete guard: id=${args.id} channel=heartbeat blocked=true one_shot=${guard.oneShot} ${reason} session=${requestSessionId ?? "n/a"}`,
+        );
+        return `ERROR: refusing to delete job '${args.id}' from heartbeat while next_run_at is in the future (${reason})`;
+      }
+    }
+
+    const oneShot = isOneShotJob(cron, spec);
+    const archivedBy = fromHeartbeat ? `tool:job_manage:delete_heartbeat:${requestAgentId}` : `tool:job_manage:delete:${requestAgentId}`;
+    const archiveReason = fromHeartbeat ? "heartbeat_delete" : "manual_delete";
+
+    ctx.log(
+      `job_delete audit: id=${args.id} channel=${requestChannel ?? "unknown"} channel_key=${requestChannelKey ?? "unknown"} one_shot=${oneShot} next_run_utc=${toUtcIso(nextRunAtMs)} now_utc=${toUtcIso(nowMs)} archived_by=${archivedBy}`,
+    );
+
     const archived = archiveAndDeleteJob({
       db,
       jobId: args.id,
       archivedAtMs: nowMs,
-      archiveReason: "manual_delete",
-      archivedBy: `tool:job_manage:delete:${ctx.request?.agentId ?? "unknown"}`,
+      archiveReason,
+      archivedBy,
       metadata: {
-        channel: ctx.request?.channel ?? null,
-        channelKey: ctx.request?.channelKey ?? null,
-        sessionId: ctx.request?.sessionId ?? null,
+        channel: requestChannel,
+        channelKey: requestChannelKey,
+        sessionId: requestSessionId,
+        heartbeatDelete: fromHeartbeat,
+        oneShot,
+        nextRunAtMs,
+        nextRunAtUtc: toUtcIso(nextRunAtMs),
+        deletedAtUtc: toUtcIso(nowMs),
       },
     });
     if (!archived.found) return "ERROR: not found";
