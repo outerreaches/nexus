@@ -27,16 +27,18 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci
+RUN npm install -g excalidraw-to-svg@3.1.0 \
+  && excalidraw-to-svg --help >/dev/null
 
 COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
 RUN npm run build
 
-# Python runtime: LangExtract + PDF/image utilities for creative skills
+# Python runtime: PDF/image utilities for creative skills
 RUN python3 -m venv /opt/nexus-py \
   && /opt/nexus-py/bin/pip install --no-cache-dir --upgrade pip \
   && /opt/nexus-py/bin/pip install --no-cache-dir \
-    'langextract[openai]' pypdf \
+    pypdf \
     img2pdf Pillow cairosvg
 
 # Make the CLI available on PATH inside the container (so `docker exec ... nexus ...` works)
@@ -48,7 +50,6 @@ ENV NEXUS_STATE_DIR=/data/nexus
 ENV NEXUS_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NEXUS_BROWSER_HEADLESS=1
 ENV NEXUS_BROWSER_NO_SANDBOX=1
-ENV NEXUS_LANGEXTRACT_PYTHON=/opt/nexus-py/bin/python
 
 EXPOSE 18789
 
