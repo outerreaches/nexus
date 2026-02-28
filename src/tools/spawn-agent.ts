@@ -16,6 +16,7 @@ import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
 import { getNodeById, type NodeRecord } from "../storage/nodes.js";
+import { canInjectSkillsPrompt, filterToolsBySkillAccess } from "../state/skill-policy.js";
 import type {
   ParentMessage,
   WorkerMessage,
@@ -301,15 +302,22 @@ export const spawnAgent = defineTool({
     const isMaxDepth = maxDepth >= 0 && workerDepth >= maxDepth;
 
     const { title: blackboardTitle, cleanedTask } = parseBlackboardTitle(args.task, preset.name);
+    const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
 
     // Build worker system prompt
     const hasSpawnAgent = preset.tools.includes("spawn_agent");
     const basePrompt = await buildPresetSystemPrompt({
       stateDir: ctx.stateDir,
+      agentId,
       promptFiles: preset.promptFiles,
       systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
       includePresets: hasSpawnAgent,
       presetFilter: preset.spawnAllowlist,
+      includeSkills: canInjectSkillsPrompt(ctx.skillsConfig, {
+        agentId,
+        preset: preset.name,
+      }),
+      skillsOptions: ctx.skillsConfig?.prompt,
     });
     const systemPrompt = [
       basePrompt,
@@ -340,7 +348,6 @@ export const spawnAgent = defineTool({
     ].filter((line): line is string => typeof line === "string").join("\n");
 
     // Start run tracking BEFORE execution (so DB row exists for isolated workers)
-    const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
     const workerSessionId = resolveWorkerSessionId({
       db,
       parent,
@@ -374,7 +381,14 @@ export const spawnAgent = defineTool({
       new Set<string>([...coderTaskPolicy.blockedToolNames, ...executionBlockedToolNames]),
     );
     const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(combinedBlockedToolNames));
-    const workerTools = mergeToolsByName(baseTools, grantedTools);
+    const workerTools = filterToolsBySkillAccess({
+      tools: mergeToolsByName(baseTools, grantedTools),
+      config: ctx.skillsConfig,
+      ctx: {
+        agentId,
+        preset: preset.name,
+      },
+    });
     if (executionTarget.target === "node" && !workerTools.some((tool) => tool.name === "shell_interactive")) {
       return "ERROR: node-target worker requires shell_interactive, but it is unavailable after policy filtering.";
     }
@@ -933,6 +947,7 @@ async function runIsolated(params: {
       llmConfig,
       modelRouterConfig,
       llmToolRouting,
+      skillsConfig: ctx.skillsConfig,
       allowShellExec: workerAllowShellExec,
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: workerAllowCodeWrite,

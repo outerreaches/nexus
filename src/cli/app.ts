@@ -223,6 +223,7 @@ export async function runCli(argv: string[]): Promise<void> {
         llm,
         llmConfig: startupRoute.primary,
         modelRouter,
+        skillsConfig: config.skills,
         modelMode: startupRoute.mode,
         db,
         browser,
@@ -256,6 +257,7 @@ export async function runCli(argv: string[]): Promise<void> {
         agentTracker,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
         nudges: config.nudges,
+        skillsConfig: config.skills,
         limits: {
           maxMessages: 20,
           anchorRolloverMessages: 40,
@@ -507,6 +509,7 @@ export async function runCli(argv: string[]): Promise<void> {
           llm,
           llmConfig: startupRoute.primary,
           modelRouter,
+          skillsConfig: config.skills,
           modelMode: startupRoute.mode,
           db,
           registry,

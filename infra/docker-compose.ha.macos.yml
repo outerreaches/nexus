@@ -1,0 +1,50 @@
+# macOS local override for HA + sidecar + TLS deployment.
+#
+# Remaps all /data/* bind mounts to ~/.nexus/* paths and sets
+# UID/GID to match the macOS host user (501:20 by default).
+#
+# Required shell exports before running:
+#   export NEXUS_MACOS_HOME="$HOME"
+#   export NEXUS_GATEWAY_ENV_FILE="$HOME/.nexus/config/gateway/nexus.env"
+#   export NEXUS_SIDECAR_ENV_FILE="$HOME/.nexus/config/sidecar/nexus.env"
+#   export NEXUS_WATCHDOG_ENV_FILE="$HOME/.nexus/config/watchdog/nexus.env"
+#
+# Usage:
+#   docker compose -p infra \
+#     -f infra/docker-compose.ha.yml \
+#     -f infra/docker-compose.ha.sidecar.yml \
+#     -f infra/docker-compose.ha.tls.yml \
+#     -f infra/docker-compose.ha.macos.yml \
+#     up -d --build
+#
+# Env files expected at:
+#   ~/.nexus/config/gateway/nexus.env
+#   ~/.nexus/config/sidecar/nexus.env
+#   ~/.nexus/config/watchdog/nexus.env
+
+services:
+  nexus-primary:
+    user: "501:20"
+    volumes:
+      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
+      - ${NEXUS_MACOS_HOME}/Workspace/Nexus:/data/code
+      - ${NEXUS_MACOS_HOME}/.nexus/workspace:/data/workspace
+
+  nexus-standby:
+    user: "501:20"
+    volumes:
+      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
+      - ${NEXUS_MACOS_HOME}/Workspace/Nexus:/data/code
+      - ${NEXUS_MACOS_HOME}/.nexus/workspace:/data/workspace
+
+  secret-sidecar:
+    environment:
+      NEXUS_SECRET_SIDECAR_SOCKET_GID: "20"
+    volumes:
+      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
+      - ${NEXUS_MACOS_HOME}/.nexus/secrets:/data/nexus-secrets
+      - secret-sidecar-run:/run/nexus
+
+  watchdog:
+    volumes:
+      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus:ro

@@ -6,7 +6,35 @@ export type SkillEntry = {
   description: string;
   triggers: string[];
   instructions: string;
+  references: string[];
+  skillDir: string;
+  skillFile: string;
 };
+
+type SkillPromptFormatOptions = {
+  maxInlineSkills?: number;
+  includeReferences?: boolean;
+  maxReferencesPerSkill?: number;
+};
+
+export function normalizeSkillReference(input: string): string | null {
+  const trimmed = input.trim().replace(/\\/g, "/");
+  if (!trimmed) return null;
+  if (trimmed.startsWith("/") || trimmed.startsWith("~")) return null;
+  const parts = trimmed.split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.some((part) => part === "." || part === "..")) return null;
+  return parts.join("/");
+}
+
+export function resolveSkillReferencePath(skill: SkillEntry, reference: string): string | null {
+  const normalized = normalizeSkillReference(reference);
+  if (!normalized) return null;
+  const absolute = path.resolve(skill.skillDir, normalized);
+  const relative = path.relative(skill.skillDir, absolute);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return absolute;
+}
 
 /**
  * Parse a SKILL.md file with simple frontmatter.
@@ -17,11 +45,12 @@ export type SkillEntry = {
  * name: skill-name
  * description: What this skill does
  * triggers: keyword1, keyword2
+ * references: references/runbook.md, references/examples.txt
  * ---
  * Instructions body here...
  * ```
  */
-function parseSkillMd(raw: string): SkillEntry | null {
+function parseSkillMd(raw: string, paths: { skillDir: string; skillFile: string }): SkillEntry | null {
   const match = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
   if (!match) return null;
 
@@ -31,6 +60,7 @@ function parseSkillMd(raw: string): SkillEntry | null {
   let name = "";
   let description = "";
   let triggers: string[] = [];
+  let references: string[] = [];
 
   for (const line of frontmatter.split("\n")) {
     const [key, ...rest] = line.split(":");
@@ -40,10 +70,24 @@ function parseSkillMd(raw: string): SkillEntry | null {
     if (k === "name") name = value;
     else if (k === "description") description = value;
     else if (k === "triggers") triggers = value.split(",").map((t) => t.trim()).filter(Boolean);
+    else if (k === "references") {
+      references = value
+        .split(",")
+        .map((item) => normalizeSkillReference(item))
+        .filter((item): item is string => Boolean(item));
+    }
   }
 
   if (!name) return null;
-  return { name, description, triggers, instructions: body };
+  return {
+    name,
+    description,
+    triggers,
+    instructions: body,
+    references,
+    skillDir: paths.skillDir,
+    skillFile: paths.skillFile,
+  };
 }
 
 /**
@@ -69,9 +113,10 @@ export async function loadSkills(stateDir: string, agentId?: string): Promise<Sk
 
     for (const entry of entries) {
       const skillPath = path.join(skillsDir, entry, "SKILL.md");
+      const skillDir = path.join(skillsDir, entry);
       try {
         const raw = await fs.readFile(skillPath, "utf8");
-        const skill = parseSkillMd(raw);
+        const skill = parseSkillMd(raw, { skillDir, skillFile: skillPath });
         if (skill && !seen.has(skill.name)) {
           seen.add(skill.name);
           skills.push(skill);
@@ -87,30 +132,42 @@ export async function loadSkills(stateDir: string, agentId?: string): Promise<Sk
 
 /**
  * Format skills into a prompt section.
- * If ≤5 skills, include full instructions. Otherwise, just list names + triggers.
+ * If within maxInlineSkills, include full instructions. Otherwise, list concise summaries.
  */
-export function formatSkillsPromptSection(skills: SkillEntry[]): string | null {
+export function formatSkillsPromptSection(skills: SkillEntry[], opts: SkillPromptFormatOptions = {}): string | null {
   if (skills.length === 0) return null;
+  const maxInlineSkills = Math.max(0, Math.floor(opts.maxInlineSkills ?? 5));
+  const includeReferences = opts.includeReferences ?? true;
+  const maxReferencesPerSkill = Math.max(0, Math.floor(opts.maxReferencesPerSkill ?? 2));
 
   const lines: string[] = ["## Learned Skills"];
 
-  if (skills.length <= 5) {
+  if (skills.length <= maxInlineSkills) {
     for (const s of skills) {
       lines.push("");
       lines.push(`### ${s.name}`);
       if (s.description) lines.push(s.description);
       if (s.triggers.length > 0) lines.push(`Triggers: ${s.triggers.join(", ")}`);
+      if (includeReferences && s.references.length > 0) {
+        const refs = s.references.slice(0, maxReferencesPerSkill);
+        const remaining = s.references.length - refs.length;
+        lines.push(
+          `References: ${refs.join(", ")}${remaining > 0 ? ` (+${remaining} more)` : ""}`,
+        );
+      }
       if (s.instructions) {
         lines.push("");
         lines.push(s.instructions);
       }
     }
   } else {
-    lines.push("Use `skill_list` to see full details. Available skills:");
+    lines.push("Use `skill_list` to browse skills and `skill_get` for full instructions/references.");
+    lines.push("Available skills:");
     lines.push("");
     for (const s of skills) {
       const triggerHint = s.triggers.length > 0 ? ` (triggers: ${s.triggers.join(", ")})` : "";
-      lines.push(`- **${s.name}**: ${s.description}${triggerHint}`);
+      const referenceHint = includeReferences && s.references.length > 0 ? ` [refs: ${s.references.length}]` : "";
+      lines.push(`- **${s.name}**: ${s.description}${triggerHint}${referenceHint}`);
     }
   }
 

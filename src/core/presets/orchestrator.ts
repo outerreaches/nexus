@@ -86,6 +86,7 @@ export const preset: AgentPreset = {
     // Skills
     "skill_create",
     "skill_list",
+    "skill_get",
     "skill_update",
     // Communication
     "telegram_send",

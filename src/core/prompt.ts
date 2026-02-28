@@ -1,17 +1,27 @@
 import { loadPersonalizationContext, readPersonalizationFile, type PersonalizationContext } from "../state/personalization.js";
 import { loadSkills, formatSkillsPromptSection } from "../state/skills.js";
+import type { SkillsConfig } from "../state/config.js";
 import { formatPresetsForPrompt } from "./presets.js";
+
+type SkillsPromptOptions = SkillsConfig["prompt"];
 
 export async function buildSystemPrompt(params: {
   stateDir: string;
   agentId?: string;
   presetSystemPrompt?: string;
+  includeSkills?: boolean;
+  skillsOptions?: SkillsPromptOptions;
 }): Promise<string> {
+  const includeSkills = params.includeSkills ?? true;
   const [ctx, skills] = await Promise.all([
     loadPersonalizationContext(params.stateDir, params.agentId),
-    loadSkills(params.stateDir, params.agentId),
+    includeSkills ? loadSkills(params.stateDir, params.agentId) : Promise.resolve([]),
   ]);
-  return formatSystemPrompt(ctx, formatSkillsPromptSection(skills), params.presetSystemPrompt);
+  return formatSystemPrompt(
+    ctx,
+    includeSkills ? formatSkillsPromptSection(skills, params.skillsOptions) : null,
+    params.presetSystemPrompt,
+  );
 }
 
 export async function buildPresetSystemPrompt(params: {
@@ -22,13 +32,23 @@ export async function buildPresetSystemPrompt(params: {
   includePresets?: boolean;
   /** When set, only these preset names are listed. Omit for full list. */
   presetFilter?: string[];
+  includeSkills?: boolean;
+  skillsOptions?: SkillsPromptOptions;
 }): Promise<string> {
   const promptFiles = params.promptFiles ?? [];
   const sections: string[] = [];
-  if (promptFiles.length > 0) {
-    const loaded = await Promise.all(
-      promptFiles.map((filename) => readPersonalizationFile(params.stateDir, filename, params.agentId)),
-    );
+  const includeSkills = params.includeSkills ?? false;
+  const loadedPromptFilesPromise = promptFiles.length > 0
+    ? Promise.all(promptFiles.map((filename) => readPersonalizationFile(params.stateDir, filename, params.agentId)))
+    : Promise.resolve<string[]>([]);
+  const loadedSkillsPromise = includeSkills
+    ? loadSkills(params.stateDir, params.agentId)
+    : Promise.resolve([]);
+
+  const [loadedPromptFiles, loadedSkills] = await Promise.all([loadedPromptFilesPromise, loadedSkillsPromise]);
+
+  if (loadedPromptFiles.length > 0) {
+    const loaded = loadedPromptFiles;
     for (const content of loaded) {
       if (content && content.trim()) {
         sections.push(content.trim());
@@ -37,6 +57,12 @@ export async function buildPresetSystemPrompt(params: {
   }
   if (params.systemPrompt?.trim()) {
     sections.push(params.systemPrompt.trim());
+  }
+  if (includeSkills) {
+    const skillsSection = formatSkillsPromptSection(loadedSkills, params.skillsOptions);
+    if (skillsSection) {
+      sections.push(skillsSection);
+    }
   }
   if (params.includePresets) {
     sections.push(formatPresetsForPrompt(params.presetFilter));

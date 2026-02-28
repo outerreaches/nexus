@@ -28,7 +28,7 @@ import { humanAction } from "./human-actions.js";
 import { jobManage } from "./jobs.js";
 import { telegramSend } from "./telegram-send.js";
 import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
-import { skillCreate, skillList, skillUpdate } from "./skills.js";
+import { skillCreate, skillGet, skillList, skillUpdate } from "./skills.js";
 import { writeToBlackboard, readFromBlackboard, blackboardManage } from "./blackboard.js";
 import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
@@ -98,6 +98,7 @@ export function getBuiltInTools(): Tool[] {
     sessionSearch,
     skillCreate,
     skillList,
+    skillGet,
     skillUpdate,
     writeToBlackboard,
     readFromBlackboard,

@@ -16,6 +16,8 @@ import { extractKeywords, generateMemoryHints, hasRecentMemorySearch } from "./m
 import type { AgentTracker } from "./agent-tracker.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
+import type { SkillsConfig } from "../state/config.js";
+import { canInjectSkillsPrompt, filterToolsBySkillAccess } from "../state/skill-policy.js";
 
 type ExecutionLane = "interactive" | "background";
 type NudgeConfig = {
@@ -160,6 +162,8 @@ export class AgentService {
       transientRetries?: number;
       /** Optional proactive nudges (memory/skill) injected per session cadence. */
       nudges?: NudgeConfig;
+      /** Skill prompt + tool access controls from config. */
+      skillsConfig?: SkillsConfig;
     },
   ) {
     const interactiveMax = Math.max(1, deps.limits.maxConcurrentInteractive ?? deps.limits.maxConcurrent);
@@ -440,13 +444,27 @@ export class AgentService {
       const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.circuitBreaker?.getEffectiveMode() ?? "default";
 
       const systemPrompt = !preset || preset.name === "orchestrator"
-        ? await buildSystemPrompt({ stateDir: this.deps.stateDir, agentId: params.agentId, presetSystemPrompt: preset?.systemPrompt })
+        ? await buildSystemPrompt({
+          stateDir: this.deps.stateDir,
+          agentId: params.agentId,
+          presetSystemPrompt: preset?.systemPrompt,
+          includeSkills: canInjectSkillsPrompt(this.deps.skillsConfig, {
+            agentId: params.agentId,
+            preset: preset?.name ?? presetName,
+          }),
+          skillsOptions: this.deps.skillsConfig?.prompt,
+        })
         : await buildPresetSystemPrompt({
           stateDir: this.deps.stateDir,
           agentId: params.agentId,
           promptFiles: preset.promptFiles,
           systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
           includePresets: false,
+          includeSkills: canInjectSkillsPrompt(this.deps.skillsConfig, {
+            agentId: params.agentId,
+            preset: preset?.name ?? presetName,
+          }),
+          skillsOptions: this.deps.skillsConfig?.prompt,
         });
 
       const onRunnerLog = this.deps.onRunnerLog
@@ -630,7 +648,14 @@ export class AgentService {
         );
       }
 
-      const tools = filterToolsByPreset(this.deps.getTools(), preset);
+      const tools = filterToolsBySkillAccess({
+        tools: filterToolsByPreset(this.deps.getTools(), preset),
+        config: this.deps.skillsConfig,
+        ctx: {
+          agentId: params.agentId,
+          preset: preset?.name ?? presetName,
+        },
+      });
 
       // Resolve budget: global limits are hard caps; presets can only tighten.
       const budget = this.resolveRunBudget(preset);

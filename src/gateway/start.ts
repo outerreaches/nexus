@@ -377,6 +377,7 @@ export async function startGateway(
     circuitBreaker,
     modelRouter,
     llmToolRouting: config.llm.toolRouting,
+    skillsConfig: config.skills,
     modelMode: startupRoute.mode,
     db,
     browser,
@@ -458,6 +459,7 @@ export async function startGateway(
     onRunnerLog: params.verbose ? log : undefined,
     defaultPreset: "orchestrator",
     nudges: config.nudges,
+    skillsConfig: config.skills,
     limits: {
       maxMessages: 20,
       anchorRolloverMessages: 40,

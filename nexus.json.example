@@ -151,6 +151,27 @@
     "skillIterationInterval": 20
   },
 
+  // ── Skills ───────────────────────────────────────────────────────────────
+  "skills": {
+    "enabled": true,
+    "prompt": {
+      "enabled": true,
+      "maxInlineSkills": 5,
+      "includeReferences": true,
+      "maxReferencesPerSkill": 2,
+      "maxReferenceChars": 1600
+    },
+    "access": {
+      // Block specific agent IDs or preset names from any skill prompt/tool access.
+      "blockedAgents": [],
+      "blockedPresets": [],
+      // Only these presets can create/update skills.
+      "manageAllowedPresets": ["orchestrator"],
+      // Empty => all presets may use skill_list/skill_get (if tool is assigned).
+      "readAllowedPresets": []
+    }
+  },
+
   // ── Maintenance ──────────────────────────────────────────────────────────
   "maintenance": {
     "enabled": true,

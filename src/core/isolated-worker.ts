@@ -21,6 +21,7 @@ import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
 import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
+import { filterToolsBySkillAccess } from "../state/skill-policy.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
@@ -125,7 +126,14 @@ process.on("message", async (msg: ParentMessage) => {
     for (const tool of grantTools) {
       byName.set(tool.name, tool);
     }
-    const workerTools = [...byName.values()];
+    const workerTools = filterToolsBySkillAccess({
+      tools: [...byName.values()],
+      config: cfg.skillsConfig,
+      ctx: {
+        agentId: cfg.agentId,
+        preset: cfg.presetName,
+      },
+    });
     const effectiveWorkerTools = applyExecutionToolOverridesForIsolatedWorker(workerTools, cfg.executionTarget);
     const nodeRoutingBridgeEnabled = cfg.executionTarget?.target === "node";
     if (nodeRoutingBridgeEnabled && !effectiveWorkerTools.some((tool) => tool.name === "shell_interactive")) {
@@ -147,6 +155,7 @@ process.on("message", async (msg: ParentMessage) => {
       llmConfig: cfg.llmConfig,
       modelRouter,
       llmToolRouting: cfg.llmToolRouting,
+      skillsConfig: cfg.skillsConfig,
       modelMode: cfg.modelMode,
       db,
       browser: undefined, // Workers do NOT get a browser instance

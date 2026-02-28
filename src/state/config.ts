@@ -68,6 +68,45 @@ const NudgesSchema = z
   })
   .default({});
 
+const SkillsAccessSchema = z
+  .object({
+    blockedAgents: z
+      .array(z.string().min(1))
+      .default([])
+      .describe("Agent IDs that are denied all skill prompt/tool access."),
+    blockedPresets: z
+      .array(z.string().min(1))
+      .default([])
+      .describe("Preset names that are denied all skill prompt/tool access."),
+    manageAllowedPresets: z
+      .array(z.string().min(1))
+      .default(["orchestrator"])
+      .describe("Preset names allowed to run skill management tools (create/update)."),
+    readAllowedPresets: z
+      .array(z.string().min(1))
+      .default([])
+      .describe("Preset names allowed to run skill read tools (list/get). Empty means all presets."),
+  })
+  .default({});
+
+const SkillsPromptSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    maxInlineSkills: z.number().int().min(0).max(20).default(5),
+    includeReferences: z.boolean().default(true),
+    maxReferencesPerSkill: z.number().int().min(0).max(10).default(2),
+    maxReferenceChars: z.number().int().min(200).max(8_000).default(1_600),
+  })
+  .default({});
+
+const SkillsSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    prompt: SkillsPromptSchema,
+    access: SkillsAccessSchema,
+  })
+  .default({});
+
 const MaintenanceSchema = z
   .object({
     enabled: z.boolean().default(true),
@@ -237,6 +276,7 @@ export const ConfigSchema = z.object({
   proactive: ProactiveSchema,
   scheduler: SchedulerSchema,
   nudges: NudgesSchema,
+  skills: SkillsSchema,
   maintenance: MaintenanceSchema,
   permissions: z
     .object({
@@ -258,6 +298,7 @@ export const ConfigSchema = z.object({
 export type NexusConfig = z.infer<typeof ConfigSchema>;
 export type LlmToolRouting = z.infer<typeof LlmToolRoutingSchema>;
 export type LlmToolRouteTarget = z.infer<typeof LlmToolRouteTargetSchema>;
+export type SkillsConfig = z.infer<typeof SkillsSchema>;
 
 export async function loadConfig(configPath: string = getDefaultConfigPath()): Promise<NexusConfig> {
   const raw = await fs.readFile(configPath, "utf8");
@@ -359,6 +400,22 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           channels: ["cli", "telegram"],
           memoryTurnInterval: 10,
           skillIterationInterval: 20,
+        },
+        skills: {
+          enabled: true,
+          prompt: {
+            enabled: true,
+            maxInlineSkills: 5,
+            includeReferences: true,
+            maxReferencesPerSkill: 2,
+            maxReferenceChars: 1600,
+          },
+          access: {
+            blockedAgents: [],
+            blockedPresets: [],
+            manageAllowedPresets: ["orchestrator"],
+            readAllowedPresets: [],
+          },
         },
         maintenance: {
           enabled: true,

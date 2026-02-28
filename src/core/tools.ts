@@ -5,7 +5,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTracker } from "./agent-tracker.js";
 import type { LLMClient, OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
-import type { LlmToolRouting } from "../state/config.js";
+import type { LlmToolRouting, SkillsConfig } from "../state/config.js";
 
 export type ToolContext = {
   workspaceDir: string;
@@ -18,6 +18,8 @@ export type ToolContext = {
   modelRouter?: ModelRouter;
   /** Optional tool-specific routing config (separate from agent reasoning routing). */
   llmToolRouting?: LlmToolRouting;
+  /** Runtime skill-system controls (prompt injection and tool access). */
+  skillsConfig?: SkillsConfig;
   /** Optional circuit breaker for global LLM provider health tracking. */
   circuitBreaker?: import("../llm/circuit-breaker.js").LlmCircuitBreaker;
   /** Resolved model mode for this run (default/local_only). */
