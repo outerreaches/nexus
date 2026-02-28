@@ -28,7 +28,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 RUN npm install -g excalidraw-to-svg@3.1.0 \
-  && excalidraw-to-svg --help >/dev/null
+  && command -v excalidraw-to-svg >/dev/null
 
 COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
