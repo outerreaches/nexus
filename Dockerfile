@@ -7,8 +7,11 @@ RUN apt-get update \
     curl \
     fonts-liberation \
     git \
+    jq \
     openssh-client \
+    ripgrep \
     tmux \
+    wget \
     python3 \
     python3-pip \
     python3-venv \
