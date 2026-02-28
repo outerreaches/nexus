@@ -330,6 +330,42 @@ current_head_sha() {
   git -C "$CODE_DIR" rev-parse HEAD
 }
 
+current_upstream_ref() {
+  git -C "$CODE_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true
+}
+
+resolve_push_target() {
+  local requested_remote="$1"
+  local requested_branch="$2"
+  local resolved_remote resolved_branch upstream_ref upstream_remote upstream_branch
+  resolved_remote="$requested_remote"
+  resolved_branch="$requested_branch"
+  [ -n "$resolved_branch" ] || resolved_branch="main"
+
+  upstream_ref="$(current_upstream_ref)"
+  if [[ "$upstream_ref" == */* ]]; then
+    upstream_remote="${upstream_ref%%/*}"
+    upstream_branch="${upstream_ref#*/}"
+  else
+    upstream_remote=""
+    upstream_branch=""
+  fi
+
+  if [ -n "$resolved_remote" ] && ! git -C "$CODE_DIR" remote get-url "$resolved_remote" >/dev/null 2>&1; then
+    if [ -n "$upstream_remote" ] && git -C "$CODE_DIR" remote get-url "$upstream_remote" >/dev/null 2>&1; then
+      warn "push remote '${resolved_remote}' not found; falling back to upstream '${upstream_remote}/${upstream_branch}'"
+      resolved_remote="$upstream_remote"
+      if [ "$requested_branch" = "main" ] && [ -n "$upstream_branch" ]; then
+        resolved_branch="$upstream_branch"
+      fi
+    else
+      warn "push remote '${resolved_remote}' not found and no branch upstream fallback is available"
+    fi
+  fi
+
+  printf '%s|%s\n' "$resolved_remote" "$resolved_branch"
+}
+
 resolve_commit() {
   local ref="$1"
   git -C "$CODE_DIR" rev-parse --verify "${ref}^{commit}"
@@ -851,10 +887,16 @@ cmd_apply_local() {
 
   # Phase 4: Push to remote (non-fatal — standby rebuild always proceeds)
   local push_failed=0
+  local push_remote="$target_remote"
+  local push_branch="$target_branch"
+  local push_output
   if [ -n "$target_remote" ]; then
-    log "pushing commit ${new_sha} to ${target_remote}/${target_branch}"
-    if ! git -C "$CODE_DIR" push "$target_remote" "HEAD:${target_branch}" >/dev/null; then
-      warn "push failed for ${target_remote}/${target_branch} — will continue with standby rebuild"
+    IFS='|' read -r push_remote push_branch <<< "$(resolve_push_target "$target_remote" "$target_branch")"
+    log "pushing commit ${new_sha} to ${push_remote}/${push_branch}"
+    if ! push_output="$(git -C "$CODE_DIR" push "$push_remote" "HEAD:${push_branch}" 2>&1)"; then
+      local compact_push_output
+      compact_push_output="$(printf '%s' "$push_output" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g' | cut -c1-320)"
+      warn "push failed for ${push_remote}/${push_branch}: ${compact_push_output} — will continue with standby rebuild"
       push_failed=1
     fi
   fi
@@ -873,7 +915,7 @@ cmd_apply_local() {
   if [ "$push_failed" = "1" ]; then
     LAST_STATUS="applied_local_push_failed"
     write_state
-    warn "apply-local complete but push to ${target_remote}/${target_branch} failed"
+    warn "apply-local complete but push to ${push_remote}/${push_branch} failed"
   else
     LAST_STATUS="applied_local"
     write_state

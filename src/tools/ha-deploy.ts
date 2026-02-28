@@ -67,6 +67,60 @@ function classifyChanges(codeDir: string): { deployable: string[]; skipped: stri
   return { deployable, skipped, all };
 }
 
+function remoteExists(codeDir: string, remote: string): boolean {
+  if (!remote) return false;
+  try {
+    execFileSync("git", ["remote", "get-url", remote], {
+      cwd: codeDir,
+      stdio: "ignore",
+      timeout: 10_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detectUpstreamTarget(codeDir: string): { remote: string; branch: string } | null {
+  try {
+    const upstream = execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], {
+      cwd: codeDir,
+      encoding: "utf-8",
+      timeout: 10_000,
+    }).trim();
+    const slash = upstream.indexOf("/");
+    if (slash <= 0 || slash >= upstream.length - 1) return null;
+    return {
+      remote: upstream.slice(0, slash),
+      branch: upstream.slice(slash + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveDeployGitTarget(
+  codeDir: string,
+  requestedRemote: string,
+  requestedBranch: string,
+): { remote: string; branch: string; notes: string[] } {
+  let remote = requestedRemote.trim();
+  const branch = requestedBranch.trim() || "main";
+  const notes: string[] = [];
+
+  if (!remoteExists(codeDir, remote)) {
+    const upstream = detectUpstreamTarget(codeDir);
+    if (upstream && remoteExists(codeDir, upstream.remote)) {
+      notes.push(
+        `push remote '${remote}' not found; falling back to branch upstream '${upstream.remote}/${upstream.branch}'`,
+      );
+      remote = upstream.remote;
+    }
+  }
+
+  return { remote: remote || requestedRemote, branch, notes };
+}
+
 /**
  * ha_deploy — writes a deploy-trigger file to the shared volume for the
  * host-side ha-deployer daemon, then polls deploy-state.env for completion.
@@ -161,11 +215,14 @@ export const haDeploy = defineTool({
     const msg =
       commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
 
+    const target = resolveDeployGitTarget(ctx.codeDir, remote, branch);
+    for (const note of target.notes) ctx.log(note);
+
     const trigger = {
       id: randomUUID(),
       commitMessage: msg,
-      remote,
-      branch,
+      remote: target.remote,
+      branch: target.branch,
       requestedAt: new Date(ctx.nowMs()).toISOString(),
       request: ctx.request
         ? {
@@ -201,6 +258,13 @@ export const haDeploy = defineTool({
         const newState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
         if (newState !== initialState) {
           const status = parseStateValue(newState, "LAST_STATUS");
+          if (status === "applied_local_push_failed") {
+            return (
+              "ERROR: deploy applied locally but push to remote failed " +
+              "(status=applied_local_push_failed). Resolve git divergence on host and push manually.\n\n" +
+              `${newState.trim()}`
+            );
+          }
           if (status && status.startsWith("applied_local")) {
             return `OK: deploy completed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
           }
@@ -217,6 +281,13 @@ export const haDeploy = defineTool({
         const updatedAtRaw = parseStateValue(newState, "LAST_UPDATED_AT");
         const updatedAt = updatedAtRaw ? Number.parseInt(updatedAtRaw, 10) : Number.NaN;
         const stateLooksFresh = Number.isFinite(updatedAt) && updatedAt >= applyRequestedAtSec;
+        if (stateLooksFresh && status === "applied_local_push_failed") {
+          return (
+            "ERROR: deploy applied locally but push to remote failed " +
+            "(status=applied_local_push_failed). Resolve git divergence on host and push manually.\n\n" +
+            `${newState.trim()}`
+          );
+        }
         if (stateLooksFresh && status && status.startsWith("applied_local")) {
           return `OK: deploy completed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
         }
