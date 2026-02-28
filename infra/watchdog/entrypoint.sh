@@ -114,6 +114,8 @@ notify_ha_event() {
 
 DEPLOY_LOCK_DIR="${DEPLOY_LOCK_DIR:-/data/nexus/ha-rollout.lock}"
 DEPLOY_LOCK_STALE_SECONDS="${DEPLOY_LOCK_STALE_SECONDS:-1800}"
+POST_DEPLOY_COOLDOWN="${POST_DEPLOY_COOLDOWN:-30}"
+deploy_lock_was_held=false
 
 normalize_positive_int() {
   value="$1"
@@ -285,12 +287,28 @@ fi
 if [ "$ENABLE_FAILBACK" = "true" ]; then
   log "Failback threshold: $FAILBACK_THRESHOLD"
 fi
-log "Deploy lock guard: dir=${DEPLOY_LOCK_DIR} stale_after=${DEPLOY_LOCK_STALE_SECONDS}s"
+log "Deploy lock guard: dir=${DEPLOY_LOCK_DIR} stale_after=${DEPLOY_LOCK_STALE_SECONDS}s cooldown=${POST_DEPLOY_COOLDOWN}s"
 
 # Wait for services to start
 sleep 10
 
 while true; do
+  # Detect deploy lock transitions: when the lock is released after being held,
+  # apply a cooldown period to avoid premature failover during post-deploy
+  # stabilization (container startup, lease acquisition, etc.).
+  if check_deploy_in_progress; then
+    deploy_lock_was_held=true
+    consecutive_failures=0
+    sleep "$CHECK_INTERVAL"
+    continue
+  elif [ "$deploy_lock_was_held" = "true" ]; then
+    deploy_lock_was_held=false
+    consecutive_failures=0
+    log "Deploy lock released — cooling down ${POST_DEPLOY_COOLDOWN}s before resuming health checks"
+    sleep "$POST_DEPLOY_COOLDOWN"
+    continue
+  fi
+
   if check_traffic "$current_primary"; then
     if [ "$consecutive_failures" -gt 0 ]; then
       log "Primary recovered after $consecutive_failures failures"

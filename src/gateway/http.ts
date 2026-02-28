@@ -25,6 +25,8 @@ export type GatewayHttpDeps = {
   getFederationBreakglassState?: () => { globalDisable: boolean };
   setFederationGlobalDisable?: (disabled: boolean) => { globalDisable: boolean };
   isStandby?: () => boolean;
+  /** Epoch ms when this instance last transitioned to active mode. */
+  getActivatedAt?: () => number | null;
   db?: NexusDatabase;
   processManager?: ProcessManager;
   agentTracker?: AgentTracker;

@@ -12,10 +12,18 @@ export function registerHealthRoutes(app: Hono, deps: GatewayHttpDeps): void {
   // Traffic health: failover/routing critical checks only.
   // This endpoint intentionally excludes operational degradation checks
   // (backup age, memory thresholds, stuck agents, proactive lag).
+  const ACTIVATION_GRACE_MS = Number(process.env.NEXUS_ACTIVATION_GRACE_MS) || 15_000;
+
   app.get("/health/traffic", async (c) => {
     const checks: Record<string, { ok: boolean; error?: string; details?: unknown }> = {};
     const nowMs = Date.now();
     let mode = "unknown";
+
+    // Grace period: after activation, allow time for lease acquisition and
+    // service startup before failing health checks. This prevents the cascade
+    // where ha-rollout smoke checks fail before the lease is fully acquired.
+    const activatedAtMs = deps.getActivatedAt?.() ?? null;
+    const inGracePeriod = activatedAtMs !== null && (nowMs - activatedAtMs) < ACTIVATION_GRACE_MS;
 
     try {
       if (deps.db) {
@@ -49,7 +57,11 @@ export function registerHealthRoutes(app: Hono, deps: GatewayHttpDeps): void {
       } else {
         checks.role = { ok: true, details: { mode } };
         if (leaseHeld === false) {
-          checks.lease = { ok: false, error: "active mode without held lease" };
+          if (inGracePeriod) {
+            checks.lease = { ok: true, details: { held: false, gracePeriod: true, activatedAgoMs: nowMs - activatedAtMs! } };
+          } else {
+            checks.lease = { ok: false, error: "active mode without held lease" };
+          }
         } else {
           checks.lease = { ok: true, details: { held: leaseHeld } };
         }

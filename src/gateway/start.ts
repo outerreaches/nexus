@@ -182,6 +182,7 @@ export async function startGateway(
   // Standby mode tracking is declared early so node transport, status, and HA
   // transitions all share the same source of truth.
   let isStandby = params.standby ?? false;
+  let activatedAt: number | null = isStandby ? null : Date.now();
   const nodeWsGateway = new NodeWebSocketGateway({
     identity: nodeGatewayIdentity,
     registry: nodeRegistry,
@@ -1078,6 +1079,7 @@ export async function startGateway(
     federationAllowInsecureWebhookHttpDev: config.federation.webhooks.allowInsecureHttpDev,
     runtimeProfile: config.runtime.profile,
     isStandby: () => isStandby,
+    getActivatedAt: () => activatedAt,
     getFederationBreakglassState: () => ({
       globalDisable: federationGlobalDisabled,
     }),
@@ -1430,6 +1432,7 @@ export async function startGateway(
     }
     releaseActiveLease();
     isStandby = true;
+    activatedAt = null;
     nodeWsGateway.closeNodeConnections("gateway entering standby");
     federationOutboxWorker?.stop();
     federationOutboxWorker = null;
@@ -1461,6 +1464,7 @@ export async function startGateway(
     log("standby: activating services");
     try {
       await startServices();
+      activatedAt = Date.now();
       log("standby: services activated");
       return { ok: true };
     } catch (err) {
