@@ -21,6 +21,9 @@ import { birdBatchSource } from "./social-bird-batch.js";
 import { canadaCPISource } from "./macro-canada-cpi.js";
 import { googleNewsSource } from "./news-google.js";
 import { hackerNewsSource } from "./news-hackernews.js";
+import { ontarioHydroSource } from "./utilities-ontario-hydro.js";
+import { ontario511TrafficSource } from "./traffic-511ontario.js";
+import { barrieAqiSource } from "./weather-aqi-barrie.js";
 
 // Registers all built-in data sources with the data intake registry.
 // This function should be called during system initialization to make all
@@ -44,4 +47,7 @@ export function registerBuiltInSources(): void {
   registerDataSource(birdSource);
   registerDataSource(birdBatchSource); // Batch Twitter/X fetching
   registerDataSource(canadaCPISource); // Canadian inflation data
+  registerDataSource(ontarioHydroSource);
+  registerDataSource(ontario511TrafficSource);
+  registerDataSource(barrieAqiSource);
 }
