@@ -71,3 +71,32 @@ test("formatSkillsPromptSection includes reference hints and fallback guidance",
   assert.match(summarized ?? "", /Use `skill_list` to browse skills and `skill_get` for full instructions\/references\./);
   assert.match(summarized ?? "", /\[refs: 1\]/);
 });
+
+test("loadSkills discovers nested categorized skill directories", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-skills-nested-"));
+  try {
+    const nestedSkillDir = path.join(root, "skills", "operations", "node-ops");
+    await fs.mkdir(nestedSkillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(nestedSkillDir, "SKILL.md"),
+      [
+        "---",
+        "name: node-ops",
+        "description: Operate remote nodes",
+        "triggers: node, deploy",
+        "---",
+        "",
+        "Use this to manage node lifecycle and diagnostics.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const skills = await loadSkills(root);
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0]?.name, "node-ops");
+    assert.equal(skills[0]?.skillDir, nestedSkillDir);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

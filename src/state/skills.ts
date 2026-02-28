@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 
 export type SkillEntry = {
@@ -90,12 +91,46 @@ function parseSkillMd(raw: string, paths: { skillDir: string; skillFile: string 
   };
 }
 
+async function discoverSkillDirs(rootDir: string, maxDepth: number = 6): Promise<string[]> {
+  const discovered: string[] = [];
+
+  async function walk(currentDir: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    // Deterministic traversal makes prompt/debug behavior less surprising.
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    const hasSkillFile = entries.some((entry) => entry.isFile() && entry.name === "SKILL.md");
+    if (hasSkillFile) {
+      discovered.push(currentDir);
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith(".")) continue;
+      await walk(path.join(currentDir, entry.name), depth + 1);
+    }
+  }
+
+  await walk(rootDir, 0);
+  return discovered;
+}
+
 /**
  * Load all skills from `{stateDir}/skills/` (or agent-specific override).
- * Each skill is a directory containing a SKILL.md file.
+ * Skills are discovered recursively so categorized trees like
+ * `skills/operations/node-ops/SKILL.md` are supported.
  */
 export async function loadSkills(stateDir: string, agentId?: string): Promise<SkillEntry[]> {
-  const dirs = [
+  const roots = [
     ...(agentId ? [path.join(stateDir, "agents", agentId, "skills")] : []),
     path.join(stateDir, "skills"),
   ];
@@ -103,17 +138,10 @@ export async function loadSkills(stateDir: string, agentId?: string): Promise<Sk
   const skills: SkillEntry[] = [];
   const seen = new Set<string>();
 
-  for (const skillsDir of dirs) {
-    let entries: string[];
-    try {
-      entries = await fs.readdir(skillsDir);
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const skillPath = path.join(skillsDir, entry, "SKILL.md");
-      const skillDir = path.join(skillsDir, entry);
+  for (const skillsRoot of roots) {
+    const skillDirs = await discoverSkillDirs(skillsRoot);
+    for (const skillDir of skillDirs) {
+      const skillPath = path.join(skillDir, "SKILL.md");
       try {
         const raw = await fs.readFile(skillPath, "utf8");
         const skill = parseSkillMd(raw, { skillDir, skillFile: skillPath });
