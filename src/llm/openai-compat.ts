@@ -661,7 +661,7 @@ async function readBodyWithInactivityTimeout(params: {
   }, 5_000);
 
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(decoder.decode(value, { stream: true }));
@@ -699,7 +699,7 @@ export class OpenAICompatClient implements LLMClient {
     let fallbackAttempted = false;
     let activeMessages = params.messages;
 
-    while (true) {
+    for (;;) {
       const timeoutMs = resolveTimeoutForMode({
         mode: params.timeoutMode ?? "default",
         messages: activeMessages,

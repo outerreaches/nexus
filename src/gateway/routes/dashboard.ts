@@ -22,7 +22,6 @@ import {
   listAgents,
   listAgentGraph,
   listNodes,
-  filterVisibleAgentRuns,
   filterVisibleAgentGraph,
   listJobs,
   listRunningJobRuns,
@@ -113,10 +112,6 @@ export function registerDashboardRoutes(app: Hono, deps: GatewayHttpDeps): void 
     const nodes = listNodes(deps.db, nodeLimit);
     const allowedRunIds = new Set([...agents.active, ...agents.recent].map((r) => r.runId));
     const agentGraph = filterVisibleAgentGraph(listAgentGraph(deps.db, allowedRunIds), nowMs, visibleNodeWindowMs);
-    const visibleAgentsById = new Map(
-      filterVisibleAgentRuns([...agents.active, ...agents.recent], nowMs, visibleNodeWindowMs).map((row) => [row.runId, row]),
-    );
-    const visibleAgents = [...visibleAgentsById.values()];
     const jobs = listJobs(deps.db, jobLimit);
     const runningJobRuns = listRunningJobRuns(deps.db);
     const dataIntake = listDataIntake(deps.db, nowMs, dataIntakeLimit, hideOrphanData);

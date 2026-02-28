@@ -32,8 +32,7 @@ export const canadaCPISource: DataSource = {
   schemaVersion: 1,
   defaultTtlMs: 24 * 60 * 60_000, // Daily
   paramsSchema: CanadaCPIParams,
-  fetch: async (params, ctx) => {
-    const parsed = CanadaCPIParams.parse(params);
+  fetch: async (_params, _ctx) => {
     // Statistics Canada API endpoint for CPI (series v41690973)
     const url = `https://www150.statcan.gc.ca/t1/wds/rest/getDataFromCubePidCoordList?productId=36100127`;
     const res = await fetch(url, {

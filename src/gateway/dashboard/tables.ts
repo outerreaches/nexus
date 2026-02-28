@@ -125,7 +125,7 @@ export function renderJobsTable(rows: JobRow[]): string {
             scheduleLabel = Number.isFinite(atMs) ? `one-shot @ ${formatTime(Math.floor(atMs))}` : "one-shot";
             timezoneLabel = "-";
           }
-        } catch { }
+        } catch { /* parse error, skip */ }
 
         const modeBadgeClass = mode === "agent_task" ? "status-running" : mode === "tool_call" ? "status-enabled" : "status-complete";
 
@@ -737,7 +737,7 @@ export function escapeHtml(value: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
+    .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
 

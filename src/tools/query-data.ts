@@ -8,7 +8,7 @@ function requireDb(ctx: { db?: unknown }) {
   return ctx.db ?? null;
 }
 
-function buildSubjects(instrument: string, currency: string): string[] {
+function buildSubjects(instrument: string, _currency: string): string[] {
   const cleaned = instrument.trim();
   if (!cleaned) return [];
   if (cleaned.includes("/")) {

@@ -23,7 +23,7 @@ export const metalsSource: DataSource = {
   schemaVersion: 1,
   defaultTtlMs: 30 * 60_000,
   paramsSchema: MetalsParams,
-  fetch: async (params, ctx) => {
+  fetch: async (params, _ctx) => {
     const parsed = MetalsParams.parse(params);
     const apiKey = getSecret("OPEN_METALS_API_KEY");
     if (!apiKey) throw new Error("OPEN_METALS_API_KEY not configured");

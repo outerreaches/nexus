@@ -228,7 +228,7 @@ test("secret provider profile lifecycle routes support sidecar upsert/state/test
       NEXUS_SECRET_BROKER_BEARER_TOKEN: "sidecar-token",
     },
     async () => {
-      await withDb(async (_db, app, stateDir) => {
+      await withDb(async (_db, app, _stateDir) => {
         const createRes = await app.request("http://localhost/api/secrets/providers", {
           method: "POST",
           headers: { "content-type": "application/json" },

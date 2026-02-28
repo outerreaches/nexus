@@ -43,8 +43,7 @@ export const cryptoCompareSource: DataSource = {
     if (json.Response === "Error") throw new Error(`CryptoCompare error: ${json.Message ?? "Unknown error"}`);
     return { symbols, currencies, data: json };
   },
-  normalize: (raw, params, ctx) => {
-    const parsed = CryptoCompareParams.parse(params);
+  normalize: (raw, _params, ctx) => {
     const payload = raw as { symbols: string[]; currencies: string[]; data: CryptoCompareResponse };
     return payload.symbols.map((symbol) => {
       const prices = payload.data?.[symbol] ?? {};

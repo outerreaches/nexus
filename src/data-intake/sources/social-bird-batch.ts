@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { TwitterClient, resolveCredentials, type SearchResult, type TweetData } from "@steipete/bird";
 
-import type { DataSource, NormalizedRecord, DataIntakeContext } from "../types.js";
+import type { DataSource, NormalizedRecord } from "../types.js";
 import { getSecret } from "../../secrets/resolve-env.js";
 
 /**

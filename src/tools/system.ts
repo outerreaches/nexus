@@ -39,7 +39,7 @@ function resolveCommandPath(input: string, cwd: string): string {
 export function isMutatingGitOnCodeDir(command: string, codeDir: string, options?: { cwd?: string }): boolean {
   const commandCwd = options?.cwd ?? codeDir;
   // Quick check: does this command invoke git at all?
-  if (!/(^|\s|&&|\||\;)git\s/.test(command)) return false;
+  if (!/(^|\s|&&|\||;)git\s/.test(command)) return false;
 
   // Extract individual commands (split on && ; |)
   const parts = command.split(/&&|;|\|/).map((s) => s.trim());

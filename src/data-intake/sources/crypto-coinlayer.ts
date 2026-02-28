@@ -44,8 +44,7 @@ export const coinlayerSource: DataSource = {
     if (json.success === false) throw new Error(`Coinlayer error: ${json.error?.info ?? "Unknown error"}`);
     return { symbols, target: parsed.target.toUpperCase(), data: json };
   },
-  normalize: (raw, params, ctx) => {
-    const parsed = CoinlayerParams.parse(params);
+  normalize: (raw, _params, ctx) => {
     const payload = raw as { symbols: string[]; target: string; data: CoinlayerResponse };
     const rates = payload.data?.rates ?? {};
     const collectedAtMs = payload.data?.timestamp ? payload.data.timestamp * 1000 : ctx.nowMs();

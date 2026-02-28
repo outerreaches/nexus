@@ -125,6 +125,7 @@ export function stableStringify(value: unknown): string {
 }
 
 export function withoutSig(value: Record<string, unknown>): Record<string, unknown> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { sig: _sig, ...rest } = value;
   return rest;
 }

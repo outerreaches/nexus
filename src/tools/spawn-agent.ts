@@ -1178,7 +1178,7 @@ function enforcePinnedSpawnExecutionPolicy(params: {
   if (executionTarget.target !== "node") {
     return (
       `ERROR: node-pinned run (${pinnedExecutionNode}) cannot spawn local workers for preset ` +
-      `"${parentPresetName ?? "unknown"}". Child spawns must set execution.target=\"node\" with nodeId="${pinnedExecutionNode}".`
+      `"${parentPresetName ?? "unknown"}". Child spawns must set execution.target="node" with nodeId="${pinnedExecutionNode}".`
     );
   }
   if (executionTarget.nodeId !== pinnedExecutionNode) {

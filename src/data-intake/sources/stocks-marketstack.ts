@@ -73,8 +73,7 @@ export const marketstackSource: DataSource = {
     if (json?.error) throw new Error(`Marketstack error: ${json.error.message ?? json.error.code ?? "Unknown error"}`);
     return { symbols, dataType: parsed.dataType, data: json.data ?? [] };
   },
-  normalize: (raw, params, ctx) => {
-    const parsed = MarketstackParams.parse(params);
+  normalize: (raw, _params, ctx) => {
     const payload = raw as { symbols: string[]; dataType: string; data: MarketstackItem[] };
     const bySymbol = new Map<string, MarketstackItem>();
     for (const item of payload.data ?? []) {

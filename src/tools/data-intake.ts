@@ -71,7 +71,7 @@ export const dataIntakeRun = defineTool({
 
     let sourceId: string;
     let params: unknown;
-    let instanceTags: string[] = [];
+    const instanceTags: string[] = [];
     let instance: { id: string; source_id: string; label: string | null; params_json: string } | null = null;
     let updateInstanceStatus:
       | ((next: { lastRunAtMs: number; lastError: string | null }) => void)

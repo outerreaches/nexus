@@ -100,7 +100,7 @@ async function promptInt(
   defaultValue: number,
   opts: { min?: number; max?: number } = {},
 ): Promise<number> {
-  while (true) {
+  for (;;) {
     const raw = await prompt(rl, question, String(defaultValue));
     const parsed = Number(raw);
     if (!Number.isInteger(parsed)) {
@@ -121,7 +121,7 @@ async function promptInt(
 
 async function promptGender(rl: readline.Interface, defaultMale: boolean = true): Promise<boolean> {
   const defaultValue = defaultMale ? "male" : "female";
-  while (true) {
+  for (;;) {
     const raw = await prompt(rl, "  Male or female?", defaultValue);
     const normalized = raw.trim().toLowerCase();
     if (["male", "m", "man", "boy"].includes(normalized)) return true;
@@ -131,7 +131,7 @@ async function promptGender(rl: readline.Interface, defaultMale: boolean = true)
 }
 
 async function promptAllowFrom(rl: readline.Interface): Promise<number[]> {
-  while (true) {
+  for (;;) {
     const raw = await prompt(rl, "  Allowlist user IDs (comma-separated, optional)", "");
     if (!raw) return [];
     const parts = raw

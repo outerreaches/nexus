@@ -213,7 +213,7 @@ export async function cleanupOldBackups(params: {
   nowMs: number;
   log?: (msg: string) => void;
 }): Promise<number> {
-  const { db, stateDir, config, nowMs, log = () => { } } = params;
+  const { db, config, nowMs, log = () => { } } = params;
 
   const cutoffMs = nowMs - config.retentionDays * 24 * 60 * 60 * 1000;
 

@@ -97,17 +97,6 @@ function resolveDefaultImageModel(
   };
 }
 
-function shouldFallbackFromError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/request timed out|abort/i.test(message)) return true;
-  if (/fetch failed|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(message)) return true;
-  const statusMatch = message.match(/LLM request failed:\s*(\d{3})\b/);
-  if (!statusMatch) return false;
-  const status = Number(statusMatch[1]);
-  if (!Number.isFinite(status)) return false;
-  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
-}
-
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -493,7 +482,7 @@ export const imageGenerate = defineTool({
     };
 
     let generation: ImageGenerationResult;
-    let routeUsed = `${routeProvider}:${primary.model}`;
+    const routeUsed = `${routeProvider}:${primary.model}`;
     try {
       generation = await generateImagesWithConfig({
         llm: primary,

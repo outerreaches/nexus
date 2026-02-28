@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { DataSource } from "./types.js";
 

@@ -64,7 +64,7 @@ export const humanAction = defineTool({
           `- CLI: nexus actions respond ${row.id} <your response>`,
           "",
           "To use the response in a browser form field (without revealing it to the model):",
-          `- browser: { action: \"type_action\", ref: \"<fieldRef>\", actionId: \"${row.id}\" }`,
+          `- browser: { action: "type_action", ref: "<fieldRef>", actionId: "${row.id}" }`,
         ].join("\n");
 
         return JSON.stringify(

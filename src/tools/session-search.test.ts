@@ -75,7 +75,7 @@ function insertRun(params: {
 
 test("session_search scopes subagents to self and descendants only", async () => {
   await withDb(async (db) => {
-    let nowMs = 1_700_000_000_000;
+    const nowMs = 1_700_000_000_000;
     const rootSession = getOrCreateSessionId({
       db,
       channel: "agent",
