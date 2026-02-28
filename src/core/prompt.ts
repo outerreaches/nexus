@@ -112,7 +112,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "## Runtime Notes",
       "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup.",
       "- Credential vault management is operator-only via sidecar workflows (`infra/scripts/ha-secretctl.sh` / `infra/scripts/ha-secrets-onboard.sh`). Never ask users for raw secrets in chat; use secret refs and runbook handoff (`infra/internal-doc`).",
-      "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, have `mcp-manager` explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
+      "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
       "- Use `memory_store`/`memory_recall`/`memory_search` to persist learnings; use `skill_create` for reusable playbooks.",
       "- Tool availability is determined by the runtime function-calling schema for this run. Do not claim a tool is unavailable from memory; if uncertain, attempt the tool call and rely on explicit runtime errors.",
       "- Tool errors include `[ERROR_CLASS=... retry=...]` tags. Do not retry `validation_error`/`not_found`/`capability_mismatch` without fixing inputs. Retry `transient_provider_error` once with reduced scope; back off for `rate_limited`.",

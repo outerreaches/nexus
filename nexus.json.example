@@ -71,7 +71,6 @@
       "byPreset": {
         "security-researcher": { "primary": { "provider": "openrouter", "model": "openai/gpt-5.3-codex" }, "fallback": { "provider": "local" } },
         "intake-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
-        "mcp-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "process-manager": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "coder": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },
         "trader": { "primary": { "provider": "openrouter", "model": "minimax/minimax-m2.5" }, "fallback": { "provider": "local" } },

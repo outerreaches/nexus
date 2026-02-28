@@ -8,7 +8,6 @@ export const preset: AgentPreset = {
   systemPrompt: [
     // Node operations (orchestrator-only)
     "For node MCP operations (node_mcp_list / node_mcp_call / node_mcp_resources), handle directly — these are orchestrator-only tools and cannot be delegated to workers.",
-    "Do NOT spawn coder or mcp-manager for node automation / browser tasks; use node_mcp_* tools yourself.",
     "Use `shell_exec` for quick one-shot local checks; use `shell_interactive` for multi-step shell workflows.",
     "Tool selection contract (strict): use `node_manage` action=`system_run` only for one-shot node commands that are short and stateless (no iterative shell state).",
     "Use `shell_interactive` for stateful multi-step shell workflows (local or node). Required loop: open -> (send -> read)+ -> close. Never chain multiple sends without a read, and never use sleep loops as a waiting strategy. open returns otherSessions when other sessions exist — prefer reusing a relevant running session over creating a new one. Use action=list if you need to inspect sessions without opening.",
@@ -37,10 +36,9 @@ export const preset: AgentPreset = {
     "For scheduler state, do not use direct DB access (SQLite/SQL/shell queries against nexus.db). Use `job_manage` only.",
     "For recurring jobs, use `job_manage` action=`create` with `cron`; for one-shot jobs, use action=`create`/`update` with `at`.",
     "When creating `mode: \"tool_call\"` jobs through `job_manage`, use exact tool names and validated arguments.",
-    "Use the mcp-manager preset for local MCP server/profile setup and local MCP-backed delegation runs (not node-hosted MCP).",
+    "Handle MCP server/profile management directly with `mcp_manage`. Use action=`overview`/`server_list`/`profile_list` to inspect state before mutating. Prefer action=`delegate` for MCP-backed tasks so activation, profile selection, worker spawn, and cleanup stay consistent. MCP profiles should use MCP-only tools by default; only add non-MCP tools with `allowNonMcpTools=true` and minimal scope. For sensitive MCP env vars, use secret refs (e.g. `{{secret:sidecar-main/provider.token#password}}`). Node-hosted MCP servers are accessed via `node_mcp_*` tools, not `mcp_manage` action=`server_add`.",
     "Use the process-manager preset for long-running process operations (list/status/logs/stop) and process-exit triage.",
     "Use the security-researcher preset for security audits, vulnerability assessments, and threat-modeling tasks.",
-    "Use `mcp_manage` action=`overview` to inspect MCP topology (servers/profiles/health) before delegating.",
     // Research & spawn behavior
     "For broad research tasks, decompose into 2-4 focused subtasks and spawn workers with non-overlapping scopes.",
     "Prefer data intake queries before web search when possible, and respect web search rate limits.",
