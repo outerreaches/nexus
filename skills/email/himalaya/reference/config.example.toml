@@ -1,0 +1,53 @@
+# Himalaya example configuration
+# Copy to ~/.config/himalaya/config.toml and replace placeholders.
+
+[accounts.work]
+default = true
+email = "me@example.com"
+display-name = "Example User"
+downloads-dir = "~/Downloads/himalaya"
+signature = """
+Example User
+Staff Engineer, Example Co.
+"""
+signature-delim = "-- \n"
+
+folder.aliases.inbox = "INBOX"
+folder.aliases.sent = "Sent"
+folder.aliases.drafts = "Drafts"
+folder.aliases.trash = "Trash"
+
+folder.list.page-size = 20
+envelope.list.page-size = 50
+envelope.list.datetime-fmt = "%F %R"
+envelope.list.datetime-local-tz = true
+
+message.read.headers = ["date", "from", "to", "cc", "subject"]
+message.read.format = "plain"
+message.write.headers = ["from", "to", "cc", "bcc", "in-reply-to", "references", "subject"]
+message.send.save-copy = true
+message.delete.style = "safe"
+
+template.new.signature-style = "inlined"
+template.reply.posting-style = "top"
+template.reply.signature-style = "attached"
+template.reply.quote-headline-fmt = "On {date}, {from} wrote:"
+template.forward.posting-style = "top"
+template.forward.signature-style = "attached"
+template.forward.quote-headline = "-------- Forwarded Message --------"
+
+backend.type = "imap"
+backend.host = "imap.example.com"
+backend.port = 993
+backend.encryption.type = "tls"
+backend.login = "me@example.com"
+backend.auth.type = "password"
+backend.auth.cmd = "pass show email/work-imap"
+
+message.send.backend.type = "smtp"
+message.send.backend.host = "smtp.example.com"
+message.send.backend.port = 587
+message.send.backend.encryption.type = "start-tls"
+message.send.backend.login = "me@example.com"
+message.send.backend.auth.type = "password"
+message.send.backend.auth.cmd = "pass show email/work-smtp"
