@@ -32,15 +32,18 @@ COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
 RUN npm run build
 
-# Python runtime for LangExtract-backed extraction tool
+# Python runtime: LangExtract + PDF/image utilities for creative skills
 RUN python3 -m venv /opt/nexus-py \
   && /opt/nexus-py/bin/pip install --no-cache-dir --upgrade pip \
-  && /opt/nexus-py/bin/pip install --no-cache-dir 'langextract[openai]' pypdf
+  && /opt/nexus-py/bin/pip install --no-cache-dir \
+    'langextract[openai]' pypdf \
+    img2pdf Pillow cairosvg
 
 # Make the CLI available on PATH inside the container (so `docker exec ... nexus ...` works)
 RUN printf '%s\n' '#!/bin/sh' 'exec node /app/dist/index.js "$@"' > /usr/local/bin/nexus \
   && chmod +x /usr/local/bin/nexus
 
+ENV PATH="/opt/nexus-py/bin:$PATH"
 ENV NEXUS_STATE_DIR=/data/nexus
 ENV NEXUS_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NEXUS_BROWSER_HEADLESS=1
