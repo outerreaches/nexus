@@ -6,6 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
+import { getSecret } from "../secrets/resolve-env.js";
 import type { CacheEntry } from "./web-shared.js";
 import { normalizeCacheKey, readCache, readResponseText, truncateText, withTimeout, writeCache } from "./web-shared.js";
 
@@ -197,6 +198,51 @@ async function fetchWithRedirects(params: {
   throw new Error(`Too many redirects (limit: ${params.maxRedirects})`);
 }
 
+// ── Firecrawl scrape ────────────────────────────────────────────────────────
+
+const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape";
+
+type FirecrawlScrapeResult = {
+  markdown: string;
+  metadata?: { title?: string; description?: string; sourceURL?: string };
+};
+
+async function firecrawlScrape(url: string, timeoutMs: number): Promise<FirecrawlScrapeResult | null> {
+  const apiKey = (getSecret("FIRECRAWL_API_KEY") ?? "").trim();
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch(FIRECRAWL_SCRAPE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["markdown"],
+        onlyMainContent: true,
+        timeout: Math.min(timeoutMs, 30_000),
+      }),
+      signal: withTimeout(timeoutMs),
+    });
+
+    if (!res.ok) {
+      // Non-2xx — let caller fall back to native fetch
+      void res.body?.cancel();
+      return null;
+    }
+
+    const json = (await res.json()) as { success?: boolean; data?: FirecrawlScrapeResult };
+    if (!json.success || !json.data?.markdown) return null;
+
+    return json.data;
+  } catch {
+    // Network / timeout / parse error — fall back silently
+    return null;
+  }
+}
+
 export const webFetch = defineTool({
   name: "web_fetch",
   description:
@@ -230,6 +276,15 @@ export const webFetch = defineTool({
     const cached = readCache(FETCH_CACHE, cacheKey);
     if (cached) return cached;
 
+    // ── Try Firecrawl first (clean markdown extraction) ──────────────────
+    const scraped = await firecrawlScrape(url, timeoutMs);
+    if (scraped) {
+      const out = truncateText(scraped.markdown.trim(), maxChars);
+      writeCache(FETCH_CACHE, cacheKey, out, cacheTtlMs);
+      return out;
+    }
+
+    // ── Fallback: native fetch ───────────────────────────────────────────
     const { res, finalUrl } = await fetchWithRedirects({ url, timeoutMs, maxRedirects, userAgent, acceptLanguage });
     if (!res.ok) {
       const detail = await readResponseText(res);

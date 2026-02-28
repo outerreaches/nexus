@@ -14,6 +14,7 @@
       "BASETEN_API_KEY": "{{secret:sidecar-main/llm.baseten.k2.5.api#password}}",
       "OPENROUTER_API_KEY": "{{secret:sidecar-main/llm.openrouter.api#password}}",
       "QUIVER_SVG_API_KEY": "{{secret:sidecar-main/quiver.svg.api#password}}",
+      "FIRECRAWL_API_KEY": "{{secret:sidecar-main/search.firecrawl.api#password}}",
       "BRAVE_API_KEY": "{{secret:sidecar-main/search.brave.api#password}}",
       "PERPLEXITY_API_KEY": "{{secret:sidecar-main/search.perplexity.api#password}}",
       "TELEGRAM_BOT_TOKEN": "{{secret:sidecar-main/telegram.bot.token#password}}",

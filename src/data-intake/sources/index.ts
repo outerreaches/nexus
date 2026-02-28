@@ -19,12 +19,14 @@ import { weatherSource } from "./weather.js";
 import { birdSource } from "./social-bird.js";
 import { birdBatchSource } from "./social-bird-batch.js";
 import { canadaCPISource } from "./macro-canada-cpi.js";
+import { googleNewsSource } from "./news-google.js";
 import { hackerNewsSource } from "./news-hackernews.js";
 
 // Registers all built-in data sources with the data intake registry.
 // This function should be called during system initialization to make all
 // standard data sources (crypto, stocks, weather, markets, etc.) available.
 export function registerBuiltInSources(): void {
+  registerDataSource(googleNewsSource);
   registerDataSource(hackerNewsSource);
   registerDataSource(cryptoSource);
   registerDataSource(coinlayerSource);
