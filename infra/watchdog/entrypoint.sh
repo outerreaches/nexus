@@ -59,6 +59,41 @@ check_traffic() {
   return 1
 }
 
+mode_of_url() {
+  url="$1"
+  mode_response="$(curl_with_auth -sf --max-time 5 "${url}/api/mode" 2>/dev/null || true)"
+  case "$mode_response" in
+    *'"mode":"active"'*) echo "active" ;;
+    *'"mode":"standby"'*) echo "standby" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+sync_active_topology() {
+  primary_mode="$(mode_of_url "$PRIMARY_URL")"
+  standby_mode="$(mode_of_url "$STANDBY_URL")"
+
+  desired_primary=""
+  desired_standby=""
+  if [ "$primary_mode" = "active" ] && [ "$standby_mode" != "active" ]; then
+    desired_primary="$PRIMARY_URL"
+    desired_standby="$STANDBY_URL"
+  elif [ "$standby_mode" = "active" ] && [ "$primary_mode" != "active" ]; then
+    desired_primary="$STANDBY_URL"
+    desired_standby="$PRIMARY_URL"
+  else
+    return 1
+  fi
+
+  if [ "$current_primary" != "$desired_primary" ] || [ "$current_standby" != "$desired_standby" ]; then
+    log "Topology sync: active switched to ${desired_primary} (primary_mode=${primary_mode}, standby_mode=${standby_mode})"
+    current_primary="$desired_primary"
+    current_standby="$desired_standby"
+    consecutive_failures=0
+  fi
+  return 0
+}
+
 wait_for_active_mode() {
   url="$1"
   attempts="${2:-10}"
@@ -165,6 +200,17 @@ failover() {
   # be temporarily down during switchover and will recover.
   if check_deploy_in_progress; then
     log "FAILOVER: Skipped — HA deploy in progress (lock held). Will retry next cycle."
+    consecutive_failures=0
+    return 0
+  fi
+
+  # A planned switchover (e.g., ha-rollout apply-local) can legitimately
+  # move activity from PRIMARY_URL to STANDBY_URL without being a failure.
+  # Re-sync from /api/mode before attempting failover to avoid false alerts.
+  failover_primary_before_sync="$current_primary"
+  sync_active_topology || true
+  if [ "$current_primary" != "$failover_primary_before_sync" ]; then
+    log "FAILOVER: Skipped — active slot changed during health-check window"
     consecutive_failures=0
     return 0
   fi
@@ -308,6 +354,10 @@ while true; do
     sleep "$POST_DEPLOY_COOLDOWN"
     continue
   fi
+
+  # Keep watchdog pointers aligned with actual slot modes so intentional
+  # deploy switchovers are not misclassified as outages.
+  sync_active_topology || true
 
   if check_traffic "$current_primary"; then
     if [ "$consecutive_failures" -gt 0 ]; then

@@ -185,17 +185,19 @@ export const haDeploy = defineTool({
 
     // Read initial state for comparison
     const initialState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+    const applyRequestedAtSec = Math.floor(ctx.nowMs() / 1000);
 
     // Poll for completion. This container (old active) is never rebuilt during
     // the deploy cycle — only the standby gets rebuilt with new code.
     const deadline = Date.now() + timeoutMs;
     const pollMs = 5_000;
-    let emptyPollsWithNoStateChange = 0;
+    let triggerClearedPolls = 0;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, pollMs));
 
       // If trigger file is gone and state changed, deploy completed (or failed)
       if (!existsSync(triggerFile) && !existsSync(processingFile)) {
+        triggerClearedPolls += 1;
         const newState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
         if (newState !== initialState) {
           const status = parseStateValue(newState, "LAST_STATUS");
@@ -207,18 +209,41 @@ export const haDeploy = defineTool({
           }
           return `OK: deploy state changed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
         }
-        emptyPollsWithNoStateChange += 1;
-        if (emptyPollsWithNoStateChange >= 2) {
-          return (
-            "ERROR: deploy trigger was cleared but deploy state did not change. " +
-            "Deploy likely failed before state write; check ha-deployer logs."
+
+        // Defensive path for racey filesystems: if state write landed with
+        // equivalent content (or shortly after trigger cleanup), use freshness
+        // markers to classify outcome instead of failing immediately.
+        const status = parseStateValue(newState, "LAST_STATUS");
+        const updatedAtRaw = parseStateValue(newState, "LAST_UPDATED_AT");
+        const updatedAt = updatedAtRaw ? Number.parseInt(updatedAtRaw, 10) : Number.NaN;
+        const stateLooksFresh = Number.isFinite(updatedAt) && updatedAt >= applyRequestedAtSec;
+        if (stateLooksFresh && status && status.startsWith("applied_local")) {
+          return `OK: deploy completed (status=${status})\n\n${newState.trim()}\n\n${postDeployNote}`;
+        }
+        if (stateLooksFresh && status && (status.includes("fail") || status.includes("rollback"))) {
+          return `ERROR: deploy failed (status=${status})\n\n${newState.trim()}`;
+        }
+        if (triggerClearedPolls % 6 === 0) {
+          ctx.log(
+            "deploy trigger cleared but state unchanged; continuing to wait for stable deploy-state write",
           );
         }
       } else {
-        emptyPollsWithNoStateChange = 0;
+        triggerClearedPolls = 0;
       }
     }
 
-    return "ERROR: deploy timed out waiting for host daemon. Is ha-deployer.service running?";
+    const finalState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
+    const finalStatus = parseStateValue(finalState, "LAST_STATUS") ?? "unknown";
+    const triggerStatus = existsSync(triggerFile)
+      ? "pending"
+      : existsSync(processingFile)
+        ? "processing"
+        : "cleared";
+    return (
+      "ERROR: deploy timed out waiting for host daemon. " +
+      `trigger=${triggerStatus} last_status=${finalStatus}. ` +
+      "Is ha-deployer.service running?"
+    );
   },
 });
