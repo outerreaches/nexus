@@ -1594,6 +1594,7 @@ class ReferenceNodeClient {
     try {
       const child = spawnChild(executionCommand, {
         shell: true,
+        detached: process.platform !== "win32",
         cwd: executionCwd ?? undefined,
         env: Object.keys(executionEnv).length > 0 ? { ...process.env, ...executionEnv } : process.env,
         stdio: ["ignore", "pipe", "pipe"],
@@ -3952,6 +3953,20 @@ class ReferenceNodeClient {
     };
   }
 
+  /** Kill a child process and its entire process group (for shell: true + detached). */
+  private killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+    try {
+      if (child.pid && process.platform !== "win32") {
+        // Negative PID kills the entire process group (shell + its children)
+        process.kill(-child.pid, signal);
+      } else {
+        child.kill(signal);
+      }
+    } catch {
+      // ignore — process may have already exited
+    }
+  }
+
   private cancelProcess(
     entry: ReferenceProcess,
     params: {
@@ -3963,21 +3978,13 @@ class ReferenceNodeClient {
     entry.cancelRequested = true;
     this.persistProcess(entry);
     if (!entry.child || entry.status !== "running") return;
-    try {
-      entry.child.kill(params.signal);
-    } catch {
-      // ignore
-    }
+    this.killProcessTree(entry.child, params.signal);
     this.appendProcessLog(entry, `cancel requested (${params.reason}) using ${params.signal}\n`, "stderr");
     if (params.signal !== "SIGKILL" && params.killAfterMs > 0) {
       if (entry.killTimer) clearTimeout(entry.killTimer);
       entry.killTimer = setTimeout(() => {
         if (!entry.child || entry.status !== "running") return;
-        try {
-          entry.child.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
+        this.killProcessTree(entry.child, "SIGKILL");
       }, params.killAfterMs);
       entry.killTimer.unref?.();
     }

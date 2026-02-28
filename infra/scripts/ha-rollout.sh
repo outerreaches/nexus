@@ -29,6 +29,7 @@
 #   WS_SMOKE_WARN_ONLY=0              # set to 1 to warn (not fail) on websocket smoke timeout
 #   WS_SMOKE_ATTEMPT_TIMEOUT_MS=8000  # per-attempt websocket probe timeout in milliseconds
 #   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
+#   ACTIVATION_GRACE_SECS=5            # seconds to wait after /api/activate before health checks
 #   ROLLBACK_RESTORE_GIT=1            # set to 0 to keep current checkout on failed deploy rollback
 #   NEXUS_HA_API_KEY=<token>            # bearer token for /api/* control-plane calls
 #                                        # defaults to NEXUS_HTTP_API_KEY when unset
@@ -542,10 +543,13 @@ recreate_slot() {
 switch_to_slot() {
   local from="$1"
   local to="$2"
+  local grace="${ACTIVATION_GRACE_SECS:-5}"
   log "deactivating ${from}"
   service_post "$from" "/api/deactivate" || warn "deactivate ${from} failed; continuing"
   log "activating ${to}"
   service_post "$to" "/api/activate"
+  log "waiting ${grace}s for lease acquisition grace period"
+  sleep "$grace"
   log "waiting for ${to} traffic health"
   wait_for_service_http "$to" "/health/traffic" "$READY_TIMEOUT" || return 1
 }

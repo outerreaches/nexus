@@ -73,11 +73,11 @@ jobs:
   semgrep:
     name: Semgrep SAST Scan
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
-      - uses: semgrep/action@latest
-        with:
-          config: ./semgrep.yml
+      - run: semgrep scan --config ./semgrep.yml --error
 
   # 5. Gitleaks Secret Detection
   gitleaks:

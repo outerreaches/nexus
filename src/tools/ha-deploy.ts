@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -21,6 +22,51 @@ function fileAgeMs(file: string): number | null {
   }
 }
 
+/** Extensions that never require a deploy (documentation, assets, etc.) */
+const NON_DEPLOYABLE_EXTS = new Set([
+  ".md", ".txt", ".log", ".csv",
+  ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+  ".mp3", ".mp4", ".wav", ".webm",
+  ".pdf", ".doc", ".docx",
+]);
+
+/**
+ * Check git working tree for changes that actually require a container rebuild.
+ * Returns { deployable, skipped, all } file lists.
+ */
+function classifyChanges(codeDir: string): { deployable: string[]; skipped: string[]; all: string[] } {
+  let raw: string;
+  try {
+    raw = execFileSync("git", ["status", "--porcelain"], {
+      cwd: codeDir,
+      encoding: "utf-8",
+      timeout: 10_000,
+    }).trim();
+  } catch {
+    // If git fails, assume everything is deployable (safe fallback)
+    return { deployable: ["(git status failed)"], skipped: [], all: [] };
+  }
+  if (!raw) return { deployable: [], skipped: [], all: [] };
+
+  const all: string[] = [];
+  const deployable: string[] = [];
+  const skipped: string[] = [];
+
+  for (const line of raw.split("\n")) {
+    // porcelain format: XY filename  (or XY orig -> renamed)
+    const file = line.slice(3).split(" -> ").pop()!.trim();
+    if (!file) continue;
+    all.push(file);
+    const ext = path.extname(file).toLowerCase();
+    if (NON_DEPLOYABLE_EXTS.has(ext)) {
+      skipped.push(file);
+    } else {
+      deployable.push(file);
+    }
+  }
+  return { deployable, skipped, all };
+}
+
 /**
  * ha_deploy — writes a deploy-trigger file to the shared volume for the
  * host-side ha-deployer daemon, then polls deploy-state.env for completion.
@@ -37,6 +83,8 @@ export const haDeploy = defineTool({
     "action='apply' writes a deploy trigger, then polls until the host daemon completes " +
     "(build candidate → health check → commit → switch traffic). " +
     "action='status' returns current deploy state. " +
+    "Only triggers if deployable changes exist (code/config); doc-only changes (.md, images) are rejected — " +
+    "commit and push those directly instead of deploying. " +
     "Important: after action='apply' succeeds, this run still executes in the pre-deploy process image; " +
     "defer post-deploy runtime/schema validation to a fresh follow-up run.",
   parameters: z.object({
@@ -92,6 +140,23 @@ export const haDeploy = defineTool({
     if (existsSync(triggerFile) || existsSync(processingFile)) {
       return "ERROR: A deploy is already pending or in progress. Use action='status' to check.";
     }
+
+    // Guard: only deploy if there are actual code/config changes worth rebuilding for.
+    const changes = classifyChanges(ctx.codeDir);
+    if (changes.all.length === 0) {
+      return "SKIP: No uncommitted changes detected in the code directory. Nothing to deploy.";
+    }
+    if (changes.deployable.length === 0) {
+      return (
+        `SKIP: All ${changes.all.length} changed file(s) are non-deployable (docs/assets only):\n` +
+        changes.skipped.map((f) => `  - ${f}`).join("\n") +
+        "\nThese changes do not require a container rebuild. Commit and push them directly instead."
+      );
+    }
+    ctx.log(
+      `deployable changes: ${changes.deployable.length} file(s), ` +
+        `skipped: ${changes.skipped.length} non-deployable file(s)`,
+    );
 
     const msg =
       commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
