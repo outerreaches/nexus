@@ -37,6 +37,7 @@ export const preset: AgentPreset = {
     "shell_exec",
     "shell_interactive",
     "ha_deploy",
+    "web_search",
     "web_fetch",
     "session_search",
     "read_from_blackboard",
@@ -45,7 +46,8 @@ export const preset: AgentPreset = {
     "data_intake_query",
   ],
   toolCallCaps: {
-    web_fetch: 10,
+    web_search: 15,
+    web_fetch: 30,
     data_intake_query: 8,
     read_from_blackboard: 12,
     write_to_blackboard: 4,
