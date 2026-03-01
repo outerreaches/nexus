@@ -86,7 +86,7 @@ export const preset: AgentPreset = {
     "web_search",
     "web_fetch",
     "image_analyze",
-    "data_intake_query",
+    "data_intake_manage",
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",

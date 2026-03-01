@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import { defineTool } from "../core/tools.js";
+import { defineTool, type Tool } from "../core/tools.js";
 import {
   initDataIntake,
   findDataSourcesByTag,
@@ -230,8 +230,8 @@ export const dataIntakeScheduleRefresh = defineTool({
     const id = randomId("J");
     const spec = {
       mode: "tool_call",
-      tool: "data_intake_run",
-      args: { sourceId: args.sourceId, params: args.params },
+      tool: "data_intake_manage",
+      args: { action: "run", args: { sourceId: args.sourceId, params: args.params } },
     };
     const { nextCronTimeMs, parseCron, validateTimeZone } = await import("../scheduler/cron.js");
     const next = nextCronTimeMs({
@@ -278,7 +278,7 @@ export const dataIntakeScheduleAll = defineTool({
       "Refresh all enabled data intake source instances from storage.",
       "",
       "Steps:",
-      "1) Call data_intake_source_list with includeDisabled=false.",
+      "1) Call data_intake_manage with action='source_list' and args={ includeDisabled: false }.",
       "2) For each source instance, spawn intake-manager to run that specific source by instance id.",
       "3) Report any failures.",
       "",
@@ -316,5 +316,66 @@ export const dataIntakeScheduleAll = defineTool({
 
     const row = (db as any).db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as any;
     return JSON.stringify(row);
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified data_intake_manage tool (facade over individual tools)
+// ─────────────────────────────────────────────────────────────────────────────
+
+import {
+  dataIntakeSourceList,
+  dataIntakeSourceAdd,
+  dataIntakeSourceUpdate,
+  dataIntakeSourceDelete,
+} from "./data-intake-sources.js";
+
+const DATA_INTAKE_ACTIONS = [
+  "list_sources",
+  "source_list",
+  "source_add",
+  "source_update",
+  "source_delete",
+  "run",
+  "query",
+  "prune",
+  "schedule_refresh",
+  "schedule_all",
+] as const;
+
+type DataIntakeAction = typeof DATA_INTAKE_ACTIONS[number];
+
+const DATA_INTAKE_DISPATCH: Record<DataIntakeAction, Tool> = {
+  list_sources: dataIntakeListSources,
+  source_list: dataIntakeSourceList,
+  source_add: dataIntakeSourceAdd,
+  source_update: dataIntakeSourceUpdate,
+  source_delete: dataIntakeSourceDelete,
+  run: dataIntakeRun,
+  query: dataIntakeQuery,
+  prune: dataIntakePrune,
+  schedule_refresh: dataIntakeScheduleRefresh,
+  schedule_all: dataIntakeScheduleAll,
+};
+
+export const dataIntakeManage = defineTool({
+  name: "data_intake_manage",
+  description:
+    "Unified data intake management tool. Actions: " +
+    "list_sources (available source types), source_list (configured instances), " +
+    "source_add, source_update, source_delete (instance CRUD), " +
+    "run (fetch data), query (read stored records), prune (cleanup), " +
+    "schedule_refresh (cron for one source), schedule_all (cron for all instances). " +
+    "Pass action-specific arguments in the `args` object.",
+  parameters: z.object({
+    action: z.enum(DATA_INTAKE_ACTIONS),
+    args: z.record(z.unknown()).default({}).describe(
+      "Action-specific arguments (same schema as the individual data_intake_* tools).",
+    ),
+  }),
+  execute: async (args, ctx) => {
+    const target = DATA_INTAKE_DISPATCH[args.action];
+    if (!target) return `ERROR: unsupported action '${args.action}'`;
+    return target.execute(args.args, ctx);
   },
 });

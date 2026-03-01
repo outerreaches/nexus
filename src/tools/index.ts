@@ -36,20 +36,7 @@ import { spawnAgent } from "./spawn-agent.js";
 import { sessionSearch } from "./session-search.js";
 import { shellInteractive } from "./shell-interactive.js";
 import { mcpManage } from "./mcp.js";
-import {
-  dataIntakeListSources,
-  dataIntakePrune,
-  dataIntakeQuery,
-  dataIntakeRun,
-  dataIntakeScheduleAll,
-  dataIntakeScheduleRefresh,
-} from "./data-intake.js";
-import {
-  dataIntakeSourceAdd,
-  dataIntakeSourceDelete,
-  dataIntakeSourceList,
-  dataIntakeSourceUpdate,
-} from "./data-intake-sources.js";
+import { dataIntakeManage } from "./data-intake.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
@@ -103,16 +90,7 @@ export function getBuiltInTools(): Tool[] {
     writeToBlackboard,
     readFromBlackboard,
     blackboardManage,
-    dataIntakeListSources,
-    dataIntakeRun,
-    dataIntakeQuery,
-    dataIntakePrune,
-    dataIntakeScheduleRefresh,
-    dataIntakeScheduleAll,
-    dataIntakeSourceList,
-    dataIntakeSourceAdd,
-    dataIntakeSourceUpdate,
-    dataIntakeSourceDelete,
+    dataIntakeManage,
     spawnAgent,
     dbMaintenance,
     dbBackup,

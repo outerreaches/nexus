@@ -70,8 +70,8 @@ function createJobForSource(params: {
   const jobName = sourceJobName(params.sourceId, params.label);
   const spec = {
     mode: "tool_call",
-    tool: "data_intake_run",
-    args: { instanceId: params.instanceId },
+    tool: "data_intake_manage",
+    args: { action: "run", args: { instanceId: params.instanceId } },
   };
 
   params.db.db

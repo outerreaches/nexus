@@ -62,10 +62,8 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "blackboard_manage",
-    // Data intake (read-only at orchestrator level)
-    "data_intake_list_sources",
-    "data_intake_query",
-    "data_intake_source_list",
+    // Data intake
+    "data_intake_manage",
     // Node management
     "node_manage",
     "node_symbols_list",
