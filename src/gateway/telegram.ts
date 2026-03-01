@@ -9,7 +9,7 @@ import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
 import type { ChatUserContentPart } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { getOrCreateSessionId } from "../storage/sessions.js";
+import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
 import { fulfillHumanAction } from "../storage/human-actions.js";
 import {
@@ -817,6 +817,26 @@ export async function startTelegramBot(deps: {
         } else {
           await ctx.reply("You are not allowlisted for this bot.");
         }
+        return;
+      }
+
+      if (/^\/sethome\b/i.test(text.trim())) {
+        setHomeSession({
+          db: deps.db,
+          agentId: tg.agentId,
+          channel: "telegram",
+          channelKey: String(chatId),
+          nowMs: Date.now(),
+        });
+        deps.log(`telegram: sethome agent=${tg.agentId} chat_id=${chatId}`);
+        await ctx.reply("OK: this chat is now the home session for background events.");
+        return;
+      }
+
+      if (/^\/unsethome\b/i.test(text.trim())) {
+        clearHomeSession({ db: deps.db, agentId: tg.agentId });
+        deps.log(`telegram: unsethome agent=${tg.agentId}`);
+        await ctx.reply("OK: home session cleared. Background events will target the most recent chat.");
         return;
       }
 

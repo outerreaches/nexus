@@ -486,3 +486,43 @@ export function loadRecentHistory(params: {
   if (params.compactToolHistory === false) return messages;
   return messages.map(compactHistoryMessage);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Home session helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function setHomeSession(params: {
+  db: NexusDatabase;
+  agentId: string;
+  channel: string;
+  channelKey: string;
+  nowMs: number;
+}): void {
+  const sessionId = getOrCreateSessionId({
+    db: params.db,
+    channel: params.channel,
+    channelKey: params.channelKey,
+    agentId: params.agentId,
+    nowMs: params.nowMs,
+  });
+  params.db.db.prepare("UPDATE sessions SET is_home = 0 WHERE agent_id = ? AND is_home = 1").run(params.agentId);
+  params.db.db.prepare("UPDATE sessions SET is_home = 1 WHERE id = ?").run(sessionId);
+}
+
+export function getHomeSession(params: {
+  db: NexusDatabase;
+  agentId: string;
+}): { channel: string; channelKey: string } | null {
+  const row = params.db.db
+    .prepare("SELECT channel, channel_key FROM sessions WHERE agent_id = ? AND is_home = 1 LIMIT 1")
+    .get(params.agentId) as { channel: string; channel_key: string } | undefined;
+  if (!row) return null;
+  return { channel: row.channel, channelKey: row.channel_key };
+}
+
+export function clearHomeSession(params: {
+  db: NexusDatabase;
+  agentId: string;
+}): void {
+  params.db.db.prepare("UPDATE sessions SET is_home = 0 WHERE agent_id = ? AND is_home = 1").run(params.agentId);
+}

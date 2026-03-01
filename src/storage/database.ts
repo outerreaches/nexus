@@ -1338,6 +1338,12 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
   }
 
   try {
+    db.exec("ALTER TABLE sessions ADD COLUMN is_home INTEGER NOT NULL DEFAULT 0;");
+  } catch {
+    // already exists
+  }
+
+  try {
     const messagesCount = (
       db.prepare("SELECT COUNT(*) AS cnt FROM messages").get() as { cnt: number } | undefined
     )?.cnt ?? 0;

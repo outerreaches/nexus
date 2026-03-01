@@ -8,7 +8,7 @@ import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContentPart } from "./types.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
-import { appendMessage, getOrCreateSessionId, loadRecentHistory } from "../storage/sessions.js";
+import { appendMessage, getOrCreateSessionId, getHomeSession, loadRecentHistory } from "../storage/sessions.js";
 import { beginSessionTurnNudges, completeSessionTurnNudges } from "../storage/nudges.js";
 import { Semaphore } from "./semaphore.js";
 import { getPreset, type AgentPreset } from "./presets.js";
@@ -36,6 +36,9 @@ type HistoryScope =
   }
   | {
     mode: "latest_telegram_for_agent";
+  }
+  | {
+    mode: "home";
   };
 
 function clampPositiveInt(value: number): number {
@@ -315,6 +318,18 @@ export class AgentService {
       };
     }
 
+    // Both "home" and "latest_telegram_for_agent" check for an explicit home session first.
+    const home = getHomeSession({ db: this.deps.db, agentId: params.agentId });
+    if (home) {
+      return {
+        channel: home.channel,
+        channelKey: home.channelKey,
+        agentId: params.agentId,
+        source: "home",
+      };
+    }
+
+    // No home session set — fall back to latest telegram session.
     const latestTelegram = this.deps.db.db
       .prepare(
         `SELECT s.channel_key AS channel_key
@@ -336,7 +351,8 @@ export class AgentService {
       };
     }
 
-    return { ...fallback, source: "latest_telegram_for_agent:fallback" };
+    const fallbackSource = scope.mode === "home" ? "home:fallback" : "latest_telegram_for_agent:fallback";
+    return { ...fallback, source: fallbackSource };
   }
 
   private buildInternalEventSummary(params: {

@@ -78,8 +78,23 @@ function resolveTargetPreset(db: NexusDatabase, rows: ClaimedReport[], targetAge
   return latestPresetForAgent(db, targetAgentId);
 }
 
-function formatAgentBatchMessage(rows: ClaimedReport[]): string {
-  const lines: string[] = [
+function hasWebhookReports(rows: ClaimedReport[]): boolean {
+  return rows.some((item) => item.row.kind === "node_webhook");
+}
+
+function formatBatchPreamble(rows: ClaimedReport[]): string[] {
+  if (hasWebhookReports(rows)) {
+    return [
+      "INCOMING EVENT BATCH",
+      `report_count=${rows.length}`,
+      "",
+      "These are incoming events from connected nodes (webhooks, sensors, or external triggers).",
+      "Review each event payload and decide if action or user notification is needed.",
+      "If the events are purely informational with no action required, respond with exactly: IDLE",
+      "",
+    ];
+  }
+  return [
     "RUN REPORT BATCH",
     `report_count=${rows.length}`,
     "",
@@ -88,6 +103,10 @@ function formatAgentBatchMessage(rows: ClaimedReport[]): string {
     "Only inform the user when there is a meaningful update or action required.",
     "",
   ];
+}
+
+function formatAgentBatchMessage(rows: ClaimedReport[]): string {
+  const lines: string[] = formatBatchPreamble(rows);
 
   rows.forEach((item, index) => {
     const row = item.row;
