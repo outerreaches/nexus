@@ -343,7 +343,7 @@ export function renderDashboard(params: {
 
       <section>
         <h2>Processes (${params.processWindowMinutes}m window)</h2>
-        ${renderProcessTable(params.processes)}
+        <div class="scroll-5">${renderProcessTable(params.processes)}</div>
       </section>
 
       <section>
