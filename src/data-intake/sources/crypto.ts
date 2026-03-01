@@ -52,6 +52,11 @@ export const cryptoSource: DataSource = {
     });
     return results;
   },
+  snapshotValue: (value) => {
+    const v = value as { price?: number | null } | null;
+    if (v?.price == null) return null;
+    return { price: v.price };
+  },
   summarize: (records) => {
     // Return a simple {token: price} mapping
     const prices: Record<string, number | null> = {};

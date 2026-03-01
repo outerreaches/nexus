@@ -184,6 +184,11 @@ export const cryptoCoingeckoMultiSource: DataSource = {
 
     return results;
   },
+  snapshotValue: (value) => {
+    const v = value as { priceUsd?: number | null; change24hPercent?: number | null; marketCapUsd?: number | null; volume24hUsd?: number | null; recordType?: string } | null;
+    if (!v || v.recordType !== "PRICE") return null; // Only snapshot the PRICE record (has all fields)
+    return { price: v.priceUsd, change24h: v.change24hPercent, marketCap: v.marketCapUsd, volume: v.volume24hUsd };
+  },
   summarize: (records) => {
     // Build a summary grouped by symbol
     const summary: Record<

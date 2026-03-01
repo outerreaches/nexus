@@ -97,6 +97,11 @@ export const polymarketSource: DataSource = {
       };
     });
   },
+  snapshotValue: (value) => {
+    const v = value as { outcomePrices?: unknown[] | null; volume?: number | null; liquidity?: number | null } | null;
+    if (!v?.outcomePrices) return null;
+    return { outcomePrices: v.outcomePrices, volume: v.volume, liquidity: v.liquidity };
+  },
   summarize: (records) => {
     const sample = records.slice(0, 5).map((r) => {
       const v = r.value as { question?: string | null } | null;

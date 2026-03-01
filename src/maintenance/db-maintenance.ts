@@ -28,16 +28,16 @@ export type MaintenanceResult = {
   errors: string[];
 };
 
-const ARCHIVE_TABLES = [
-  "messages",
-  "paper_trades",
-  "data_items",
-  "data_item_events",
-  "agent_runs",
-  "jobs_archive",
-  "job_runs_archive",
-  "job_events_archive",
-] as const;
+const ARCHIVE_TABLES: readonly { table: string; retentionDays?: number }[] = [
+  { table: "messages" },
+  { table: "paper_trades" },
+  { table: "data_item_events" },         // legacy table — drain to archive then delete
+  { table: "data_snapshots", retentionDays: 30 },
+  { table: "agent_runs" },
+  { table: "jobs_archive" },
+  { table: "job_runs_archive" },
+  { table: "job_events_archive" },
+];
 const CLEANUP_TABLES = ["job_runs", "job_events"] as const;
 const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes", "federation_replay_nonces"] as const;
 const OPERATIONAL_CLEANUP_TABLES = [
@@ -52,8 +52,8 @@ const OPERATIONAL_CLEANUP_TABLES = [
 const DATE_COLUMNS: Record<string, string> = {
   messages: "created_at",
   paper_trades: "created_at",
-  data_items: "created_at",
   data_item_events: "created_at",
+  data_snapshots: "collected_at",
   agent_runs: "started_at",
   jobs_archive: "archived_at",
   job_runs_archive: "archived_at",
@@ -66,8 +66,8 @@ const DATE_COLUMNS: Record<string, string> = {
 const ID_COLUMNS: Record<string, string> = {
   messages: "id",
   paper_trades: "id",
-  data_items: "id",
   data_item_events: "id",
+  data_snapshots: "id",
   agent_runs: "run_id",
   jobs_archive: "archive_id",
   job_runs_archive: "archive_id",
@@ -108,17 +108,21 @@ export async function runMaintenance(params: {
   };
 
   // Initialize result structures
-  for (const t of ARCHIVE_TABLES) result.archive[t] = { archived: 0, errors: [] };
+  for (const t of ARCHIVE_TABLES) result.archive[t.table] = { archived: 0, errors: [] };
   for (const t of CLEANUP_TABLES) result.cleanup[t] = { deleted: 0, summaryId: null };
   for (const t of TTL_TABLES) result.ttl[t] = { deleted: 0 };
   for (const t of OPERATIONAL_CLEANUP_TABLES) result.operational[t] = { deleted: 0 };
 
   // Calculate cutoff timestamps
-  const archiveCutoffMs = nowMs - config.archiveRetentionDays * 24 * 60 * 60 * 1000;
+  const defaultArchiveCutoffMs = nowMs - config.archiveRetentionDays * 24 * 60 * 60 * 1000;
   const cleanupCutoffMs = nowMs - config.jobRunRetentionDays * 24 * 60 * 60 * 1000;
 
-  // 1. Archive tables (180-day retention by default)
-  for (const table of ARCHIVE_TABLES) {
+  // 1. Archive tables (per-table retention, default 180 days)
+  for (const entry of ARCHIVE_TABLES) {
+    const { table, retentionDays } = entry;
+    const cutoffMs = retentionDays != null
+      ? nowMs - retentionDays * 24 * 60 * 60 * 1000
+      : defaultArchiveCutoffMs;
     try {
       const archived = await archiveTable({
         db,
@@ -126,7 +130,7 @@ export async function runMaintenance(params: {
         table,
         dateColumn: DATE_COLUMNS[table]!,
         idColumn: ID_COLUMNS[table]!,
-        cutoffMs: archiveCutoffMs,
+        cutoffMs,
         nowMs,
         dryRun,
         log,
@@ -220,7 +224,7 @@ export async function runMaintenance(params: {
     const eventsDeleted = cleanupOperationalTable({
       db,
       sql: `DELETE FROM federation_events WHERE created_at < ?`,
-      args: [archiveCutoffMs],
+      args: [defaultArchiveCutoffMs],
       dryRun,
     });
     result.operational.federation_events!.deleted = eventsDeleted;
@@ -252,7 +256,7 @@ export async function runMaintenance(params: {
       sql: `DELETE FROM webhook_dlq
             WHERE replayed_at IS NOT NULL
               AND replayed_at < ?`,
-      args: [archiveCutoffMs],
+      args: [defaultArchiveCutoffMs],
       dryRun,
     });
     result.operational.webhook_dlq!.deleted = dlqDeleted;

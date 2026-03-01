@@ -156,4 +156,9 @@ export const yahooStocksSource: DataSource = {
       };
     });
   },
+  snapshotValue: (value) => {
+    const v = value as { price?: number | null; dayHigh?: number | null; dayLow?: number | null; volume?: number | null } | null;
+    if (v?.price == null) return null;
+    return { price: v.price, high: v.dayHigh, low: v.dayLow, volume: v.volume };
+  },
 };

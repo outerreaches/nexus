@@ -35,6 +35,8 @@ export type DataSource = {
   normalize: (raw: unknown, params: unknown, ctx: DataIntakeContext) => Promise<NormalizedRecord[]> | NormalizedRecord[];
   /** Generate a concise, context-relevant preview from normalized records (for ad-hoc runs) */
   summarize?: (records: NormalizedRecord[], ctx: DataIntakeContext) => unknown;
+  /** Extract compact snapshot value for historical storage. Return null to skip snapshot for this record. */
+  snapshotValue?: (value: unknown) => unknown | null;
 };
 
 export type DataRunResult = {

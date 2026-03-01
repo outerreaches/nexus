@@ -81,12 +81,14 @@ function storeRecords(
     return { stored: 0, skipped: records.length };
   }
 
-  const stmt = ctx.db.db.prepare(
-    "INSERT INTO data_items (id, source_id, source_name, tags_json, subject, value_json, metadata_json, collected_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  const upsertStmt = ctx.db.db.prepare(
+    "INSERT OR REPLACE INTO data_items (id, source_id, source_name, tags_json, subject, value_json, metadata_json, collected_at, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
-  const historyStmt = ctx.db.db.prepare(
-    "INSERT INTO data_item_events (source_id, subject, collected_at, value_json, created_at) VALUES (?, ?, ?, ?, ?)",
-  );
+  const snapshotStmt = source.snapshotValue
+    ? ctx.db.db.prepare(
+        "INSERT INTO data_snapshots (source_id, subject, value_json, collected_at, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+    : null;
 
   let stored = 0;
   let skipped = 0;
@@ -105,12 +107,12 @@ function storeRecords(
     const nowMs = ctx.nowMs();
     const collectedAt = typeof record.collectedAtMs === "number" ? record.collectedAtMs : collectedAtMs;
     const expiresAt = collectedAt + ttlMs;
-    const id = `${source.id}:${record.subject}:${collectedAt}`;
+    const id = `${source.id}:${record.subject}`;
 
     try {
       const valueJson = JSON.stringify(record.value ?? null);
       const allTags = [...(source.tags ?? []), ...(instanceTags ?? [])];
-      stmt.run(
+      upsertStmt.run(
         id,
         source.id,
         source.name,
@@ -119,7 +121,6 @@ function storeRecords(
         valueJson,
         JSON.stringify({
           ...(record.metadata ?? {}),
-          params: params ?? null,
           collectedAt,
           sourceSchemaVersion: source.schemaVersion,
         }),
@@ -127,7 +128,15 @@ function storeRecords(
         expiresAt,
         nowMs,
       );
-      historyStmt.run(source.id, record.subject, collectedAt, valueJson, nowMs);
+
+      // Write compact snapshot for historical tracking (if source supports it)
+      if (snapshotStmt && source.snapshotValue) {
+        const snap = source.snapshotValue(record.value);
+        if (snap != null) {
+          snapshotStmt.run(source.id, record.subject, JSON.stringify(snap), collectedAt, nowMs);
+        }
+      }
+
       stored += 1;
     } catch (err) {
       errors.push(`Store error (${record.subject}): ${err instanceof Error ? err.message : String(err)}`);

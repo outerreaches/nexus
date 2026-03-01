@@ -62,43 +62,32 @@ export function listLatestDataItems(params: {
   includeExpired: boolean;
   nowMs: number;
 }): DataItemRow[] {
+  // With upsert model, each (source_id, subject) has exactly one row — it IS the latest.
   const conditions: string[] = [];
   const values: unknown[] = [];
 
   if (params.sourceId) {
-    conditions.push("d.source_id = ?");
+    conditions.push("source_id = ?");
     values.push(params.sourceId);
   }
   if (params.subject) {
-    conditions.push("d.subject = ?");
+    conditions.push("subject = ?");
     values.push(params.subject);
   } else if (params.subjectLike) {
-    conditions.push("d.subject LIKE ?");
+    conditions.push("subject LIKE ?");
     values.push(params.subjectLike);
   }
   if (params.tag) {
-    conditions.push("d.tags_json LIKE ?");
+    conditions.push("tags_json LIKE ?");
     values.push(`%${params.tag}%`);
   }
   if (!params.includeExpired) {
-    conditions.push("d.expires_at > ?");
+    conditions.push("expires_at > ?");
     values.push(params.nowMs);
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const sql = `
-    SELECT d.*
-    FROM data_items d
-    INNER JOIN (
-      SELECT source_id, subject, MAX(collected_at) AS latest
-      FROM data_items
-      GROUP BY source_id, subject
-    ) agg
-    ON d.source_id = agg.source_id AND d.subject = agg.subject AND d.collected_at = agg.latest
-    ${where}
-    ORDER BY d.collected_at DESC
-    LIMIT ?
-  `;
+  const sql = `SELECT * FROM data_items ${where} ORDER BY collected_at DESC LIMIT ?`;
   const stmt = params.db.db.prepare(sql);
   return stmt.all(...values, params.limit) as DataItemRow[];
 }
@@ -119,8 +108,7 @@ export function listLatestDataItemsPerSource(params: {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  // Use a subquery to get one representative row per source_id
-  // We pick the row with the highest collected_at, and if there are ties, the smallest id (deterministic)
+  // With upsert model, pick one representative row per source_id (most recent collected_at)
   const sql = `
     SELECT d.*
     FROM data_items d
@@ -180,5 +168,59 @@ export function deleteDataItemsBySource(params: {
   sourceId: string;
 }): number {
   const res = params.db.db.prepare("DELETE FROM data_items WHERE source_id = ?").run(params.sourceId);
+  return res.changes;
+}
+
+// ─── Snapshot queries ────────────────────────────────────────────────────────
+
+export type DataSnapshotRow = {
+  id: number;
+  source_id: string;
+  subject: string;
+  value_json: string;
+  collected_at: number;
+  created_at: number;
+};
+
+export function listDataSnapshots(params: {
+  db: NexusDatabase;
+  sourceId?: string;
+  subject?: string;
+  afterMs?: number;
+  beforeMs?: number;
+  limit: number;
+}): DataSnapshotRow[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (params.sourceId) {
+    conditions.push("source_id = ?");
+    values.push(params.sourceId);
+  }
+  if (params.subject) {
+    conditions.push("subject = ?");
+    values.push(params.subject);
+  }
+  if (params.afterMs != null) {
+    conditions.push("collected_at >= ?");
+    values.push(params.afterMs);
+  }
+  if (params.beforeMs != null) {
+    conditions.push("collected_at <= ?");
+    values.push(params.beforeMs);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const sql = `SELECT * FROM data_snapshots ${where} ORDER BY collected_at DESC LIMIT ?`;
+  return params.db.db.prepare(sql).all(...values, params.limit) as DataSnapshotRow[];
+}
+
+export function pruneDataSnapshots(params: {
+  db: NexusDatabase;
+  nowMs: number;
+  maxAgeMs: number;
+}): number {
+  const cutoff = params.nowMs - params.maxAgeMs;
+  const res = params.db.db.prepare("DELETE FROM data_snapshots WHERE collected_at < ?").run(cutoff);
   return res.changes;
 }

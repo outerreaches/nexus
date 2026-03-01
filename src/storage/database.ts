@@ -472,6 +472,17 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS data_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      collected_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_data_snapshots_lookup ON data_snapshots(source_id, subject, collected_at DESC);
+
     CREATE INDEX IF NOT EXISTS idx_data_item_events_source_subject ON data_item_events(source_id, subject, collected_at DESC);
 
     CREATE INDEX IF NOT EXISTS idx_data_items_source_subject ON data_items(source_id, subject, collected_at DESC);
