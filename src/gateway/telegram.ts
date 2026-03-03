@@ -640,15 +640,9 @@ function createStreamBridge(): StreamBridge {
 
   return {
     onTextDelta: (delta) => push(delta),
-    onToolStart: (name, preview) => {
-      const label = preview
-        ? `\n[ ${name}: ${preview} ]`
-        : `\n[ ${name} ]`;
-      push(label);
-    },
-    onToolEnd: () => {
-      push("\n");
-    },
+    // Keep stream text-only for Telegram drafts; tool statuses are surfaced via typing.
+    onToolStart: () => {},
+    onToolEnd: () => {},
     iterable,
     finish: () => {
       done = true;
