@@ -1,0 +1,17 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { renderHelpText } from "./help-command-handler.js";
+
+test("renderHelpText includes terminal-only commands for terminal channel", () => {
+  const text = renderHelpText("terminal");
+  assert.match(text, /\/theme/);
+  assert.match(text, /\/exit/);
+});
+
+test("renderHelpText includes telegram commands for telegram channel", () => {
+  const text = renderHelpText("telegram");
+  assert.match(text, /\/sethome/);
+  assert.match(text, /\/act <id> <response>/);
+  assert.doesNotMatch(text, /\/theme/);
+});

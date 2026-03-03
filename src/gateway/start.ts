@@ -56,7 +56,10 @@ import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
 import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
-import { parseDurationToMs, parseStopCommandText, formatDurationMs } from "../control/stop-command.js";
+import { parseDurationToMs, formatDurationMs } from "../control/stop-command.js";
+import { parseControlCommandText } from "../control/control-command.js";
+import { executeInfoCommand } from "../control/info-command-handler.js";
+import { renderHelpText } from "../control/help-command-handler.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
@@ -1033,10 +1036,31 @@ export async function startGateway(
       return assistantText;
     };
 
-    const parsed = parseStopCommandText(params.text);
+    const parsed = parseControlCommandText(params.text);
     if (!parsed) return null;
     const actor = params.actorLabel ?? `${params.channel}:${params.channelKey}`;
-    if (parsed.kind === "stop") {
+    if (parsed.kind === "help") {
+      const helpChannel = params.channel === "telegram" ? "telegram" : "generic";
+      return persistControlTurn(renderHelpText(helpChannel));
+    }
+    if (parsed.kind === "info") {
+      const infoText = await executeInfoCommand({
+        command: parsed.info,
+        deps: {
+          db,
+          processManager,
+          agentTracker,
+          mcp,
+          listTools: () => registry.list(),
+          nowMs: () => Date.now(),
+          federationEnabled: config.federation.enabled,
+        },
+      });
+      return persistControlTurn(infoText);
+    }
+
+    const stopParsed = parsed.stop;
+    if (stopParsed.kind === "stop") {
       const result = await executeStop({
         scope: "session",
         sessionId: params.sessionId,
@@ -1049,12 +1073,12 @@ export async function startGateway(
       }));
     }
 
-    if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
+    if (stopParsed.rawCooldown && stopParsed.cooldownMs === undefined) {
       return persistControlTurn(
-        `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, 1h, or 1d.`,
+        `ERROR: invalid cooldown "${stopParsed.rawCooldown}". Use values like 30s, 5m, 1h, or 1d.`,
       );
     }
-    const cooldownMs = parsed.cooldownMs ?? defaultStopAllCooldownMs;
+    const cooldownMs = stopParsed.cooldownMs ?? defaultStopAllCooldownMs;
     const result = await executeStop({
       scope: "all",
       sessionId: null,

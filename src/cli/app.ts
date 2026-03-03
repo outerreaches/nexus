@@ -147,7 +147,18 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
       const { McpManager } = await import("../mcp/manager.js");
-      const { parseStopCommandText, formatDurationMs } = await import("../control/stop-command.js");
+      const { parseTerminalCommandText } = await import("../control/terminal-command.js");
+      const { executeInfoCommand } = await import("../control/info-command-handler.js");
+      const { renderHelpText } = await import("../control/help-command-handler.js");
+      const { formatDurationMs } = await import("../control/stop-command.js");
+      const {
+        formatThemeList,
+        getTerminalTheme,
+        loadTerminalThemePreference,
+        paintTheme,
+        resolveTerminalThemeId,
+        saveTerminalThemePreference,
+      } = await import("./terminal-theme.js");
       const { stopLocalInteractiveSessions } = await import("../tools/shell-interactive.js");
 
       await ensureConfigExists(options.config);
@@ -162,6 +173,9 @@ export async function runCli(argv: string[]): Promise<void> {
         return;
       }
       const db = await openDatabase(paths.dbPath);
+      let activeThemeId = await loadTerminalThemePreference(paths.stateDir);
+      let activeTheme = getTerminalTheme(activeThemeId);
+      const colorEnabled = Boolean(process.stdout.isTTY);
 
       const resolveApiKey = (value?: string): string | undefined => {
         if (!value) return value;
@@ -299,7 +313,7 @@ export async function runCli(argv: string[]): Promise<void> {
       };
 
       const handleControlCommand = async (text: string): Promise<string | null> => {
-        const parsed = parseStopCommandText(text);
+        const parsed = parseTerminalCommandText(text);
         if (!parsed) return null;
         const persistControlTurn = (sessionId: string, assistantText: string): string => {
           const nowMs = Date.now();
@@ -317,13 +331,59 @@ export async function runCli(argv: string[]): Promise<void> {
               nowMs: nowMs + 1,
             });
           } catch (err) {
-            log(`stop_control: failed to persist control turn: ${err instanceof Error ? err.message : String(err)}`);
+            log(`terminal_control: failed to persist control turn: ${err instanceof Error ? err.message : String(err)}`);
           }
           return assistantText;
         };
         const nowMs = Date.now();
         const localSessionId = resolveSessionId(nowMs);
-        if (parsed.kind === "stop") {
+        if (parsed.kind === "theme") {
+          const requested = parsed.theme.requestedTheme;
+          if (!requested) {
+            return persistControlTurn(localSessionId, formatThemeList(activeThemeId));
+          }
+          const resolved = resolveTerminalThemeId(requested);
+          if (!resolved) {
+            return persistControlTurn(
+              localSessionId,
+              `ERROR: unknown theme "${requested}".\n\n${formatThemeList(activeThemeId)}`,
+            );
+          }
+          activeThemeId = resolved;
+          activeTheme = getTerminalTheme(activeThemeId);
+          try {
+            await saveTerminalThemePreference(paths.stateDir, activeThemeId);
+          } catch (err) {
+            log(`terminal_theme: failed to persist preference: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return persistControlTurn(
+            localSessionId,
+            `Theme changed to ${activeThemeId}.\n\n${formatThemeList(activeThemeId)}`,
+          );
+        }
+
+        const controlParsed = parsed.control;
+        if (controlParsed.kind === "help") {
+          return persistControlTurn(localSessionId, renderHelpText("terminal"));
+        }
+        if (controlParsed.kind === "info") {
+          const infoText = await executeInfoCommand({
+            command: controlParsed.info,
+            deps: {
+              db,
+              processManager,
+              agentTracker,
+              mcp,
+              listTools: () => registry.list(),
+              nowMs: () => Date.now(),
+              federationEnabled: config.federation.enabled,
+            },
+          });
+          return persistControlTurn(localSessionId, infoText);
+        }
+
+        const stopParsed = controlParsed.stop;
+        if (stopParsed.kind === "stop") {
           const cancelledRuns = agent.cancelSessionRuns(localSessionId, "cli /stop");
           const shellStop = await stopLocalInteractiveSessions({
             stateDir: paths.stateDir,
@@ -338,10 +398,10 @@ export async function runCli(argv: string[]): Promise<void> {
           ].join("\n"));
         }
 
-        if (parsed.rawCooldown && parsed.cooldownMs === undefined) {
+        if (stopParsed.rawCooldown && stopParsed.cooldownMs === undefined) {
           return persistControlTurn(
             localSessionId,
-            `ERROR: invalid cooldown "${parsed.rawCooldown}". Use values like 30s, 5m, or 1h.`,
+            `ERROR: invalid cooldown "${stopParsed.rawCooldown}". Use values like 30s, 5m, or 1h.`,
           );
         }
         const cancelledRuns = agent.cancelAllRuns("cli /stopall");
@@ -349,7 +409,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const processStop = await stopManagedProcesses(null);
         const errors = [...shellStop.errors, ...processStop.errors];
         return persistControlTurn(localSessionId, [
-          `STOP ALL executed. Cooldown ignored in local chat mode (${formatDurationMs(parsed.cooldownMs ?? 5 * 60_000)}).`,
+          `STOP ALL executed. Cooldown ignored in local chat mode (${formatDurationMs(stopParsed.cooldownMs ?? 5 * 60_000)}).`,
           `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
           ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
         ].join("\n"));
@@ -358,7 +418,7 @@ export async function runCli(argv: string[]): Promise<void> {
       async function send(text: string): Promise<void> {
         const intercepted = await handleControlCommand(text);
         if (intercepted !== null) {
-          process.stdout.write(intercepted.trimEnd() + "\n");
+          process.stdout.write(paintTheme(activeTheme, "system", intercepted.trimEnd(), colorEnabled) + "\n");
           return;
         }
         const res = await agent.handleUserMessage({
@@ -367,7 +427,7 @@ export async function runCli(argv: string[]): Promise<void> {
           agentId: String(opts.agent ?? "main"),
           text,
         });
-        process.stdout.write(res.output.trimEnd() + "\n");
+        process.stdout.write(paintTheme(activeTheme, "assistant", res.output.trimEnd(), colorEnabled) + "\n");
       }
 
       try {
@@ -378,10 +438,18 @@ export async function runCli(argv: string[]): Promise<void> {
 
         const { createInterface } = await import("node:readline/promises");
         const rl = createInterface({ input: process.stdin, output: process.stdout });
-        process.stdout.write('Interactive chat. Type "/exit" to quit.\n');
+        process.stdout.write(
+          paintTheme(
+            activeTheme,
+            "system",
+            `Interactive chat. Type "/exit" to quit. Type "/theme" to view or change terminal themes.`,
+            colorEnabled,
+          ) + "\n",
+        );
         let running = true;
         while (running) {
-          const line = (await rl.question("> ")).trim();
+          const prompt = paintTheme(activeTheme, "prompt", "nexus> ", colorEnabled);
+          const line = (await rl.question(prompt)).trim();
           if (!line) continue;
           if (line === "/exit" || line === "/quit") {
             running = false;
@@ -599,6 +667,27 @@ export async function runCli(argv: string[]): Promise<void> {
       await applyInitTelegramConfig(options.config, onboardingValues.telegram);
 
       process.stdout.write(`OK: initialized using config ${options.config}\n`);
+    });
+
+  program
+    .command("setup")
+    .description("Run interactive instance setup wizard (green themed)")
+    .option("--root <path>", "Install root directory (default: ~/.nexus)")
+    .option("--code-dir <path>", "Code checkout path (default: <root>/code)")
+    .option("--repo-url <url>", "Git repository URL (used when code directory is missing)")
+    .option("--yes", "Accept defaults / confirmations", false)
+    .option("--non-interactive", "Run with defaults without prompts", false)
+    .option("--dry-run", "Print actions without executing shell commands", false)
+    .action(async (opts) => {
+      const { runSetupWizard } = await import("./setup-wizard.js");
+      await runSetupWizard({
+        root: opts.root,
+        codeDir: opts.codeDir,
+        repoUrl: opts.repoUrl,
+        yes: Boolean(opts.yes),
+        nonInteractive: Boolean(opts.nonInteractive),
+        dryRun: Boolean(opts.dryRun),
+      });
     });
 
   program
