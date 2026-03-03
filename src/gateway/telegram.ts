@@ -630,8 +630,8 @@ function createStreamBridge(): StreamBridge {
     onTextDelta: (delta) => push(delta),
     onToolStart: (name, preview) => {
       const label = preview
-        ? `\n\n_Running ${name}:_ \`${preview}\`\n`
-        : `\n\n_Running ${name}..._\n`;
+        ? `\n[ ${name}: ${preview} ]`
+        : `\n[ ${name} ]`;
       push(label);
     },
     onToolEnd: () => {

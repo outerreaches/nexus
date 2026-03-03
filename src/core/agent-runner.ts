@@ -34,11 +34,15 @@ function toolCallPreview(name: string, args: Record<string, unknown>): string {
       return typeof args.query === "string" ? previewString(args.query, 60) : "";
     case "spawn_agent":
       return typeof args.task === "string" ? previewString(args.task, 60) : "";
-    default:
-      for (const v of Object.values(args)) {
-        if (typeof v === "string" && v.length > 0) return previewString(v, 60);
+    default: {
+      // Build a compact "key=value" summary of top-level string/number/boolean args.
+      const parts: string[] = [];
+      for (const [k, v] of Object.entries(args)) {
+        if (typeof v === "string") parts.push(`${k}=${previewString(v, 40)}`);
+        else if (typeof v === "number" || typeof v === "boolean") parts.push(`${k}=${v}`);
       }
-      return "";
+      return parts.length > 0 ? parts.join(", ") : "";
+    }
   }
 }
 
