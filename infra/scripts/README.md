@@ -18,7 +18,7 @@ Use for:
 - routine secret management operations during steady-state operations
 
 ### `pull-deploy.sh`
-Host-side update helper that fast-forwards code from `origin/main` and recreates the running compose stack.
+Host-side update helper that syncs code to `origin/main` (including forced-history updates) and recreates the running compose stack.
 
 Use for:
 - operator-driven host updates after pulling repo changes

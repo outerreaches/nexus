@@ -71,11 +71,32 @@ export NEXUS_HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR}"
 export NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}"
 
 cd "$CODE_DIR"
-old_sha="$(git rev-parse HEAD)"
 git fetch origin main
-git merge --ff-only origin/main
+target_sha="$(git rev-parse origin/main)"
+current_branch="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$current_branch" != "main" ]; then
+  log "switching branch: ${current_branch} -> main"
+  if git show-ref --verify --quiet refs/heads/main; then
+    git switch main >/dev/null 2>&1 || git checkout main >/dev/null
+  else
+    git switch -c main --track origin/main >/dev/null 2>&1 || git checkout -b main --track origin/main >/dev/null
+  fi
+fi
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  fail "working tree has local tracked changes; commit/stash before deploy sync"
+fi
+
+old_sha="$(git rev-parse HEAD)"
+if [ "$old_sha" != "$target_sha" ] && ! git merge-base --is-ancestor "$old_sha" "$target_sha"; then
+  backup_branch="backup/pull-deploy-$(date +%Y%m%d-%H%M%S)"
+  git branch "$backup_branch" "$old_sha"
+  log "non-fast-forward update detected; backup branch created: ${backup_branch} @ ${old_sha}"
+fi
+
+git reset --hard "$target_sha" >/dev/null
 new_sha="$(git rev-parse HEAD)"
-log "updated code: ${old_sha} -> ${new_sha}"
+log "synced code to origin/main: ${old_sha} -> ${new_sha}"
 
 if git diff --name-only "$old_sha" "$new_sha" | grep -Eq '^(infra/scripts/ha-deployer\.sh|infra/systemd/ha-deployer\.service)$'; then
   if command -v systemctl >/dev/null 2>&1; then

@@ -235,7 +235,7 @@ infra/scripts/pull-deploy.sh
 
 This performs:
 
-- git fast-forward to `origin/main`
+- git sync to `origin/main` (handles forced updates)
 - HA+sidecar+TLS compose up with rebuild/recreate
 - stale container/image/cache pruning
 
