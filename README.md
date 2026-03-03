@@ -56,7 +56,7 @@ What this does:
 
 - clones/updates code under `~/.nexus/code`
 - builds the CLI
-- installs/updates a `nexus` launcher (default: `~/.local/bin/nexus`) that proxies runtime commands to the active HA container
+- installs/updates a `nexus` launcher (default: `~/.local/bin/nexus`) that proxies runtime commands to the active gateway container
 - launches `nexus setup` (interactive wizard)
 - prepares split env files and runtime config under `~/.nexus`
 - runs required first-time initialization (personalization + prompt files)
@@ -88,6 +88,7 @@ LOCAL_ENTRYPOINT="$HOME/.nexus/code/dist/index.js"
 CONTAINER_ENTRYPOINT="${NEXUS_CONTAINER_ENTRYPOINT:-/data/code/dist/index.js}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 CLI_TARGET="${NEXUS_CLI_TARGET:-active-container}"
+KNOWN_SERVICES=("nexus-primary" "nexus-standby" "nexus")
 
 print_err() { printf '[nexus-launcher] ERROR: %s\n' "$*" >&2; }
 
@@ -105,22 +106,47 @@ first_subcommand() {
 }
 
 container_id_for_service() {
+  local project="$1"
+  local service="$2"
   docker ps \
-    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
-    --filter "label=com.docker.compose.service=$1" \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$service" \
     --format '{{.ID}}' | head -n1
 }
 
-resolve_active_service() {
+resolve_active_service_for_project() {
+  local project="$1"
   local cid mode_payload service
-  for service in nexus-primary nexus-standby; do
-    cid="$(container_id_for_service "$service")"; [[ -n "$cid" ]] || continue
+  for service in "${KNOWN_SERVICES[@]}"; do
+    cid="$(container_id_for_service "$project" "$service")"; [[ -n "$cid" ]] || continue
     mode_payload="$(docker exec "$cid" sh -lc 'curl -fsS --max-time 2 http://localhost:18789/api/mode' 2>/dev/null || true)"
-    [[ "$mode_payload" == *'"mode":"active"'* ]] && { printf '%s' "$service"; return 0; }
+    [[ "$mode_payload" == *'"mode":"active"'* ]] && { printf '%s\n%s' "$project" "$service"; return 0; }
   done
-  for service in nexus-primary nexus-standby; do
-    cid="$(container_id_for_service "$service")"; [[ -n "$cid" ]] && { printf '%s' "$service"; return 0; }
+  for service in "${KNOWN_SERVICES[@]}"; do
+    cid="$(container_id_for_service "$project" "$service")"; [[ -n "$cid" ]] && { printf '%s\n%s' "$project" "$service"; return 0; }
   done
+  return 1
+}
+
+candidate_projects() {
+  local service
+  {
+    printf '%s\n' "$COMPOSE_PROJECT"
+    for service in "${KNOWN_SERVICES[@]}"; do
+      docker ps --filter "label=com.docker.compose.service=$service" --format '{{.Label "com.docker.compose.project"}}'
+    done
+  } | awk 'NF && !seen[$0]++'
+}
+
+resolve_active_target() {
+  local project result
+  while IFS= read -r project; do
+    [[ -n "$project" ]] || continue
+    result="$(resolve_active_service_for_project "$project" || true)"
+    [[ -n "$result" ]] || continue
+    printf '%s' "$result"
+    return 0
+  done < <(candidate_projects)
   return 1
 }
 
@@ -130,10 +156,12 @@ if [[ "$CLI_TARGET" == "host" ]] || [[ "$subcommand" == "setup" ]] || [[ "$subco
 fi
 
 command -v docker >/dev/null 2>&1 || { print_err "docker is required for active-container mode"; exit 1; }
-active_service="$(resolve_active_service || true)"
-[[ -n "$active_service" ]] || { print_err "no running HA gateway containers found (project=$COMPOSE_PROJECT)"; exit 1; }
-active_cid="$(container_id_for_service "$active_service")"
-[[ -n "$active_cid" ]] || { print_err "failed to resolve container id for active service '$active_service'"; exit 1; }
+target_info="$(resolve_active_target || true)"
+[[ -n "$target_info" ]] || { print_err "no running gateway containers found (services: nexus-primary, nexus-standby, nexus)"; exit 1; }
+active_project="$(printf '%s\n' "$target_info" | sed -n '1p')"
+active_service="$(printf '%s\n' "$target_info" | sed -n '2p')"
+active_cid="$(container_id_for_service "$active_project" "$active_service")"
+[[ -n "$active_cid" ]] || { print_err "failed to resolve container id for service '$active_service' (project '$active_project')"; exit 1; }
 
 if [[ -t 0 && -t 1 ]]; then
   exec docker exec -it "$active_cid" node "$CONTAINER_ENTRYPOINT" "$@"
@@ -151,7 +179,7 @@ If needed, add to PATH:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Default launcher mode is `active-container`. Use `NEXUS_CLI_TARGET=host` to force direct host execution when needed.
+Default launcher mode is `active-container`. It auto-detects HA (`nexus-primary`/`nexus-standby`) and single-instance (`nexus`) services. Use `NEXUS_CLI_TARGET=host` to force direct host execution when needed.
 
 ## Start Here: New Instance Deployment
 

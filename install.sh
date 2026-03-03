@@ -63,6 +63,7 @@ LOCAL_ENTRYPOINT="$target"
 CONTAINER_ENTRYPOINT="\${NEXUS_CONTAINER_ENTRYPOINT:-/data/code/dist/index.js}"
 COMPOSE_PROJECT="\${COMPOSE_PROJECT:-infra}"
 CLI_TARGET="\${NEXUS_CLI_TARGET:-active-container}"
+KNOWN_SERVICES=("nexus-primary" "nexus-standby" "nexus")
 
 print_err() {
   printf '[nexus-launcher] ERROR: %s\n' "\$*" >&2
@@ -95,31 +96,55 @@ first_subcommand() {
 }
 
 container_id_for_service() {
-  local service="\$1"
+  local project="\$1"
+  local service="\$2"
   docker ps \
-    --filter "label=com.docker.compose.project=\$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.project=\$project" \
     --filter "label=com.docker.compose.service=\$service" \
     --format '{{.ID}}' | head -n1
 }
 
-resolve_active_service() {
+resolve_active_service_for_project() {
+  local project="\$1"
   local cid mode_payload service
-  for service in nexus-primary nexus-standby; do
-    cid="\$(container_id_for_service "\$service")"
+  for service in "\${KNOWN_SERVICES[@]}"; do
+    cid="\$(container_id_for_service "\$project" "\$service")"
     [[ -n "\$cid" ]] || continue
     mode_payload="\$(docker exec "\$cid" sh -lc 'curl -fsS --max-time 2 http://localhost:18789/api/mode' 2>/dev/null || true)"
     if [[ "\$mode_payload" == *'"mode":"active"'* ]]; then
-      printf '%s' "\$service"
+      printf '%s\n%s' "\$project" "\$service"
       return 0
     fi
   done
-  for service in nexus-primary nexus-standby; do
-    cid="\$(container_id_for_service "\$service")"
+  for service in "\${KNOWN_SERVICES[@]}"; do
+    cid="\$(container_id_for_service "\$project" "\$service")"
     if [[ -n "\$cid" ]]; then
-      printf '%s' "\$service"
+      printf '%s\n%s' "\$project" "\$service"
       return 0
     fi
   done
+  return 1
+}
+
+candidate_projects() {
+  local service
+  {
+    printf '%s\n' "\$COMPOSE_PROJECT"
+    for service in "\${KNOWN_SERVICES[@]}"; do
+      docker ps --filter "label=com.docker.compose.service=\$service" --format '{{.Label "com.docker.compose.project"}}'
+    done
+  } | awk 'NF && !seen[\$0]++'
+}
+
+resolve_active_target() {
+  local project result
+  while IFS= read -r project; do
+    [[ -n "\$project" ]] || continue
+    result="\$(resolve_active_service_for_project "\$project" || true)"
+    [[ -n "\$result" ]] || continue
+    printf '%s' "\$result"
+    return 0
+  done < <(candidate_projects)
   return 1
 }
 
@@ -133,15 +158,17 @@ command -v docker >/dev/null 2>&1 || {
   exit 1
 }
 
-active_service="\$(resolve_active_service || true)"
-if [[ -z "\$active_service" ]]; then
-  print_err "no running HA gateway containers found for compose project '\$COMPOSE_PROJECT'"
+target_info="\$(resolve_active_target || true)"
+if [[ -z "\$target_info" ]]; then
+  print_err "no running gateway containers found (services: nexus-primary, nexus-standby, nexus)"
   exit 1
 fi
 
-active_cid="\$(container_id_for_service "\$active_service")"
+active_project="\$(printf '%s\n' "\$target_info" | sed -n '1p')"
+active_service="\$(printf '%s\n' "\$target_info" | sed -n '2p')"
+active_cid="\$(container_id_for_service "\$active_project" "\$active_service")"
 if [[ -z "\$active_cid" ]]; then
-  print_err "failed to resolve container id for active service '\$active_service'"
+  print_err "failed to resolve container id for service '\$active_service' (project '\$active_project')"
   exit 1
 fi
 
