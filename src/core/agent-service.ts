@@ -405,6 +405,12 @@ export class AgentService {
     writeSession?: { channel: string; channelKey: string; agentId?: string };
     /** Max chars for the summary injected into the read session when writeSession is set. Default 800. */
     summaryMaxChars?: number;
+    /** Called with each text content delta during LLM streaming. */
+    onTextDelta?: (delta: string) => void;
+    /** Called when a tool begins execution with a human-readable preview. */
+    onToolStart?: (name: string, preview: string) => void;
+    /** Called when a tool finishes execution. */
+    onToolEnd?: (name: string) => void;
   }): Promise<{
     runId: string | null;
     sessionId: string;
@@ -724,6 +730,9 @@ export class AgentService {
         budget,
         toolContext,
         onLog: onRunnerLog,
+        onTextDelta: params.onTextDelta,
+        onToolStart: params.onToolStart,
+        onToolEnd: params.onToolEnd,
         circuitBreaker: this.deps.circuitBreaker,
         trackCircuitBreaker,
         transientRetries: this.deps.transientRetries ?? 5,

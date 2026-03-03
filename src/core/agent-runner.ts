@@ -22,6 +22,26 @@ function previewString(value: string, limit: number): string {
   return `${value.slice(0, limit)}…(+${value.length - limit} chars)`;
 }
 
+function toolCallPreview(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case "shell_exec":
+      return typeof args.command === "string" ? previewString(args.command, 80) : "";
+    case "file_read":
+    case "file_write":
+    case "file_edit":
+      return typeof args.path === "string" ? args.path : "";
+    case "web_search":
+      return typeof args.query === "string" ? previewString(args.query, 60) : "";
+    case "spawn_agent":
+      return typeof args.task === "string" ? previewString(args.task, 60) : "";
+    default:
+      for (const v of Object.values(args)) {
+        if (typeof v === "string" && v.length > 0) return previewString(v, 60);
+      }
+      return "";
+  }
+}
+
 function redactForLog(value: unknown, depth: number = 0): unknown {
   if (depth > 6) return "[max_depth]";
   if (value === null || value === undefined) return value;
@@ -417,6 +437,12 @@ export class AgentRunner {
       budget: AgentBudget;
       toolContext: ToolContext;
       onLog?: (line: string) => void;
+      /** Called with each text content delta during LLM streaming. */
+      onTextDelta?: (delta: string) => void;
+      /** Called when a tool begins execution with a human-readable preview. */
+      onToolStart?: (name: string, preview: string) => void;
+      /** Called when a tool finishes execution. */
+      onToolEnd?: (name: string) => void;
       circuitBreaker?: LlmCircuitBreaker;
       /** Track circuit-breaker health for this run (default true). */
       trackCircuitBreaker?: boolean;
@@ -581,6 +607,7 @@ export class AgentRunner {
         const res = await this.deps.llm.completeChat({
           messages,
           tools: this.deps.tools,
+          onTextDelta: this.deps.onTextDelta,
           abortSignal: this.deps.abortSignal,
         });
         this.recordCircuitSuccess();
@@ -634,6 +661,7 @@ export class AgentRunner {
               const retry = await this.deps.llm.completeChat({
                 messages,
                 tools: this.deps.tools,
+                onTextDelta: this.deps.onTextDelta,
                 abortSignal: this.deps.abortSignal,
               });
               this.recordCircuitSuccess();
@@ -1103,6 +1131,7 @@ export class AgentRunner {
               }
               toolCallsPerName.set(batchCall.name, usedForTool + 1);
               this.deps.onLog?.(`tool_call name=${batchCall.name} id=${batchCall.id} args=${safeJson(redactForLog(args))}`);
+              this.deps.onToolStart?.(batchCall.name, toolCallPreview(batchCall.name, args));
               const promise = tool
                 .execute(args, this.deps.toolContext)
                 .catch((err) => `ERROR: ${err instanceof Error ? err.message : String(err)}`);
@@ -1111,6 +1140,9 @@ export class AgentRunner {
 
             const results = await Promise.all(executions.map((e) => e.promise));
             this.throwIfCancelled();
+            for (const entry of executions) {
+              this.deps.onToolEnd?.(entry.call.name);
+            }
             for (let idx = 0; idx < executions.length; idx++) {
               const entry = executions[idx];
               toolCallsUsed += 1;
@@ -1204,6 +1236,7 @@ export class AgentRunner {
         }
         toolCallsPerName.set(call.name, usedForTool + 1);
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
+        this.deps.onToolStart?.(call.name, toolCallPreview(call.name, args));
         let result: string;
         try {
           const hasNodeRoutingContext =
@@ -1236,6 +1269,7 @@ export class AgentRunner {
               : null;
           result = code ? `ERROR: [${code}] ${msg}` : `ERROR: ${msg}`;
         }
+        this.deps.onToolEnd?.(call.name);
 
         const abort = handleToolResult(call, args, result, i);
         if (abort) {

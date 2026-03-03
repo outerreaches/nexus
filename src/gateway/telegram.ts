@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
 import { Bot, Context, InputFile } from "grammy";
+import { stream as streamPlugin, type StreamFlavor } from "@grammyjs/stream";
 
 import type { NexusConfig } from "../state/config.js";
 import { getSecret } from "../secrets/resolve-env.js";
@@ -346,7 +347,7 @@ function collectIncomingAttachments(message: Record<string, unknown> | undefined
 }
 
 async function ingestIncomingAttachments(params: {
-  bot: Bot;
+  bot: { api: Bot["api"] };
   token: string;
   stateDir: string;
   chatId: number;
@@ -581,6 +582,71 @@ function writeTelegramUploadBlackboardEntry(params: {
   return id;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming bridge: converts push-based callbacks into an AsyncIterable<string>
+// for the @grammyjs/stream plugin's replyWithStream().
+// ---------------------------------------------------------------------------
+type StreamBridge = {
+  onTextDelta: (delta: string) => void;
+  onToolStart: (name: string, preview: string) => void;
+  onToolEnd: (name: string) => void;
+  iterable: AsyncIterable<string>;
+  finish: () => void;
+};
+
+function createStreamBridge(): StreamBridge {
+  let resolve: ((value: IteratorResult<string>) => void) | null = null;
+  const queue: string[] = [];
+  let done = false;
+
+  const push = (text: string) => {
+    if (done) return;
+    if (resolve) {
+      const r = resolve;
+      resolve = null;
+      r({ value: text, done: false });
+    } else {
+      queue.push(text);
+    }
+  };
+
+  const iterable: AsyncIterable<string> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next(): Promise<IteratorResult<string>> {
+          if (queue.length > 0) {
+            return Promise.resolve({ value: queue.shift()!, done: false });
+          }
+          if (done) {
+            return Promise.resolve({ value: undefined as unknown as string, done: true });
+          }
+          return new Promise((r) => { resolve = r; });
+        },
+      };
+    },
+  };
+
+  return {
+    onTextDelta: (delta) => push(delta),
+    onToolStart: (name, preview) => {
+      const label = preview
+        ? `\n\n_Running ${name}:_ \`${preview}\`\n`
+        : `\n\n_Running ${name}..._\n`;
+      push(label);
+    },
+    onToolEnd: () => {
+      push("\n");
+    },
+    iterable,
+    finish: () => {
+      done = true;
+      if (resolve) {
+        resolve({ value: undefined as unknown as string, done: true });
+      }
+    },
+  };
+}
+
 export async function startTelegramBot(deps: {
   config: NexusConfig;
   agent: AgentService;
@@ -609,7 +675,8 @@ export async function startTelegramBot(deps: {
     throw new Error("Telegram is enabled but no token is configured (set TELEGRAM_BOT_TOKEN).");
   }
 
-  const bot = new Bot(token);
+  const bot = new Bot<StreamFlavor<Context>>(token);
+  bot.use(streamPlugin());
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
@@ -1006,31 +1073,78 @@ export async function startTelegramBot(deps: {
       deps.log(
         `telegram: dispatch chat_id=${chatId} actor_id=${actorId} agent=${tg.agentId} chars=${dispatchText.length} media_parts=${contentParts ? contentParts.length : 0}`,
       );
-      bot.api.sendChatAction(chatId, "typing").catch(() => { });
-      const typingInterval = setInterval(() => {
-        bot.api.sendChatAction(chatId, "typing").catch(() => { });
-      }, 4_000);
-      let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
-      try {
-        res = await deps.agent.handleUserMessage({
+
+      const isPrivateChat = ctx.chat?.type === "private";
+
+      if (isPrivateChat) {
+        // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
+        const bridge = createStreamBridge();
+        const streamPromise = ctx.replyWithStream(bridge.iterable);
+
+        let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
+        try {
+          res = await deps.agent.handleUserMessage({
+            channel: "telegram",
+            channelKey: String(chatId),
+            agentId: tg.agentId,
+            text: dispatchText,
+            contentParts,
+            onTextDelta: bridge.onTextDelta,
+            onToolStart: bridge.onToolStart,
+            onToolEnd: bridge.onToolEnd,
+          });
+        } finally {
+          bridge.finish();
+        }
+
+        await streamPromise;
+
+        // Send images as follow-up messages (they can't be part of a text stream)
+        const extracted = await extractTelegramImageAttachments(res.output);
+        for (const img of extracted.imagePaths) {
+          try {
+            await sendFile(chatId, img, { caption: path.basename(img) });
+          } catch (err) {
+            deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
+            await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`);
+          }
+        }
+
+        deps.agent.ackDeployIfPending({
+          runId: res.runId,
+          sessionId: res.sessionId,
           channel: "telegram",
           channelKey: String(chatId),
           agentId: tg.agentId,
-          text: dispatchText,
-          contentParts,
         });
-      } finally {
-        clearInterval(typingInterval);
-      }
+      } else {
+        // --- Non-streaming path for groups/channels: existing behavior ---
+        bot.api.sendChatAction(chatId, "typing").catch(() => { });
+        const typingInterval = setInterval(() => {
+          bot.api.sendChatAction(chatId, "typing").catch(() => { });
+        }, 4_000);
+        let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
+        try {
+          res = await deps.agent.handleUserMessage({
+            channel: "telegram",
+            channelKey: String(chatId),
+            agentId: tg.agentId,
+            text: dispatchText,
+            contentParts,
+          });
+        } finally {
+          clearInterval(typingInterval);
+        }
 
-      await sendOutput(chatId, res.output);
-      deps.agent.ackDeployIfPending({
-        runId: res.runId,
-        sessionId: res.sessionId,
-        channel: "telegram",
-        channelKey: String(chatId),
-        agentId: tg.agentId,
-      });
+        await sendOutput(chatId, res.output);
+        deps.agent.ackDeployIfPending({
+          runId: res.runId,
+          sessionId: res.sessionId,
+          channel: "telegram",
+          channelKey: String(chatId),
+          agentId: tg.agentId,
+        });
+      }
     } catch (err) {
       deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);
       try {

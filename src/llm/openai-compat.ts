@@ -20,6 +20,8 @@ export type LLMCompleteChatParams = {
   timeoutMode?: "default" | "extended";
   allowImageFallback?: boolean;
   onActivity?: () => void;
+  /** Called with each text content delta as it arrives from the SSE stream. */
+  onTextDelta?: (delta: string) => void;
   abortSignal?: AbortSignal;
 };
 
@@ -233,6 +235,43 @@ function resolveChatCompletionStreaming(config: OpenAICompatConfig, payload: Rec
   if (typeof payload.stream === "boolean") return payload.stream;
   if (typeof config.stream === "boolean") return config.stream;
   return isFireworksBaseUrl(config.baseUrl);
+}
+
+/**
+ * Creates a stateful incremental SSE parser that extracts text content deltas
+ * from raw SSE chunk data as it arrives. Buffers partial lines across chunks.
+ */
+function createIncrementalSseTextExtractor(onDelta: (delta: string) => void): (rawChunk: string) => void {
+  let lineBuffer = "";
+  let currentData = "";
+  return (rawChunk: string): void => {
+    lineBuffer += rawChunk;
+    const lines = lineBuffer.split(/\r?\n/);
+    lineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.length === 0) {
+        const trimmed = currentData.trim();
+        currentData = "";
+        if (!trimmed || trimmed === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(trimmed);
+          const choices = Array.isArray(parsed?.choices) ? parsed.choices : [];
+          for (const choice of choices) {
+            const content = choice?.delta?.content;
+            if (typeof content === "string" && content) {
+              onDelta(content);
+            }
+          }
+        } catch { /* skip malformed */ }
+        continue;
+      }
+      if (line.startsWith(":")) continue;
+      if (line.startsWith("data:")) {
+        const payload = line.slice(5).trimStart();
+        currentData = currentData.length > 0 ? `${currentData}\n${payload}` : payload;
+      }
+    }
+  };
 }
 
 function parseSseDataEvents(rawBody: string): string[] {
@@ -643,6 +682,7 @@ async function readBodyWithInactivityTimeout(params: {
   controller: AbortController;
   inactivityMs: number;
   onActivity?: () => void;
+  onChunk?: (text: string) => void;
   onLog?: (line: string) => void;
   startMs: number;
 }): Promise<string> {
@@ -664,7 +704,9 @@ async function readBodyWithInactivityTimeout(params: {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(decoder.decode(value, { stream: true }));
+      const decoded = decoder.decode(value, { stream: true });
+      chunks.push(decoded);
+      params.onChunk?.(decoded);
       lastActivityMs = Date.now();
       if (params.onActivity && Date.now() - lastActivityCallMs > 4_000) {
         lastActivityCallMs = Date.now();
@@ -778,11 +820,15 @@ export class OpenAICompatClient implements LLMClient {
           1_000,
           envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
         );
+        const sseOnChunk = (stream && params.onTextDelta)
+          ? createIncrementalSseTextExtractor(params.onTextDelta)
+          : undefined;
         const bodyText = await readBodyWithInactivityTimeout({
           body: res.body,
           controller,
           inactivityMs: bodyInactivityMs,
           onActivity: params.onActivity,
+          onChunk: sseOnChunk,
           onLog: log,
           startMs,
         });
