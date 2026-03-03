@@ -676,7 +676,9 @@ export async function startTelegramBot(deps: {
   }
 
   const bot = new Bot<StreamFlavor<Context>>(token);
-  bot.use(streamPlugin());
+  bot.use(streamPlugin({
+    defaultDraftIdOffset: (ctx) => ctx.msg?.message_id ?? 0,
+  }));
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
