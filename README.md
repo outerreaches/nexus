@@ -56,7 +56,8 @@ What this does:
 
 - clones/updates code under `~/.nexus/code`
 - builds the CLI
-- launches `nexus setup` (green-themed interactive wizard)
+- installs/updates a `nexus` launcher (default: `~/.local/bin/nexus`)
+- launches `nexus setup` (interactive wizard)
 - prepares split env files and runtime config under `~/.nexus`
 - runs required first-time initialization (personalization + prompt files)
 - runs full secrets onboarding (provider selection + API key vaulting + config wiring)
@@ -73,7 +74,24 @@ You can also run the wizard directly from an existing checkout:
 
 ```bash
 npm run build
-node dist/index.js setup
+nexus setup
+```
+
+If `nexus` is not installed yet on an existing instance, install the launcher:
+
+```bash
+mkdir -p ~/.local/bin && cat > ~/.local/bin/nexus <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec node "$HOME/.nexus/code/dist/index.js" "$@"
+EOF
+chmod +x ~/.local/bin/nexus
+```
+
+If needed, add to PATH:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## Start Here: New Instance Deployment

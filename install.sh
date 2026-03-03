@@ -5,6 +5,7 @@ ROOT_DIR="${NEXUS_HOME:-$HOME/.nexus}"
 CODE_DIR=""
 REPO_URL="${NEXUS_REPO_URL:-}"
 BRANCH="${NEXUS_REPO_BRANCH:-main}"
+BIN_PATH="${NEXUS_BIN_PATH:-$HOME/.local/bin/nexus}"
 NON_INTERACTIVE=0
 YES=0
 DRY_RUN=0
@@ -18,6 +19,7 @@ Options:
   --branch <name>       Git branch to checkout/update (default: ${BRANCH})
   --root <path>         Nexus home directory (default: ${ROOT_DIR})
   --code-dir <path>     Code checkout directory (default: <root>/code)
+  --bin-path <path>     Install nexus launcher at this path (default: ${BIN_PATH})
   --yes                 Accept wizard defaults and confirmations
   --non-interactive     Run setup wizard without prompts
   --dry-run             Print actions without executing deployment commands
@@ -41,6 +43,35 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+install_nexus_launcher() {
+  local target="$1"
+  local launcher_dir launcher_path
+  launcher_path="$BIN_PATH"
+  launcher_dir="$(dirname "$launcher_path")"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "dry-run: would install launcher ${launcher_path} -> ${target}"
+    return
+  fi
+
+  mkdir -p "$launcher_dir"
+  cat > "$launcher_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec node "$target" "\$@"
+EOF
+  chmod +x "$launcher_path"
+  log "installed launcher: ${launcher_path}"
+
+  case ":$PATH:" in
+    *":${launcher_dir}:"*) ;;
+    *)
+      log "NOTE: ${launcher_dir} is not in PATH in this shell."
+      log "      Add it to your shell profile to run 'nexus' directly."
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo-url)
@@ -57,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --code-dir)
       CODE_DIR="$2"
+      shift 2
+      ;;
+    --bin-path)
+      BIN_PATH="$2"
       shift 2
       ;;
     --yes)
@@ -88,6 +123,9 @@ fi
 if [[ -z "$CODE_DIR" ]]; then
   CODE_DIR="${ROOT_DIR}/code"
 fi
+if [[ -z "$BIN_PATH" ]]; then
+  fail "--bin-path cannot be empty"
+fi
 
 require_cmd git
 require_cmd node
@@ -114,6 +152,9 @@ fi
 
 log "building CLI"
 npm --prefix "$CODE_DIR" run build
+
+log "installing nexus launcher"
+install_nexus_launcher "$CODE_DIR/dist/index.js"
 
 setup_args=(
   "$CODE_DIR/dist/index.js"
