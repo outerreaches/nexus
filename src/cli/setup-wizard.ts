@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -6,7 +5,9 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
+import dotenv from "dotenv";
 import JSON5 from "json5";
+import { runCommand as runCommandShared } from "./run-command.js";
 import { createSharedTui } from "./tui.js";
 
 type SetupWizardOptions = {
@@ -16,10 +17,6 @@ type SetupWizardOptions = {
   nonInteractive?: boolean;
   yes?: boolean;
   dryRun?: boolean;
-};
-
-type RunCommandOptions = {
-  interactive?: boolean;
 };
 
 type SetupPaths = {
@@ -291,39 +288,19 @@ async function runCommand(
   args: string[],
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
-  options: RunCommandOptions = {},
+  options: { interactive?: boolean } = {},
 ): Promise<void> {
-  section(title);
-  process.stdout.write(`${tui.paint("dim", "$")} ${command} ${args.join(" ")}\n`);
-  if (dryRun) {
-    ok("dry-run: command skipped");
-    return;
-  }
-  const interactive = Boolean(options.interactive);
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      env,
-      stdio: interactive ? "inherit" : ["ignore", "pipe", "pipe"],
-    });
-    if (!interactive) {
-      if (!child.stdout || !child.stderr) {
-        reject(new Error(`command failed (${command}): unable to capture output`));
-        return;
-      }
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        process.stdout.write(tui.paint("assistant", chunk));
-      });
-      child.stderr.on("data", (chunk: string) => {
-        process.stdout.write(tui.paint("error", chunk));
-      });
-    }
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`command failed (${command}), exit=${code ?? "unknown"}`));
-    });
+  await runCommandShared(title, command, args, {
+    env,
+    dryRun,
+    interactive: options.interactive,
+    callbacks: {
+      onTitle: (t) => section(t),
+      onCommand: (cmd, a) => process.stdout.write(`${tui.paint("dim", "$")} ${cmd} ${a.join(" ")}\n`),
+      onStdout: (chunk) => process.stdout.write(tui.paint("assistant", chunk)),
+      onStderr: (chunk) => process.stdout.write(tui.paint("error", chunk)),
+      onDryRun: () => ok("dry-run: command skipped"),
+    },
   });
 }
 
@@ -866,19 +843,8 @@ function ensureObject(parent: Record<string, unknown>, key: string): Record<stri
 }
 
 function readEnvLineValue(content: string, key: string): string | undefined {
-  const lines = content.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (!line.startsWith(`${key}=`)) continue;
-    let value = line.slice(key.length + 1).trim();
-    if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-      value = value.slice(1, -1);
-    } else if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-      value = value.slice(1, -1);
-    }
-    return value;
-  }
-  return undefined;
+  const parsed = dotenv.parse(content);
+  return parsed[key];
 }
 
 async function readEnvFileValue(filePath: string, key: string): Promise<string | undefined> {
@@ -1239,71 +1205,96 @@ function printSummary(state: SetupState): void {
 async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readline.Interface): Promise<void> {
   const dryRun = Boolean(opts.dryRun);
   const nonInteractive = Boolean(opts.nonInteractive || opts.yes);
+  const completedPhases: string[] = [];
 
-  section("Prepare Directories");
-  await ensureDir(state.paths.rootDir);
-  await ensureDir(state.paths.stateDir);
-  await ensureDir(state.paths.workspaceDir);
-  await ensureDir(state.paths.configRoot);
-  await ensureDir(path.join(state.paths.configRoot, "gateway"));
-  await ensureDir(path.join(state.paths.configRoot, "sidecar"));
-  await ensureDir(path.join(state.paths.configRoot, "watchdog"));
-  await ensureDir(state.paths.storeDir);
-  ok("directory layout prepared");
+  try {
+    section("Prepare Directories");
+    await ensureDir(state.paths.rootDir);
+    await ensureDir(state.paths.stateDir);
+    await ensureDir(state.paths.workspaceDir);
+    await ensureDir(state.paths.configRoot);
+    await ensureDir(path.join(state.paths.configRoot, "gateway"));
+    await ensureDir(path.join(state.paths.configRoot, "sidecar"));
+    await ensureDir(path.join(state.paths.configRoot, "watchdog"));
+    await ensureDir(state.paths.storeDir);
+    ok("directory layout prepared");
+    completedPhases.push("Prepare Directories");
 
-  section("Write Config + Env");
-  if (!dryRun) {
-    await writeSplitEnvFiles(state);
-    await writeRuntimeConfig(state);
-  }
-  ok(dryRun ? "dry-run: skipped file writes" : "config and split env files written");
-
-  section("Initialize Agent State");
-  if (dryRun) {
-    ok("dry-run: skipped initialization");
-  } else {
-    await initializeAgentState(state, nonInteractive);
-  }
-
-  section("Secrets Onboarding");
-  if (dryRun) {
-    if (state.secretOnboarding.enabled) {
-      info(
-        `dry-run: would onboard providers ${state.secretOnboarding.providers.map((provider) => provider.id).join(", ")}`,
-      );
+    section("Write Config + Env");
+    if (!dryRun) {
+      await writeSplitEnvFiles(state);
+      await writeRuntimeConfig(state);
     }
-    ok("dry-run: skipped secret onboarding");
-  } else {
-    await applySecretOnboarding(state, rl, nonInteractive);
-  }
+    ok(dryRun ? "dry-run: skipped file writes" : "config and split env files written");
+    completedPhases.push("Write Config + Env");
 
-  const env = buildScriptEnv(state);
-  const tlsScript = path.join(state.paths.codeDir, "infra", "scripts", "setup", "ha-generate-tls-cert.sh");
-  const preflightScript = path.join(state.paths.codeDir, "infra", "scripts", "setup", "ha-secrets-preflight.sh");
-  const deployScript = path.join(state.paths.codeDir, "infra", "scripts", "pull-deploy.sh");
-  const rolloutScript = path.join(state.paths.codeDir, "infra", "scripts", "ha-rollout.sh");
+    section("Initialize Agent State");
+    if (dryRun) {
+      ok("dry-run: skipped initialization");
+    } else {
+      await initializeAgentState(state, nonInteractive);
+    }
+    completedPhases.push("Initialize Agent State");
 
-  await runCommand(
-    "Generate TLS Certificate",
-    "bash",
-    [tlsScript, "--san", state.tlsSan, "--san", "localhost"],
-    env,
-    dryRun,
-  );
+    section("Secrets Onboarding");
+    if (dryRun) {
+      if (state.secretOnboarding.enabled) {
+        info(
+          `dry-run: would onboard providers ${state.secretOnboarding.providers.map((provider) => provider.id).join(", ")}`,
+        );
+      }
+      ok("dry-run: skipped secret onboarding");
+    } else {
+      await applySecretOnboarding(state, rl, nonInteractive);
+    }
+    completedPhases.push("Secrets Onboarding");
 
-  await runCommand(
-    "Secrets Preflight",
-    "bash",
-    [preflightScript, "--auto-fix", "--require-http-api-key"],
-    env,
-    dryRun,
-  );
+    const env = buildScriptEnv(state);
+    const tlsScript = path.join(state.paths.codeDir, "infra", "scripts", "setup", "ha-generate-tls-cert.sh");
+    const preflightScript = path.join(state.paths.codeDir, "infra", "scripts", "setup", "ha-secrets-preflight.sh");
+    const deployScript = path.join(state.paths.codeDir, "infra", "scripts", "pull-deploy.sh");
+    const rolloutScript = path.join(state.paths.codeDir, "infra", "scripts", "ha-rollout.sh");
 
-  await runCommand("Deploy Stack", "bash", [deployScript], env, dryRun);
-  await runCommand("HA Status", "bash", [rolloutScript, "status"], env, dryRun);
+    await runCommand(
+      "Generate TLS Certificate",
+      "bash",
+      [tlsScript, "--san", state.tlsSan, "--san", "localhost"],
+      env,
+      dryRun,
+    );
+    completedPhases.push("Generate TLS Certificate");
 
-  if (state.enableHaDeployer) {
-    await installHaDeployerService(state, env, dryRun);
+    await runCommand(
+      "Secrets Preflight",
+      "bash",
+      [preflightScript, "--auto-fix", "--require-http-api-key"],
+      env,
+      dryRun,
+    );
+    completedPhases.push("Secrets Preflight");
+
+    await runCommand("Deploy Stack", "bash", [deployScript], env, dryRun);
+    completedPhases.push("Deploy Stack");
+
+    await runCommand("HA Status", "bash", [rolloutScript, "status"], env, dryRun);
+    completedPhases.push("HA Status");
+
+    if (state.enableHaDeployer) {
+      await installHaDeployerService(state, env, dryRun);
+      completedPhases.push("Install ha-deployer Service");
+    }
+  } catch (err) {
+    process.stdout.write("\n");
+    warn(`Setup failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (completedPhases.length > 0) {
+      warn("The following phases completed before the failure:");
+      for (const phase of completedPhases) {
+        process.stdout.write(`  - ${phase}\n`);
+      }
+    }
+    warn("Partial state may have been written. Re-running setup is safe (files are upserted, not overwritten destructively).");
+    info("Fix the issue above and re-run: nexus setup");
+    throw err;
   }
 }
 

@@ -18,6 +18,8 @@ export type TerminalTheme = {
   error: string;
   dim: string;
   reset: string;
+  /** When true, panel() keeps background colors active across lines instead of resetting per-line. */
+  continuousBg?: boolean;
 };
 
 const RESET = "\x1b[0m";
@@ -68,6 +70,7 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     error: "\x1b[37;41m",
     dim: "\x1b[36;44m",
     reset: RESET,
+    continuousBg: true,
   },
   light: {
     id: "light",
@@ -79,6 +82,7 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     error: "\x1b[31;1m",
     dim: "\x1b[30;2m",
     reset: RESET,
+    continuousBg: true,
   },
 };
 

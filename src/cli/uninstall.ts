@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { runCommand as runCommandShared } from "./run-command.js";
 
 type UninstallOptions = {
   yes?: boolean;
@@ -11,39 +11,23 @@ type UninstallOptions = {
   dryRun?: boolean;
 };
 
-type RunCommandOptions = {
-  tolerateFailure?: boolean;
-};
-
 async function runCommand(
   title: string,
   command: string,
   args: string[],
   dryRun: boolean,
-  options: RunCommandOptions = {},
+  options: { tolerateFailure?: boolean } = {},
 ): Promise<void> {
-  process.stdout.write(`[uninstall] ${title}\n`);
-  process.stdout.write(`[uninstall] $ ${command} ${args.join(" ")}\n`);
-  if (dryRun) {
-    process.stdout.write("[uninstall] dry-run: command skipped\n");
-    return;
-  }
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit" });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const err = new Error(`command failed (${command}), exit=${code ?? "unknown"}`);
-      if (options.tolerateFailure) {
-        process.stdout.write(`[uninstall] warn: ${err.message}; continuing\n`);
-        resolve();
-        return;
-      }
-      reject(err);
-    });
+  await runCommandShared(title, command, args, {
+    dryRun,
+    interactive: true,
+    tolerateFailure: options.tolerateFailure,
+    callbacks: {
+      onTitle: (t) => process.stdout.write(`[uninstall] ${t}\n`),
+      onCommand: (cmd, a) => process.stdout.write(`[uninstall] $ ${cmd} ${a.join(" ")}\n`),
+      onDryRun: () => process.stdout.write("[uninstall] dry-run: command skipped\n"),
+      onWarn: (msg) => process.stdout.write(`[uninstall] warn: ${msg}; continuing\n`),
+    },
   });
 }
 

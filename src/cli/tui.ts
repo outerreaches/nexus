@@ -62,29 +62,38 @@ function clampPanelWidth(width?: number): number {
 
 function wrapLine(input: string, width: number): string[] {
   if (input.length <= width) return [input];
-  const words = input.split(/\s+/).filter(Boolean);
+
+  // Preserve leading whitespace so indented content stays indented.
+  const leadingMatch = input.match(/^(\s+)/);
+  const indent = leadingMatch ? leadingMatch[1] : "";
+  const content = indent ? input.slice(indent.length) : input;
+  const effectiveWidth = width - indent.length;
+  if (effectiveWidth <= 0) return [input.slice(0, width)];
+
+  const words = content.split(/\s+/).filter(Boolean);
   if (words.length === 0) return [input.slice(0, width)];
   const out: string[] = [];
   let current = "";
   for (const word of words) {
     const next = current ? `${current} ${word}` : word;
-    if (next.length <= width) {
+    if (next.length <= effectiveWidth) {
       current = next;
       continue;
     }
     if (current) out.push(current);
-    if (word.length <= width) {
+    if (word.length <= effectiveWidth) {
       current = word;
       continue;
     }
     // Hard-wrap extra long tokens so panels don't overflow.
-    for (let i = 0; i < word.length; i += width) {
-      out.push(word.slice(i, i + width));
+    for (let i = 0; i < word.length; i += effectiveWidth) {
+      out.push(word.slice(i, i + effectiveWidth));
     }
     current = "";
   }
   if (current) out.push(current);
-  return out.length > 0 ? out : [input.slice(0, width)];
+  if (out.length === 0) return [input.slice(0, width)];
+  return out.map((line) => `${indent}${line}`);
 }
 
 export class SharedTui {
@@ -116,6 +125,12 @@ export class SharedTui {
 
   paint(role: TuiRole, text: string): string {
     return paintTheme(this.theme, role, text, this.colorEnabled);
+  }
+
+  /** Apply role color without a trailing reset — used for continuous-bg panel rendering. */
+  private paintNoReset(role: TuiRole, text: string): string {
+    if (!this.colorEnabled) return text;
+    return `${this.theme[role]}${text}`;
   }
 
   promptString(): string {
@@ -170,6 +185,19 @@ export class SharedTui {
     }
 
     const bottom = `${bl}${h.repeat(inner)}${br}`;
+
+    // For themes with background colors (e.g. midnight), avoid resetting bg between
+    // lines so the background stays continuous across the entire panel.
+    if (this.theme.continuousBg && this.colorEnabled) {
+      const parts = [
+        this.paintNoReset(borderRole, top),
+        this.paintNoReset(titleRole, titleBar),
+        ...body.map((line) => this.paintNoReset(bodyRole, line)),
+        this.paintNoReset(borderRole, bottom),
+      ];
+      return parts.join("\n") + this.theme.reset;
+    }
+
     const rendered: string[] = [
       this.paint(borderRole, top),
       this.paint(titleRole, titleBar),

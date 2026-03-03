@@ -32,6 +32,16 @@ test("promptString omits underscore cursor marker", () => {
   assert.equal(tui.promptString(), "> ");
 });
 
+test("wrapLine preserves leading whitespace on wrapped lines", () => {
+  const tui = createSharedTui({ colorEnabled: false, useUnicode: false, width: 48 });
+  const out = tui.panel("Indent Test", [
+    "  - This indented bullet should keep its indent when wrapping across lines.",
+  ]);
+  // Panel body: "| " + content + padding + " |" — indent preserved on both lines
+  assert.match(out, /\| {3}- This indented bullet should keep its/);
+  assert.match(out, /\| {3}indent when wrapping across lines\./);
+});
+
 test("defaults to Unicode boxes when locale is not explicitly non-UTF", () => {
   const prevLang = process.env.LANG;
   const prevLcAll = process.env.LC_ALL;

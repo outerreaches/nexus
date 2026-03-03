@@ -523,9 +523,11 @@ export async function runCli(argv: string[]): Promise<void> {
 
         const { clearScreenDown, cursorTo, moveCursor } = await import("node:readline");
         const previousRawMode = process.stdin.isRaw;
+        const promptLen = 2; // visible width of "> "
 
         return await new Promise<string | null>((resolve, reject) => {
           let value = "";
+          let cursorPos = 0;
           let renderedLines = 0;
           let escaped = false;
           let inCsi = false;
@@ -552,6 +554,11 @@ export async function runCli(argv: string[]): Promise<void> {
             reject(err instanceof Error ? err : new Error(String(err)));
           };
 
+          const insertAt = (text: string) => {
+            value = value.slice(0, cursorPos) + text + value.slice(cursorPos);
+            cursorPos += text.length;
+          };
+
           const render = () => {
             const lines = value.split("\n");
             if (renderedLines > 0) {
@@ -561,6 +568,20 @@ export async function runCli(argv: string[]): Promise<void> {
             }
             process.stdout.write(lines.map((line) => `${tui.promptString()}${line}`).join("\n"));
             renderedLines = lines.length;
+
+            // Position cursor at cursorPos within the rendered lines.
+            let pos = 0;
+            for (let i = 0; i < lines.length; i++) {
+              const lineEnd = pos + lines[i].length;
+              if (cursorPos <= lineEnd || i === lines.length - 1) {
+                const col = promptLen + (cursorPos - pos);
+                const rowsBack = lines.length - 1 - i;
+                if (rowsBack > 0) moveCursor(process.stdout, 0, -rowsBack);
+                cursorTo(process.stdout, col);
+                break;
+              }
+              pos = lineEnd + 1; // +1 for the \n
+            }
           };
 
           const onData = (chunk: Buffer | string) => {
@@ -571,7 +592,14 @@ export async function runCli(argv: string[]): Promise<void> {
               for (const ch of input) {
                 if (inCsi) {
                   const code = ch.codePointAt(0) ?? 0;
-                  if (code >= 0x40 && code <= 0x7e) inCsi = false;
+                  if (code >= 0x40 && code <= 0x7e) {
+                    inCsi = false;
+                    // Arrow keys and navigation
+                    if (ch === "C" && cursorPos < value.length) { cursorPos++; dirty = true; } // right
+                    else if (ch === "D" && cursorPos > 0) { cursorPos--; dirty = true; } // left
+                    else if (ch === "H") { cursorPos = 0; dirty = true; } // home
+                    else if (ch === "F") { cursorPos = value.length; dirty = true; } // end
+                  }
                   continue;
                 }
                 if (escaped) {
@@ -581,13 +609,13 @@ export async function runCli(argv: string[]): Promise<void> {
                     continue;
                   }
                   if (ch === "\n" || ch === "\r") {
-                    value += "\n";
+                    insertAt("\n");
                     dirty = true;
                     continue;
                   }
                   const code = ch.codePointAt(0) ?? 0;
                   if (code >= 0x20 && code !== 0x7f) {
-                    value += ch;
+                    insertAt(ch);
                     dirty = true;
                   }
                   continue;
@@ -597,29 +625,60 @@ export async function runCli(argv: string[]): Promise<void> {
                   escaped = true;
                   continue;
                 }
+                // Ctrl+C — cancel
                 if (ch === "\u0003") {
                   done(null);
                   return;
                 }
+                // Ctrl+D — EOF on empty
                 if (ch === "\u0004") {
-                  if (!value) {
-                    done(null);
-                    return;
-                  }
+                  if (!value) { done(null); return; }
                   continue;
                 }
+                // Ctrl+A — home
+                if (ch === "\u0001") { cursorPos = 0; dirty = true; continue; }
+                // Ctrl+E — end
+                if (ch === "\u0005") { cursorPos = value.length; dirty = true; continue; }
+                // Ctrl+U — clear before cursor
+                if (ch === "\u0015") {
+                  value = value.slice(cursorPos);
+                  cursorPos = 0;
+                  dirty = true;
+                  continue;
+                }
+                // Ctrl+K — kill to end of current line
+                if (ch === "\u000b") {
+                  const nextNl = value.indexOf("\n", cursorPos);
+                  value = value.slice(0, cursorPos) + (nextNl >= 0 ? value.slice(nextNl) : "");
+                  dirty = true;
+                  continue;
+                }
+                // Ctrl+W — delete word backward
+                if (ch === "\u0017") {
+                  const before = value.slice(0, cursorPos);
+                  const trimmed = before.replace(/\s+$/, "");
+                  const wordStart = Math.max(0, trimmed.lastIndexOf(" ") + 1);
+                  value = value.slice(0, wordStart) + value.slice(cursorPos);
+                  cursorPos = wordStart;
+                  dirty = true;
+                  continue;
+                }
+                // Enter — submit
                 if (ch === "\r") {
                   done(value);
                   return;
                 }
+                // Literal newline (Ctrl+J or pasted \n)
                 if (ch === "\n") {
-                  value += "\n";
+                  insertAt("\n");
                   dirty = true;
                   continue;
                 }
+                // Backspace
                 if (ch === "\u007f" || ch === "\b") {
-                  if (value) {
-                    value = value.slice(0, -1);
+                  if (cursorPos > 0) {
+                    value = value.slice(0, cursorPos - 1) + value.slice(cursorPos);
+                    cursorPos--;
                     dirty = true;
                   }
                   continue;
@@ -627,7 +686,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
                 const code = ch.codePointAt(0) ?? 0;
                 if (ch === "\t" || code >= 0x20) {
-                  value += ch;
+                  insertAt(ch);
                   dirty = true;
                 }
               }
