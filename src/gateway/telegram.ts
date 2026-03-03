@@ -66,10 +66,17 @@ function resolveMessageThreadId(ctx: Context): number | undefined {
   return typeof msg.message_thread_id === "number" ? msg.message_thread_id : undefined;
 }
 
-function draftOffsetForStream(): number {
-  // Keep draft identifiers far from regular message id ranges and independent
-  // from inbound message ids to avoid client-side "deleted message" artifacts.
-  return crypto.randomInt(1_500_000_000, 2_000_000_000);
+function draftOffsetForStream(params: { messageId: number; updateId: number }): number {
+  // Telegram clients can show a transient "Deleted message" header for draft ids
+  // that are not anchored to a real chat message id. Prefer inbound message id.
+  if (Number.isSafeInteger(params.messageId) && params.messageId > 0) {
+    return params.messageId;
+  }
+  // Keep a deterministic, bounded fallback that leaves room for split drafts.
+  if (Number.isSafeInteger(params.updateId) && params.updateId > 0) {
+    return Math.floor((params.updateId % 8_000_000) * 256 + 1);
+  }
+  return 1;
 }
 
 function isGroupChat(ctx: Context): boolean {
@@ -640,9 +647,15 @@ function createStreamBridge(): StreamBridge {
 
   return {
     onTextDelta: (delta) => push(delta),
-    // Keep stream text-only for Telegram drafts; tool statuses are surfaced via typing.
-    onToolStart: () => {},
-    onToolEnd: () => {},
+    onToolStart: (name, preview) => {
+      const label = preview
+        ? `\n[ ${name}: ${preview} ]`
+        : `\n[ ${name} ]`;
+      push(label);
+    },
+    onToolEnd: () => {
+      push("\n");
+    },
     iterable,
     finish: () => {
       done = true;
@@ -1109,7 +1122,10 @@ export async function startTelegramBot(deps: {
           bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
         }, 4_000);
         const bridge = createStreamBridge();
-        const draftIdOffset = draftOffsetForStream();
+        const draftIdOffset = draftOffsetForStream({
+          messageId,
+          updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
+        });
         const streamPromise = ctx.api.streamMessage(
           chatId,
           draftIdOffset,
