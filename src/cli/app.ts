@@ -237,7 +237,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { appendMessage, getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
+      const { getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
@@ -423,39 +423,16 @@ export async function runCli(argv: string[]): Promise<void> {
       const handleControlCommand = async (text: string): Promise<string | null> => {
         const parsed = parseTerminalCommandText(text);
         if (!parsed) return null;
-        const persistControlTurn = (sessionId: string, assistantText: string): string => {
-          const nowMs = Date.now();
-          try {
-            appendMessage({
-              db,
-              sessionId,
-              message: { role: "user", content: text },
-              nowMs,
-            });
-            appendMessage({
-              db,
-              sessionId,
-              message: { role: "assistant", content: assistantText },
-              nowMs: nowMs + 1,
-            });
-          } catch (err) {
-            log(`terminal_control: failed to persist control turn: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          return assistantText;
-        };
         const nowMs = Date.now();
         const localSessionId = resolveSessionId(nowMs);
         if (parsed.kind === "theme") {
           const requested = parsed.theme.requestedTheme;
           if (!requested) {
-            return persistControlTurn(localSessionId, formatThemeList(activeThemeId));
+            return formatThemeList(activeThemeId);
           }
           const resolved = resolveTerminalThemeId(requested);
           if (!resolved) {
-            return persistControlTurn(
-              localSessionId,
-              `ERROR: unknown theme "${requested}".\n\n${formatThemeList(activeThemeId)}`,
-            );
+            return `ERROR: unknown theme "${requested}".\n\n${formatThemeList(activeThemeId)}`;
           }
           activeThemeId = resolved;
           tui.setTheme(activeThemeId);
@@ -464,15 +441,12 @@ export async function runCli(argv: string[]): Promise<void> {
           } catch (err) {
             log(`terminal_theme: failed to persist preference: ${err instanceof Error ? err.message : String(err)}`);
           }
-          return persistControlTurn(
-            localSessionId,
-            `Theme changed to ${activeThemeId}.\n\n${formatThemeList(activeThemeId)}`,
-          );
+          return `Theme changed to ${activeThemeId}.\n\n${formatThemeList(activeThemeId)}`;
         }
 
         const controlParsed = parsed.control;
         if (controlParsed.kind === "help") {
-          return persistControlTurn(localSessionId, renderHelpText("terminal"));
+          return renderHelpText("terminal");
         }
         if (controlParsed.kind === "info") {
           const infoText = await executeInfoCommand({
@@ -487,7 +461,7 @@ export async function runCli(argv: string[]): Promise<void> {
               federationEnabled: config.federation.enabled,
             },
           });
-          return persistControlTurn(localSessionId, infoText);
+          return infoText;
         }
         if (controlParsed.kind === "home") {
           const agentId = String(opts.agent ?? "main");
@@ -499,10 +473,10 @@ export async function runCli(argv: string[]): Promise<void> {
               channelKey: "local",
               nowMs,
             });
-            return persistControlTurn(localSessionId, `OK: this CLI chat is now the home session for agent ${agentId}.`);
+            return `OK: this CLI chat is now the home session for agent ${agentId}.`;
           }
           clearHomeSession({ db, agentId });
-          return persistControlTurn(localSessionId, `OK: home session cleared for agent ${agentId}.`);
+          return `OK: home session cleared for agent ${agentId}.`;
         }
 
         const stopParsed = controlParsed.stop;
@@ -514,28 +488,25 @@ export async function runCli(argv: string[]): Promise<void> {
           });
           const processStop = await stopManagedProcesses(localSessionId);
           const errors = [...shellStop.errors, ...processStop.errors];
-          return persistControlTurn(localSessionId, [
+          return [
             `STOP executed for session ${localSessionId}.`,
             `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
             ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
-          ].join("\n"));
+          ].join("\n");
         }
 
         if (stopParsed.rawCooldown && stopParsed.cooldownMs === undefined) {
-          return persistControlTurn(
-            localSessionId,
-            `ERROR: invalid cooldown "${stopParsed.rawCooldown}". Use values like 30s, 5m, or 1h.`,
-          );
+          return `ERROR: invalid cooldown "${stopParsed.rawCooldown}". Use values like 30s, 5m, or 1h.`;
         }
         const cancelledRuns = agent.cancelAllRuns("cli /stopall");
         const shellStop = await stopLocalInteractiveSessions({ stateDir: paths.stateDir });
         const processStop = await stopManagedProcesses(null);
         const errors = [...shellStop.errors, ...processStop.errors];
-        return persistControlTurn(localSessionId, [
+        return [
           `STOP ALL executed. Cooldown ignored in local chat mode (${formatDurationMs(stopParsed.cooldownMs ?? 5 * 60_000)}).`,
           `runs=${cancelledRuns} local_shell=${shellStop.closed} local_process=${processStop.stopped}`,
           ...(errors.length > 0 ? [`errors=${errors.length}`, ...errors.slice(0, 5).map((entry) => `- ${entry}`)] : []),
-        ].join("\n"));
+        ].join("\n");
       };
 
       async function send(text: string): Promise<void> {
