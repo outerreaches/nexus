@@ -164,9 +164,10 @@ export const dataIntakeQuery = defineTool({
   description:
     "Read-only query for stored data intake records. " +
     "Use 'tag' to query by the source instance label (e.g., 'Innisfil Temperature'). " +
-    "Use 'sourceId' to filter by source type. Use 'subjectLike' for partial subject matches.",
+    "Use 'sourceId' (or alias 'sourceType') to filter by source type. Use 'subjectLike' for partial subject matches.",
   parameters: z.object({
     sourceId: z.string().min(1).optional(),
+    sourceType: z.string().min(1).optional().describe("Alias of sourceId for compatibility"),
     tag: z.string().min(1).optional(),
     subject: z.string().min(1).optional().describe("Exact subject match"),
     subjectLike: z.string().min(1).optional().describe("Partial subject match using SQL LIKE (use % as wildcard)"),
@@ -177,10 +178,11 @@ export const dataIntakeQuery = defineTool({
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
     if (!db) return "ERROR: database is not available";
+    const sourceId = args.sourceId ?? args.sourceType;
     const query = args.latestOnly ? listLatestDataItems : listDataItems;
     const rows = query({
       db: db as any,
-      sourceId: args.sourceId,
+      sourceId,
       tag: args.tag,
       subject: args.subject,
       subjectLike: args.subjectLike,
