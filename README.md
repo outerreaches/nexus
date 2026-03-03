@@ -26,10 +26,30 @@ The supported deployment path is:
 
 Default install root is `~/.nexus`.
 
-Run the installer via curl:
+Run the bootstrap installer via curl:
 
 ```bash
-curl -fsSL <raw-install-url> | bash -s -- --repo-url <git-repo-url>
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | bash -s -- --channel stable
+```
+
+Release channels:
+
+```bash
+# Stable (latest GitHub release tag; falls back to main if none)
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | bash -s -- --channel stable
+
+# Main branch
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | bash -s -- --channel main
+
+# Explicit ref (tag/branch/commit)
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | bash -s -- --ref v0.1.0
+```
+
+Forward additional install args (for example non-interactive):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | \
+  bash -s -- --channel stable --non-interactive --yes
 ```
 
 What this does:
@@ -38,7 +58,16 @@ What this does:
 - builds the CLI
 - launches `nexus setup` (green-themed interactive wizard)
 - prepares split env files and runtime config under `~/.nexus`
+- runs required first-time initialization (personalization + prompt files)
+- runs full secrets onboarding (provider selection + API key vaulting + config wiring)
+- preserves existing split-env and sidecar credential values on rerun unless overwrite is explicitly confirmed
 - runs TLS generation, secrets preflight, and deploy flow
+- optionally enables `ha-deployer` autostart (`systemd` on Linux, `launchd` on macOS)
+
+Platform notes:
+
+- Linux is the primary production target (Docker + systemd)
+- macOS is supported for local/single-host workflows (Docker Desktop + launchd user agent)
 
 You can also run the wizard directly from an existing checkout:
 
@@ -51,74 +80,34 @@ node dist/index.js setup
 
 Use this for a fresh VM/host.
 
-### Option A (Recommended): Automated Provision + Deploy
-
-Run from your control machine:
+### Recommended Flow (Wizard)
 
 ```bash
-infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
-  --vm-name nexus-service-vm \
-  --hostname nexus-service-vm \
-  --memory-mb 8192 \
-  --disk-size 40G \
-  --profile service_custom \
-  --repo-url ssh://<host-user>@192.168.122.1/~/git/nexus.git \
-  --repo-branch main
+curl -fsSL https://raw.githubusercontent.com/outerreaches/nexus/main/get.sh | bash -s -- --channel stable
 ```
 
-This provisions VM resources, prepares paths, creates split env files, runs preflight, deploys HA+sidecar+TLS, and bootstraps sidecar provider wiring.
+The wizard handles clone/build, split env setup, required first-time init, TLS generation, secrets preflight, deploy, and HA status checks.
+It also supports provider onboarding for OpenRouter, Fireworks, Baseten, local, and additional common OpenAI-compatible providers, plus custom provider entries.
 
-### Option B: Manual Bootstrap on an Existing VM
+### Manual Flow from Existing Checkout
 
 ```bash
-# host paths
-sudo mkdir -p /data/{code,nexus,workspace}
-sudo mkdir -p /data/nexus-config/{gateway,sidecar,watchdog}
-sudo chown -R "$USER:$USER" /data/code /data/nexus /data/workspace /data/nexus-config
-
-# code
-cd /data
-git clone <repo-url> code
-cd /data/code
-
-# split env files
-cp .env.gateway.example /data/nexus-config/gateway/nexus.env
-cp .env.sidecar.example /data/nexus-config/sidecar/nexus.env
-cp .env.watchdog.example /data/nexus-config/watchdog/nexus.env
-chmod 600 /data/nexus-config/gateway/nexus.env /data/nexus-config/sidecar/nexus.env /data/nexus-config/watchdog/nexus.env
+mkdir -p ~/.nexus
+git clone <repo-url> ~/.nexus/code
+cd ~/.nexus/code
+npm ci
+npm run build
+node dist/index.js setup --root ~/.nexus --code-dir ~/.nexus/code --repo-url <repo-url>
 ```
 
-Set required values:
-
-- `/data/nexus-config/gateway/nexus.env`
-  - `NEXUS_HTTP_API_KEY`
-  - `NEXUS_DASHBOARD_PASSWORD`
-- `/data/nexus-config/sidecar/nexus.env`
-  - `NEXUS_CREDENTIALS_KEY`
-  - `NEXUS_SECRETCTL_PASSWORD`
-- `/data/nexus-config/watchdog/nexus.env`
-  - `NEXUS_HA_API_KEY` (must match `NEXUS_HTTP_API_KEY`)
-
-Deploy:
-
-```bash
-cd /data/code
-infra/scripts/setup/ha-secrets-preflight.sh --auto-fix --require-http-api-key
-infra/scripts/pull-deploy.sh
-```
-
-If TLS cert does not exist yet:
-
-```bash
-bash infra/scripts/setup/ha-generate-tls-cert.sh --san "$(hostname -f)" --san "$(hostname)"
-chmod 644 /data/code/infra/haproxy/certs/nexus.pem
-```
+Legacy `/data/*` layouts are still supported by infra scripts, but `~/.nexus` is the default standard for new installs.
 
 ## Post-Deploy Verification
 
 ```bash
-cd /data/code
+cd ~/.nexus/code
 infra/scripts/ha-rollout.sh status
+source ~/.nexus/config/gateway/nexus.env
 curl -s http://localhost:18789/health/traffic | jq .
 curl -s -H "Authorization: Bearer $NEXUS_HTTP_API_KEY" http://localhost:18789/api/secrets/providers | jq .
 ```
@@ -135,7 +124,7 @@ Expected:
 On the instance:
 
 ```bash
-cd /data/code
+cd ~/.nexus/code
 infra/scripts/pull-deploy.sh
 ```
 
@@ -153,6 +142,19 @@ infra/scripts/ha-rollout.sh finalize HEAD
 infra/scripts/ha-rollout.sh status
 ```
 
+## Uninstall Autostart Integration
+
+To remove only the host autostart integration for `ha-deployer` (without deleting `~/.nexus` data):
+
+```bash
+node dist/index.js uninstall --yes
+```
+
+Behavior:
+
+- Linux: disables/removes `ha-deployer` systemd unit wiring
+- macOS: unloads/removes `ha-deployer` launchd user-agent plist
+
 ## Secrets Workflow
 
 Do not keep provider credentials as plaintext app vars in env files. Store them in sidecar credential storage and reference them in `nexus.json`.
@@ -166,7 +168,7 @@ Reference format:
 Common operations:
 
 ```bash
-cd /data/code
+cd ~/.nexus/code
 infra/scripts/ha-secretctl.sh list
 infra/scripts/ha-secretctl.sh set llm.openrouter.api --note "openrouter key"
 infra/scripts/ha-secretctl.sh refs llm.openrouter.api
@@ -189,8 +191,8 @@ Containerized/runtime deploys are HA-only and should use the HA scripts above (`
 
 - Keep `/dashboard` and `/api/*` on trusted networks or behind authenticated reverse proxy.
 - Use strong values for `NEXUS_HTTP_API_KEY` and dashboard credentials.
-- Keep `/data/nexus-config/*/nexus.env` file mode at `600`.
-- Keep `/data/nexus-secrets` isolated for sidecar credential storage.
+- Keep `~/.nexus/config/*/nexus.env` file mode at `600`.
+- Keep `~/.nexus/secrets` isolated for sidecar credential storage.
 
 ## Key Docs
 
@@ -200,3 +202,4 @@ Containerized/runtime deploys are HA-only and should use the HA scripts above (`
 - HTTP auth rollout/migration: `infra/internal-doc`
 - MCP operations: `infra/internal-doc`
 - Architecture and federation details: see `src/gateway/start.ts`, `src/gateway/routes/federation.ts`, and `src/federation/*`
+- Shared CLI/setup TUI primitives: `src/cli/tui.ts` (panels, checkboxes, logo); palette definitions in `src/cli/terminal-theme.ts`

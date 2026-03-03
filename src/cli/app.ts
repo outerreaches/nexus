@@ -153,12 +153,11 @@ export async function runCli(argv: string[]): Promise<void> {
       const { formatDurationMs } = await import("../control/stop-command.js");
       const {
         formatThemeList,
-        getTerminalTheme,
         loadTerminalThemePreference,
-        paintTheme,
         resolveTerminalThemeId,
         saveTerminalThemePreference,
       } = await import("./terminal-theme.js");
+      const { createSharedTui } = await import("./tui.js");
       const { stopLocalInteractiveSessions } = await import("../tools/shell-interactive.js");
 
       await ensureConfigExists(options.config);
@@ -174,8 +173,8 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       const db = await openDatabase(paths.dbPath);
       let activeThemeId = await loadTerminalThemePreference(paths.stateDir);
-      let activeTheme = getTerminalTheme(activeThemeId);
       const colorEnabled = Boolean(process.stdout.isTTY);
+      const tui = createSharedTui({ themeId: activeThemeId, colorEnabled });
 
       const resolveApiKey = (value?: string): string | undefined => {
         if (!value) return value;
@@ -350,7 +349,7 @@ export async function runCli(argv: string[]): Promise<void> {
             );
           }
           activeThemeId = resolved;
-          activeTheme = getTerminalTheme(activeThemeId);
+          tui.setTheme(activeThemeId);
           try {
             await saveTerminalThemePreference(paths.stateDir, activeThemeId);
           } catch (err) {
@@ -418,7 +417,7 @@ export async function runCli(argv: string[]): Promise<void> {
       async function send(text: string): Promise<void> {
         const intercepted = await handleControlCommand(text);
         if (intercepted !== null) {
-          process.stdout.write(paintTheme(activeTheme, "system", intercepted.trimEnd(), colorEnabled) + "\n");
+          process.stdout.write(tui.paint("system", intercepted.trimEnd()) + "\n");
           return;
         }
         const res = await agent.handleUserMessage({
@@ -427,7 +426,7 @@ export async function runCli(argv: string[]): Promise<void> {
           agentId: String(opts.agent ?? "main"),
           text,
         });
-        process.stdout.write(paintTheme(activeTheme, "assistant", res.output.trimEnd(), colorEnabled) + "\n");
+        process.stdout.write(tui.paint("assistant", res.output.trimEnd()) + "\n");
       }
 
       try {
@@ -439,16 +438,14 @@ export async function runCli(argv: string[]): Promise<void> {
         const { createInterface } = await import("node:readline/promises");
         const rl = createInterface({ input: process.stdin, output: process.stdout });
         process.stdout.write(
-          paintTheme(
-            activeTheme,
-            "system",
+          `${tui.logoPanel(
+            "Nexus CLI",
             `Interactive chat. Type "/exit" to quit. Type "/theme" to view or change terminal themes.`,
-            colorEnabled,
-          ) + "\n",
+          )}\n`,
         );
         let running = true;
         while (running) {
-          const prompt = paintTheme(activeTheme, "prompt", "nexus> ", colorEnabled);
+          const prompt = tui.paint("prompt", "nexus> ");
           const line = (await rl.question(prompt)).trim();
           if (!line) continue;
           if (line === "/exit" || line === "/quit") {
@@ -684,6 +681,21 @@ export async function runCli(argv: string[]): Promise<void> {
         root: opts.root,
         codeDir: opts.codeDir,
         repoUrl: opts.repoUrl,
+        yes: Boolean(opts.yes),
+        nonInteractive: Boolean(opts.nonInteractive),
+        dryRun: Boolean(opts.dryRun),
+      });
+    });
+
+  program
+    .command("uninstall")
+    .description("Remove Nexus host autostart integration for ha-deployer (systemd/launchd)")
+    .option("--yes", "Proceed without confirmation prompt", false)
+    .option("--non-interactive", "Do not prompt (requires --yes)", false)
+    .option("--dry-run", "Print actions without executing shell commands", false)
+    .action(async (opts) => {
+      const { runUninstall } = await import("./uninstall.js");
+      await runUninstall({
         yes: Boolean(opts.yes),
         nonInteractive: Boolean(opts.nonInteractive),
         dryRun: Boolean(opts.dryRun),
