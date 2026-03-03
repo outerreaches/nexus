@@ -249,6 +249,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { parseTerminalCommandText } = await import("../control/terminal-command.js");
       const { executeInfoCommand } = await import("../control/info-command-handler.js");
       const { renderHelpText } = await import("../control/help-command-handler.js");
+      const { executeModelSettingsCommand } = await import("../control/model-settings-command-handler.js");
       const { formatDurationMs } = await import("../control/stop-command.js");
       const {
         formatThemeList,
@@ -345,6 +346,7 @@ export async function runCli(argv: string[]): Promise<void> {
         llm,
         llmConfig: startupRoute.primary,
         modelRouter,
+        llmToolRouting: config.llm.toolRouting,
         skillsConfig: config.skills,
         modelMode: startupRoute.mode,
         db,
@@ -689,6 +691,22 @@ export async function runCli(argv: string[]): Promise<void> {
           });
           return infoText;
         }
+        if (controlParsed.kind === "model_settings") {
+          const result = await executeModelSettingsCommand({
+            command: controlParsed.modelSettings,
+            deps: {
+              configPath: options.config,
+              config,
+              modelRouter,
+              listTools: () => registry.list(),
+              applyRuntimeConfig: (nextConfig) => {
+                toolContext.llmToolRouting = nextConfig.llm.toolRouting;
+              },
+              log,
+            },
+          });
+          return result;
+        }
         if (controlParsed.kind === "home") {
           const agentId = String(opts.agent ?? "main");
           if (controlParsed.home.kind === "sethome") {
@@ -800,6 +818,9 @@ export async function runCli(argv: string[]): Promise<void> {
           tui.panel("Quick Commands", [
             "Enter send | Alt+Enter/Ctrl+J newline",
             "/help",
+            "/provider [target] [provider]",
+            "/model [target] [model]",
+            "/presets [name]",
             "/tools [limit]",
             "/sethome | /unsethome",
             "/theme [name]",

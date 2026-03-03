@@ -42,12 +42,14 @@ export type ModelRouterConfig = {
 
 export class ModelRouter {
   private readonly providers: Record<string, OpenAICompatConfig>;
+  private routing: NexusConfig["llm"]["routing"];
 
   constructor(private readonly opts: ModelRouterConfig) {
     this.providers = {
       default: opts.defaultProvider,
       ...(opts.providers ?? {}),
     };
+    this.routing = cloneRouting(opts.routing);
   }
 
   resolve(params: {
@@ -57,10 +59,10 @@ export class ModelRouter {
     presetLlm?: AgentPreset["llm"];
   }): ResolvedModelRoute {
     const mode = params.mode ?? "default";
-    let route: LlmRouteDefinition = this.opts.routing.default;
+    let route: LlmRouteDefinition = this.routing.default;
     let source = "routing.default";
 
-    const presetRoute = params.preset ? this.opts.routing.byPreset[params.preset] : undefined;
+    const presetRoute = params.preset ? this.routing.byPreset[params.preset] : undefined;
     if (presetRoute) {
       route = presetRoute;
       source = `routing.byPreset.${params.preset}`;
@@ -71,14 +73,14 @@ export class ModelRouter {
       source = params.preset ? `preset.${params.preset}.llm` : "preset.llm";
     }
 
-    const agentRoute = this.opts.routing.byAgent[params.agentId];
+    const agentRoute = this.routing.byAgent[params.agentId];
     if (agentRoute) {
       route = agentRoute;
       source = `routing.byAgent.${params.agentId}`;
     }
 
     if (mode === "local_only") {
-      const localProvider = this.opts.routing.localProvider;
+      const localProvider = this.routing.localProvider;
       const localPrimary =
         route.primary.provider === localProvider
           ? route.primary
@@ -119,8 +121,12 @@ export class ModelRouter {
     return {
       defaultProvider: sanitizeConfig(this.providers.default),
       providers,
-      routing: JSON.parse(JSON.stringify(this.opts.routing)) as NexusConfig["llm"]["routing"],
+      routing: cloneRouting(this.routing),
     };
+  }
+
+  updateRouting(routing: NexusConfig["llm"]["routing"]): void {
+    this.routing = cloneRouting(routing);
   }
 
   private resolveTarget(target: LlmRouteTarget): { provider: string; config: OpenAICompatConfig } {
@@ -138,6 +144,10 @@ export class ModelRouter {
       },
     };
   }
+}
+
+function cloneRouting(routing: NexusConfig["llm"]["routing"]): NexusConfig["llm"]["routing"] {
+  return JSON.parse(JSON.stringify(routing)) as NexusConfig["llm"]["routing"];
 }
 
 function sanitizeConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig {

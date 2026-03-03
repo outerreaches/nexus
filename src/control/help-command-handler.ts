@@ -8,6 +8,9 @@ export function renderHelpText(channel: HelpChannel): string {
   lines.push("- /stopall [cooldown] (e.g. 30s, 5m, 1h, 1d)");
   lines.push("- /sethome");
   lines.push("- /unsethome");
+  lines.push("- /provider [target] [provider]");
+  lines.push("- /model [target] [model]");
+  lines.push("- /presets [name]");
   lines.push("- /tools [limit]");
   lines.push("- /nodes [limit]");
   lines.push("- /jobs [limit]");

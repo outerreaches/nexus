@@ -9,6 +9,9 @@ test("renderHelpText includes terminal-only commands for terminal channel", () =
   assert.match(text, /\/exit/);
   assert.match(text, /Alt\+Enter\/Ctrl\+J/);
   assert.match(text, /\/sethome/);
+  assert.match(text, /\/provider/);
+  assert.match(text, /\/model/);
+  assert.match(text, /\/presets/);
 });
 
 test("renderHelpText includes telegram commands for telegram channel", () => {

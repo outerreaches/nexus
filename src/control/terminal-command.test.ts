@@ -41,6 +41,14 @@ test("parseTerminalCommandText parses home commands", () => {
   assert.equal(parsed.control.home.kind, "unsethome");
 });
 
+test("parseTerminalCommandText parses model settings commands", () => {
+  const parsed = parseTerminalCommandText("/model gpt-4o");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "control");
+  assert.equal(parsed.control.kind, "model_settings");
+  assert.equal(parsed.control.modelSettings.kind, "model");
+});
+
 test("parseTerminalCommandText ignores non-control text", () => {
   assert.equal(parseTerminalCommandText("hello"), null);
 });

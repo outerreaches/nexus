@@ -31,6 +31,14 @@ test("parseControlCommandText parses home commands", () => {
   assert.equal(parsed.home.kind, "sethome");
 });
 
+test("parseControlCommandText parses model settings commands", () => {
+  const parsed = parseControlCommandText("/provider openrouter");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "model_settings");
+  assert.equal(parsed.modelSettings.kind, "provider");
+  assert.equal(parsed.modelSettings.action, "set");
+});
+
 test("parseControlCommandText ignores unknown commands", () => {
   assert.equal(parseControlCommandText("/theme"), null);
   assert.equal(parseControlCommandText("hello"), null);

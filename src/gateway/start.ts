@@ -60,6 +60,7 @@ import { parseDurationToMs, formatDurationMs } from "../control/stop-command.js"
 import { parseControlCommandText } from "../control/control-command.js";
 import { executeInfoCommand } from "../control/info-command-handler.js";
 import { renderHelpText } from "../control/help-command-handler.js";
+import { executeModelSettingsCommand } from "../control/model-settings-command-handler.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
@@ -86,6 +87,7 @@ type StopExecutionSummary = {
 export async function startGateway(
   params: { configPath: string; port?: number; verbose: boolean; standby?: boolean; profile?: RuntimeProfile },
 ): Promise<void> {
+  const startConfigPath = params.configPath;
   let logStream: fs.WriteStream | null = null;
   const stdoutWrite = process.stdout.write.bind(process.stdout);
   const stderrWrite = process.stderr.write.bind(process.stderr);
@@ -1026,6 +1028,22 @@ export async function startGateway(
         },
       });
       return infoText;
+    }
+    if (parsed.kind === "model_settings") {
+      const settingsText = await executeModelSettingsCommand({
+        command: parsed.modelSettings,
+        deps: {
+          configPath: startConfigPath,
+          config,
+          modelRouter,
+          listTools: () => registry.list(),
+          applyRuntimeConfig: (nextConfig) => {
+            toolContext.llmToolRouting = nextConfig.llm.toolRouting;
+          },
+          log,
+        },
+      });
+      return settingsText;
     }
     if (parsed.kind === "home") {
       if (parsed.home.kind === "sethome") {
