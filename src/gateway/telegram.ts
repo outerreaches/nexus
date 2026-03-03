@@ -60,6 +60,18 @@ function splitTelegramMessage(text: string, maxLen: number = 3900): string[] {
   return chunks.length === 0 ? [""] : chunks;
 }
 
+function resolveMessageThreadId(ctx: Context): number | undefined {
+  const msg = ctx.msg;
+  if (!msg || !msg.is_topic_message) return undefined;
+  return typeof msg.message_thread_id === "number" ? msg.message_thread_id : undefined;
+}
+
+function draftOffsetForStream(): number {
+  // Keep draft identifiers far from regular message id ranges and independent
+  // from inbound message ids to avoid client-side "deleted message" artifacts.
+  return crypto.randomInt(1_500_000_000, 2_000_000_000);
+}
+
 function isGroupChat(ctx: Context): boolean {
   const type = ctx.chat?.type;
   return type === "group" || type === "supergroup";
@@ -584,7 +596,7 @@ function writeTelegramUploadBlackboardEntry(params: {
 
 // ---------------------------------------------------------------------------
 // Streaming bridge: converts push-based callbacks into an AsyncIterable<string>
-// for the @grammyjs/stream plugin's replyWithStream().
+// for the @grammyjs/stream plugin's streamMessage API.
 // ---------------------------------------------------------------------------
 type StreamBridge = {
   onTextDelta: (delta: string) => void;
@@ -676,9 +688,8 @@ export async function startTelegramBot(deps: {
   }
 
   const bot = new Bot<StreamFlavor<Context>>(token);
-  bot.use(streamPlugin({
-    defaultDraftIdOffset: (ctx) => ctx.msg?.message_id ?? 0,
-  }));
+  // Use plugin defaults for draft-id offsets to avoid collisions with real message ids.
+  bot.use(streamPlugin());
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
@@ -722,7 +733,11 @@ export async function startTelegramBot(deps: {
     deps.log("telegram: WARN no static allowlist and pairing is disabled; no users can authenticate.");
   }
 
-  const sendFile = async (chatId: number, filePath: string, options?: { caption?: string }): Promise<void> => {
+  const sendFile = async (
+    chatId: number,
+    filePath: string,
+    options?: { caption?: string; messageThreadId?: number },
+  ): Promise<void> => {
     const absolute = path.resolve(filePath);
     const stat = await fs.stat(absolute);
     if (!stat.isFile()) throw new Error(`not a file: ${absolute}`);
@@ -734,7 +749,10 @@ export async function startTelegramBot(deps: {
     const TELEGRAM_PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif"]);
     if (TELEGRAM_PHOTO_MIME_TYPES.has(mimeType)) {
       try {
-        await bot.api.sendPhoto(chatId, new InputFile(absolute), { caption: options?.caption });
+        await bot.api.sendPhoto(chatId, new InputFile(absolute), {
+          caption: options?.caption,
+          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+        });
         return;
       } catch (err) {
         // Some valid images still fail Telegram's photo pipeline (dimension/encoding quirks).
@@ -744,10 +762,13 @@ export async function startTelegramBot(deps: {
         );
       }
     }
-    await bot.api.sendDocument(chatId, new InputFile(absolute), { caption: options?.caption });
+    await bot.api.sendDocument(chatId, new InputFile(absolute), {
+      caption: options?.caption,
+      ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+    });
   };
 
-  const sendOutput = async (chatId: number, output: string): Promise<void> => {
+  const sendOutput = async (chatId: number, output: string, options?: { messageThreadId?: number }): Promise<void> => {
     if (!output || output.trim().length === 0) {
       deps.log(`telegram: send chat_id=${chatId} skipped (empty output)`);
       return;
@@ -757,14 +778,21 @@ export async function startTelegramBot(deps: {
     deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);
     for (const chunk of chunks) {
       if (chunk.trim().length === 0) continue;
-      await bot.api.sendMessage(chatId, chunk);
+      await bot.api.sendMessage(chatId, chunk, {
+        ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+      });
     }
     for (const img of extracted.imagePaths) {
       try {
-        await sendFile(chatId, img, { caption: path.basename(img) });
+        await sendFile(chatId, img, {
+          caption: path.basename(img),
+          messageThreadId: options?.messageThreadId,
+        });
       } catch (err) {
         deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-        await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`);
+        await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+        });
       }
     }
   };
@@ -1077,13 +1105,30 @@ export async function startTelegramBot(deps: {
       );
 
       const isPrivateChat = ctx.chat?.type === "private";
+      const messageThreadId = resolveMessageThreadId(ctx);
+      const typingParams = typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : undefined;
 
       if (isPrivateChat) {
         // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
+        bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+        const typingInterval = setInterval(() => {
+          bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+        }, 4_000);
         const bridge = createStreamBridge();
-        const streamPromise = ctx.replyWithStream(bridge.iterable);
+        const draftIdOffset = draftOffsetForStream();
+        const streamPromise = ctx.api.streamMessage(
+          chatId,
+          draftIdOffset,
+          bridge.iterable,
+          typingParams,
+          typingParams,
+        );
+        deps.log(
+          `telegram: stream_start chat_id=${chatId} draft_offset=${draftIdOffset} thread_id=${typeof messageThreadId === "number" ? messageThreadId : "none"}`,
+        );
 
         let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
+        let streamErr: unknown = null;
         try {
           res = await deps.agent.handleUserMessage({
             channel: "telegram",
@@ -1097,18 +1142,28 @@ export async function startTelegramBot(deps: {
           });
         } finally {
           bridge.finish();
+          clearInterval(typingInterval);
+          await streamPromise.catch((err) => {
+            streamErr = err;
+          });
         }
-
-        await streamPromise;
+        if (streamErr) {
+          deps.log(`telegram: stream_error chat_id=${chatId} ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`);
+        }
 
         // Send images as follow-up messages (they can't be part of a text stream)
         const extracted = await extractTelegramImageAttachments(res.output);
         for (const img of extracted.imagePaths) {
           try {
-            await sendFile(chatId, img, { caption: path.basename(img) });
+            await sendFile(chatId, img, {
+              caption: path.basename(img),
+              messageThreadId,
+            });
           } catch (err) {
             deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-            await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`);
+            await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+              ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+            });
           }
         }
 
@@ -1121,9 +1176,9 @@ export async function startTelegramBot(deps: {
         });
       } else {
         // --- Non-streaming path for groups/channels: existing behavior ---
-        bot.api.sendChatAction(chatId, "typing").catch(() => { });
+        bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
         const typingInterval = setInterval(() => {
-          bot.api.sendChatAction(chatId, "typing").catch(() => { });
+          bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
         }, 4_000);
         let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
         try {
@@ -1138,7 +1193,7 @@ export async function startTelegramBot(deps: {
           clearInterval(typingInterval);
         }
 
-        await sendOutput(chatId, res.output);
+        await sendOutput(chatId, res.output, { messageThreadId });
         deps.agent.ackDeployIfPending({
           runId: res.runId,
           sessionId: res.sessionId,
