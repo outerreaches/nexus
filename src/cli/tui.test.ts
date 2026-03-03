@@ -22,7 +22,7 @@ test("panel includes title and wrapped content", () => {
 test("logoPanel includes the Nexus ASCII logo", () => {
   const tui = createSharedTui({ colorEnabled: false, width: 72 });
   const out = tui.logoPanel("Header", "Sub");
-  assert.match(out, /_   _ ________  ___ _   _ ____/);
+  assert.match(out, /███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗/);
   assert.match(out, /\| Header/);
   assert.match(out, /\| Sub/);
 });
