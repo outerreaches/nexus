@@ -18,8 +18,24 @@ type PanelOptions = {
 type SharedTuiOptions = {
   themeId?: TerminalThemeId;
   colorEnabled?: boolean;
+  useUnicode?: boolean;
   width?: number;
 };
+
+type BoxChars = {
+  tl: string; tr: string; bl: string; br: string;
+  h: string; v: string;
+};
+
+const UNICODE_BOX: BoxChars = { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" };
+const ASCII_BOX: BoxChars = { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" };
+
+const BLINK = "\x1b[5m";
+
+function detectUnicodeSupport(): boolean {
+  const lang = (process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_CTYPE ?? "").toLowerCase();
+  return lang.includes("utf");
+}
 
 const LOGO_LINES = [
   "███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
@@ -67,12 +83,15 @@ export class SharedTui {
   private theme: TerminalTheme;
   private colorEnabled: boolean;
   private panelWidth: number;
+  private box: BoxChars;
 
   constructor(options: SharedTuiOptions = {}) {
     const themeId = options.themeId ?? DEFAULT_TERMINAL_THEME;
     this.theme = getTerminalTheme(themeId);
     this.colorEnabled = options.colorEnabled ?? Boolean(process.stdout.isTTY);
     this.panelWidth = clampPanelWidth(options.width);
+    const unicode = options.useUnicode ?? detectUnicodeSupport();
+    this.box = unicode ? UNICODE_BOX : ASCII_BOX;
   }
 
   setTheme(themeId: TerminalThemeId): void {
@@ -89,6 +108,13 @@ export class SharedTui {
 
   paint(role: TuiRole, text: string): string {
     return paintTheme(this.theme, role, text, this.colorEnabled);
+  }
+
+  promptString(): string {
+    if (!this.colorEnabled) return ">_ ";
+    const gt = this.paint("prompt", ">");
+    const cursor = `${this.theme.prompt}${BLINK}_${this.theme.reset}`;
+    return `${gt}${cursor} `;
   }
 
   section(title: string): string {
@@ -118,24 +144,25 @@ export class SharedTui {
     const borderRole = options.borderRole ?? "dim";
     const titleRole = options.titleRole ?? "system";
     const bodyRole = options.bodyRole ?? "assistant";
+    const { tl, tr, bl, br, h, v } = this.box;
 
-    const top = `+${"-".repeat(inner)}+`;
+    const top = `${tl}${h.repeat(inner)}${tr}`;
     const titleText = ` ${title} `;
-    const titleBar = `|${titleText.padEnd(inner, " ")}|`;
+    const titleBar = `${v}${titleText.padEnd(inner, " ")}${v}`;
 
     const body: string[] = [];
     const lineWidth = inner - 2;
     for (const raw of lines) {
       const pieces = wrapLine(raw, lineWidth);
       for (const piece of pieces) {
-        body.push(`| ${piece.padEnd(lineWidth, " ")} |`);
+        body.push(`${v} ${piece.padEnd(lineWidth, " ")} ${v}`);
       }
     }
     if (body.length === 0) {
-      body.push(`| ${"".padEnd(lineWidth, " ")} |`);
+      body.push(`${v} ${"".padEnd(lineWidth, " ")} ${v}`);
     }
 
-    const bottom = top;
+    const bottom = `${bl}${h.repeat(inner)}${br}`;
     const rendered: string[] = [
       this.paint(borderRole, top),
       this.paint(titleRole, titleBar),

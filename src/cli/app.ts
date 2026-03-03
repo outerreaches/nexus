@@ -551,7 +551,7 @@ export async function runCli(argv: string[]): Promise<void> {
         );
         let running = true;
         while (running) {
-          const prompt = tui.paint("prompt", "nexus> ");
+          const prompt = tui.promptString();
           const line = (await rl.question(prompt)).trim();
           if (!line) continue;
           if (line === "/exit" || line === "/quit") {

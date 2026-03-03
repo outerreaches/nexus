@@ -5,7 +5,7 @@ export type TerminalThemeId =
   | "terminal-green"
   | "terminal-amber"
   | "dos-bw"
-  | "midnight-commander"
+  | "midnight"
   | "light";
 
 export type TerminalTheme = {
@@ -58,9 +58,9 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     dim: "\x1b[37;2m",
     reset: RESET,
   },
-  "midnight-commander": {
-    id: "midnight-commander",
-    label: "Midnight Commander",
+  midnight: {
+    id: "midnight",
+    label: "Midnight",
     description: "Blue-background retro file-manager style.",
     prompt: "\x1b[97;44m",
     assistant: "\x1b[37;44m",
@@ -91,10 +91,10 @@ const THEME_ALIASES: Record<string, TerminalThemeId> = {
   bw: "dos-bw",
   mono: "dos-bw",
   "dos-bw": "dos-bw",
-  midnight: "midnight-commander",
-  mc: "midnight-commander",
-  blue: "midnight-commander",
-  "midnight-commander": "midnight-commander",
+  midnight: "midnight",
+  mc: "midnight",
+  blue: "midnight",
+  "midnight-commander": "midnight",
   light: "light",
 };
 

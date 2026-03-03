@@ -10,7 +10,7 @@ test("checkbox renders checked and unchecked markers", () => {
 });
 
 test("panel includes title and wrapped content", () => {
-  const tui = createSharedTui({ colorEnabled: false, width: 48 });
+  const tui = createSharedTui({ colorEnabled: false, useUnicode: false, width: 48 });
   const out = tui.panel("Panel Title", [
     "This is a long line that should wrap within the panel width without overflowing.",
   ]);
@@ -20,7 +20,7 @@ test("panel includes title and wrapped content", () => {
 });
 
 test("logoPanel includes the Nexus ASCII logo", () => {
-  const tui = createSharedTui({ colorEnabled: false, width: 72 });
+  const tui = createSharedTui({ colorEnabled: false, useUnicode: false, width: 72 });
   const out = tui.logoPanel("Header", "Sub");
   assert.match(out, /███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗/);
   assert.match(out, /\| Header/);
