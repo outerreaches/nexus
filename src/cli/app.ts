@@ -3,7 +3,10 @@ import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
 import { startSecretSidecar } from "../secrets/sidecar.js";
-import { getSecret } from "../secrets/resolve-env.js";
+import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
+import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
+import type { NexusDatabase } from "../storage/database.js";
+import type { NexusConfig } from "../state/config.js";
 
 const RUNTIME_PROFILES = [
   "standard",
@@ -22,6 +25,91 @@ function envInt(name: string): number | null {
   const n = Number(raw);
   if (!Number.isFinite(n)) return null;
   return Math.floor(n);
+}
+
+function resolveApiKey(value?: string): string | undefined {
+  if (!value) return value;
+  const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+  if (envMatch) return getSecret(envMatch[1]) ?? undefined;
+  return value;
+}
+
+async function resolveConfigSecretValue(params: {
+  db: NexusDatabase;
+  stateDir: string;
+  value?: string;
+  fieldPath: string;
+  actorPrefix: string;
+}): Promise<string | undefined> {
+  const value = params.value;
+  if (!value) return value;
+  const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
+  if (envMatch) return getSecret(envMatch[1]) ?? undefined;
+  if (parseSecretReference(value) === null) return value;
+
+  const nowMs = Date.now();
+  try {
+    const resolved = await resolveSecretReference({
+      db: params.db,
+      stateDir: params.stateDir,
+      reference: value,
+      traceId: `${params.actorPrefix}:${params.fieldPath}:${nowMs}`,
+      actor: `${params.actorPrefix}:${params.fieldPath}`,
+      nowMs,
+    });
+    if (resolved.leaseId) {
+      revokeSecretLease({
+        db: params.db,
+        leaseId: resolved.leaseId,
+        nowMs: nowMs + 1,
+      });
+    }
+    return resolved.value;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`cli_config_secret_resolution_failed:${params.fieldPath}:${message}`);
+  }
+}
+
+async function resolveCliLlmConfigSecrets(params: {
+  db: NexusDatabase;
+  stateDir: string;
+  config: NexusConfig;
+  log: (line: string) => void;
+  actorPrefix: string;
+}): Promise<{ defaultApiKey: string | undefined; providerApiKeyByName: Map<string, string | undefined> }> {
+  await resolveEnvSecrets({
+    db: params.db,
+    stateDir: params.stateDir,
+    env: params.config.secrets.env,
+    log: params.log,
+  });
+
+  const defaultApiKey = await resolveConfigSecretValue({
+    db: params.db,
+    stateDir: params.stateDir,
+    value: params.config.llm.openaiCompat.apiKey,
+    fieldPath: "llm.openaiCompat.apiKey",
+    actorPrefix: params.actorPrefix,
+  });
+
+  const resolvedProviderApiKeys = await Promise.all(
+    Object.entries(params.config.llm.providers).map(async ([providerName, provider]) => {
+      const resolvedApiKey = await resolveConfigSecretValue({
+        db: params.db,
+        stateDir: params.stateDir,
+        value: provider.apiKey,
+        fieldPath: `llm.providers.${providerName}.apiKey`,
+        actorPrefix: params.actorPrefix,
+      });
+      return [providerName, resolvedApiKey] as const;
+    }),
+  );
+
+  return {
+    defaultApiKey,
+    providerApiKeyByName: new Map<string, string | undefined>(resolvedProviderApiKeys),
+  };
 }
 
 export async function runCli(argv: string[]): Promise<void> {
@@ -176,22 +264,23 @@ export async function runCli(argv: string[]): Promise<void> {
       const colorEnabled = Boolean(process.stdout.isTTY);
       const tui = createSharedTui({ themeId: activeThemeId, colorEnabled });
 
-      const resolveApiKey = (value?: string): string | undefined => {
-        if (!value) return value;
-        const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
-        if (envMatch) return getSecret(envMatch[1]) ?? undefined;
-        return value;
-      };
+      const { defaultApiKey, providerApiKeyByName } = await resolveCliLlmConfigSecrets({
+        db,
+        stateDir: paths.stateDir,
+        config,
+        log,
+        actorPrefix: "cli:chat:config",
+      });
       const defaultLlmConfig = {
         ...config.llm.openaiCompat,
-        apiKey: resolveApiKey(config.llm.openaiCompat.apiKey),
+        apiKey: resolveApiKey(defaultApiKey),
       };
       const llmProviderConfigs = Object.fromEntries(
         Object.entries(config.llm.providers).map(([name, provider]) => [
           name,
           {
             ...provider,
-            apiKey: resolveApiKey(provider.apiKey),
+            apiKey: resolveApiKey(providerApiKeyByName.get(name)),
           },
         ]),
       );
@@ -437,11 +526,22 @@ export async function runCli(argv: string[]): Promise<void> {
 
         const { createInterface } = await import("node:readline/promises");
         const rl = createInterface({ input: process.stdin, output: process.stdout });
-        process.stdout.write(
-          `${tui.logoPanel(
+        const intro = [
+          tui.logoPanel(
             "Nexus CLI",
-            `Interactive chat. Type "/exit" to quit. Type "/theme" to view or change terminal themes.`,
-          )}\n`,
+            "Interactive chat ready. Ask anything, or run slash commands below.",
+          ),
+          tui.panel("Quick Commands", [
+            "/help",
+            "/tools [limit]",
+            "/sethome [absolute-path]",
+            "/theme [name]",
+            "/stop | /stopall",
+            "/exit",
+          ]),
+        ].join("\n");
+        process.stdout.write(
+          `${intro}\n`,
         );
         let running = true;
         while (running) {
@@ -499,22 +599,23 @@ export async function runCli(argv: string[]): Promise<void> {
       let mcp: InstanceType<typeof McpManager> | null = null;
 
       try {
-        const resolveApiKey = (value?: string): string | undefined => {
-          if (!value) return value;
-          const envMatch = value.match(/^\$\{([A-Z0-9_]+)\}$/);
-          if (envMatch) return getSecret(envMatch[1]) ?? undefined;
-          return value;
-        };
+        const { defaultApiKey, providerApiKeyByName } = await resolveCliLlmConfigSecrets({
+          db,
+          stateDir: paths.stateDir,
+          config,
+          log,
+          actorPrefix: "cli:tool:config",
+        });
         const defaultLlmConfig = {
           ...config.llm.openaiCompat,
-          apiKey: resolveApiKey(config.llm.openaiCompat.apiKey),
+          apiKey: resolveApiKey(defaultApiKey),
         };
         const llmProviderConfigs = Object.fromEntries(
           Object.entries(config.llm.providers).map(([providerName, provider]) => [
             providerName,
             {
               ...provider,
-              apiKey: resolveApiKey(provider.apiKey),
+              apiKey: resolveApiKey(providerApiKeyByName.get(providerName)),
             },
           ]),
         );
@@ -880,5 +981,6 @@ export async function runCli(argv: string[]): Promise<void> {
       }
     });
 
-  await program.parseAsync(argv);
+  const normalizedArgv = argv.length <= 2 ? [...argv, "chat"] : argv;
+  await program.parseAsync(normalizedArgv);
 }
