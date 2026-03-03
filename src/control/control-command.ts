@@ -1,6 +1,7 @@
 import { type ParsedStopCommand, parseStopCommandText } from "./stop-command.js";
 import { type ParsedInfoCommand, parseInfoCommandText } from "./info-command.js";
 import { type ParsedHelpCommand, parseHelpCommandText } from "./help-command.js";
+import { type ParsedHomeCommand, parseHomeCommandText } from "./home-command.js";
 
 export type ParsedControlCommand =
   | {
@@ -14,6 +15,10 @@ export type ParsedControlCommand =
   | {
       kind: "info";
       info: ParsedInfoCommand;
+    }
+  | {
+      kind: "home";
+      home: ParsedHomeCommand;
     };
 
 export function parseControlCommandText(text: string): ParsedControlCommand | null {
@@ -25,6 +30,9 @@ export function parseControlCommandText(text: string): ParsedControlCommand | nu
 
   const info = parseInfoCommandText(text);
   if (info) return { kind: "info", info };
+
+  const home = parseHomeCommandText(text);
+  if (home) return { kind: "home", home };
 
   return null;
 }

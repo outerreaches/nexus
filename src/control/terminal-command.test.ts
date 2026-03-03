@@ -33,6 +33,14 @@ test("parseTerminalCommandText parses info commands", () => {
   assert.equal(parsed.control.info.topic, "tools");
 });
 
+test("parseTerminalCommandText parses home commands", () => {
+  const parsed = parseTerminalCommandText("/unsethome");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "control");
+  assert.equal(parsed.control.kind, "home");
+  assert.equal(parsed.control.home.kind, "unsethome");
+});
+
 test("parseTerminalCommandText ignores non-control text", () => {
   assert.equal(parseTerminalCommandText("hello"), null);
 });

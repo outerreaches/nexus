@@ -6,6 +6,8 @@ export function renderHelpText(channel: HelpChannel): string {
   lines.push("- /help");
   lines.push("- /stop");
   lines.push("- /stopall [cooldown] (e.g. 30s, 5m, 1h, 1d)");
+  lines.push("- /sethome");
+  lines.push("- /unsethome");
   lines.push("- /tools [limit]");
   lines.push("- /nodes [limit]");
   lines.push("- /jobs [limit]");
@@ -23,8 +25,6 @@ export function renderHelpText(channel: HelpChannel): string {
   } else if (channel === "telegram") {
     lines.push("");
     lines.push("Telegram-specific:");
-    lines.push("- /sethome");
-    lines.push("- /unsethome");
     lines.push("- /act <id> <response>");
     lines.push("- /pair (when pairing is required)");
   }

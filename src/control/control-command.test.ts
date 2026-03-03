@@ -24,6 +24,13 @@ test("parseControlCommandText parses info commands", () => {
   assert.equal(parsed.info.topic, "federation");
 });
 
+test("parseControlCommandText parses home commands", () => {
+  const parsed = parseControlCommandText("/sethome");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "home");
+  assert.equal(parsed.home.kind, "sethome");
+});
+
 test("parseControlCommandText ignores unknown commands", () => {
   assert.equal(parseControlCommandText("/theme"), null);
   assert.equal(parseControlCommandText("hello"), null);

@@ -55,7 +55,7 @@ import { createFederationTransportRouter } from "../federation/transport.js";
 import { createNodeWsDispatcher } from "../federation/node-dispatcher.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
-import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
+import { appendMessage, clearHomeSession, getOrCreateSessionId, setHomeSession } from "../storage/sessions.js";
 import { parseDurationToMs, formatDurationMs } from "../control/stop-command.js";
 import { parseControlCommandText } from "../control/control-command.js";
 import { executeInfoCommand } from "../control/info-command-handler.js";
@@ -1057,6 +1057,23 @@ export async function startGateway(
         },
       });
       return persistControlTurn(infoText);
+    }
+    if (parsed.kind === "home") {
+      if (parsed.home.kind === "sethome") {
+        setHomeSession({
+          db,
+          agentId: params.agentId,
+          channel: params.channel,
+          channelKey: params.channelKey,
+          nowMs: Date.now(),
+        });
+        return persistControlTurn("OK: this session is now the home session for background events.");
+      }
+      clearHomeSession({
+        db,
+        agentId: params.agentId,
+      });
+      return persistControlTurn("OK: home session cleared. Background events will use the latest eligible session.");
     }
 
     const stopParsed = parsed.stop;

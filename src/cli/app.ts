@@ -226,7 +226,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { appendMessage, getOrCreateSessionId } = await import("../storage/sessions.js");
+      const { appendMessage, getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
@@ -469,6 +469,21 @@ export async function runCli(argv: string[]): Promise<void> {
           });
           return persistControlTurn(localSessionId, infoText);
         }
+        if (controlParsed.kind === "home") {
+          const agentId = String(opts.agent ?? "main");
+          if (controlParsed.home.kind === "sethome") {
+            setHomeSession({
+              db,
+              agentId,
+              channel: "cli",
+              channelKey: "local",
+              nowMs,
+            });
+            return persistControlTurn(localSessionId, `OK: this CLI chat is now the home session for agent ${agentId}.`);
+          }
+          clearHomeSession({ db, agentId });
+          return persistControlTurn(localSessionId, `OK: home session cleared for agent ${agentId}.`);
+        }
 
         const stopParsed = controlParsed.stop;
         if (stopParsed.kind === "stop") {
@@ -534,7 +549,7 @@ export async function runCli(argv: string[]): Promise<void> {
           tui.panel("Quick Commands", [
             "/help",
             "/tools [limit]",
-            "/sethome [absolute-path]",
+            "/sethome | /unsethome",
             "/theme [name]",
             "/stop | /stopall",
             "/exit",
