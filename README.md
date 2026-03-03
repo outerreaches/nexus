@@ -56,7 +56,7 @@ What this does:
 
 - clones/updates code under `~/.nexus/code`
 - builds the CLI
-- installs/updates a `nexus` launcher (default: `~/.local/bin/nexus`)
+- installs/updates a `nexus` launcher (default: `~/.local/bin/nexus`) that proxies runtime commands to the active HA container
 - launches `nexus setup` (interactive wizard)
 - prepares split env files and runtime config under `~/.nexus`
 - runs required first-time initialization (personalization + prompt files)
@@ -83,16 +83,75 @@ If `nexus` is not installed yet on an existing instance, install the launcher:
 mkdir -p ~/.local/bin && cat > ~/.local/bin/nexus <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-exec node "$HOME/.nexus/code/dist/index.js" "$@"
+
+LOCAL_ENTRYPOINT="$HOME/.nexus/code/dist/index.js"
+CONTAINER_ENTRYPOINT="${NEXUS_CONTAINER_ENTRYPOINT:-/data/code/dist/index.js}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
+CLI_TARGET="${NEXUS_CLI_TARGET:-active-container}"
+
+print_err() { printf '[nexus-launcher] ERROR: %s\n' "$*" >&2; }
+
+first_subcommand() {
+  local expect_config=0 arg
+  for arg in "$@"; do
+    if [[ "$expect_config" -eq 1 ]]; then expect_config=0; continue; fi
+    case "$arg" in
+      --config) expect_config=1 ;;
+      --config=*|--verbose|-v|--help|-h|--*|-*) ;;
+      *) printf '%s' "$arg"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+container_id_for_service() {
+  docker ps \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=$1" \
+    --format '{{.ID}}' | head -n1
+}
+
+resolve_active_service() {
+  local cid mode_payload service
+  for service in nexus-primary nexus-standby; do
+    cid="$(container_id_for_service "$service")"; [[ -n "$cid" ]] || continue
+    mode_payload="$(docker exec "$cid" sh -lc 'curl -fsS --max-time 2 http://localhost:18789/api/mode' 2>/dev/null || true)"
+    [[ "$mode_payload" == *'"mode":"active"'* ]] && { printf '%s' "$service"; return 0; }
+  done
+  for service in nexus-primary nexus-standby; do
+    cid="$(container_id_for_service "$service")"; [[ -n "$cid" ]] && { printf '%s' "$service"; return 0; }
+  done
+  return 1
+}
+
+subcommand="$(first_subcommand "$@" || true)"
+if [[ "$CLI_TARGET" == "host" ]] || [[ "$subcommand" == "setup" ]] || [[ "$subcommand" == "uninstall" ]]; then
+  exec node "$LOCAL_ENTRYPOINT" "$@"
+fi
+
+command -v docker >/dev/null 2>&1 || { print_err "docker is required for active-container mode"; exit 1; }
+active_service="$(resolve_active_service || true)"
+[[ -n "$active_service" ]] || { print_err "no running HA gateway containers found (project=$COMPOSE_PROJECT)"; exit 1; }
+active_cid="$(container_id_for_service "$active_service")"
+[[ -n "$active_cid" ]] || { print_err "failed to resolve container id for active service '$active_service'"; exit 1; }
+
+if [[ -t 0 && -t 1 ]]; then
+  exec docker exec -it "$active_cid" node "$CONTAINER_ENTRYPOINT" "$@"
+fi
+exec docker exec -i "$active_cid" node "$CONTAINER_ENTRYPOINT" "$@"
 EOF
 chmod +x ~/.local/bin/nexus
 ```
+
+For legacy `/data/*` layouts, set `LOCAL_ENTRYPOINT="/data/code/dist/index.js"` in the launcher.
 
 If needed, add to PATH:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+Default launcher mode is `active-container`. Use `NEXUS_CLI_TARGET=host` to force direct host execution when needed.
 
 ## Start Here: New Instance Deployment
 

@@ -58,7 +58,97 @@ install_nexus_launcher() {
   cat > "$launcher_path" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec node "$target" "\$@"
+
+LOCAL_ENTRYPOINT="$target"
+CONTAINER_ENTRYPOINT="\${NEXUS_CONTAINER_ENTRYPOINT:-/data/code/dist/index.js}"
+COMPOSE_PROJECT="\${COMPOSE_PROJECT:-infra}"
+CLI_TARGET="\${NEXUS_CLI_TARGET:-active-container}"
+
+print_err() {
+  printf '[nexus-launcher] ERROR: %s\n' "\$*" >&2
+}
+
+first_subcommand() {
+  local expect_config=0 arg
+  for arg in "\$@"; do
+    if [[ "\$expect_config" -eq 1 ]]; then
+      expect_config=0
+      continue
+    fi
+    case "\$arg" in
+      --config)
+        expect_config=1
+        ;;
+      --config=*|--verbose|-v|--help|-h)
+        ;;
+      --*)
+        ;;
+      -*)
+        ;;
+      *)
+        printf '%s' "\$arg"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+container_id_for_service() {
+  local service="\$1"
+  docker ps \
+    --filter "label=com.docker.compose.project=\$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=\$service" \
+    --format '{{.ID}}' | head -n1
+}
+
+resolve_active_service() {
+  local cid mode_payload service
+  for service in nexus-primary nexus-standby; do
+    cid="\$(container_id_for_service "\$service")"
+    [[ -n "\$cid" ]] || continue
+    mode_payload="\$(docker exec "\$cid" sh -lc 'curl -fsS --max-time 2 http://localhost:18789/api/mode' 2>/dev/null || true)"
+    if [[ "\$mode_payload" == *'"mode":"active"'* ]]; then
+      printf '%s' "\$service"
+      return 0
+    fi
+  done
+  for service in nexus-primary nexus-standby; do
+    cid="\$(container_id_for_service "\$service")"
+    if [[ -n "\$cid" ]]; then
+      printf '%s' "\$service"
+      return 0
+    fi
+  done
+  return 1
+}
+
+subcommand="\$(first_subcommand "\$@" || true)"
+if [[ "\$CLI_TARGET" == "host" ]] || [[ "\$subcommand" == "setup" ]] || [[ "\$subcommand" == "uninstall" ]]; then
+  exec node "\$LOCAL_ENTRYPOINT" "\$@"
+fi
+
+command -v docker >/dev/null 2>&1 || {
+  print_err "docker is required for active-container mode; set NEXUS_CLI_TARGET=host to bypass"
+  exit 1
+}
+
+active_service="\$(resolve_active_service || true)"
+if [[ -z "\$active_service" ]]; then
+  print_err "no running HA gateway containers found for compose project '\$COMPOSE_PROJECT'"
+  exit 1
+fi
+
+active_cid="\$(container_id_for_service "\$active_service")"
+if [[ -z "\$active_cid" ]]; then
+  print_err "failed to resolve container id for active service '\$active_service'"
+  exit 1
+fi
+
+if [[ -t 0 && -t 1 ]]; then
+  exec docker exec -it "\$active_cid" node "\$CONTAINER_ENTRYPOINT" "\$@"
+fi
+exec docker exec -i "\$active_cid" node "\$CONTAINER_ENTRYPOINT" "\$@"
 EOF
   chmod +x "$launcher_path"
   log "installed launcher: ${launcher_path}"
