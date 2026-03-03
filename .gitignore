@@ -10,3 +10,18 @@ nexus-data/
 infra/haproxy/certs/*.pem
 infra/haproxy/certs/*.crt
 infra/haproxy/certs/*.key
+
+# Local-only docs/plans/assets (kept on workstation, not versioned)
+internal-doc
+internal-doc
+internal-doc
+internal-doc
+internal-doc
+internal-doc
+internal-doc
+internal-doc
+internal-asset
+internal-asset
+internal-asset
+internal-asset
+internal-asset

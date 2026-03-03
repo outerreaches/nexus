@@ -174,5 +174,4 @@ Containerized/runtime deploys are HA-only and should use the HA scripts above (`
 - Secrets operations: `infra/internal-doc`
 - HTTP auth rollout/migration: `infra/internal-doc`
 - MCP operations: `infra/internal-doc`
-- Architecture overview: `internal-doc`
-- Federation plan/tracking: `internal-doc`
+- Architecture and federation details: see `src/gateway/start.ts`, `src/gateway/routes/federation.ts`, and `src/federation/*`
