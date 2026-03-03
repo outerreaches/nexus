@@ -30,11 +30,19 @@ type BoxChars = {
 const UNICODE_BOX: BoxChars = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" };
 const ASCII_BOX: BoxChars = { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" };
 
-const BLINK = "\x1b[5m";
-
 function detectUnicodeSupport(): boolean {
-  const lang = (process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_CTYPE ?? "").toLowerCase();
-  return lang.includes("utf");
+  const override = (process.env.NEXUS_TUI_UNICODE ?? "").trim().toLowerCase();
+  if (override === "1" || override === "true" || override === "yes") return true;
+  if (override === "0" || override === "false" || override === "no") return false;
+
+  const term = (process.env.TERM ?? "").trim().toLowerCase();
+  if (term === "dumb") return false;
+
+  const locale = (process.env.LC_ALL ?? process.env.LC_CTYPE ?? process.env.LANG ?? "").trim().toLowerCase();
+  if (!locale) return true;
+  if (locale === "c" || locale === "posix") return false;
+  if (locale.includes("utf")) return true;
+  return true;
 }
 
 const LOGO_LINES = [
@@ -111,10 +119,9 @@ export class SharedTui {
   }
 
   promptString(): string {
-    if (!this.colorEnabled) return ">_ ";
-    const gt = this.paint("prompt", ">");
-    const cursor = `${this.theme.prompt}${BLINK}_${this.theme.reset}`;
-    return `${gt}${cursor} `;
+    if (!this.colorEnabled) return "> ";
+    // Keep prompt style active so user input inherits theme colors/background.
+    return `${this.theme.prompt}> `;
   }
 
   section(title: string): string {

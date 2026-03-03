@@ -126,7 +126,7 @@ async function resolveCliLlmConfigSecrets(params: {
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command()
     .name("nexus")
-    .description("Nexus — lightweight multi-agent assistant (OpenClaw-inspired)")
+    .description("Nexus — lightweight multi-agent assistant")
     .option("--config <path>", "Path to config JSON5", getDefaultConfigPath())
     .option("--verbose", "Verbose logs", false);
 
@@ -420,6 +420,94 @@ export async function runCli(argv: string[]): Promise<void> {
         return { stopped, errors };
       };
 
+      const agentLabel = `Nexus (${String(opts.agent ?? "main")})`;
+
+      const toPanelLines = (text: string): string[] => {
+        const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+        if (!normalized) return [""];
+        return normalized.split("\n");
+      };
+
+      const renderSystemMessage = (text: string): void => {
+        process.stdout.write(
+          tui.panel("System", toPanelLines(text), {
+            borderRole: "system",
+            titleRole: "system",
+            bodyRole: "system",
+          }) + "\n",
+        );
+      };
+
+      const renderUserMessage = (text: string): void => {
+        process.stdout.write(
+          tui.panel("You", toPanelLines(text), {
+            borderRole: "prompt",
+            titleRole: "prompt",
+            bodyRole: "prompt",
+          }) + "\n",
+        );
+      };
+
+      const renderAgentMessage = (text: string): void => {
+        process.stdout.write(
+          tui.panel(agentLabel, toPanelLines(text), {
+            borderRole: "assistant",
+            titleRole: "assistant",
+            bodyRole: "assistant",
+          }) + "\n",
+        );
+      };
+
+      const renderToolMessage = (line: string): void => {
+        process.stdout.write(tui.paint("dim", line) + "\n");
+      };
+
+      const createTypingIndicator = (label: string): { pause: () => void; resume: () => void; stop: () => void } => {
+        if (!process.stdout.isTTY) {
+          return {
+            pause: () => {},
+            resume: () => {},
+            stop: () => {},
+          };
+        }
+
+        const frames = ["typing   ", "typing.  ", "typing.. ", "typing..."];
+        let frameIndex = 0;
+        let timer: NodeJS.Timeout | null = null;
+        let active = false;
+
+        const render = () => {
+          const frame = frames[frameIndex % frames.length] ?? "typing...";
+          frameIndex += 1;
+          process.stdout.write(`\r${tui.paint("dim", `${label} ${frame}`)}\x1b[K`);
+        };
+
+        const pause = () => {
+          if (!active) return;
+          if (timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+          active = false;
+          process.stdout.write("\r\x1b[2K");
+        };
+
+        const resume = () => {
+          if (active) return;
+          active = true;
+          render();
+          timer = setInterval(render, 220);
+          timer.unref?.();
+        };
+
+        const stop = () => {
+          pause();
+        };
+
+        resume();
+        return { pause, resume, stop };
+      };
+
       const handleControlCommand = async (text: string): Promise<string | null> => {
         const parsed = parseTerminalCommandText(text);
         if (!parsed) return null;
@@ -509,24 +597,59 @@ export async function runCli(argv: string[]): Promise<void> {
         ].join("\n");
       };
 
-      async function send(text: string): Promise<void> {
+      async function send(text: string, sendOptions: { interactive: boolean }): Promise<void> {
         const intercepted = await handleControlCommand(text);
         if (intercepted !== null) {
-          process.stdout.write(tui.paint("system", intercepted.trimEnd()) + "\n");
+          if (sendOptions.interactive) {
+            renderSystemMessage(intercepted);
+          } else {
+            process.stdout.write(tui.paint("system", intercepted.trimEnd()) + "\n");
+          }
           return;
         }
-        const res = await agent.handleUserMessage({
-          channel: "cli",
-          channelKey: "local",
-          agentId: String(opts.agent ?? "main"),
-          text,
-        });
-        process.stdout.write(tui.paint("assistant", res.output.trimEnd()) + "\n");
+
+        if (!sendOptions.interactive) {
+          const res = await agent.handleUserMessage({
+            channel: "cli",
+            channelKey: "local",
+            agentId: String(opts.agent ?? "main"),
+            text,
+          });
+          process.stdout.write(tui.paint("assistant", res.output.trimEnd()) + "\n");
+          return;
+        }
+
+        renderUserMessage(text);
+        const typing = createTypingIndicator(agentLabel);
+        try {
+          const res = await agent.handleUserMessage({
+            channel: "cli",
+            channelKey: "local",
+            agentId: String(opts.agent ?? "main"),
+            text,
+            onToolStart: (name, preview) => {
+              typing.pause();
+              const suffix = preview.trim().length > 0 ? ` :: ${preview}` : "";
+              renderToolMessage(`[tool:start] ${name}${suffix}`);
+              typing.resume();
+            },
+            onToolEnd: (name) => {
+              typing.pause();
+              renderToolMessage(`[tool:done] ${name}`);
+              typing.resume();
+            },
+          });
+          typing.stop();
+          renderAgentMessage(res.output);
+        } catch (err) {
+          typing.stop();
+          throw err;
+        }
       }
 
       try {
         if (typeof message === "string" && message.trim().length > 0) {
-          await send(message);
+          await send(message, { interactive: false });
           return;
         }
 
@@ -558,10 +681,11 @@ export async function runCli(argv: string[]): Promise<void> {
             running = false;
             continue;
           }
-          await send(line);
+          await send(line, { interactive: true });
         }
         rl.close();
       } finally {
+        if (colorEnabled) process.stdout.write("\x1b[0m");
         await mcp.close();
         db.close();
       }

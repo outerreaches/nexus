@@ -26,3 +26,39 @@ test("logoPanel includes the Nexus ASCII logo", () => {
   assert.match(out, /\| Header/);
   assert.match(out, /\| Sub/);
 });
+
+test("promptString omits underscore cursor marker", () => {
+  const tui = createSharedTui({ colorEnabled: false, width: 72 });
+  assert.equal(tui.promptString(), "> ");
+});
+
+test("defaults to Unicode boxes when locale is not explicitly non-UTF", () => {
+  const prevLang = process.env.LANG;
+  const prevLcAll = process.env.LC_ALL;
+  const prevLcCtype = process.env.LC_CTYPE;
+  const prevTerm = process.env.TERM;
+  const prevOverride = process.env.NEXUS_TUI_UNICODE;
+  try {
+    delete process.env.LANG;
+    delete process.env.LC_ALL;
+    delete process.env.LC_CTYPE;
+    process.env.TERM = "xterm-256color";
+    delete process.env.NEXUS_TUI_UNICODE;
+
+    const tui = createSharedTui({ colorEnabled: false, width: 48 });
+    const out = tui.panel("Unicode", ["line"]);
+    assert.match(out, /┌/);
+    assert.match(out, /└/);
+  } finally {
+    if (prevLang === undefined) delete process.env.LANG;
+    else process.env.LANG = prevLang;
+    if (prevLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = prevLcAll;
+    if (prevLcCtype === undefined) delete process.env.LC_CTYPE;
+    else process.env.LC_CTYPE = prevLcCtype;
+    if (prevTerm === undefined) delete process.env.TERM;
+    else process.env.TERM = prevTerm;
+    if (prevOverride === undefined) delete process.env.NEXUS_TUI_UNICODE;
+    else process.env.NEXUS_TUI_UNICODE = prevOverride;
+  }
+});
