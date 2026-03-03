@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Hono } from "hono";
 import { Bot, Context, InputFile } from "grammy";
 import { stream as streamPlugin, type StreamFlavor } from "@grammyjs/stream";
+import { autoRetry } from "@grammyjs/auto-retry";
 
 import type { NexusConfig } from "../state/config.js";
 import { getSecret } from "../secrets/resolve-env.js";
@@ -704,13 +705,18 @@ type StreamBridge = {
   finish: () => void;
 };
 
-function createStreamBridge(): StreamBridge {
+function createStreamBridge(onFirstChunk?: () => void): StreamBridge {
   let resolve: ((value: IteratorResult<string>) => void) | null = null;
   const queue: string[] = [];
   let done = false;
+  let firstChunkFired = false;
 
   const push = (text: string) => {
     if (done) return;
+    if (!firstChunkFired) {
+      firstChunkFired = true;
+      onFirstChunk?.();
+    }
     if (resolve) {
       const r = resolve;
       resolve = null;
@@ -786,7 +792,9 @@ export async function startTelegramBot(deps: {
   }
 
   const bot = new Bot<StreamFlavor<Context>>(token);
-  // Use plugin defaults for draft-id offsets to avoid collisions with real message ids.
+  // Auto-retry on 429 rate limits and transient 5xx errors (must be installed
+  // before the stream plugin so draft sends are retried instead of crashing).
+  bot.api.config.use(autoRetry({ maxDelaySeconds: 10, maxRetryAttempts: 3 }));
   bot.use(streamPlugin());
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
@@ -1213,11 +1221,15 @@ export async function startTelegramBot(deps: {
 
       if (isPrivateChat) {
         // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
+        // Show typing indicator while waiting for the first LLM token. Once
+        // drafts start flowing the client shows the draft text natively — the
+        // periodic typing action would race with draft updates and cause the
+        // text to flicker (disappear then reappear).
         bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
         const typingInterval = setInterval(() => {
           bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
         }, 4_000);
-        const bridge = createStreamBridge();
+        const bridge = createStreamBridge(() => clearInterval(typingInterval));
         const draftIdOffset = draftOffsetForStream({
           messageId,
           updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
