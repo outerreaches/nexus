@@ -7,6 +7,7 @@ test("renderHelpText includes terminal-only commands for terminal channel", () =
   const text = renderHelpText("terminal");
   assert.match(text, /\/theme/);
   assert.match(text, /\/exit/);
+  assert.match(text, /Alt\+Enter\/Ctrl\+J/);
   assert.match(text, /\/sethome/);
 });
 

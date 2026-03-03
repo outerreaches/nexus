@@ -27,6 +27,94 @@ const DEFAULT_FILE_BLACKBOARD_TTL_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_MAX_INLINE_IMAGES_FOR_LLM = 3;
 const DEFAULT_MAX_INLINE_IMAGE_BYTES_FOR_LLM = 4 * 1024 * 1024;
 
+type TelegramBotCommand = {
+  command: string;
+  description: string;
+};
+
+type TelegramCommandScope = {
+  type: "default" | "all_private_chats" | "all_group_chats";
+};
+
+const TELEGRAM_DEFAULT_COMMANDS: readonly TelegramBotCommand[] = [
+  { command: "help", description: "Show available commands" },
+];
+
+const TELEGRAM_GROUP_COMMANDS: readonly TelegramBotCommand[] = [
+  { command: "nexus", description: "Talk to Nexus in group chats" },
+  { command: "help", description: "Show available commands" },
+];
+
+const TELEGRAM_PRIVATE_COMMANDS_BASE: readonly TelegramBotCommand[] = [
+  { command: "help", description: "Show available commands" },
+  { command: "sethome", description: "Set this chat as home for background events" },
+  { command: "unsethome", description: "Clear home chat assignment" },
+  { command: "stop", description: "Stop current run in this chat" },
+  { command: "stopall", description: "Stop all runs and workers" },
+  { command: "tools", description: "List available tools" },
+  { command: "nodes", description: "Show node status" },
+  { command: "jobs", description: "Show scheduler jobs" },
+  { command: "intakes", description: "Show data intake sources" },
+  { command: "processes", description: "Show managed processes" },
+  { command: "mcp", description: "Show MCP servers and profiles" },
+  { command: "federation", description: "Show federation status" },
+  { command: "blackboard", description: "Show blackboard inventory" },
+  { command: "act", description: "Respond to a human action request" },
+];
+
+function buildTelegramPrivateCommands(pairingEnabled: boolean): TelegramBotCommand[] {
+  const commands = [...TELEGRAM_PRIVATE_COMMANDS_BASE];
+  if (pairingEnabled) {
+    commands.push({ command: "pair", description: "Request a pairing code in this DM" });
+  }
+  return commands;
+}
+
+function commandScopeLabel(scope: TelegramCommandScope): string {
+  return scope.type;
+}
+
+function areTelegramCommandsEqual(
+  actual: readonly { command: string; description: string }[],
+  expected: readonly TelegramBotCommand[],
+): boolean {
+  if (actual.length !== expected.length) return false;
+  for (let i = 0; i < actual.length; i += 1) {
+    const left = actual[i];
+    const right = expected[i];
+    if (!left || !right) return false;
+    if (left.command !== right.command || left.description !== right.description) return false;
+  }
+  return true;
+}
+
+async function syncTelegramCommands(params: {
+  bot: Bot<StreamFlavor<Context>>;
+  pairingEnabled: boolean;
+  log: (msg: string) => void;
+}): Promise<void> {
+  const syncPlan: Array<{ scope: TelegramCommandScope; commands: TelegramBotCommand[] }> = [
+    { scope: { type: "default" }, commands: [...TELEGRAM_DEFAULT_COMMANDS] },
+    { scope: { type: "all_group_chats" }, commands: [...TELEGRAM_GROUP_COMMANDS] },
+    { scope: { type: "all_private_chats" }, commands: buildTelegramPrivateCommands(params.pairingEnabled) },
+  ];
+
+  for (const entry of syncPlan) {
+    const label = commandScopeLabel(entry.scope);
+    try {
+      const current = await params.bot.api.getMyCommands({ scope: entry.scope });
+      if (areTelegramCommandsEqual(current, entry.commands)) {
+        params.log(`telegram: commands scope=${label} unchanged count=${entry.commands.length}`);
+        continue;
+      }
+      await params.bot.api.setMyCommands(entry.commands, { scope: entry.scope });
+      params.log(`telegram: commands scope=${label} synced count=${entry.commands.length}`);
+    } catch (err) {
+      params.log(`telegram: WARN commands scope=${label} sync_failed=${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 type IncomingAttachment = {
   kind: string;
   fileId: string;
@@ -739,6 +827,11 @@ export async function startTelegramBot(deps: {
   if (allowFrom.length === 0 && !allowAllUsers && !tg.pairing.enabled) {
     deps.log("telegram: WARN no static allowlist and pairing is disabled; no users can authenticate.");
   }
+  await syncTelegramCommands({
+    bot,
+    pairingEnabled: tg.pairing.enabled,
+    log: deps.log,
+  });
 
   const sendFile = async (
     chatId: number,

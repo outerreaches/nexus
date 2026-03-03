@@ -22,6 +22,7 @@ export function renderHelpText(channel: HelpChannel): string {
     lines.push("Terminal-only:");
     lines.push("- /theme [name]");
     lines.push("- /exit (or /quit)");
+    lines.push("- Enter sends, Alt+Enter/Ctrl+J inserts newline");
   } else if (channel === "telegram") {
     lines.push("");
     lines.push("Telegram-specific:");

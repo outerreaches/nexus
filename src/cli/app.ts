@@ -508,6 +508,144 @@ export async function runCli(argv: string[]): Promise<void> {
         return { pause, resume, stop };
       };
 
+      const readInteractiveInput = async (): Promise<string | null> => {
+        if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
+          const { createInterface } = await import("node:readline/promises");
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          try {
+            return await rl.question(tui.promptString());
+          } finally {
+            rl.close();
+          }
+        }
+
+        const { clearScreenDown, cursorTo, moveCursor } = await import("node:readline");
+        const previousRawMode = process.stdin.isRaw;
+
+        return await new Promise<string | null>((resolve, reject) => {
+          let value = "";
+          let renderedLines = 0;
+          let escaped = false;
+          let inCsi = false;
+          let closed = false;
+
+          const cleanup = () => {
+            if (closed) return;
+            closed = true;
+            process.stdin.off("data", onData);
+            if (!previousRawMode) {
+              process.stdin.setRawMode(false);
+            }
+            process.stdin.pause();
+          };
+
+          const done = (result: string | null) => {
+            cleanup();
+            process.stdout.write("\n");
+            resolve(result);
+          };
+
+          const fail = (err: unknown) => {
+            cleanup();
+            reject(err instanceof Error ? err : new Error(String(err)));
+          };
+
+          const render = () => {
+            const lines = value.split("\n");
+            if (renderedLines > 0) {
+              if (renderedLines > 1) moveCursor(process.stdout, 0, -(renderedLines - 1));
+              cursorTo(process.stdout, 0);
+              clearScreenDown(process.stdout);
+            }
+            process.stdout.write(lines.map((line) => `${tui.promptString()}${line}`).join("\n"));
+            renderedLines = lines.length;
+          };
+
+          const onData = (chunk: Buffer | string) => {
+            try {
+              const raw = chunk.toString("utf8");
+              const input = raw.length > 1 ? raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n") : raw;
+              let dirty = false;
+              for (const ch of input) {
+                if (inCsi) {
+                  const code = ch.codePointAt(0) ?? 0;
+                  if (code >= 0x40 && code <= 0x7e) inCsi = false;
+                  continue;
+                }
+                if (escaped) {
+                  escaped = false;
+                  if (ch === "[") {
+                    inCsi = true;
+                    continue;
+                  }
+                  if (ch === "\n" || ch === "\r") {
+                    value += "\n";
+                    dirty = true;
+                    continue;
+                  }
+                  const code = ch.codePointAt(0) ?? 0;
+                  if (code >= 0x20 && code !== 0x7f) {
+                    value += ch;
+                    dirty = true;
+                  }
+                  continue;
+                }
+
+                if (ch === "\u001b") {
+                  escaped = true;
+                  continue;
+                }
+                if (ch === "\u0003") {
+                  done(null);
+                  return;
+                }
+                if (ch === "\u0004") {
+                  if (!value) {
+                    done(null);
+                    return;
+                  }
+                  continue;
+                }
+                if (ch === "\r") {
+                  done(value);
+                  return;
+                }
+                if (ch === "\n") {
+                  value += "\n";
+                  dirty = true;
+                  continue;
+                }
+                if (ch === "\u007f" || ch === "\b") {
+                  if (value) {
+                    value = value.slice(0, -1);
+                    dirty = true;
+                  }
+                  continue;
+                }
+
+                const code = ch.codePointAt(0) ?? 0;
+                if (ch === "\t" || code >= 0x20) {
+                  value += ch;
+                  dirty = true;
+                }
+              }
+              if (dirty) render();
+            } catch (err) {
+              fail(err);
+            }
+          };
+
+          try {
+            process.stdin.setRawMode(true);
+            process.stdin.resume();
+            process.stdin.on("data", onData);
+            render();
+          } catch (err) {
+            fail(err);
+          }
+        });
+      };
+
       const handleControlCommand = async (text: string): Promise<string | null> => {
         const parsed = parseTerminalCommandText(text);
         if (!parsed) return null;
@@ -598,7 +736,8 @@ export async function runCli(argv: string[]): Promise<void> {
       };
 
       async function send(text: string, sendOptions: { interactive: boolean }): Promise<void> {
-        const intercepted = await handleControlCommand(text);
+        const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const intercepted = normalized.includes("\n") ? null : await handleControlCommand(normalized);
         if (intercepted !== null) {
           if (sendOptions.interactive) {
             renderSystemMessage(intercepted);
@@ -613,20 +752,20 @@ export async function runCli(argv: string[]): Promise<void> {
             channel: "cli",
             channelKey: "local",
             agentId: String(opts.agent ?? "main"),
-            text,
+            text: normalized,
           });
           process.stdout.write(tui.paint("assistant", res.output.trimEnd()) + "\n");
           return;
         }
 
-        renderUserMessage(text);
+        renderUserMessage(normalized);
         const typing = createTypingIndicator(agentLabel);
         try {
           const res = await agent.handleUserMessage({
             channel: "cli",
             channelKey: "local",
             agentId: String(opts.agent ?? "main"),
-            text,
+            text: normalized,
             onToolStart: (name, preview) => {
               typing.pause();
               const suffix = preview.trim().length > 0 ? ` :: ${preview}` : "";
@@ -653,14 +792,13 @@ export async function runCli(argv: string[]): Promise<void> {
           return;
         }
 
-        const { createInterface } = await import("node:readline/promises");
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
         const intro = [
           tui.logoPanel(
             "Nexus CLI",
             "Interactive chat ready. Ask anything, or run slash commands below.",
           ),
           tui.panel("Quick Commands", [
+            "Enter send | Alt+Enter/Ctrl+J newline",
             "/help",
             "/tools [limit]",
             "/sethome | /unsethome",
@@ -674,16 +812,19 @@ export async function runCli(argv: string[]): Promise<void> {
         );
         let running = true;
         while (running) {
-          const prompt = tui.promptString();
-          const line = (await rl.question(prompt)).trim();
-          if (!line) continue;
-          if (line === "/exit" || line === "/quit") {
+          const line = await readInteractiveInput();
+          if (line === null) {
+            running = false;
+            continue;
+          }
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (trimmed === "/exit" || trimmed === "/quit") {
             running = false;
             continue;
           }
           await send(line, { interactive: true });
         }
-        rl.close();
       } finally {
         if (colorEnabled) process.stdout.write("\x1b[0m");
         await mcp.close();
