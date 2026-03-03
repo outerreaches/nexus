@@ -22,6 +22,31 @@ The supported deployment path is:
 - Secrets sidecar: `secret-sidecar` (sidecar-only secret resolution)
 - TLS overlay enabled (`:18790` for node/websocket TLS entry)
 
+## Quick Setup Wizard (Recommended)
+
+Default install root is `~/.nexus`.
+
+Run the installer via curl:
+
+```bash
+curl -fsSL <raw-install-url> | bash -s -- --repo-url <git-repo-url>
+```
+
+What this does:
+
+- clones/updates code under `~/.nexus/code`
+- builds the CLI
+- launches `nexus setup` (green-themed interactive wizard)
+- prepares split env files and runtime config under `~/.nexus`
+- runs TLS generation, secrets preflight, and deploy flow
+
+You can also run the wizard directly from an existing checkout:
+
+```bash
+npm run build
+node dist/index.js setup
+```
+
 ## Start Here: New Instance Deployment
 
 Use this for a fresh VM/host.
@@ -31,7 +56,7 @@ Use this for a fresh VM/host.
 Run from your control machine:
 
 ```bash
-infra/scripts/provision-libvirt-instance.sh \
+infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
   --vm-name nexus-service-vm \
   --hostname nexus-service-vm \
   --memory-mb 8192 \
@@ -78,14 +103,14 @@ Deploy:
 
 ```bash
 cd /data/code
-infra/scripts/ha-secrets-preflight.sh --auto-fix --require-http-api-key
+infra/scripts/setup/ha-secrets-preflight.sh --auto-fix --require-http-api-key
 infra/scripts/pull-deploy.sh
 ```
 
 If TLS cert does not exist yet:
 
 ```bash
-bash infra/scripts/ha-generate-tls-cert.sh --san "$(hostname -f)" --san "$(hostname)"
+bash infra/scripts/setup/ha-generate-tls-cert.sh --san "$(hostname -f)" --san "$(hostname)"
 chmod 644 /data/code/infra/haproxy/certs/nexus.pem
 ```
 
@@ -145,7 +170,7 @@ cd /data/code
 infra/scripts/ha-secretctl.sh list
 infra/scripts/ha-secretctl.sh set llm.openrouter.api --note "openrouter key"
 infra/scripts/ha-secretctl.sh refs llm.openrouter.api
-infra/scripts/ha-secrets-onboard.sh
+infra/scripts/setup/ha-secrets-onboard.sh
 ```
 
 ## Local Development (Non-HA)

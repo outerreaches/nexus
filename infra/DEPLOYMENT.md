@@ -254,7 +254,7 @@ chmod 600 /data/nexus-config/gateway/nexus.env /data/nexus-config/sidecar/nexus.
 
 ```bash
 cd /data/code
-infra/scripts/ha-secrets-preflight.sh --auto-fix --require-http-api-key
+infra/scripts/setup/ha-secrets-preflight.sh --auto-fix --require-http-api-key
 infra/scripts/pull-deploy.sh
 ```
 
@@ -575,7 +575,7 @@ Notes:
 - `/data/code` is mounted writable in containers to allow direct in-agent code edits.
 - Deploys should be performed from the VM host using `ha-rollout.sh apply-local` or `/home/nexus/pull-deploy.sh`.
 - `ha-rollout.sh` and `pull-deploy.sh` now require sidecar and TLS overlays; sidecar-less or TLS-less deploys are unsupported.
-- `ha-rollout.sh` runs `infra/scripts/ha-secrets-preflight.sh` before deploy.
+- `ha-rollout.sh` runs `infra/scripts/setup/ha-secrets-preflight.sh` before deploy.
 - `pull-deploy.sh` is update-focused and does not run secrets preflight.
 - Secrets preflight enforces hardened defaults (sidecar-only resolution, API key + dashboard + secretctl auth, encrypted credentials key).
 
@@ -633,7 +633,7 @@ Bootstrap helper (upsert + test + recent audit events):
 ```bash
 cd /data/code
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
-infra/scripts/ha-sidecar-bootstrap.sh
+infra/scripts/setup/ha-sidecar-bootstrap.sh
 ```
 
 Test-only run (no provider mutation):
@@ -641,7 +641,7 @@ Test-only run (no provider mutation):
 ```bash
 cd /data/code
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
-infra/scripts/ha-sidecar-bootstrap.sh --test-only
+infra/scripts/setup/ha-sidecar-bootstrap.sh --test-only
 ```
 
 Optional overrides for non-default profile wiring:
@@ -663,9 +663,9 @@ Phase 2 storage isolation (sidecar-only filesystem access):
 cd /data/code
 
 # 1) Prepare/migrate credential store to dedicated host path
-infra/scripts/ha-sidecar-secrets-isolation.sh --prepare
-infra/scripts/ha-sidecar-secrets-isolation.sh --migrate
-infra/scripts/ha-sidecar-secrets-isolation.sh --status
+infra/scripts/setup/ha-sidecar-secrets-isolation.sh --prepare
+infra/scripts/setup/ha-sidecar-secrets-isolation.sh --migrate
+infra/scripts/setup/ha-sidecar-secrets-isolation.sh --status
 
 # 2) Enable isolated store + sidecar-only enforcement
 #    (in /data/nexus-config/sidecar/nexus.env)
@@ -768,7 +768,7 @@ docker compose -p infra \
 
 # 4) Bootstrap/verify sidecar provider profile
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
-infra/scripts/ha-sidecar-bootstrap.sh
+infra/scripts/setup/ha-sidecar-bootstrap.sh
 
 # 5) Sanity checks
 curl -s http://localhost:18789/health/traffic | jq .
@@ -790,7 +790,7 @@ To use strict node transport security for non-loopback nodes, enable TLS on HAPr
 cd /data/code
 
 # 1) Generate or inspect the HAProxy TLS certificate bundle and fingerprint
-bash infra/scripts/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
+bash infra/scripts/setup/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
 
 # 2) Ensure TLS overlay is available
 test -f /data/code/infra/docker-compose.ha.tls.yml
@@ -1288,25 +1288,25 @@ Principles:
 
 ### VM Provisioning (parameterized)
 
-Use `infra/scripts/setup-vm.sh` with explicit resources per VM:
+Use `infra/scripts/archive/provisioning/setup-vm.sh` with explicit resources per VM:
 
 ```bash
 # Primary VM
-bash infra/scripts/setup-vm.sh \
+bash infra/scripts/archive/provisioning/setup-vm.sh \
   --vm-name nexus-vm \
   --memory-mb 8192 \
   --cpus 4 \
   --disk-size 80G
 
 # Monetization VM (no host forwarding by default)
-bash infra/scripts/setup-vm.sh \
+bash infra/scripts/archive/provisioning/setup-vm.sh \
   --vm-name nexus-monetization-vm \
   --memory-mb 12288 \
   --cpus 4 \
   --disk-size 120G
 
 # Optional host forwarding only when needed
-bash infra/scripts/setup-vm.sh \
+bash infra/scripts/archive/provisioning/setup-vm.sh \
   --vm-name nexus-vm \
   --enable-forwarding \
   --forward-http-port 18789 \
@@ -1317,7 +1317,7 @@ bash infra/scripts/setup-vm.sh \
 
 For repeated profile testing loops (service/standby/monetization), use:
 
-- `infra/scripts/provision-libvirt-instance.sh`
+- `infra/scripts/archive/provisioning/provision-libvirt-instance.sh`
 
 This script provisions a libvirt VM, waits for SSH, clones/pulls Nexus in-guest, and deploys a selected runtime profile. It also supports optional federation config bootstrap for test environments.
 
@@ -1328,8 +1328,8 @@ Initialization note:
 - The script runs `ha-secrets-preflight.sh --auto-fix` in-guest before deploy, and auto-generates `NEXUS_CREDENTIALS_KEY` only when missing and no credential store exists.
 - Use `--http-api-key` to seed control-plane auth keys and `--require-http-api-key` to enforce presence.
 - Guest helper wrappers are installed automatically:
-  - `~/sidecar-bootstrap.sh` -> `/data/code/infra/scripts/ha-sidecar-bootstrap.sh`
-  - `~/secrets-onboard.sh` -> `/data/code/infra/scripts/ha-secrets-onboard.sh`
+  - `~/sidecar-bootstrap.sh` -> `/data/code/infra/scripts/setup/ha-sidecar-bootstrap.sh`
+  - `~/secrets-onboard.sh` -> `/data/code/infra/scripts/setup/ha-secrets-onboard.sh`
   - `~/secretctl.sh` -> `/data/code/infra/scripts/ha-secretctl.sh`
 
 Private repo + SSH readiness note:
@@ -1350,7 +1350,7 @@ ssh-add /home/<user>/.ssh/id_ed25519
 ```bash
 # Example: non-monetization federated service instance (8GB RAM, 40GB disk)
 # (private repo via host bare mirror)
-bash infra/scripts/provision-libvirt-instance.sh \
+bash infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
   --vm-name nexus-service-vm \
   --hostname nexus-service-vm \
   --memory-mb 8192 \
@@ -1366,7 +1366,7 @@ bash infra/scripts/provision-libvirt-instance.sh \
   --federation-allow-insecure-dev
 
 # Example: standby iteration
-bash infra/scripts/provision-libvirt-instance.sh \
+bash infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
   --vm-name nexus-standby-vm \
   --memory-mb 8192 \
   --disk-size 40G \
@@ -1390,7 +1390,7 @@ infra/scripts/ha-rollout.sh finalize HEAD
 ```
 
 Set runtime profile and federation settings via `/data/nexus/nexus.json` (or
-`infra/scripts/provision-libvirt-instance.sh --profile ...` during provisioning).
+`infra/scripts/archive/provisioning/provision-libvirt-instance.sh --profile ...` during provisioning).
 
 Monetization compose overlay (when using shared compose stacks):
 
@@ -1402,27 +1402,22 @@ Network policy between primary and monetization VMs:
 
 ```bash
 # Dry-run
-bash infra/scripts/apply-federation-vm-network-policy.sh \
+bash infra/scripts/archive/federation/apply-federation-vm-network-policy.sh \
   --primary-ip 10.10.0.11 \
   --monetization-ip 10.10.0.12 \
   --inference-ip 10.10.0.20
 
 # Apply
-bash infra/scripts/apply-federation-vm-network-policy.sh \
+bash infra/scripts/archive/federation/apply-federation-vm-network-policy.sh \
   --primary-ip 10.10.0.11 \
   --monetization-ip 10.10.0.12 \
   --inference-ip 10.10.0.20 \
   --apply
 ```
 
-Secret locality enforcement and checks:
+Secret locality enforcement:
 
-```bash
-bash infra/scripts/enforce-monetization-secret-locality.sh \
-  --primary-state-dir /data/nexus \
-  --monetization-state-dir /data/nexus-monetization \
-  --apply-perms
-```
+- Monetization secret locality and permissions are enforced by the monetization deployment/profile setup.
 
 ### Failover + Rebind Runbook (Primary -> Standby)
 
@@ -1435,7 +1430,7 @@ curl -X POST http://<standby>:18789/api/activate -H 'content-type: application/j
 2. Rebind service peer endpoint to new active primary:
 
 ```bash
-bash infra/scripts/federation-failover-rebind-smoke.sh \
+bash infra/scripts/archive/federation/federation-failover-rebind-smoke.sh \
   --standby-url http://<standby>:18789 \
   --service-url http://<service>:18789 \
   --peer-id primary-peer \
@@ -1446,7 +1441,7 @@ bash infra/scripts/federation-failover-rebind-smoke.sh \
 3. Validate webhook continuity/drain:
 
 ```bash
-bash infra/scripts/federation-webhook-continuity-smoke.sh \
+bash infra/scripts/archive/federation/federation-webhook-continuity-smoke.sh \
   --service-url http://<service>:18789
 ```
 
@@ -1460,10 +1455,10 @@ Expected behavior:
 
 ```bash
 # Dry-run validation
-bash infra/scripts/federation-retrofit-smoke.sh --state-dir /data/nexus
+bash infra/scripts/archive/federation/federation-retrofit-smoke.sh --state-dir /data/nexus
 
 # Apply safe config retrofit
-bash infra/scripts/federation-retrofit-smoke.sh --state-dir /data/nexus --apply
+bash infra/scripts/archive/federation/federation-retrofit-smoke.sh --state-dir /data/nexus --apply
 ```
 
 ### Portable Workflow
@@ -1471,9 +1466,9 @@ bash infra/scripts/federation-retrofit-smoke.sh --state-dir /data/nexus --apply
 Build portable bundle:
 
 ```bash
-bash infra/scripts/build-portable-runtime.sh --instance-mode portable
-bash infra/scripts/build-portable-runtime.sh --instance-mode portable_federated
-bash infra/scripts/build-portable-runtime.sh --instance-mode execution_node_host
+bash infra/scripts/archive/portable/build-portable-runtime.sh --instance-mode portable
+bash infra/scripts/archive/portable/build-portable-runtime.sh --instance-mode portable_federated
+bash infra/scripts/archive/portable/build-portable-runtime.sh --instance-mode execution_node_host
 ```
 
 Launcher dry-run:
@@ -1481,27 +1476,27 @@ Launcher dry-run:
 ```bash
 PORTABLE_STATE_PASSPHRASE=... \
 NEXUS_FEDERATION_JOIN_APPROVED=1 \
-bash infra/scripts/portable-launcher.sh --manifest infra/portable/dist/portable-manifest.json --dry-run
+bash infra/scripts/archive/portable/portable-launcher.sh --manifest infra/portable/dist/portable-manifest.json --dry-run
 ```
 
 Execution-node-host install path:
 
 ```bash
-bash infra/scripts/install-execution-node-host.sh --dry-run
+bash infra/scripts/node/install-execution-node-host.sh --dry-run
 ```
 
 Portable smoke checks:
 
 ```bash
-bash infra/scripts/portable-smoke.sh
+bash infra/scripts/archive/portable/portable-smoke.sh
 ```
 
 ### Infra Smokes
 
 ```bash
 # host dual-VM presence
-bash infra/scripts/host-two-vm-smoke.sh
+bash infra/scripts/archive/federation/host-two-vm-smoke.sh
 
 # Legacy single-instance deploy retirement smoke
-bash infra/scripts/profile-bootstrap-smoke.sh
+bash infra/scripts/archive/smoke/profile-bootstrap-smoke.sh
 ```

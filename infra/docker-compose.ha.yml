@@ -48,11 +48,11 @@ services:
     user: "${NEXUS_GATEWAY_UID:-1000}:${NEXUS_GATEWAY_GID:-1000}"
     volumes:
       # Persistent host state (reuse existing DB/backups/config)
-      - /data/nexus:/data/nexus
+      - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus
       # Host code tree (writable for direct in-agent edits)
-      - /data/code:/data/code
+      - ${NEXUS_HOST_CODE_DIR:-/data/code}:/data/code
       # Persistent workspace
-      - /data/workspace:/data/workspace
+      - ${NEXUS_HOST_WORKSPACE_DIR:-/data/workspace}:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
@@ -85,9 +85,9 @@ services:
     user: "${NEXUS_GATEWAY_UID:-1000}:${NEXUS_GATEWAY_GID:-1000}"
     volumes:
       # Same bind mounts as primary
-      - /data/nexus:/data/nexus
-      - /data/code:/data/code
-      - /data/workspace:/data/workspace
+      - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus
+      - ${NEXUS_HOST_CODE_DIR:-/data/code}:/data/code
+      - ${NEXUS_HOST_WORKSPACE_DIR:-/data/workspace}:/data/workspace
     environment:
       - NEXUS_STATE_DIR=/data/nexus
       - NEXUS_CODE_DIR=/data/code
@@ -117,7 +117,7 @@ services:
       dockerfile: Dockerfile
     volumes:
       # Mount state dir so watchdog can check deploy lock
-      - /data/nexus:/data/nexus:ro
+      - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus:ro
     environment:
       - PRIMARY_URL=http://nexus-primary:18789
       - STANDBY_URL=http://nexus-standby:18789

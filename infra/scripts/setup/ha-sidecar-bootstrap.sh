@@ -2,8 +2,8 @@
 # Bootstrap or update the default sidecar secret-provider profile on an HA instance.
 #
 # Usage:
-#   NEXUS_HTTP_API_KEY=... infra/scripts/ha-sidecar-bootstrap.sh
-#   NEXUS_HTTP_API_KEY=... PROVIDER_ID=sidecar-main infra/scripts/ha-sidecar-bootstrap.sh --test-only
+#   NEXUS_HTTP_API_KEY=... infra/scripts/setup/ha-sidecar-bootstrap.sh
+#   NEXUS_HTTP_API_KEY=... PROVIDER_ID=sidecar-main infra/scripts/setup/ha-sidecar-bootstrap.sh --test-only
 #
 # Environment overrides:
 #   API_BASE_URL=http://localhost:18789

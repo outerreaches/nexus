@@ -2,24 +2,36 @@
 # Prepare and migrate credentials store for sidecar-only secrets isolation.
 #
 # Defaults:
-#   source: /data/nexus/secrets/credentials.json
-#   target: /data/nexus-secrets/credentials.json
+#   source: <state-dir>/secrets/credentials.json
+#   target: <store-dir>/credentials.json
 #
 # Usage:
-#   infra/scripts/ha-sidecar-secrets-isolation.sh --status
-#   infra/scripts/ha-sidecar-secrets-isolation.sh --prepare
-#   infra/scripts/ha-sidecar-secrets-isolation.sh --migrate
-#   infra/scripts/ha-sidecar-secrets-isolation.sh --migrate --force
+#   infra/scripts/setup/ha-sidecar-secrets-isolation.sh --status
+#   infra/scripts/setup/ha-sidecar-secrets-isolation.sh --prepare
+#   infra/scripts/setup/ha-sidecar-secrets-isolation.sh --migrate
+#   infra/scripts/setup/ha-sidecar-secrets-isolation.sh --migrate --force
 #
 # Environment overrides:
-#   OLD_STORE_PATH=/data/nexus/secrets/credentials.json
-#   NEW_STORE_DIR=/data/nexus-secrets
-#   NEW_STORE_PATH=/data/nexus-secrets/credentials.json
+#   NEXUS_HOME=~/.nexus
+#   OLD_STORE_PATH=<state-dir>/secrets/credentials.json
+#   NEW_STORE_DIR=<store-dir>
+#   NEW_STORE_PATH=<store-dir>/credentials.json
 
 set -euo pipefail
 
-OLD_STORE_PATH="${OLD_STORE_PATH:-/data/nexus/secrets/credentials.json}"
-NEW_STORE_DIR="${NEW_STORE_DIR:-/data/nexus-secrets}"
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_STATE_DIR="${NEXUS_HOME}/state"
+  DEFAULT_STORE_DIR="${NEXUS_HOME}/secrets"
+elif [ -d "/data/nexus" ] || [ -d "/data/nexus-secrets" ]; then
+  DEFAULT_STATE_DIR="/data/nexus"
+  DEFAULT_STORE_DIR="/data/nexus-secrets"
+else
+  DEFAULT_STATE_DIR="${HOME}/.nexus/state"
+  DEFAULT_STORE_DIR="${HOME}/.nexus/secrets"
+fi
+
+OLD_STORE_PATH="${OLD_STORE_PATH:-${DEFAULT_STATE_DIR}/secrets/credentials.json}"
+NEW_STORE_DIR="${NEW_STORE_DIR:-${DEFAULT_STORE_DIR}}"
 NEW_STORE_PATH="${NEW_STORE_PATH:-${NEW_STORE_DIR}/credentials.json}"
 
 ACTION="status"
@@ -120,4 +132,3 @@ case "$ACTION" in
     print_status
     ;;
 esac
-

@@ -15,11 +15,14 @@
 #   status                              Show HA slot modes and rollout state.
 #
 # Environment overrides:
-#   CODE_DIR=/data/code
-#   COMPOSE_FILES=/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml:/data/code/infra/docker-compose.ha.tls.yml
+#   NEXUS_HOME=~/.nexus
+#   CODE_DIR=<repo-root>
+#   COMPOSE_FILES=<repo-root>/infra/docker-compose.ha.yml:<repo-root>/infra/docker-compose.ha.sidecar.yml:<repo-root>/infra/docker-compose.ha.tls.yml
 #   COMPOSE_PROJECT=infra
-#   STATE_DIR=/data/nexus
-#   STATE_FILE=/data/nexus/deploy-state.env
+#   STATE_DIR=<state-dir>
+#   STATE_FILE=<state-dir>/deploy-state.env
+#   CONFIG_ROOT=<config-root>
+#   STORE_DIR=<secrets-store-dir>
 #   API_PORT=18789
 #   LIVE_TIMEOUT=90
 #   READY_TIMEOUT=120
@@ -28,7 +31,7 @@
 #   SKIP_WS_SMOKE=0                   # set to 1 to skip websocket smoke probe
 #   WS_SMOKE_WARN_ONLY=0              # set to 1 to warn (not fail) on websocket smoke timeout
 #   WS_SMOKE_ATTEMPT_TIMEOUT_MS=8000  # per-attempt websocket probe timeout in milliseconds
-#   NEXUS_HAPROXY_TLS_CERT_PEM=/data/code/infra/haproxy/certs/nexus.pem
+#   NEXUS_HAPROXY_TLS_CERT_PEM=<repo-root>/infra/haproxy/certs/nexus.pem
 #   ACTIVATION_GRACE_SECS=5            # seconds to wait after /api/activate before health checks
 #   ROLLBACK_RESTORE_GIT=1            # set to 0 to keep current checkout on failed deploy rollback
 #   NEXUS_HA_API_KEY=<token>            # bearer token for /api/* control-plane calls
@@ -39,16 +42,42 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-CODE_DIR="${CODE_DIR:-${DEFAULT_CODE_DIR}}"
-CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_NEXUS_HOME="$NEXUS_HOME"
+elif [ -d "/data/code" ] || [ -d "/data/nexus" ] || [ -d "/data/nexus-config" ]; then
+  DEFAULT_NEXUS_HOME=""
+else
+  DEFAULT_NEXUS_HOME="${HOME}/.nexus"
+fi
+
+if [ -n "$DEFAULT_NEXUS_HOME" ]; then
+  DEFAULT_CONFIG_ROOT="${DEFAULT_NEXUS_HOME}/config"
+  DEFAULT_STATE_DIR="${DEFAULT_NEXUS_HOME}/state"
+  DEFAULT_WORKSPACE_DIR="${DEFAULT_NEXUS_HOME}/workspace"
+  DEFAULT_STORE_DIR="${DEFAULT_NEXUS_HOME}/secrets"
+else
+  DEFAULT_CONFIG_ROOT="/data/nexus-config"
+  DEFAULT_STATE_DIR="/data/nexus"
+  DEFAULT_WORKSPACE_DIR="/data/workspace"
+  DEFAULT_STORE_DIR="/data/nexus-secrets"
+fi
+
+CODE_DIR="${CODE_DIR:-${NEXUS_CODE_DIR:-${DEFAULT_CODE_DIR}}}"
+CONFIG_ROOT="${CONFIG_ROOT:-${DEFAULT_CONFIG_ROOT}}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
 SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
 WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
 COMPOSE_FILES_RAW="${COMPOSE_FILES:-${DEFAULT_COMPOSE_FILES}}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
-STATE_DIR="${STATE_DIR:-/data/nexus}"
+STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-${NEXUS_WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/deploy-state.env}"
+STORE_DIR="${STORE_DIR:-${DEFAULT_STORE_DIR}}"
+HOST_CODE_DIR="${NEXUS_HOST_CODE_DIR:-${CODE_DIR}}"
+HOST_STATE_DIR="${NEXUS_HOST_STATE_DIR:-${STATE_DIR}}"
+HOST_WORKSPACE_DIR="${NEXUS_HOST_WORKSPACE_DIR:-${WORKSPACE_DIR}}"
+HOST_SECRETS_DIR="${NEXUS_HOST_SECRETS_DIR:-${STORE_DIR}}"
 LOCK_DIR="${STATE_DIR}/ha-rollout.lock"
 API_PORT="${API_PORT:-18789}"
 LIVE_TIMEOUT="${LIVE_TIMEOUT:-90}"
@@ -60,7 +89,7 @@ WS_SMOKE_WARN_ONLY="${WS_SMOKE_WARN_ONLY:-0}"
 WS_SMOKE_ATTEMPT_TIMEOUT_MS="${WS_SMOKE_ATTEMPT_TIMEOUT_MS:-8000}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
-SECRETS_PREFLIGHT_SCRIPT="${SECRETS_PREFLIGHT_SCRIPT:-${CODE_DIR}/infra/scripts/ha-secrets-preflight.sh}"
+SECRETS_PREFLIGHT_SCRIPT="${SECRETS_PREFLIGHT_SCRIPT:-${CODE_DIR}/infra/scripts/setup/ha-secrets-preflight.sh}"
 ROLLBACK_RESTORE_GIT="${ROLLBACK_RESTORE_GIT:-1}"
 CONTROL_PLANE_API_KEY="${NEXUS_HA_API_KEY:-${NEXUS_HTTP_API_KEY:-}}"
 
@@ -237,6 +266,10 @@ compose() {
   NEXUS_HA_API_KEY="${CONTROL_PLANE_API_KEY}" \
   NEXUS_GATEWAY_UID="${runtime_uid}" \
   NEXUS_GATEWAY_GID="${runtime_gid}" \
+  NEXUS_HOST_CODE_DIR="${HOST_CODE_DIR}" \
+  NEXUS_HOST_STATE_DIR="${HOST_STATE_DIR}" \
+  NEXUS_HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR}" \
+  NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}" \
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
@@ -259,7 +292,7 @@ refresh_secret_sidecar_if_present() {
 ensure_tls_preflight() {
   [ "$COMPOSE_HAS_TLS_OVERLAY" -eq 1 ] || fail "TLS overlay not selected in COMPOSE_FILES"
   if [ ! -f "$TLS_CERT_PEM" ]; then
-    fail "TLS overlay selected but cert bundle missing: $TLS_CERT_PEM (run infra/scripts/ha-generate-tls-cert.sh)"
+    fail "TLS overlay selected but cert bundle missing: $TLS_CERT_PEM (run infra/scripts/setup/ha-generate-tls-cert.sh)"
   fi
 }
 
@@ -272,7 +305,7 @@ ensure_secrets_preflight() {
     --sidecar-env-file "${SIDECAR_ENV_FILE}"
     --watchdog-env-file "${WATCHDOG_ENV_FILE}"
     --state-dir "$STATE_DIR"
-    --store-dir "/data/nexus-secrets"
+    --store-dir "$STORE_DIR"
     --require-http-api-key
   )
   "${cmd[@]}"

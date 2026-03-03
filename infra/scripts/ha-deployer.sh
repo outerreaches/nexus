@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Host-side deploy daemon.
-# Watches for /data/nexus/deploy-trigger.json written by the ha_deploy tool
+# Watches for <state-dir>/deploy-trigger.json written by the ha_deploy tool
 # inside a container, then runs ha-rollout.sh apply-local on the host.
 #
 # apply-local builds the standby with new code, health-checks it, switches
@@ -19,7 +19,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE_DIR="${STATE_DIR:-/data/nexus}"
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_STATE_DIR="${NEXUS_HOME}/state"
+elif [ -d "/data/nexus" ]; then
+  DEFAULT_STATE_DIR="/data/nexus"
+else
+  DEFAULT_STATE_DIR="${HOME}/.nexus/state"
+fi
+
+STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
 TRIGGER_FILE="${STATE_DIR}/deploy-trigger.json"
 PROCESSING_FILE="${STATE_DIR}/deploy-trigger.processing.json"
 FINALIZE_PENDING="${STATE_DIR}/finalize-pending"

@@ -1,7 +1,7 @@
 # Nexus HA Deploy Daemon
 #
 # Install:
-#   sudo cp /data/code/infra/systemd/ha-deployer.service /etc/systemd/system/
+#   sudo cp <code-dir>/infra/systemd/ha-deployer.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now ha-deployer
 
@@ -13,8 +13,9 @@ Requires=docker.service
 [Service]
 Type=simple
 User=nexus
-ExecStart=/data/code/infra/scripts/ha-deployer.sh
-Environment=STATE_DIR=/data/nexus
+ExecStart=/usr/bin/env bash -lc 'set -euo pipefail; if [ -n "${NEXUS_CODE_DIR:-}" ] && [ -x "${NEXUS_CODE_DIR}/infra/scripts/ha-deployer.sh" ]; then exec "${NEXUS_CODE_DIR}/infra/scripts/ha-deployer.sh"; elif [ -x "$HOME/.nexus/code/infra/scripts/ha-deployer.sh" ]; then exec "$HOME/.nexus/code/infra/scripts/ha-deployer.sh"; else exec /data/code/infra/scripts/ha-deployer.sh; fi'
+EnvironmentFile=-%h/.nexus/config/watchdog/nexus.env
+EnvironmentFile=-%h/.nexus/config/gateway/nexus.env
 EnvironmentFile=-/data/nexus-config/watchdog/nexus.env
 EnvironmentFile=-/data/nexus-config/gateway/nexus.env
 Restart=always

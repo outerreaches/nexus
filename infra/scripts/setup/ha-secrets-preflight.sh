@@ -14,13 +14,36 @@
 
 set -euo pipefail
 
-CODE_DIR="${CODE_DIR:-/data/code}"
-CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_NEXUS_HOME="$NEXUS_HOME"
+elif [ -d "/data/code" ] || [ -d "/data/nexus-config" ] || [ -d "/data/nexus" ]; then
+  DEFAULT_NEXUS_HOME=""
+else
+  DEFAULT_NEXUS_HOME="${HOME}/.nexus"
+fi
+
+if [ -n "$DEFAULT_NEXUS_HOME" ]; then
+  DEFAULT_CODE_DIR="${DEFAULT_NEXUS_HOME}/code"
+  DEFAULT_CONFIG_ROOT="${DEFAULT_NEXUS_HOME}/config"
+  DEFAULT_STATE_DIR="${DEFAULT_NEXUS_HOME}/state"
+  DEFAULT_STORE_DIR="${DEFAULT_NEXUS_HOME}/secrets"
+else
+  DEFAULT_CODE_DIR="${REPO_ROOT}"
+  DEFAULT_CONFIG_ROOT="/data/nexus-config"
+  DEFAULT_STATE_DIR="/data/nexus"
+  DEFAULT_STORE_DIR="/data/nexus-secrets"
+fi
+
+CODE_DIR="${CODE_DIR:-${NEXUS_CODE_DIR:-${DEFAULT_CODE_DIR}}}"
+CONFIG_ROOT="${CONFIG_ROOT:-${DEFAULT_CONFIG_ROOT}}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
 SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
 WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
-STATE_DIR="${STATE_DIR:-/data/nexus}"
-STORE_DIR="${STORE_DIR:-/data/nexus-secrets}"
+STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
+STORE_DIR="${STORE_DIR:-${DEFAULT_STORE_DIR}}"
 STORE_PATH="${STORE_PATH:-${STORE_DIR}/credentials.json}"
 
 AUTO_FIX=0

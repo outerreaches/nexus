@@ -2,7 +2,7 @@
 # (same VM/host, process/API boundary; no additional VM required).
 #
 # Usage:
-#   COMPOSE_FILES="/data/code/infra/docker-compose.ha.yml:/data/code/infra/docker-compose.ha.sidecar.yml:/data/code/infra/docker-compose.ha.tls.yml" \
+#   COMPOSE_FILES="<repo-root>/infra/docker-compose.ha.yml:<repo-root>/infra/docker-compose.ha.sidecar.yml:<repo-root>/infra/docker-compose.ha.tls.yml" \
 #   infra/scripts/ha-rollout.sh deploy HEAD
 #
 # Provider profile example:
@@ -32,8 +32,8 @@ services:
       dockerfile: Dockerfile
     command: secret-sidecar --socket-path /run/nexus/secret-sidecar.sock
     volumes:
-      - /data/nexus:/data/nexus
-      - /data/nexus-secrets:/data/nexus-secrets
+      - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus
+      - ${NEXUS_HOST_SECRETS_DIR:-/data/nexus-secrets}:/data/nexus-secrets
       - secret-sidecar-run:/run/nexus
     environment:
       - NEXUS_STATE_DIR=/data/nexus

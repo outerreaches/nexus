@@ -585,7 +585,7 @@ npm run node:deploy:macos
 Or run the script directly:
 
 ```bash
-bash infra/scripts/deploy-nexus-node-linux.sh
+bash infra/scripts/node/deploy-nexus-node-linux.sh
 ```
 
 Validate config generation locally without starting containers:

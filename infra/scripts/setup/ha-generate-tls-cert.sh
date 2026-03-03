@@ -6,8 +6,8 @@
 #   - SHA-256 fingerprint for node-side pinning
 #
 # Examples:
-#   infra/scripts/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
-#   infra/scripts/ha-generate-tls-cert.sh --force --days 365 --san gateway.example.com
+#   infra/scripts/setup/ha-generate-tls-cert.sh --san <host-ip> --san <hostname>
+#   infra/scripts/setup/ha-generate-tls-cert.sh --force --days 365 --san gateway.example.com
 
 set -euo pipefail
 

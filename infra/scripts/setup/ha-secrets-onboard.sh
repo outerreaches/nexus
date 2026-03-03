@@ -18,8 +18,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CODE_DIR="${CODE_DIR:-$REPO_ROOT}"
-CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+CODE_DIR="${CODE_DIR:-${NEXUS_CODE_DIR:-$REPO_ROOT}}"
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_CONFIG_ROOT="${NEXUS_HOME}/config"
+elif [ -d "/data/nexus-config" ]; then
+  DEFAULT_CONFIG_ROOT="/data/nexus-config"
+else
+  DEFAULT_CONFIG_ROOT="${HOME}/.nexus/config"
+fi
+CONFIG_ROOT="${CONFIG_ROOT:-${DEFAULT_CONFIG_ROOT}}"
 
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 COMPOSE_FILES="${COMPOSE_FILES:-${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
