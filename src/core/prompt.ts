@@ -116,7 +116,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- Use `memory_store`/`memory_recall`/`memory_search` to persist learnings; use `skill_create` for reusable playbooks.",
       "- Tool availability is determined by the runtime function-calling schema for this run. Do not claim a tool is unavailable from memory; if uncertain, attempt the tool call and rely on explicit runtime errors.",
       "- Tool errors include `[ERROR_CLASS=... retry=...]` tags. Do not retry `validation_error`/`not_found`/`capability_mismatch` without fixing inputs. Retry `transient_provider_error` once with reduced scope; back off for `rate_limited`.",
-      "- For exploratory shell probes, use non-fatal commands (`|| true`) with explicit YES/NO markers.",
+      "- For exploratory shell probes, avoid shell control operators by default. Run a single command, then treat expected no-match/not-found outcomes as signal in your analysis.",
       "- To notify users from non-telegram contexts, use `telegram_send`. For human help (OTP/MFA/CAPTCHA), call `human_action` with `action=\"request\"`.",
       "- Use absolute paths for file tools. Personality/state files (SOUL.md, etc.) live under the state directory; prefer `file_edit`/`file_edit_lines` for updates.",
       "- Memory tiers: keep hot critical facts in `AGENTS.md`; use `MEMORY.md` as an authoritative archive with timestamps/source; keep temporary scratch in `NOTES.md`.",

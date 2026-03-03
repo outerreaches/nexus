@@ -225,9 +225,23 @@ Architecture and implementation guide for the **coder** preset.
 - Treat auto-deploy fallback as a safety net only; always call `ha_deploy action="apply"` explicitly.
 - Custom tool/runtime refresh is deploy-only; do not attempt hot-reload paths.
 - Keep SSH keys/config in persistent state-backed paths only (`~/.ssh` or `/data/nexus/.ssh`). Do not store keys in ephemeral container paths (for example `/tmp/*`).
-- Keep probes non-fatal (`|| true`) when checking existence/grep-style conditions.
+- Avoid shell control operators in probe commands by default; run a single command and treat expected no-match/not-found outcomes as signal.
+
+## Retry Policy (Enforced)
+Tool errors may include normalized tags like `[ERROR_CLASS=... retry=...]`. This policy is now **enforced** by the runner:
+- `retry=no`: do not repeat the same tool call with identical args; it will be blocked for the rest of the run.
+- `retry=yes`: at most one identical retry is allowed; further identical calls are blocked.
+- `retry=after_backoff`: same as `retry=yes`, but wait/back off first.
+
+## Shell Probes (Avoid False Failures)
+For exploratory `shell_exec` probes (grep/head/curl checks), treat “no match” as an expected outcome:
+- Avoid shell control operators by default; run a single command and interpret expected no-match/not-found outcomes without retry loops.
+- Prefer small single-purpose commands over long pipelines so failures are easier to interpret.
 
 ## Troubleshooting
 - `ERROR: full absolute path is required`: retry with full absolute path.
 - Code root read-only errors: confirm writable code mount and `NEXUS_ALLOW_CODE_WRITE=1`.
+- Missing files: verify `/data/code` contains `package.json` and `src/`.
 - `ha_deploy` timeout/pending: check deploy status/logs via infra runbook in `infra/DEPLOYMENT.md`.
+- Infra runbooks (deploy validation, rollout recovery, TLS/compose issues) live in `infra/DEPLOYMENT.md`.
+- HA issues: verify only one active node via dashboard HA status.

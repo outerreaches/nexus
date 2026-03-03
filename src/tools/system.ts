@@ -117,7 +117,7 @@ export const shellExec = defineTool({
           const hint = isTimeout
             ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_start and inspect with process_logs.`
             : "\n\nHINT: If this keeps failing with the same command, stop retrying and inspect STDERR (or switch approach)." +
-              "\nFor exploratory probes, make commands non-fatal (e.g., append `|| true` or emit explicit YES/NO output).";
+              "\nFor exploratory probes, avoid shell control operators by default; run a single command and treat expected no-match/not-found outcomes as signal.";
           resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));
         }
         else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n")));

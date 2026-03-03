@@ -56,7 +56,7 @@ export const preset: AgentPreset = {
     "- Use `shell_exec` for one-shot security scanning commands (e.g., npm audit, dependency checkers).",
     "- Use `shell_interactive` only for short stateful multi-step shell workflows. Required loop: open -> (send -> read)+ -> close. open returns otherSessions when other sessions exist — prefer reusing a relevant running session over creating a new one.",
     "- Never use sleep loops as a waiting strategy in interactive shell. If a command turns long-running in foreground, interrupt it and switch to detached/log-based follow-up.",
-    "- For exploratory shell probes (headers/status/path checks), use non-fatal commands (`|| true`) and explicit YES/NO output so expected misses do not derail the run.",
+    "- For exploratory shell probes (headers/status/path checks), avoid shell control operators by default. Run single commands and treat expected no-match/not-found outcomes as signal in your analysis.",
     "- Retry shell/web probes only for transient failures (timeouts/connection resets/5xx). Do not retry deterministic outcomes (404/403/not-found/no-match/policy-denied) with identical inputs.",
     "- When reviewing code, use `file_read` to examine the actual implementation — don't assume security based on function names alone.",
     "- Keep `web_search` usage focused on relevant security research; avoid general queries.",

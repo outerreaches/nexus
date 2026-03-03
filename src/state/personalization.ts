@@ -412,7 +412,7 @@ Architecture and implementation guide for the **coder** preset.
 - Treat auto-deploy fallback as a safety net only; always call \`ha_deploy action="apply"\` explicitly.
 - Custom tool/runtime refresh is deploy-only; do not attempt hot-reload paths.
 - Keep SSH keys/config in persistent state-backed paths only (\`~/.ssh\` or \`${stateDirPath}/.ssh\`). Do not store keys in ephemeral container paths (for example \`/tmp/*\`).
-- Keep probes non-fatal (\`|| true\`) when checking existence/grep-style conditions.
+- Avoid shell control operators in probe commands by default; run a single command and treat expected no-match/not-found outcomes as signal.
 
 ## Retry Policy (Enforced)
 Tool errors may include normalized tags like \`[ERROR_CLASS=... retry=...]\`. This policy is now **enforced** by the runner:
@@ -422,7 +422,7 @@ Tool errors may include normalized tags like \`[ERROR_CLASS=... retry=...]\`. Th
 
 ## Shell Probes (Avoid False Failures)
 For exploratory \`shell_exec\` probes (grep/head/curl checks), treat “no match” as an expected outcome:
-- Make probes non-fatal: append \`|| true\`, or emit explicit \`YES/NO\` output.
+- Avoid shell control operators by default; run a single command and interpret expected no-match/not-found outcomes without retry loops.
 - Prefer small single-purpose commands over long pipelines so failures are easier to interpret.
 
 ## Troubleshooting
