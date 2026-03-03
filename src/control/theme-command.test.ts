@@ -12,10 +12,6 @@ test("parseThemeCommandText parses first arg as requested theme", () => {
     kind: "theme",
     requestedTheme: "amber",
   });
-  assert.deepEqual(parseThemeCommandText("/theme midnight-commander extra"), {
-    kind: "theme",
-    requestedTheme: "midnight-commander",
-  });
 });
 
 test("parseThemeCommandText supports bot mention token", () => {

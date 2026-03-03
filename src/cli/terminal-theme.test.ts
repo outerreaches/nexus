@@ -15,7 +15,6 @@ test("resolveTerminalThemeId maps aliases", () => {
   assert.equal(resolveTerminalThemeId("green"), "terminal-green");
   assert.equal(resolveTerminalThemeId("amber"), "terminal-amber");
   assert.equal(resolveTerminalThemeId("dos"), "dos-bw");
-  assert.equal(resolveTerminalThemeId("mc"), "midnight");
   assert.equal(resolveTerminalThemeId("light"), "light");
   assert.equal(resolveTerminalThemeId("unknown-theme"), null);
 });

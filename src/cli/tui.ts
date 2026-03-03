@@ -27,7 +27,7 @@ type BoxChars = {
   h: string; v: string;
 };
 
-const UNICODE_BOX: BoxChars = { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" };
+const UNICODE_BOX: BoxChars = { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" };
 const ASCII_BOX: BoxChars = { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" };
 
 const BLINK = "\x1b[5m";
