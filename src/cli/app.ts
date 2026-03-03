@@ -34,6 +34,17 @@ function resolveApiKey(value?: string): string | undefined {
   return value;
 }
 
+function isLikelyLocalBaseUrl(baseUrl: string): boolean {
+  const raw = (baseUrl ?? "").trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 async function resolveConfigSecretValue(params: {
   db: NexusDatabase;
   stateDir: string;
@@ -295,6 +306,15 @@ export async function runCli(argv: string[]): Promise<void> {
         mode: "default",
         presetLlm: getPreset("orchestrator")?.llm,
       });
+      const startupApiKeyPresent = Boolean(startupRoute.primary.apiKey && startupRoute.primary.apiKey.trim().length > 0);
+      log(
+        `cli: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model} source=${startupRoute.source} api_key=${startupApiKeyPresent ? "set" : "missing"}`,
+      );
+      if (!startupApiKeyPresent && !isLikelyLocalBaseUrl(startupRoute.primary.baseUrl)) {
+        log(
+          `cli: WARN selected provider ${startupRoute.primaryProvider} uses non-local baseUrl ${startupRoute.primary.baseUrl} but api_key is missing`,
+        );
+      }
       const llm = modelRouter.createClient(startupRoute, {
         onLog: (line) => log(line),
       });
@@ -645,6 +665,15 @@ export async function runCli(argv: string[]): Promise<void> {
           mode: "default",
           presetLlm: getPreset("orchestrator")?.llm,
         });
+        const startupApiKeyPresent = Boolean(startupRoute.primary.apiKey && startupRoute.primary.apiKey.trim().length > 0);
+        log(
+          `cli: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model} source=${startupRoute.source} api_key=${startupApiKeyPresent ? "set" : "missing"}`,
+        );
+        if (!startupApiKeyPresent && !isLikelyLocalBaseUrl(startupRoute.primary.baseUrl)) {
+          log(
+            `cli: WARN selected provider ${startupRoute.primaryProvider} uses non-local baseUrl ${startupRoute.primary.baseUrl} but api_key is missing`,
+          );
+        }
         const llm = modelRouter.createClient(startupRoute, {
           onLog: (line) => log(line),
         });
