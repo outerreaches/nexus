@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Hono } from "hono";
 import { Bot, Context, InputFile } from "grammy";
 import { stream as streamPlugin, type StreamFlavor } from "@grammyjs/stream";
-import { autoRetry } from "@grammyjs/auto-retry";
+
 
 import type { NexusConfig } from "../state/config.js";
 import { getSecret } from "../secrets/resolve-env.js";
@@ -789,6 +789,7 @@ export async function startTelegramBot(deps: {
   const bot = new Bot<StreamFlavor<Context>>(token);
   // Auto-retry on 429 rate limits and transient 5xx errors (must be installed
   // before the stream plugin so draft sends are retried instead of crashing).
+  const { autoRetry } = await import("@grammyjs/auto-retry");
   bot.api.config.use(autoRetry({ maxDelaySeconds: 10, maxRetryAttempts: 3 }));
   bot.use(streamPlugin());
   const me = await bot.api.getMe();
