@@ -40,6 +40,8 @@ Architecture and implementation guide for the **coder** preset.
 - Primary source root: `/data/code`
 - Runtime state root: `/data/nexus`
 - Scratch root: `/data/workspace`
+- Treat `/data/code` as Nexus source only. Do not create unrelated app/scripts there.
+- Place non-Nexus code under `/data/workspace/projects/<slug>/` (create a slug first if missing).
 - Persistent SSH path: `/data/nexus/.ssh` (`~/.ssh` in gateway containers because `HOME=/data/nexus`)
 - Runtime prompt source of truth is `/data/nexus/CODEGUIDE.md`.
 

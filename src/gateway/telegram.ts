@@ -705,18 +705,13 @@ type StreamBridge = {
   finish: () => void;
 };
 
-function createStreamBridge(onFirstChunk?: () => void): StreamBridge {
+function createStreamBridge(): StreamBridge {
   let resolve: ((value: IteratorResult<string>) => void) | null = null;
   const queue: string[] = [];
   let done = false;
-  let firstChunkFired = false;
 
   const push = (text: string) => {
     if (done) return;
-    if (!firstChunkFired) {
-      firstChunkFired = true;
-      onFirstChunk?.();
-    }
     if (resolve) {
       const r = resolve;
       resolve = null;
@@ -1222,14 +1217,25 @@ export async function startTelegramBot(deps: {
       if (isPrivateChat) {
         // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
         // Show typing indicator while waiting for the first LLM token. Once
-        // drafts start flowing the client shows the draft text natively — the
-        // periodic typing action would race with draft updates and cause the
-        // text to flicker (disappear then reappear).
-        bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-        const typingInterval = setInterval(() => {
+        // Show typing while waiting for the first LLM token and during tool
+        // execution gaps.  Once drafts start flowing the client shows the
+        // draft text natively — a concurrent typing action races with draft
+        // updates and causes the text to flicker (disappear then reappear).
+        let typingTimer: ReturnType<typeof setInterval> | null = null;
+        const startTyping = () => {
+          if (typingTimer) return;
           bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-        }, 4_000);
-        const bridge = createStreamBridge(() => clearInterval(typingInterval));
+          typingTimer = setInterval(() => {
+            bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+          }, 4_000);
+        };
+        const stopTyping = () => {
+          if (!typingTimer) return;
+          clearInterval(typingTimer);
+          typingTimer = null;
+        };
+        startTyping();
+        const bridge = createStreamBridge();
         const draftIdOffset = draftOffsetForStream({
           messageId,
           updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
@@ -1254,13 +1260,13 @@ export async function startTelegramBot(deps: {
             agentId: tg.agentId,
             text: dispatchText,
             contentParts,
-            onTextDelta: bridge.onTextDelta,
-            onToolStart: bridge.onToolStart,
+            onTextDelta: (delta) => { stopTyping(); bridge.onTextDelta(delta); },
+            onToolStart: (name, preview) => { bridge.onToolStart(name, preview); startTyping(); },
             onToolEnd: bridge.onToolEnd,
           });
         } finally {
           bridge.finish();
-          clearInterval(typingInterval);
+          stopTyping();
           await streamPromise.catch((err) => {
             streamErr = err;
           });

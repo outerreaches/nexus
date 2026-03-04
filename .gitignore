@@ -25,3 +25,17 @@ internal-asset
 internal-asset
 internal-asset
 internal-asset
+
+# Local collector scripts/config (keep local, never commit)
+jetson-collector-config.json
+jetson-collector.py
+jetson-nexus-node-start.sh
+pi-collect-and-post.sh
+pi-collect-check.sh
+pi-collector-config.json
+pi-collector.py
+pi-config-check.json
+pi-config-fixed.json
+pi-env-updated.env
+pi-nexus-node-start.sh
+pi-start.sh
