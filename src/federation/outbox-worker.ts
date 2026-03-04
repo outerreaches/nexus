@@ -119,7 +119,10 @@ export function startFederationOutboxWorker(params: {
   };
 
   const timer = setInterval(() => {
-    void tick();
+    void tick().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`federation/outbox: tick_failed err=${message}`);
+    });
   }, intervalMs);
   if (typeof timer.unref === "function") timer.unref();
 

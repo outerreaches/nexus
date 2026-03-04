@@ -10,6 +10,18 @@ const EnvString = z.string().transform((val) => {
   return val.replace(/\$\{([A-Z0-9_]+)\}/g, (match, name) => process.env[name] ?? match);
 });
 
+const TelegramStreamingSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    serializePerChat: z.boolean().default(true),
+    maxConcurrentPerChat: z.number().int().positive().max(8).default(1),
+    draftOffsetMode: z.enum(["update_id_window", "message_id"]).default("update_id_window"),
+    draftOffsetWindow: z.number().int().min(64).max(8192).default(256),
+    fallbackToSendOutput: z.boolean().default(true),
+    emitFallbackNotice: z.boolean().default(true),
+  })
+  .default({});
+
 const TelegramChannelSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -22,6 +34,7 @@ const TelegramChannelSchema = z
     allowFrom: z.array(z.number().int()).default([]),
     requireMentionInGroups: z.boolean().default(true),
     agentId: z.string().default("main"),
+    streaming: TelegramStreamingSchema,
     pairing: z
       .object({
         enabled: z.boolean().default(true),
@@ -333,6 +346,15 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
             allowFrom: [],
             requireMentionInGroups: true,
             agentId: "main",
+            streaming: {
+              enabled: true,
+              serializePerChat: true,
+              maxConcurrentPerChat: 1,
+              draftOffsetMode: "update_id_window",
+              draftOffsetWindow: 256,
+              fallbackToSendOutput: true,
+              emitFallbackNotice: true
+            },
             pairing: {
               enabled: true,
               codeTtlMs: 3600000,

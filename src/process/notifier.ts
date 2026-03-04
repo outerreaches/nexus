@@ -334,9 +334,17 @@ export function startProcessNotifier(deps: {
     }
   };
 
-  timer = setInterval(() => void tick(), tickIntervalMs);
+  timer = setInterval(() => {
+    void tick().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      deps.log(`process_notifier: tick_failed err=${msg}`);
+    });
+  }, tickIntervalMs);
   // Kick once on start.
-  void tick();
+  void tick().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    deps.log(`process_notifier: initial_tick_failed err=${msg}`);
+  });
 
   deps.log(`process_notifier: started tickIntervalMs=${tickIntervalMs} maxPerTick=${maxPerTick}`);
   return { stop };

@@ -110,6 +110,15 @@
       "allowFrom": [],
       "requireMentionInGroups": true,
       "agentId": "main",
+      "streaming": {
+        "enabled": true,
+        "serializePerChat": true,
+        "maxConcurrentPerChat": 1,
+        "draftOffsetMode": "update_id_window",
+        "draftOffsetWindow": 256,
+        "fallbackToSendOutput": true,
+        "emitFallbackNotice": true
+      },
       "pairing": {
         "enabled": true,
         "codeTtlMs": 3600000,

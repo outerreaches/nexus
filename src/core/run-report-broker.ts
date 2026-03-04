@@ -264,7 +264,10 @@ export function startRunReportBroker(deps: {
   };
 
   const timer = setInterval(() => {
-    void tick();
+    void tick().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      deps.log(`run_report_broker: tick_failed err=${msg}`);
+    });
   }, tickIntervalMs);
   if (typeof timer.unref === "function") timer.unref();
 

@@ -9,6 +9,7 @@ import { stream as streamPlugin, type StreamFlavor } from "@grammyjs/stream";
 import type { NexusConfig } from "../state/config.js";
 import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
+import { Semaphore } from "../core/semaphore.js";
 import type { ChatUserContentPart } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
@@ -158,15 +159,22 @@ function resolveMessageThreadId(ctx: Context): number | undefined {
   return typeof msg.message_thread_id === "number" ? msg.message_thread_id : undefined;
 }
 
-function draftOffsetForStream(params: { messageId: number; updateId: number }): number {
-  // Telegram clients can show a transient "Deleted message" header for draft ids
-  // that are not anchored to a real chat message id. Prefer inbound message id.
-  if (Number.isSafeInteger(params.messageId) && params.messageId > 0) {
+function draftOffsetForStream(params: {
+  messageId: number;
+  updateId: number;
+  mode: "update_id_window" | "message_id";
+  windowSize: number;
+}): number {
+  if (params.mode === "message_id" && Number.isSafeInteger(params.messageId) && params.messageId > 0) {
     return params.messageId;
   }
-  // Keep a deterministic, bounded fallback that leaves room for split drafts.
+  // Use update_id windows to avoid collisions between overlapping streams.
   if (Number.isSafeInteger(params.updateId) && params.updateId > 0) {
-    return Math.floor((params.updateId % 8_000_000) * 256 + 1);
+    const window = Math.max(64, Math.floor(params.windowSize));
+    return Math.floor((params.updateId % 8_000_000) * window + 1);
+  }
+  if (Number.isSafeInteger(params.messageId) && params.messageId > 0) {
+    return params.messageId;
   }
   return 1;
 }
@@ -796,6 +804,23 @@ export async function startTelegramBot(deps: {
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
   const allowFrom = tg.allowFrom ?? [];
+  const streamingEnabled = tg.streaming.enabled;
+  const streamingSerializePerChat = tg.streaming.serializePerChat;
+  const streamingMaxConcurrentPerChat = Math.max(1, Math.floor(tg.streaming.maxConcurrentPerChat));
+  const streamingDraftOffsetMode = tg.streaming.draftOffsetMode;
+  const streamingDraftOffsetWindow = Math.max(64, Math.floor(tg.streaming.draftOffsetWindow));
+  const streamingFallbackToSendOutput = tg.streaming.fallbackToSendOutput;
+  const streamingEmitFallbackNotice = tg.streaming.emitFallbackNotice;
+  const streamSemaphores = new Map<number, Semaphore>();
+  const withChatStreamLock = async <T>(chatId: number, fn: () => Promise<T>): Promise<T> => {
+    if (!streamingSerializePerChat) return await fn();
+    let sem = streamSemaphores.get(chatId);
+    if (!sem) {
+      sem = new Semaphore(streamingMaxConcurrentPerChat);
+      streamSemaphores.set(chatId, sem);
+    }
+    return await sem.withLock(fn);
+  };
   const stateDir = process.env.NEXUS_STATE_DIR ?? "/data/nexus";
   const maxInboundFilesPerMessage = envInt("NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE", DEFAULT_MAX_INBOUND_FILES_PER_MESSAGE, {
     min: 1,
@@ -824,6 +849,9 @@ export async function startTelegramBot(deps: {
 
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
+  deps.log(
+    `telegram: streaming enabled=${streamingEnabled} serialize_per_chat=${streamingSerializePerChat} max_per_chat=${streamingMaxConcurrentPerChat} draft_offset_mode=${streamingDraftOffsetMode} draft_offset_window=${streamingDraftOffsetWindow} fallback_send_output=${streamingFallbackToSendOutput}`,
+  );
   deps.log(
     `telegram: file_io max_files_per_msg=${maxInboundFilesPerMessage} max_file_bytes=${maxInboundFileBytes} blackboard_ttl_ms=${fileBlackboardTtlMs}`,
   );
@@ -1215,89 +1243,119 @@ export async function startTelegramBot(deps: {
       const messageThreadId = resolveMessageThreadId(ctx);
       const typingParams = typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : undefined;
 
-      if (isPrivateChat) {
-        // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
-        // Show typing indicator while waiting for the first LLM token. Once
-        // Show typing while waiting for the first LLM token and during tool
-        // execution gaps.  Once drafts start flowing the client shows the
-        // draft text natively — a concurrent typing action races with draft
-        // updates and causes the text to flicker (disappear then reappear).
-        let typingTimer: ReturnType<typeof setInterval> | null = null;
-        const startTyping = () => {
-          if (typingTimer) return;
-          bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-          typingTimer = setInterval(() => {
+      if (streamingEnabled && isPrivateChat) {
+        await withChatStreamLock(chatId, async () => {
+          // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
+          // Show typing while waiting for first tokens and during tool gaps.
+          let typingTimer: ReturnType<typeof setInterval> | null = null;
+          const startTyping = () => {
+            if (typingTimer) return;
             bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-          }, 4_000);
-        };
-        const stopTyping = () => {
-          if (!typingTimer) return;
-          clearInterval(typingTimer);
-          typingTimer = null;
-        };
-        startTyping();
-        const bridge = createStreamBridge();
-        const draftIdOffset = draftOffsetForStream({
-          messageId,
-          updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
-        });
-        const streamPromise = ctx.api.streamMessage(
-          chatId,
-          draftIdOffset,
-          bridge.iterable,
-          typingParams,
-          typingParams,
-        );
-        deps.log(
-          `telegram: stream_start chat_id=${chatId} draft_offset=${draftIdOffset} thread_id=${typeof messageThreadId === "number" ? messageThreadId : "none"}`,
-        );
+            typingTimer = setInterval(() => {
+              bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+            }, 4_000);
+          };
+          const stopTyping = () => {
+            if (!typingTimer) return;
+            clearInterval(typingTimer);
+            typingTimer = null;
+          };
+          startTyping();
 
-        let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
-        let streamErr: unknown = null;
-        try {
-          res = await deps.agent.handleUserMessage({
+          const bridge = createStreamBridge();
+          const draftIdOffset = draftOffsetForStream({
+            messageId,
+            updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
+            mode: streamingDraftOffsetMode,
+            windowSize: streamingDraftOffsetWindow,
+          });
+          let streamErr: unknown = null;
+          let streamHadMessages = false;
+          // Attach rejection handling immediately to avoid unhandled promise crashes.
+          const streamPromise = ctx.api
+            .streamMessage(
+              chatId,
+              draftIdOffset,
+              bridge.iterable,
+              typingParams,
+              typingParams,
+            )
+            .then((messages) => {
+              streamHadMessages = Array.isArray(messages) && messages.length > 0;
+              return messages;
+            })
+            .catch((err) => {
+              streamErr = err;
+              return [];
+            });
+
+          deps.log(
+            `telegram: stream_start chat_id=${chatId} draft_offset=${draftIdOffset} thread_id=${typeof messageThreadId === "number" ? messageThreadId : "none"}`,
+          );
+
+          let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
+          try {
+            res = await deps.agent.handleUserMessage({
+              channel: "telegram",
+              channelKey: String(chatId),
+              agentId: tg.agentId,
+              text: dispatchText,
+              contentParts,
+              onTextDelta: (delta) => { stopTyping(); bridge.onTextDelta(delta); },
+              onToolStart: (name, preview) => { bridge.onToolStart(name, preview); startTyping(); },
+              onToolEnd: bridge.onToolEnd,
+            });
+          } finally {
+            bridge.finish();
+            stopTyping();
+            await streamPromise;
+          }
+          if (streamErr) {
+            deps.log(
+              `telegram: stream_error chat_id=${chatId} ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`,
+            );
+          }
+
+          const extracted = await extractTelegramImageAttachments(res.output);
+          const shouldFallbackSend =
+            (streamErr && streamingFallbackToSendOutput)
+            || (!streamErr && !streamHadMessages && extracted.text.trim().length > 0);
+          if (shouldFallbackSend) {
+            if (streamErr && streamingEmitFallbackNotice) {
+              await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
+                ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+              });
+            }
+            deps.log(
+              `telegram: stream_fallback_send_output chat_id=${chatId} reason=${
+                streamErr ? "stream_error" : "no_stream_messages"
+              }`,
+            );
+            await sendOutput(chatId, res.output, { messageThreadId });
+          } else {
+            // Send images as follow-up messages (they can't be part of a text stream)
+            for (const img of extracted.imagePaths) {
+              try {
+                await sendFile(chatId, img, {
+                  caption: path.basename(img),
+                  messageThreadId,
+                });
+              } catch (err) {
+                deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
+                await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+                  ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                });
+              }
+            }
+          }
+
+          deps.agent.ackDeployIfPending({
+            runId: res.runId,
+            sessionId: res.sessionId,
             channel: "telegram",
             channelKey: String(chatId),
             agentId: tg.agentId,
-            text: dispatchText,
-            contentParts,
-            onTextDelta: (delta) => { stopTyping(); bridge.onTextDelta(delta); },
-            onToolStart: (name, preview) => { bridge.onToolStart(name, preview); startTyping(); },
-            onToolEnd: bridge.onToolEnd,
           });
-        } finally {
-          bridge.finish();
-          stopTyping();
-          await streamPromise.catch((err) => {
-            streamErr = err;
-          });
-        }
-        if (streamErr) {
-          deps.log(`telegram: stream_error chat_id=${chatId} ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`);
-        }
-
-        // Send images as follow-up messages (they can't be part of a text stream)
-        const extracted = await extractTelegramImageAttachments(res.output);
-        for (const img of extracted.imagePaths) {
-          try {
-            await sendFile(chatId, img, {
-              caption: path.basename(img),
-              messageThreadId,
-            });
-          } catch (err) {
-            deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-            await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
-              ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
-            });
-          }
-        }
-
-        deps.agent.ackDeployIfPending({
-          runId: res.runId,
-          sessionId: res.sessionId,
-          channel: "telegram",
-          channelKey: String(chatId),
-          agentId: tg.agentId,
         });
       } else {
         // --- Non-streaming path for groups/channels: existing behavior ---

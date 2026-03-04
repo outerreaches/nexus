@@ -679,8 +679,16 @@ export async function startGateway(
     if (leaseTimer) clearInterval(leaseTimer);
     leaseTimer = setInterval(() => {
       if (!leaseHeld) return;
-      const ok = renewActiveLease(Date.now());
-      if (!ok) {
+      try {
+        const ok = renewActiveLease(Date.now());
+        if (!ok) {
+          leaseHeld = false;
+          leaseExpiresAt = null;
+          void deactivate("lost active lease");
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`standby: lease renewal failed (${msg})`);
         leaseHeld = false;
         leaseExpiresAt = null;
         void deactivate("lost active lease");
