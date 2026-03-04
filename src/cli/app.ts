@@ -546,12 +546,14 @@ export async function runCli(argv: string[]): Promise<void> {
 
           const done = (result: string | null) => {
             cleanup();
+            if (colorEnabled) process.stdout.write("\x1b[0m");
             process.stdout.write("\n");
             resolve(result);
           };
 
           const fail = (err: unknown) => {
             cleanup();
+            if (colorEnabled) process.stdout.write("\x1b[0m");
             reject(err instanceof Error ? err : new Error(String(err)));
           };
 
@@ -570,7 +572,9 @@ export async function runCli(argv: string[]): Promise<void> {
               cursorTo(process.stdout, 0);
               clearScreenDown(process.stdout);
             }
-            process.stdout.write(lines.map((line) => `${tui.promptString()}${line}`).join("\n"));
+            // Clear to end-of-line after each rendered input row so prompt background
+            // fills the full terminal width on themed prompts.
+            process.stdout.write(lines.map((line) => `${tui.promptString()}${line}\x1b[K`).join("\n"));
             renderedRows = nextRows;
 
             // Position cursor at cursorPos within the rendered lines.
