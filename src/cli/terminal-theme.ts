@@ -6,7 +6,15 @@ export type TerminalThemeId =
   | "terminal-amber"
   | "dos-bw"
   | "midnight"
-  | "light";
+  | "light"
+  | "nord"
+  | "solarized-dark"
+  | "dracula"
+  | "gruvbox"
+  | "high-contrast"
+  | "cyberpunk"
+  | "ocean"
+  | "paper";
 
 export type TerminalTheme = {
   id: TerminalThemeId;
@@ -84,6 +92,94 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     reset: RESET,
     continuousBg: true,
   },
+  nord: {
+    id: "nord",
+    label: "Nord",
+    description: "Frosty arctic blues.",
+    prompt: "\x1b[38;2;143;188;187m",
+    assistant: "\x1b[38;2;136;192;208m",
+    system: "\x1b[38;2;129;161;193;1m",
+    error: "\x1b[38;2;191;97;106m",
+    dim: "\x1b[38;2;76;86;106m",
+    reset: RESET,
+  },
+  "solarized-dark": {
+    id: "solarized-dark",
+    label: "Solarized Dark",
+    description: "Classic low-contrast beige and cyan.",
+    prompt: "\x1b[38;2;42;161;152m",
+    assistant: "\x1b[38;2;131;148;150m",
+    system: "\x1b[38;2;181;137;0;1m",
+    error: "\x1b[38;2;220;50;47m",
+    dim: "\x1b[38;2;88;110;117m",
+    reset: RESET,
+  },
+  dracula: {
+    id: "dracula",
+    label: "Dracula",
+    description: "Purple, pink, and cyan dark theme.",
+    prompt: "\x1b[38;2;189;147;249m",
+    assistant: "\x1b[38;2;248;248;242m",
+    system: "\x1b[38;2;255;121;198;1m",
+    error: "\x1b[38;2;255;85;85m",
+    dim: "\x1b[38;2;98;114;164m",
+    reset: RESET,
+  },
+  gruvbox: {
+    id: "gruvbox",
+    label: "Gruvbox",
+    description: "Warm retro dark with browns and beiges.",
+    prompt: "\x1b[38;2;184;187;38m",
+    assistant: "\x1b[38;2;235;219;178m",
+    system: "\x1b[38;2;250;189;47;1m",
+    error: "\x1b[38;2;204;36;29m",
+    dim: "\x1b[38;2;102;92;84m",
+    reset: RESET,
+  },
+  "high-contrast": {
+    id: "high-contrast",
+    label: "High Contrast",
+    description: "Pure black and white for accessibility.",
+    prompt: "\x1b[97;1m",
+    assistant: "\x1b[97m",
+    system: "\x1b[97;1;7m",
+    error: "\x1b[97;1;41m",
+    dim: "\x1b[90m",
+    reset: RESET,
+  },
+  cyberpunk: {
+    id: "cyberpunk",
+    label: "Cyberpunk",
+    description: "Neon pink and cyan on dark.",
+    prompt: "\x1b[38;2;0;255;255m",
+    assistant: "\x1b[38;2;255;0;255m",
+    system: "\x1b[38;2;255;255;0;1m",
+    error: "\x1b[38;2;255;0;0;1m",
+    dim: "\x1b[38;2;128;0;128m",
+    reset: RESET,
+  },
+  ocean: {
+    id: "ocean",
+    label: "Ocean",
+    description: "Deep teals and blues.",
+    prompt: "\x1b[38;2;0;255;200m",
+    assistant: "\x1b[38;2;0;180;200m",
+    system: "\x1b[38;2;0;150;255;1m",
+    error: "\x1b[38;2;255;100;100m",
+    dim: "\x1b[38;2;0;100;120m",
+    reset: RESET,
+  },
+  paper: {
+    id: "paper",
+    label: "Paper",
+    description: "Warm off-white with sepia tones.",
+    prompt: "\x1b[38;2;139;90;43m",
+    assistant: "\x1b[38;2;101;67;33m",
+    system: "\x1b[38;2;160;82;45;1m",
+    error: "\x1b[38;2;178;34;34m",
+    dim: "\x1b[38;2;139;125;107m",
+    reset: RESET,
+  },
 };
 
 const THEME_ALIASES: Record<string, TerminalThemeId> = {
@@ -100,6 +196,18 @@ const THEME_ALIASES: Record<string, TerminalThemeId> = {
   blue: "midnight",
   "midnight-commander": "midnight",
   light: "light",
+  nord: "nord",
+  "solarized-dark": "solarized-dark",
+  solarized: "solarized-dark",
+  dracula: "dracula",
+  gruvbox: "gruvbox",
+  "high-contrast": "high-contrast",
+  hc: "high-contrast",
+  cyberpunk: "cyberpunk",
+  neon: "cyberpunk",
+  ocean: "ocean",
+  paper: "paper",
+  sepia: "paper",
 };
 
 type TerminalUiPreferences = {
