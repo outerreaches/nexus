@@ -114,8 +114,7 @@
         "enabled": true,
         "serializePerChat": true,
         "maxConcurrentPerChat": 1,
-        "draftOffsetMode": "update_id_window",
-        "draftOffsetWindow": 256,
+        "previewThrottleMs": 650,
         "fallbackToSendOutput": true,
         "emitFallbackNotice": true
       },

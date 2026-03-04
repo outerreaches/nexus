@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
 import { Bot, Context, InputFile } from "grammy";
-import { stream as streamPlugin, type StreamFlavor } from "@grammyjs/stream";
 
 
 import type { NexusConfig } from "../state/config.js";
@@ -94,7 +93,7 @@ function areTelegramCommandsEqual(
 }
 
 async function syncTelegramCommands(params: {
-  bot: Bot<StreamFlavor<Context>>;
+  bot: Bot<Context>;
   pairingEnabled: boolean;
   log: (msg: string) => void;
 }): Promise<void> {
@@ -159,24 +158,53 @@ function resolveMessageThreadId(ctx: Context): number | undefined {
   return typeof msg.message_thread_id === "number" ? msg.message_thread_id : undefined;
 }
 
-function draftOffsetForStream(params: {
-  messageId: number;
-  updateId: number;
-  mode: "update_id_window" | "message_id";
-  windowSize: number;
-}): number {
-  if (params.mode === "message_id" && Number.isSafeInteger(params.messageId) && params.messageId > 0) {
-    return params.messageId;
+const TELEGRAM_STREAM_PREVIEW_MAX_CHARS = 4096;
+const TELEGRAM_STREAM_PREVIEW_THROTTLE_MS = 650;
+const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
+const DRAFT_METHOD_UNAVAILABLE_RE = /(unknown method|method .*not (found|available|supported)|unsupported)/i;
+const DRAFT_CHAT_UNSUPPORTED_RE = /(can't be used|can be used only)/i;
+const MESSAGE_NOT_MODIFIED_RE = /message is not modified/i;
+
+type TelegramSendMessageDraft = (
+  chatId: number,
+  draftId: number,
+  text: string,
+  params?: {
+    message_thread_id?: number;
+  },
+) => Promise<unknown>;
+
+let nextTelegramDraftId = 0;
+
+function allocateTelegramDraftId(): number {
+  nextTelegramDraftId = nextTelegramDraftId >= TELEGRAM_DRAFT_ID_MAX ? 1 : nextTelegramDraftId + 1;
+  return nextTelegramDraftId;
+}
+
+function toErrorText(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err && "description" in err) {
+    const description = (err as { description?: unknown }).description;
+    if (typeof description === "string") return description;
   }
-  // Use update_id windows to avoid collisions between overlapping streams.
-  if (Number.isSafeInteger(params.updateId) && params.updateId > 0) {
-    const window = Math.max(64, Math.floor(params.windowSize));
-    return Math.floor((params.updateId % 8_000_000) * window + 1);
-  }
-  if (Number.isSafeInteger(params.messageId) && params.messageId > 0) {
-    return params.messageId;
-  }
-  return 1;
+  return String(err);
+}
+
+function resolveSendMessageDraft(api: Bot["api"]): TelegramSendMessageDraft | null {
+  const fn = (api as Bot["api"] & { sendMessageDraft?: TelegramSendMessageDraft }).sendMessageDraft;
+  if (typeof fn !== "function") return null;
+  return fn.bind(api as object);
+}
+
+function shouldFallbackFromDraftTransport(err: unknown): boolean {
+  const text = toErrorText(err);
+  if (!/sendMessageDraft/i.test(text)) return false;
+  return DRAFT_METHOD_UNAVAILABLE_RE.test(text) || DRAFT_CHAT_UNSUPPORTED_RE.test(text);
+}
+
+function isMessageNotModifiedError(err: unknown): boolean {
+  return MESSAGE_NOT_MODIFIED_RE.test(toErrorText(err));
 }
 
 function isGroupChat(ctx: Context): boolean {
@@ -701,69 +729,290 @@ function writeTelegramUploadBlackboardEntry(params: {
   return id;
 }
 
-// ---------------------------------------------------------------------------
-// Streaming bridge: converts push-based callbacks into an AsyncIterable<string>
-// for the @grammyjs/stream plugin's streamMessage API.
-// ---------------------------------------------------------------------------
-type StreamBridge = {
+type TelegramStreamPreviewMode = "draft" | "message";
+
+type TelegramStreamPreviewState = {
+  mode: TelegramStreamPreviewMode;
+  failed: boolean;
+  hadPreview: boolean;
+  messageId?: number;
+};
+
+type TelegramStreamPreview = {
   onTextDelta: (delta: string) => void;
   onToolStart: (name: string, preview: string) => void;
   onToolEnd: (name: string) => void;
-  iterable: AsyncIterable<string>;
-  finish: () => void;
+  flush: () => Promise<void>;
+  finish: () => Promise<void>;
+  clear: () => Promise<void>;
+  state: () => TelegramStreamPreviewState;
 };
 
-function createStreamBridge(): StreamBridge {
-  let resolve: ((value: IteratorResult<string>) => void) | null = null;
-  const queue: string[] = [];
-  let done = false;
+function createTelegramStreamPreview(params: {
+  api: Bot["api"];
+  chatId: number;
+  messageThreadId?: number;
+  preferDraft: boolean;
+  throttleMs?: number;
+  log: (msg: string) => void;
+  warn: (msg: string) => void;
+}): TelegramStreamPreview {
+  const throttleMs = Math.max(200, Math.floor(params.throttleMs ?? TELEGRAM_STREAM_PREVIEW_THROTTLE_MS));
+  const threadParams =
+    typeof params.messageThreadId === "number"
+      ? ({ message_thread_id: params.messageThreadId } as const)
+      : undefined;
 
-  const push = (text: string) => {
-    if (done) return;
-    if (resolve) {
-      const r = resolve;
-      resolve = null;
-      r({ value: text, done: false });
-    } else {
-      queue.push(text);
+  const sendMessageDraft = params.preferDraft ? resolveSendMessageDraft(params.api) : null;
+  let mode: TelegramStreamPreviewMode = params.preferDraft && sendMessageDraft ? "draft" : "message";
+  if (params.preferDraft && !sendMessageDraft) {
+    params.warn("telegram: sendMessageDraft unavailable; preview transport fallback=message");
+  }
+
+  let textBuffer = "";
+  let lastSentText = "";
+  let previewMessageId: number | undefined;
+  let previewDraftId = mode === "draft" ? allocateTelegramDraftId() : undefined;
+  let failed = false;
+  let hadPreview = false;
+  let pending = false;
+  let ending = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let flushing = false;
+  const idleWaiters: Array<() => void> = [];
+
+  const resolveIdleWaiters = () => {
+    if (pending || flushing) return;
+    const waiters = idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  };
+
+  const sendViaMessageTransport = async (nextText: string) => {
+    if (typeof previewMessageId === "number") {
+      try {
+        await params.api.editMessageText(params.chatId, previewMessageId, nextText);
+      } catch (err) {
+        if (!isMessageNotModifiedError(err)) {
+          throw err;
+        }
+      }
+      hadPreview = true;
+      return;
+    }
+
+    const sent = threadParams
+      ? await params.api.sendMessage(params.chatId, nextText, threadParams)
+      : await params.api.sendMessage(params.chatId, nextText);
+    const sentId = sent?.message_id;
+    if (typeof sentId === "number" && Number.isFinite(sentId)) {
+      previewMessageId = Math.trunc(sentId);
+      hadPreview = true;
     }
   };
 
-  const iterable: AsyncIterable<string> = {
-    [Symbol.asyncIterator]() {
-      return {
-        next(): Promise<IteratorResult<string>> {
-          if (queue.length > 0) {
-            return Promise.resolve({ value: queue.shift()!, done: false });
-          }
-          if (done) {
-            return Promise.resolve({ value: undefined as unknown as string, done: true });
-          }
-          return new Promise((r) => { resolve = r; });
-        },
-      };
-    },
+  const sendPreviewText = async (nextText: string) => {
+    if (mode === "draft") {
+      const draftId = previewDraftId ?? allocateTelegramDraftId();
+      previewDraftId = draftId;
+      try {
+        if (threadParams) {
+          await sendMessageDraft!(params.chatId, draftId, nextText, threadParams);
+        } else {
+          await sendMessageDraft!(params.chatId, draftId, nextText);
+        }
+        hadPreview = true;
+        return;
+      } catch (err) {
+        if (!shouldFallbackFromDraftTransport(err)) {
+          throw err;
+        }
+        mode = "message";
+        previewDraftId = undefined;
+        params.warn("telegram: sendMessageDraft rejected by API; preview transport fallback=message");
+      }
+    }
+
+    await sendViaMessageTransport(nextText);
+  };
+
+  const runFlush = async () => {
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (pending && !failed) {
+        pending = false;
+        const nextText = textBuffer.trimEnd();
+        if (!nextText || nextText === lastSentText) continue;
+        if (nextText.length > TELEGRAM_STREAM_PREVIEW_MAX_CHARS) {
+          params.log(
+            `telegram: stream_preview_skip chat_id=${params.chatId} reason=text_too_long chars=${nextText.length}`,
+          );
+          continue;
+        }
+        try {
+          await sendPreviewText(nextText);
+          lastSentText = nextText;
+        } catch (err) {
+          failed = true;
+          params.warn(`telegram: stream_preview_error chat_id=${params.chatId} ${toErrorText(err)}`);
+        }
+      }
+    } finally {
+      flushing = false;
+      resolveIdleWaiters();
+    }
+  };
+
+  const scheduleFlush = () => {
+    if (ending || failed) return;
+    pending = true;
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      void runFlush();
+    }, throttleMs);
+  };
+
+  const appendText = (delta: string) => {
+    if (!delta || ending || failed) return;
+    textBuffer += delta;
+    scheduleFlush();
+  };
+
+  const flush = async () => {
+    if (failed) return;
+    pending = true;
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    await runFlush();
+    if (pending || flushing) {
+      await new Promise<void>((resolve) => {
+        idleWaiters.push(resolve);
+      });
+    }
+  };
+
+  const finish = async () => {
+    if (ending) {
+      await flush();
+      return;
+    }
+    ending = true;
+    await flush();
+  };
+
+  const clear = async () => {
+    await finish();
+    if (typeof previewMessageId === "number") {
+      try {
+        await params.api.deleteMessage(params.chatId, previewMessageId);
+      } catch (err) {
+        params.warn(
+          `telegram: stream_preview_cleanup_failed chat_id=${params.chatId} message_id=${previewMessageId} ${toErrorText(err)}`,
+        );
+      }
+      previewMessageId = undefined;
+    }
   };
 
   return {
-    onTextDelta: (delta) => push(delta),
+    onTextDelta: (delta) => {
+      appendText(delta);
+    },
     onToolStart: (name, preview) => {
       const label = preview
         ? `\n[ ${name}: ${preview} ]`
         : `\n[ ${name} ]`;
-      push(label);
+      appendText(label);
     },
     onToolEnd: () => {
-      push("\n");
+      appendText("\n");
     },
-    iterable,
-    finish: () => {
-      done = true;
-      if (resolve) {
-        resolve({ value: undefined as unknown as string, done: true });
-      }
-    },
+    flush,
+    finish,
+    clear,
+    state: () => ({
+      mode,
+      failed,
+      hadPreview,
+      ...(typeof previewMessageId === "number" ? { messageId: previewMessageId } : {}),
+    }),
   };
+}
+
+async function finalizeTelegramStreamPreviewText(params: {
+  api: Bot["api"];
+  chatId: number;
+  messageThreadId?: number;
+  text: string;
+  preview: TelegramStreamPreviewState;
+  log: (msg: string) => void;
+}): Promise<boolean> {
+  const threadParams =
+    typeof params.messageThreadId === "number"
+      ? ({ message_thread_id: params.messageThreadId } as const)
+      : undefined;
+
+  const chunks = splitTelegramMessage(params.text).filter((chunk) => chunk.trim().length > 0);
+  if (chunks.length === 0) {
+    if (params.preview.mode === "message" && typeof params.preview.messageId === "number") {
+      try {
+        await params.api.deleteMessage(params.chatId, params.preview.messageId);
+      } catch (err) {
+        params.log(
+          `telegram: stream_preview_cleanup_failed chat_id=${params.chatId} message_id=${params.preview.messageId} ${toErrorText(err)}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  const sendChunk = async (chunk: string) => {
+    if (threadParams) {
+      await params.api.sendMessage(params.chatId, chunk, threadParams);
+    } else {
+      await params.api.sendMessage(params.chatId, chunk);
+    }
+  };
+
+  if (params.preview.mode === "message" && typeof params.preview.messageId === "number") {
+    const firstChunk = chunks[0]!;
+    try {
+      await params.api.editMessageText(params.chatId, params.preview.messageId, firstChunk);
+    } catch (err) {
+      if (!isMessageNotModifiedError(err)) {
+        params.log(
+          `telegram: stream_finalize_edit_failed chat_id=${params.chatId} message_id=${params.preview.messageId} ${toErrorText(err)}; replacing preview`,
+        );
+        try {
+          await params.api.deleteMessage(params.chatId, params.preview.messageId);
+        } catch {
+          // ignore delete failure
+        }
+        for (const chunk of chunks) {
+          await sendChunk(chunk);
+        }
+        return true;
+      }
+    }
+
+    for (const chunk of chunks.slice(1)) {
+      await sendChunk(chunk);
+    }
+    return true;
+  }
+
+  try {
+    for (const chunk of chunks) {
+      await sendChunk(chunk);
+    }
+    return true;
+  } catch (err) {
+    params.log(`telegram: stream_finalize_send_failed chat_id=${params.chatId} ${toErrorText(err)}`);
+    return false;
+  }
 }
 
 export async function startTelegramBot(deps: {
@@ -794,12 +1043,11 @@ export async function startTelegramBot(deps: {
     throw new Error("Telegram is enabled but no token is configured (set TELEGRAM_BOT_TOKEN).");
   }
 
-  const bot = new Bot<StreamFlavor<Context>>(token);
-  // Auto-retry on 429 rate limits and transient 5xx errors (must be installed
-  // before the stream plugin so draft sends are retried instead of crashing).
+  const bot = new Bot<Context>(token);
+  // Auto-retry on 429 rate limits and transient 5xx errors for both preview
+  // updates and normal message sends.
   const { autoRetry } = await import("@grammyjs/auto-retry");
   bot.api.config.use(autoRetry({ maxDelaySeconds: 10, maxRetryAttempts: 3 }));
-  bot.use(streamPlugin());
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
@@ -807,8 +1055,6 @@ export async function startTelegramBot(deps: {
   const streamingEnabled = tg.streaming.enabled;
   const streamingSerializePerChat = tg.streaming.serializePerChat;
   const streamingMaxConcurrentPerChat = Math.max(1, Math.floor(tg.streaming.maxConcurrentPerChat));
-  const streamingDraftOffsetMode = tg.streaming.draftOffsetMode;
-  const streamingDraftOffsetWindow = Math.max(64, Math.floor(tg.streaming.draftOffsetWindow));
   const streamingFallbackToSendOutput = tg.streaming.fallbackToSendOutput;
   const streamingEmitFallbackNotice = tg.streaming.emitFallbackNotice;
   const streamSemaphores = new Map<number, Semaphore>();
@@ -850,7 +1096,7 @@ export async function startTelegramBot(deps: {
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
   deps.log(
-    `telegram: streaming enabled=${streamingEnabled} serialize_per_chat=${streamingSerializePerChat} max_per_chat=${streamingMaxConcurrentPerChat} draft_offset_mode=${streamingDraftOffsetMode} draft_offset_window=${streamingDraftOffsetWindow} fallback_send_output=${streamingFallbackToSendOutput}`,
+    `telegram: streaming enabled=${streamingEnabled} serialize_per_chat=${streamingSerializePerChat} max_per_chat=${streamingMaxConcurrentPerChat} preview=dm_draft_auto fallback_send_output=${streamingFallbackToSendOutput}`,
   );
   deps.log(
     `telegram: file_io max_files_per_msg=${maxInboundFilesPerMessage} max_file_bytes=${maxInboundFileBytes} blackboard_ttl_ms=${fileBlackboardTtlMs}`,
@@ -1245,7 +1491,7 @@ export async function startTelegramBot(deps: {
 
       if (streamingEnabled && isPrivateChat) {
         await withChatStreamLock(chatId, async () => {
-          // --- Streaming path: stream LLM tokens + tool indicators via sendMessageDraft ---
+          // --- Streaming path: native preview updates (draft-first with runtime fallback) ---
           // Show typing while waiting for first tokens and during tool gaps.
           let typingTimer: ReturnType<typeof setInterval> | null = null;
           const startTyping = () => {
@@ -1262,35 +1508,18 @@ export async function startTelegramBot(deps: {
           };
           startTyping();
 
-          const bridge = createStreamBridge();
-          const draftIdOffset = draftOffsetForStream({
-            messageId,
-            updateId: typeof ctx.update.update_id === "number" ? ctx.update.update_id : 0,
-            mode: streamingDraftOffsetMode,
-            windowSize: streamingDraftOffsetWindow,
+          const streamPreview = createTelegramStreamPreview({
+            api: bot.api,
+            chatId,
+            messageThreadId,
+            preferDraft: true,
+            throttleMs: tg.streaming.previewThrottleMs,
+            log: deps.log,
+            warn: deps.log,
           });
-          let streamErr: unknown = null;
-          let streamHadMessages = false;
-          // Attach rejection handling immediately to avoid unhandled promise crashes.
-          const streamPromise = ctx.api
-            .streamMessage(
-              chatId,
-              draftIdOffset,
-              bridge.iterable,
-              typingParams,
-              typingParams,
-            )
-            .then((messages) => {
-              streamHadMessages = Array.isArray(messages) && messages.length > 0;
-              return messages;
-            })
-            .catch((err) => {
-              streamErr = err;
-              return [];
-            });
 
           deps.log(
-            `telegram: stream_start chat_id=${chatId} draft_offset=${draftIdOffset} thread_id=${typeof messageThreadId === "number" ? messageThreadId : "none"}`,
+            `telegram: stream_start chat_id=${chatId} preview_mode=${streamPreview.state().mode} thread_id=${typeof messageThreadId === "number" ? messageThreadId : "none"}`,
           );
 
           let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
@@ -1301,38 +1530,52 @@ export async function startTelegramBot(deps: {
               agentId: tg.agentId,
               text: dispatchText,
               contentParts,
-              onTextDelta: (delta) => { stopTyping(); bridge.onTextDelta(delta); },
-              onToolStart: (name, preview) => { bridge.onToolStart(name, preview); startTyping(); },
-              onToolEnd: bridge.onToolEnd,
+              onTextDelta: (delta) => { stopTyping(); streamPreview.onTextDelta(delta); },
+              onToolStart: (name, preview) => { streamPreview.onToolStart(name, preview); startTyping(); },
+              onToolEnd: streamPreview.onToolEnd,
             });
           } finally {
-            bridge.finish();
             stopTyping();
-            await streamPromise;
+            await streamPreview.finish();
           }
-          if (streamErr) {
+
+          const previewState = streamPreview.state();
+          if (previewState.failed) {
             deps.log(
-              `telegram: stream_error chat_id=${chatId} ${streamErr instanceof Error ? streamErr.message : String(streamErr)}`,
+              `telegram: stream_error chat_id=${chatId} preview_transport=${previewState.mode}`,
             );
           }
 
           const extracted = await extractTelegramImageAttachments(res.output);
           const shouldFallbackSend =
-            (streamErr && streamingFallbackToSendOutput)
-            || (!streamErr && !streamHadMessages && extracted.text.trim().length > 0);
+            (previewState.failed && streamingFallbackToSendOutput)
+            || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
           if (shouldFallbackSend) {
-            if (streamErr && streamingEmitFallbackNotice) {
+            await streamPreview.clear();
+            if (previewState.failed && streamingEmitFallbackNotice) {
               await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
                 ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
               });
             }
             deps.log(
               `telegram: stream_fallback_send_output chat_id=${chatId} reason=${
-                streamErr ? "stream_error" : "no_stream_messages"
+                previewState.failed ? "stream_error" : "no_preview_updates"
               }`,
             );
             await sendOutput(chatId, res.output, { messageThreadId });
           } else {
+            const textDelivered = await finalizeTelegramStreamPreviewText({
+              api: bot.api,
+              chatId,
+              messageThreadId,
+              text: extracted.text,
+              preview: previewState,
+              log: deps.log,
+            });
+            if (!textDelivered && extracted.text.trim().length > 0) {
+              deps.log(`telegram: stream_finalize_fallback_send_output chat_id=${chatId}`);
+              await sendOutput(chatId, extracted.text, { messageThreadId });
+            }
             // Send images as follow-up messages (they can't be part of a text stream)
             for (const img of extracted.imagePaths) {
               try {
