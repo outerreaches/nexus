@@ -75,6 +75,25 @@ function parseJobSpec(specJson: unknown): Record<string, unknown> {
   }
 }
 
+function cleanSpecForMode(spec: Record<string, unknown>): void {
+  switch (spec.mode) {
+    case "tool_call":
+      delete spec.command;
+      break;
+    case "script":
+      delete spec.tool;
+      delete spec.args;
+      break;
+    case "agent_task":
+      delete spec.command;
+      delete spec.tool;
+      delete spec.args;
+      break;
+    default:
+      break;
+  }
+}
+
 function toUtcIso(ts: number | null): string {
   if (typeof ts !== "number" || !Number.isFinite(ts)) return "null";
   return new Date(Math.floor(ts)).toISOString();
@@ -275,6 +294,10 @@ export const jobUpdate = defineTool({
       .enum(["full", "delta", "none"])
       .optional()
       .describe("For agent_task mode: context strategy (full=latest telegram history, delta=bounded telegram deltas, none=job-local only)"),
+    cleanSpec: z
+      .boolean()
+      .default(false)
+      .describe("When true, remove mode-incompatible fields from spec before save (e.g. command in tool_call mode)."),
     nextRunAtMs: z.number().int().min(0).optional().describe("Manually set the next run time (epoch ms). Useful for staggering jobs."),
   }),
   execute: async (args, ctx) => {
@@ -340,6 +363,7 @@ export const jobUpdate = defineTool({
     if (spec.mode === "agent_task" && !spec.task) return "ERROR: 'task' is required for agent_task mode";
     if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
     if (spec.mode === "tool_call" && !spec.tool) return "ERROR: 'tool' is required for tool_call mode";
+    if (args.cleanSpec) cleanSpecForMode(spec);
     if (spec.mode !== "agent_task") delete spec.contextMode;
 
     const specJson = JSON.stringify(spec ?? {});
@@ -578,6 +602,7 @@ export const jobManage = defineTool({
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
+    cleanSpec: z.boolean().default(false),
     nextRunAtMs: z.number().int().min(0).optional(),
     includeDisabled: z.boolean().optional(),
     limit: z.number().int().min(1).max(200).optional(),
@@ -649,6 +674,7 @@ export const jobManage = defineTool({
             ...(args.tool !== undefined ? { tool: args.tool } : {}),
             ...(args.args !== undefined ? { args: args.args } : {}),
             ...(args.contextMode !== undefined ? { contextMode: args.contextMode } : {}),
+            ...(args.cleanSpec !== undefined ? { cleanSpec: args.cleanSpec } : {}),
             ...(args.nextRunAtMs !== undefined ? { nextRunAtMs: args.nextRunAtMs } : {}),
           },
           ctx,
