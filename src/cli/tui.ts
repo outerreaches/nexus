@@ -170,7 +170,8 @@ export class SharedTui {
 
     const top = `${tl}${h.repeat(inner)}${tr}`;
     const titleText = ` ${title} `;
-    const titleBar = `${v}${titleText.padEnd(inner, " ")}${v}`;
+    const titleFit = titleText.length > inner ? titleText.slice(0, inner) : titleText;
+    const titleBar = `${v}${titleFit.padEnd(inner, " ")}${v}`;
 
     const body: string[] = [];
     const lineWidth = inner - 2;

@@ -7,6 +7,7 @@ import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { NexusConfig } from "../state/config.js";
+import { getPromptLayout } from "./input-layout.js";
 
 const RUNTIME_PROFILES = [
   "standard",
@@ -528,7 +529,7 @@ export async function runCli(argv: string[]): Promise<void> {
         return await new Promise<string | null>((resolve, reject) => {
           let value = "";
           let cursorPos = 0;
-          let renderedLines = 0;
+          let renderedRows = 0;
           let escaped = false;
           let inCsi = false;
           let closed = false;
@@ -561,27 +562,21 @@ export async function runCli(argv: string[]): Promise<void> {
 
           const render = () => {
             const lines = value.split("\n");
-            if (renderedLines > 0) {
-              if (renderedLines > 1) moveCursor(process.stdout, 0, -(renderedLines - 1));
+            const columns = typeof process.stdout.columns === "number" ? process.stdout.columns : 80;
+            const layout = getPromptLayout({ value, cursorPos, promptLen, columns });
+            const nextRows = layout.totalRows;
+            if (renderedRows > 0) {
+              if (renderedRows > 1) moveCursor(process.stdout, 0, -(renderedRows - 1));
               cursorTo(process.stdout, 0);
               clearScreenDown(process.stdout);
             }
             process.stdout.write(lines.map((line) => `${tui.promptString()}${line}`).join("\n"));
-            renderedLines = lines.length;
+            renderedRows = nextRows;
 
             // Position cursor at cursorPos within the rendered lines.
-            let pos = 0;
-            for (let i = 0; i < lines.length; i++) {
-              const lineEnd = pos + lines[i].length;
-              if (cursorPos <= lineEnd || i === lines.length - 1) {
-                const col = promptLen + (cursorPos - pos);
-                const rowsBack = lines.length - 1 - i;
-                if (rowsBack > 0) moveCursor(process.stdout, 0, -rowsBack);
-                cursorTo(process.stdout, col);
-                break;
-              }
-              pos = lineEnd + 1; // +1 for the \n
-            }
+            const rowsBack = nextRows - 1 - layout.cursorRow;
+            if (rowsBack > 0) moveCursor(process.stdout, 0, -rowsBack);
+            cursorTo(process.stdout, layout.cursorCol);
           };
 
           const onData = (chunk: Buffer | string) => {

@@ -19,6 +19,15 @@ test("panel includes title and wrapped content", () => {
   assert.match(out, /\|\s+the panel width without overflowing\./);
 });
 
+test("panel truncates overly long titles to panel width", () => {
+  const tui = createSharedTui({ colorEnabled: false, useUnicode: false, width: 48 });
+  const out = tui.panel("X".repeat(120), ["body"]);
+  const lines = out.split("\n");
+  assert.equal(lines[0].length, 48);
+  assert.equal(lines[1].length, 48);
+  assert.equal(lines[lines.length - 1].length, 48);
+});
+
 test("logoPanel includes the Nexus ASCII logo", () => {
   const tui = createSharedTui({ colorEnabled: false, useUnicode: false, width: 72 });
   const out = tui.logoPanel("Header", "Sub");
