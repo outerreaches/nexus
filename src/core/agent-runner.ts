@@ -338,7 +338,7 @@ function classifyToolError(summary: string): {
   }
 
   if (
-    has("timed out", "timeout", "service unavailable", "connection reset", "temporarily unavailable") ||
+    has("timed out", "timeout", "service unavailable", "connection reset", "temporarily unavailable", "aborted", "aborterror") ||
     hasAnyRegex(/\b5\d\d\b/, /\beconnreset\b/, /\bhttp\s*50[0-9]\b/)
   ) {
     return {
@@ -1260,7 +1260,7 @@ export class AgentRunner {
           }
           this.throwIfCancelled();
         } catch (err) {
-          if (this.deps.abortSignal?.aborted || isAbortLikeError(err)) {
+          if (this.deps.abortSignal?.aborted) {
             throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during tool execution");
           }
           const msg = err instanceof Error ? err.message : String(err);
@@ -1271,7 +1271,12 @@ export class AgentRunner {
               typeof (err as { code?: unknown }).code === "string"
               ? (err as { code: string }).code
               : null;
-          result = code ? `ERROR: [${code}] ${msg}` : `ERROR: ${msg}`;
+          if (isAbortLikeError(err)) {
+            const normalized = msg.trim() ? `tool request timed out or aborted: ${msg}` : "tool request timed out or aborted";
+            result = code ? `ERROR: [${code}] ${normalized}` : `ERROR: ${normalized}`;
+          } else {
+            result = code ? `ERROR: [${code}] ${msg}` : `ERROR: ${msg}`;
+          }
         }
         this.deps.onToolEnd?.(call.name);
 

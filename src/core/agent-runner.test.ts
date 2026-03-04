@@ -85,6 +85,17 @@ test("classifyToolResultStatus classifies rate limit errors", () => {
   assert.equal(result.retryPolicy, "after_backoff");
 });
 
+test("classifyToolResultStatus classifies abort/timeouts as transient provider errors", () => {
+  const call = makeCall("web_search");
+  const result = classifyToolResultStatus(
+    call,
+    "ERROR: tool request timed out or aborted: This operation was aborted",
+  );
+  assert.equal(result.status, "error");
+  assert.equal(result.errorClass, "transient_provider_error");
+  assert.equal(result.retryPolicy, "yes");
+});
+
 test("classifyToolResultStatus classifies capability mismatch errors", () => {
   const call = makeCall("image_edit");
   const result = classifyToolResultStatus(call, "ERROR: No endpoints found that support the requested output modalities");
@@ -346,4 +357,110 @@ test("AgentRunner logs prompt estimate calibration when usage is available", asy
 
   assert.equal(result.status, "complete");
   assert.equal(logs.some((line) => line.includes("llm_prompt_estimate mode=default")), true);
+});
+
+test("AgentRunner treats tool-local AbortError as tool failure, not run cancellation", async () => {
+  let step = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step === 0) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-web-search",
+              name: "web_search",
+              arguments: JSON.stringify({ query: "test query" }),
+            },
+          ],
+        };
+      }
+      return { content: "continued after tool error", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "web_search",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          const err = new Error("This operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        },
+      },
+    ],
+    budget: { maxIterations: 3, maxToolCalls: 4 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "trigger web_search",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "continued after tool error");
+});
+
+test("AgentRunner still cancels run when abortSignal is aborted during tool execution", async () => {
+  const controller = new AbortController();
+  let step = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step === 0) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-web-search",
+              name: "web_search",
+              arguments: JSON.stringify({ query: "test query" }),
+            },
+          ],
+        };
+      }
+      return { content: "should not complete", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "web_search",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          controller.abort("test abort");
+          const err = new Error("This operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        },
+      },
+    ],
+    budget: { maxIterations: 3, maxToolCalls: 4 },
+    toolContext: makeToolContext(),
+    abortSignal: controller.signal,
+  });
+
+  await assert.rejects(
+    () => runner.run({
+      systemPrompt: "You are a test runner.",
+      history: [],
+      userMessage: "trigger web_search",
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.name, "RunCancelledError");
+      assert.match(err.message, /test abort/i);
+      return true;
+    },
+  );
 });
