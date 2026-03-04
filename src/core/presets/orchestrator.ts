@@ -27,7 +27,7 @@ export const preset: AgentPreset = {
     "For webhook/dashboard integration tasks, explicitly instruct coder to preserve node webhook architecture: node-local listener -> node WS `webhook.deliver` -> existing gateway `/api/webhooks/*` + `/api/nodes/*` surfaces. Do not ask coder to introduce ad-hoc gateway webhook transports unless the user requests an architecture change.",
     "For long research outputs, require workers to keep blackboard content concise and attach full reports as files when needed.",
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
-    "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/sub-agents. Keep routine/idle outcomes silent; only use telegram_send when a user-facing update or action is needed.",
+    "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/webhooks/code deploys. Keep routine heartbeat and idle job outcomes silent; but always notify user when a webhook event or a code deploy report arrives. If you're not sure, notify the user.",
     "For process completion reports, default to silent handling (IDLE) for expected/benign exits; notify only when user action is actually required.",
     // Preset routing
     "Use the graphic-designer preset for visual design tasks and creative asset requests; prefer `image_generate` for general visuals, and reserve `generate_svg`/`vectorize` for explicit vector/SVG deliverables.",
