@@ -752,7 +752,7 @@ function createTelegramStreamPreview(params: {
   api: Bot["api"];
   chatId: number;
   messageThreadId?: number;
-  preferDraft: boolean;
+  transport: "auto" | "message" | "draft";
   throttleMs?: number;
   log: (msg: string) => void;
   warn: (msg: string) => void;
@@ -763,9 +763,10 @@ function createTelegramStreamPreview(params: {
       ? ({ message_thread_id: params.messageThreadId } as const)
       : undefined;
 
-  const sendMessageDraft = params.preferDraft ? resolveSendMessageDraft(params.api) : null;
-  let mode: TelegramStreamPreviewMode = params.preferDraft && sendMessageDraft ? "draft" : "message";
-  if (params.preferDraft && !sendMessageDraft) {
+  const prefersDraft = params.transport !== "message";
+  const sendMessageDraft = prefersDraft ? resolveSendMessageDraft(params.api) : null;
+  let mode: TelegramStreamPreviewMode = prefersDraft && sendMessageDraft ? "draft" : "message";
+  if (prefersDraft && !sendMessageDraft) {
     params.warn("telegram: sendMessageDraft unavailable; preview transport fallback=message");
   }
 
@@ -823,6 +824,10 @@ function createTelegramStreamPreview(params: {
         hadPreview = true;
         return;
       } catch (err) {
+        if (isMessageNotModifiedError(err)) {
+          hadPreview = true;
+          return;
+        }
         if (!shouldFallbackFromDraftTransport(err)) {
           throw err;
         }
@@ -958,13 +963,12 @@ async function finalizeTelegramStreamPreviewText(params: {
   const chunks = splitTelegramMessage(params.text).filter((chunk) => chunk.trim().length > 0);
   if (chunks.length === 0) {
     if (params.preview.mode === "message" && typeof params.preview.messageId === "number") {
-      try {
-        await params.api.deleteMessage(params.chatId, params.preview.messageId);
-      } catch (err) {
-        params.log(
-          `telegram: stream_preview_cleanup_failed chat_id=${params.chatId} message_id=${params.preview.messageId} ${toErrorText(err)}`,
-        );
-      }
+      // Keep the last preview in-place when final text is empty. This avoids
+      // visible disappearance during tool hand-offs that intentionally produce
+      // no final text in the same turn.
+      params.log(
+        `telegram: stream_finalize_keep_preview chat_id=${params.chatId} message_id=${params.preview.messageId} reason=empty_final_text`,
+      );
     }
     return true;
   }
@@ -1055,6 +1059,7 @@ export async function startTelegramBot(deps: {
   const streamingEnabled = tg.streaming.enabled;
   const streamingSerializePerChat = tg.streaming.serializePerChat;
   const streamingMaxConcurrentPerChat = Math.max(1, Math.floor(tg.streaming.maxConcurrentPerChat));
+  const streamingPreviewTransport = tg.streaming.previewTransport;
   const streamingFallbackToSendOutput = tg.streaming.fallbackToSendOutput;
   const streamingEmitFallbackNotice = tg.streaming.emitFallbackNotice;
   const streamSemaphores = new Map<number, Semaphore>();
@@ -1096,7 +1101,7 @@ export async function startTelegramBot(deps: {
   deps.log(`telegram: bot @${botUsername || me.id} starting`);
   deps.log(`telegram: auth allow_all=${allowAllUsers} allow_from_count=${allowFrom.length} pairing=${tg.pairing.enabled}`);
   deps.log(
-    `telegram: streaming enabled=${streamingEnabled} serialize_per_chat=${streamingSerializePerChat} max_per_chat=${streamingMaxConcurrentPerChat} preview=dm_draft_auto fallback_send_output=${streamingFallbackToSendOutput}`,
+    `telegram: streaming enabled=${streamingEnabled} serialize_per_chat=${streamingSerializePerChat} max_per_chat=${streamingMaxConcurrentPerChat} preview_transport=${streamingPreviewTransport} fallback_send_output=${streamingFallbackToSendOutput}`,
   );
   deps.log(
     `telegram: file_io max_files_per_msg=${maxInboundFilesPerMessage} max_file_bytes=${maxInboundFileBytes} blackboard_ttl_ms=${fileBlackboardTtlMs}`,
@@ -1512,7 +1517,7 @@ export async function startTelegramBot(deps: {
             api: bot.api,
             chatId,
             messageThreadId,
-            preferDraft: true,
+            transport: streamingPreviewTransport,
             throttleMs: tg.streaming.previewThrottleMs,
             log: deps.log,
             warn: deps.log,
@@ -1552,7 +1557,7 @@ export async function startTelegramBot(deps: {
             || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
           if (shouldFallbackSend) {
             await streamPreview.clear();
-            if (previewState.failed && streamingEmitFallbackNotice) {
+            if (previewState.failed && streamingEmitFallbackNotice && !previewState.hadPreview) {
               await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
                 ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
               });

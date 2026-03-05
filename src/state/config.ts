@@ -15,6 +15,7 @@ const TelegramStreamingSchema = z
     enabled: z.boolean().default(true),
     serializePerChat: z.boolean().default(true),
     maxConcurrentPerChat: z.number().int().positive().max(8).default(1),
+    previewTransport: z.enum(["auto", "message", "draft"]).default("message"),
     previewThrottleMs: z.number().int().min(200).max(5000).default(650),
     fallbackToSendOutput: z.boolean().default(true),
     emitFallbackNotice: z.boolean().default(true),
@@ -349,6 +350,7 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
               enabled: true,
               serializePerChat: true,
               maxConcurrentPerChat: 1,
+              previewTransport: "message",
               previewThrottleMs: 650,
               fallbackToSendOutput: true,
               emitFallbackNotice: true
