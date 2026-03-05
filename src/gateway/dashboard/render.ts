@@ -288,33 +288,25 @@ export function renderDashboard(params: {
             <pre id="llm-raw" class="log-viewer">Loading session list…</pre>
           </div>
           <div class="tab-panel" id="tab-cli-chat">
-            <div class="log-controls">
-              <button class="graph-btn" id="cli-sessions-refresh">Sessions</button>
-              <button class="graph-btn" id="cli-session-new">New CLI Session</button>
-              <button class="graph-btn" id="cli-send">Send</button>
-              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
-                Session limit
-                <input id="cli-sessions-limit" class="inline-input" type="number" min="1" max="200" step="1" value="50" />
-              </label>
-              <label style="display:flex; align-items:center; gap:6px; font-size:11px;">
-                Message limit
-                <input id="cli-messages-limit" class="inline-input" type="number" min="1" max="500" step="1" value="200" />
-              </label>
-              <label style="display:flex; align-items:center; gap:6px; font-size:11px; min-width: 320px;">
-                Session
-                <select id="cli-session-select" class="inline-input" style="min-width: 320px;"></select>
-              </label>
+            <div class="cli-chat-shell">
+              <div class="log-controls cli-chat-controls">
+                <button class="graph-btn" id="cli-refresh">Refresh</button>
+                <button class="graph-btn" id="cli-session-new">New Chat</button>
+                <span id="cli-session-hint" class="meta">Session: initializing...</span>
+              </div>
+              <div id="cli-chat-view" class="cli-chat-view">
+                <span class="log-empty">Preparing CLI chat...</span>
+              </div>
+              <div class="cli-chat-composer">
+                <textarea
+                  id="cli-input"
+                  class="inline-input cli-chat-input"
+                  rows="3"
+                  placeholder="Type a message and press Enter. Use Shift+Enter for a newline."
+                ></textarea>
+                <button class="graph-btn" id="cli-send">Send</button>
+              </div>
             </div>
-            <div class="log-controls" style="align-items: stretch;">
-              <textarea
-                id="cli-input"
-                class="inline-input"
-                rows="3"
-                style="width:100%; min-height:74px; resize:vertical;"
-                placeholder="Type a message for the selected CLI session and click Send."
-              ></textarea>
-            </div>
-            <pre id="cli-raw" class="log-viewer">Loading CLI sessions…</pre>
           </div>
         </div>
         <div class="split">
@@ -687,13 +679,11 @@ export function renderDashboard(params: {
       const llmSessionsLimitInput = document.getElementById("llm-sessions-limit");
       const llmMessagesLimitInput = document.getElementById("llm-messages-limit");
       const llmSessionSelect = document.getElementById("llm-session-select");
-      const cliPre = document.getElementById("cli-raw");
-      const cliSessionsRefreshBtn = document.getElementById("cli-sessions-refresh");
+      const cliChatView = document.getElementById("cli-chat-view");
+      const cliRefreshBtn = document.getElementById("cli-refresh");
       const cliSessionNewBtn = document.getElementById("cli-session-new");
       const cliSendBtn = document.getElementById("cli-send");
-      const cliSessionsLimitInput = document.getElementById("cli-sessions-limit");
-      const cliMessagesLimitInput = document.getElementById("cli-messages-limit");
-      const cliSessionSelect = document.getElementById("cli-session-select");
+      const cliSessionHint = document.getElementById("cli-session-hint");
       const cliInput = document.getElementById("cli-input");
       const federationRefreshBtn = document.getElementById("federation-refresh");
       const federationPeerAddBtn = document.getElementById("federation-peer-add");
@@ -843,6 +833,8 @@ export function renderDashboard(params: {
         hasMore: false,
         nextBeforeId: null,
       };
+      const CLI_CHAT_DEFAULT_CHANNEL_KEY = "dashboard:chat";
+      const CLI_CHAT_MESSAGE_LIMIT = 200;
       const MAX_LLM_ROWS = 1200;
       const MAX_NODE_AUDIT_EVENTS = 1500;
       const HOVER_RAYCAST_INTERVAL_MS = 50;
@@ -866,11 +858,9 @@ export function renderDashboard(params: {
       let agentRefreshInFlight = false;
       let logsFetchInFlight = false;
       const cliState = {
-        sessions: [],
-        selectedSessionId: null,
+        session: null,
         rows: [],
-        hasMore: false,
-        nextBeforeId: null,
+        loading: false,
         sending: false,
       };
       const federationState = {
@@ -1154,198 +1144,169 @@ export function renderDashboard(params: {
         }
       };
 
-      const getCliSelectedSession = () =>
-        cliState.sessions.find((session) => session.id === cliState.selectedSessionId) ?? null;
+      const getCliSession = () => cliState.session;
 
       const isCliSessionWritable = (session) => Boolean(session && session.channel === "cli");
 
       const updateCliComposerState = () => {
-        const selected = getCliSelectedSession();
+        const selected = getCliSession();
         const writable = isCliSessionWritable(selected);
+        const busy = cliState.loading || cliState.sending;
         if (cliInput) {
-          cliInput.disabled = !writable || cliState.sending;
+          cliInput.disabled = !writable || busy;
           if (!selected) {
-            cliInput.placeholder = "No session selected.";
+            cliInput.placeholder = "Preparing CLI chat session...";
           } else if (!writable) {
-            cliInput.placeholder = "Selected session is read-only. Create a new CLI session to send messages.";
+            cliInput.placeholder = "Current session is read-only.";
           } else {
-            cliInput.placeholder = "Type a message for the selected CLI session and click Send.";
+            cliInput.placeholder = "Type a message and press Enter. Use Shift+Enter for a newline.";
           }
         }
         if (cliSendBtn) {
-          cliSendBtn.disabled = !writable || cliState.sending;
+          cliSendBtn.disabled = !writable || busy;
           cliSendBtn.textContent = cliState.sending ? "Sending..." : "Send";
         }
+        if (cliSessionHint) {
+          if (!selected) {
+            cliSessionHint.textContent = "Session: initializing...";
+          } else {
+            const shortId = String(selected.id ?? "").slice(0, 8);
+            cliSessionHint.textContent =
+              "Session " + shortId + " - " + String(selected.channel ?? "cli") + ":" + String(selected.channel_key ?? "-");
+          }
+        }
+      };
+
+      const normalizeCliRole = (role) => {
+        const value = String(role ?? "").trim().toLowerCase();
+        if (!value) return "system";
+        if (value === "user" || value === "assistant" || value === "tool" || value === "system") return value;
+        return "system";
+      };
+
+      const getCliRoleLabel = (role, row) => {
+        if (role === "user") return "YOU";
+        if (role === "assistant") return "NEXUS";
+        if (role === "tool") {
+          const toolName = String(row?.name ?? "").trim();
+          return toolName ? "TOOL:" + toolName : "TOOL";
+        }
+        return "SYSTEM";
       };
 
       const renderCliRows = () => {
-        if (!cliPre) return;
-        const selected = getCliSelectedSession();
-        const headerLines = [];
-        if (selected) {
-          const access = selected.channel === "cli" ? "writable" : "read-only";
-          headerLines.push(
-            "session_id=" + selected.id,
-            "channel=" + selected.channel + ":" + selected.channel_key,
-            "agent_id=" + selected.agent_id,
-            "access=" + access,
-            "last_message_at=" + formatIso(selected.last_message_at),
-            "message_count=" + selected.message_count,
-            "",
-          );
+        if (!cliChatView) return;
+        const selected = getCliSession();
+        if (!selected) {
+          cliChatView.innerHTML = '<span class="log-empty">Preparing CLI session...</span>';
+          updateCliComposerState();
+          return;
         }
         if (!cliState.rows || cliState.rows.length === 0) {
-          cliPre.innerHTML =
-            '<span class="log-empty">' + escapeLogHtml(headerLines.concat(["No messages found."]).join("\\n")) + "</span>";
+          cliChatView.innerHTML = '<span class="log-empty">No messages yet. Send one to start.</span>';
           updateCliComposerState();
           return;
         }
+        const shouldStick =
+          cliChatView.scrollTop + cliChatView.clientHeight >= cliChatView.scrollHeight - 80;
         const body = cliState.rows
           .map((row) => {
-            const chunks = [
-              "#" + row.id + " " + row.role + " created_at=" + formatIso(row.created_at),
-              row.name ? "name=" + row.name : "",
-              row.tool_call_id ? "tool_call_id=" + row.tool_call_id : "",
-              "",
-              "content:",
-              row.content ?? "",
-            ];
-            return chunks.filter((line) => line !== "").join("\\n");
-          })
-          .join("\\n\\n----------------------------------------\\n\\n");
-        cliPre.innerHTML = escapeLogHtml(headerLines.join("\\n") + body);
-        updateCliComposerState();
-      };
-
-      const renderCliSessionOptions = () => {
-        if (!cliSessionSelect) return;
-        const sessions = cliState.sessions;
-        if (!sessions || sessions.length === 0) {
-          cliSessionSelect.innerHTML = "";
-          updateCliComposerState();
-          return;
-        }
-        cliSessionSelect.innerHTML = sessions
-          .map((session) => {
-            const access = session.channel === "cli" ? "rw" : "ro";
-            const label = [
-              "[" + access + "]",
-              session.channel + ":" + session.channel_key,
-              session.agent_id,
-              formatIso(session.last_message_at),
-              session.message_count + " msgs",
-              session.id.slice(0, 8),
-            ].join(" ");
-            const selected = session.id === cliState.selectedSessionId ? ' selected="selected"' : "";
-            return '<option value="' + escapeLogHtml(session.id) + '"' + selected + ">" + escapeLogHtml(label) + "</option>";
+            const role = normalizeCliRole(row.role);
+            const roleClass = role === "user" ? "user" : role === "assistant" ? "assistant" : role === "tool" ? "tool" : "system";
+            const label = getCliRoleLabel(role, row);
+            const timestamp = formatIso(row.created_at);
+            const idText = Number.isFinite(row.id) ? "#" + String(row.id) : "";
+            const content = String(row.content ?? "");
+            return (
+              '<article class="cli-chat-message ' + roleClass + '">' +
+              '<div class="cli-chat-head">' +
+              '<span class="cli-chat-role">' + escapeLogHtml(label) + '</span>' +
+              '<span class="cli-chat-time">' + escapeLogHtml(timestamp) + "</span>" +
+              "</div>" +
+              '<div class="cli-chat-meta">' +
+              escapeLogHtml(idText) +
+              (row.tool_call_id ? ' <span>tool_call_id=' + escapeLogHtml(String(row.tool_call_id)) + "</span>" : "") +
+              "</div>" +
+              '<pre class="cli-chat-body">' + escapeLogHtml(content || "[empty]") + "</pre>" +
+              "</article>"
+            );
           })
           .join("");
+        cliChatView.innerHTML = body;
+        if (shouldStick || cliState.sending) cliChatView.scrollTop = cliChatView.scrollHeight;
         updateCliComposerState();
       };
 
-      const fetchCliMessages = async () => {
-        if (!cliPre) return;
-        const sessionId = cliState.selectedSessionId;
-        if (!sessionId) {
-          cliState.rows = [];
-          cliPre.innerHTML = '<span class="log-empty">No sessions found.</span>';
-          updateCliComposerState();
-          return;
+      const ensureCliSession = async (opts = { forceNew: false }) => {
+        if (!opts.forceNew && cliState.session) return cliState.session;
+        const agentId = String(cliState.session?.agent_id ?? "main").trim() || "main";
+        const channelKey = opts.forceNew
+          ? "dashboard:chat:" + Date.now().toString(36)
+          : CLI_CHAT_DEFAULT_CHANNEL_KEY;
+        const res = await fetchWithAuth("/api/cli/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ agentId, channelKey }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(String(payload?.error ?? res.status));
         }
+        const session = payload?.session;
+        if (!session || !session.id) {
+          throw new Error("invalid cli session response");
+        }
+        cliState.session = session;
+        return session;
+      };
 
-        const limit = readBoundedInt(cliMessagesLimitInput, 200, 1, 500);
-        if (cliMessagesLimitInput) cliMessagesLimitInput.value = String(limit);
-        const url = "/api/llm/messages?sessionId=" + encodeURIComponent(sessionId) + "&limit=" + limit;
+      const fetchCliMessages = async (opts = { forceNewSession: false }) => {
+        if (!cliChatView) return;
+        if (cliState.loading) return;
+        cliState.loading = true;
+        updateCliComposerState();
         try {
+          const session = await ensureCliSession({ forceNew: opts.forceNewSession });
+          const url =
+            "/api/llm/messages?sessionId=" +
+            encodeURIComponent(String(session.id)) +
+            "&limit=" +
+            String(CLI_CHAT_MESSAGE_LIMIT);
           const res = await fetchWithAuth(url);
+          const payload = await res.json().catch(() => ({}));
           if (!res.ok) {
-            cliPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
-            updateCliComposerState();
+            cliChatView.innerHTML = escapeLogHtml("ERROR: " + String(payload?.error ?? res.status));
             return;
           }
-          const payload = await res.json();
           cliState.rows = Array.isArray(payload?.messages) ? payload.messages : [];
           renderCliRows();
         } catch (err) {
-          cliPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
-          updateCliComposerState();
-        }
-      };
-
-      const fetchCliSessions = async (opts = { preserveSelection: true, refreshMessages: true }) => {
-        if (!cliPre) return;
-        const limit = readBoundedInt(cliSessionsLimitInput, 50, 1, 200);
-        if (cliSessionsLimitInput) cliSessionsLimitInput.value = String(limit);
-        const previousSessionId = cliState.selectedSessionId;
-        try {
-          const res = await fetchWithAuth("/api/llm/sessions?limit=" + limit);
-          if (!res.ok) {
-            cliPre.innerHTML = escapeLogHtml("ERROR: " + res.status);
-            updateCliComposerState();
-            return;
-          }
-          const payload = await res.json();
-          const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
-          cliState.sessions = sessions;
-          if (opts.preserveSelection && previousSessionId && sessions.some((s) => s.id === previousSessionId)) {
-            cliState.selectedSessionId = previousSessionId;
-          } else {
-            cliState.selectedSessionId = sessions.find((s) => s.channel === "cli")?.id ?? sessions[0]?.id ?? null;
-          }
-          renderCliSessionOptions();
-          if (opts.refreshMessages) {
-            await fetchCliMessages();
-          } else {
-            renderCliRows();
-          }
-        } catch (err) {
-          cliPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+          cliChatView.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+        } finally {
+          cliState.loading = false;
           updateCliComposerState();
         }
       };
 
       const createCliSession = async () => {
-        if (!cliPre) return;
-        const selected = getCliSelectedSession();
-        const agentId = String(selected?.agent_id ?? "main").trim() || "main";
-        try {
-          const res = await fetchWithAuth("/api/cli/sessions", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ agentId }),
-          });
-          const payload = await res.json();
-          if (!res.ok) {
-            cliPre.innerHTML = escapeLogHtml("ERROR: " + String(payload?.error ?? res.status));
-            updateCliComposerState();
-            return;
-          }
-          const createdSessionId = String(payload?.session?.id ?? "").trim();
-          await fetchCliSessions({ preserveSelection: false, refreshMessages: false });
-          if (createdSessionId && cliState.sessions.some((session) => session.id === createdSessionId)) {
-            cliState.selectedSessionId = createdSessionId;
-            renderCliSessionOptions();
-          }
-          await fetchCliMessages();
-          if (cliInput) cliInput.focus();
-        } catch (err) {
-          cliPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
-          updateCliComposerState();
-        }
+        await fetchCliMessages({ forceNewSession: true });
+        if (cliInput) cliInput.focus();
       };
 
       const sendCliMessage = async () => {
-        if (!cliPre || !cliInput) return;
-        if (cliState.sending) return;
-        const selected = getCliSelectedSession();
-        if (!selected) {
-          cliPre.innerHTML = escapeLogHtml("No session selected.");
+        if (!cliChatView || !cliInput) return;
+        if (cliState.sending || cliState.loading) return;
+        const session = await ensureCliSession().catch((err) => {
+          cliChatView.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+          return null;
+        });
+        if (!session) {
           updateCliComposerState();
           return;
         }
-        if (!isCliSessionWritable(selected)) {
-          cliPre.innerHTML = escapeLogHtml(
-            "Selected session is read-only (" + selected.channel + "). Create a new CLI session to send messages.",
+        if (!isCliSessionWritable(session)) {
+          cliChatView.innerHTML = escapeLogHtml(
+            "Current session is read-only (" + String(session.channel) + ").",
           );
           updateCliComposerState();
           return;
@@ -1362,17 +1323,17 @@ export function renderDashboard(params: {
           const res = await fetchWithAuth("/api/cli/messages", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ sessionId: selected.id, text }),
+            body: JSON.stringify({ sessionId: session.id, text }),
           });
-          const payload = await res.json();
+          const payload = await res.json().catch(() => ({}));
           if (!res.ok) {
-            cliPre.innerHTML = escapeLogHtml("ERROR: " + String(payload?.error ?? res.status));
+            cliChatView.innerHTML = escapeLogHtml("ERROR: " + String(payload?.error ?? res.status));
             return;
           }
           cliInput.value = "";
-          await fetchCliSessions({ preserveSelection: true, refreshMessages: true });
+          await fetchCliMessages();
         } catch (err) {
-          cliPre.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
+          cliChatView.innerHTML = escapeLogHtml("ERROR: " + (err instanceof Error ? err.message : String(err)));
         } finally {
           cliState.sending = false;
           updateCliComposerState();
@@ -1691,7 +1652,7 @@ export function renderDashboard(params: {
         } else if (name === "llm-raw") {
           fetchLlmSessions({ preserveSelection: true, refreshMessages: true });
         } else if (name === "cli-chat") {
-          fetchCliSessions({ preserveSelection: true, refreshMessages: true });
+          fetchCliMessages();
         }
       };
 
@@ -1761,9 +1722,9 @@ export function renderDashboard(params: {
           fetchLlmMessages({ reset: true });
         });
       }
-      if (cliSessionsRefreshBtn) {
-        cliSessionsRefreshBtn.addEventListener("click", () => {
-          fetchCliSessions({ preserveSelection: true, refreshMessages: true });
+      if (cliRefreshBtn) {
+        cliRefreshBtn.addEventListener("click", () => {
+          fetchCliMessages();
         });
       }
       if (cliSessionNewBtn) {
@@ -1776,15 +1737,9 @@ export function renderDashboard(params: {
           sendCliMessage();
         });
       }
-      if (cliSessionSelect) {
-        cliSessionSelect.addEventListener("change", () => {
-          cliState.selectedSessionId = cliSessionSelect.value || null;
-          fetchCliMessages();
-        });
-      }
       if (cliInput) {
         cliInput.addEventListener("keydown", (event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             sendCliMessage();
           }
