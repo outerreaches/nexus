@@ -1,5 +1,7 @@
 FROM node:22-bookworm-slim
 
+ARG HIMALAYA_VERSION=v1.1.0
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     chromium \
@@ -16,6 +18,23 @@ RUN apt-get update \
     python3-pip \
     python3-venv \
   && rm -rf /var/lib/apt/lists/*
+
+# Install pinned Himalaya release for the current container architecture.
+RUN set -eux; \
+  arch="$(uname -m)"; \
+  case "$arch" in \
+    x86_64) target="x86_64-linux" ;; \
+    aarch64|arm64) target="aarch64-linux" ;; \
+    armv6l) target="armv6l-linux" ;; \
+    armv7l) target="armv7l-linux" ;; \
+    i386|i686|x86) target="i686-linux" ;; \
+    *) echo "Unsupported architecture for Himalaya: $arch" >&2; exit 1 ;; \
+  esac; \
+  curl -fsSL -o /tmp/himalaya.tgz "https://github.com/pimalaya/himalaya/releases/download/${HIMALAYA_VERSION}/himalaya.${target}.tgz"; \
+  tar -xzf /tmp/himalaya.tgz -C /tmp; \
+  install -m 0755 /tmp/himalaya /usr/local/bin/himalaya; \
+  rm -f /tmp/himalaya /tmp/himalaya.tgz; \
+  himalaya --version
 
 # Configure git for container environment (safe.directory for mounted volumes,
 # identity for automated commits by coder agents)
