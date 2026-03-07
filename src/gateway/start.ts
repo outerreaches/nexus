@@ -797,21 +797,28 @@ export async function startGateway(
       }
     }
 
-    for (const processId of localIds) {
-      try {
+    const localResults = await Promise.allSettled(
+      [...localIds].map(async (processId) => {
         await processManager.stop({
           id: processId,
           signal: "SIGTERM",
           killAfterMs: 2_000,
         });
+        return processId;
+      }),
+    );
+    for (const [i, result] of localResults.entries()) {
+      if (result.status === "fulfilled") {
         local += 1;
-      } catch (err) {
-        errors.push(`local process ${processId}: ${err instanceof Error ? err.message : String(err)}`);
+      } else {
+        const processId = [...localIds][i];
+        errors.push(`local process ${processId}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
       }
     }
 
-    for (const target of remoteTargets.values()) {
-      try {
+    const remoteEntries = [...remoteTargets.values()];
+    const remoteResults = await Promise.allSettled(
+      remoteEntries.map(async (target) => {
         const result = await nodeWsGateway.requestTransportOperation({
           nodeId: target.nodeId,
           method: "process.cancel",
@@ -821,18 +828,19 @@ export async function startGateway(
             killAfterMs: 2_000,
             reason,
           },
-          timeoutMs: 20_000,
+          timeoutMs: 10_000,
         });
         if (!result.ok) {
-          const message = result.error?.message ?? "unknown error";
-          errors.push(`remote process ${target.nodeId}/${target.processId}: ${message}`);
-          continue;
+          throw new Error(result.error?.message ?? "unknown error");
         }
+      }),
+    );
+    for (const [i, result] of remoteResults.entries()) {
+      if (result.status === "fulfilled") {
         remote += 1;
-      } catch (err) {
-        errors.push(
-          `remote process ${target.nodeId}/${target.processId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      } else {
+        const target = remoteEntries[i];
+        errors.push(`remote process ${target.nodeId}/${target.processId}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
       }
     }
 
@@ -846,7 +854,8 @@ export async function startGateway(
     return rows.map((row) => row.id);
   };
 
-  const runShellCtlOnNode = async (nodeId: string, command: string): Promise<string> => {
+  const runShellCtlOnNode = async (nodeId: string, command: string, timeoutMs = 40_000): Promise<string> => {
+    const cmdTimeoutMs = Math.max(1_000, timeoutMs - 2_000);
     const response = await nodeWsGateway.requestTransportOperation({
       nodeId,
       method: "tool.execute",
@@ -854,10 +863,10 @@ export async function startGateway(
         tool: "system.run",
         args: {
           command,
-          timeoutMs: 30_000,
+          timeoutMs: cmdTimeoutMs,
         },
       },
-      timeoutMs: 40_000,
+      timeoutMs,
     });
     if (!response.ok) {
       throw new Error(response.error?.message ?? "tool.execute failed");
@@ -879,44 +888,68 @@ export async function startGateway(
     let closed = 0;
     const errors: string[] = [];
     const nodeIds = listOnlineNexusNodeIds();
-    for (const nodeId of nodeIds) {
-      let listOutput = "";
-      try {
-        listOutput = await runShellCtlOnNode(nodeId, "nexus-shellctl list");
-      } catch (err) {
-        errors.push(`remote shell list ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
-        continue;
-      }
-      let parsedList: Record<string, unknown> | null = null;
-      try {
-        parsedList = JSON.parse(listOutput) as Record<string, unknown>;
-      } catch {
-        if (listOutput.trim() && !listOutput.trimStart().startsWith("ERROR:")) {
-          errors.push(`remote shell list ${nodeId}: non-JSON response`);
-        }
-        continue;
-      }
-      const sessions = Array.isArray(parsedList.sessions) ? parsedList.sessions : [];
-      for (const row of sessions) {
-        if (!row || typeof row !== "object") continue;
-        const sessionName = String((row as Record<string, unknown>).session ?? "").trim();
-        if (!sessionName) continue;
-        if (!/^[A-Za-z0-9._-]{1,64}$/.test(sessionName)) {
-          errors.push(`remote shell close ${nodeId}: invalid session id "${sessionName}"`);
-          continue;
-        }
-        if (sessionId) {
-          const ownerSessionId = String((row as Record<string, unknown>).ownerSessionId ?? "").trim();
-          if (!ownerSessionId || ownerSessionId !== sessionId) continue;
-        }
+
+    const nodeResults = await Promise.allSettled(
+      nodeIds.map(async (nodeId) => {
+        const nodeClosed: string[] = [];
+        const nodeErrors: string[] = [];
+        let listOutput = "";
         try {
-          await runShellCtlOnNode(nodeId, `nexus-shellctl close --session ${sessionName}`);
-          closed += 1;
+          listOutput = await runShellCtlOnNode(nodeId, "nexus-shellctl list", 10_000);
         } catch (err) {
-          errors.push(
-            `remote shell close ${nodeId}/${sessionName}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          nodeErrors.push(`remote shell list ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
+          return { closed: nodeClosed, errors: nodeErrors };
         }
+        let parsedList: Record<string, unknown> | null = null;
+        try {
+          parsedList = JSON.parse(listOutput) as Record<string, unknown>;
+        } catch {
+          if (listOutput.trim() && !listOutput.trimStart().startsWith("ERROR:")) {
+            nodeErrors.push(`remote shell list ${nodeId}: non-JSON response`);
+          }
+          return { closed: nodeClosed, errors: nodeErrors };
+        }
+        const sessions = Array.isArray(parsedList.sessions) ? parsedList.sessions : [];
+        const toClose: string[] = [];
+        for (const row of sessions) {
+          if (!row || typeof row !== "object") continue;
+          const sessionName = String((row as Record<string, unknown>).session ?? "").trim();
+          if (!sessionName) continue;
+          if (!/^[A-Za-z0-9._-]{1,64}$/.test(sessionName)) {
+            nodeErrors.push(`remote shell close ${nodeId}: invalid session id "${sessionName}"`);
+            continue;
+          }
+          if (sessionId) {
+            const ownerSessionId = String((row as Record<string, unknown>).ownerSessionId ?? "").trim();
+            if (!ownerSessionId || ownerSessionId !== sessionId) continue;
+          }
+          toClose.push(sessionName);
+        }
+        const closeResults = await Promise.allSettled(
+          toClose.map(async (sessionName) => {
+            await runShellCtlOnNode(nodeId, `nexus-shellctl close --session ${sessionName}`, 10_000);
+            return sessionName;
+          }),
+        );
+        for (const [i, result] of closeResults.entries()) {
+          if (result.status === "fulfilled") {
+            nodeClosed.push(result.value);
+          } else {
+            nodeErrors.push(
+              `remote shell close ${nodeId}/${toClose[i]}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+            );
+          }
+        }
+        return { closed: nodeClosed, errors: nodeErrors };
+      }),
+    );
+
+    for (const result of nodeResults) {
+      if (result.status === "fulfilled") {
+        closed += result.value.closed.length;
+        errors.push(...result.value.errors);
+      } else {
+        errors.push(`remote shell cleanup: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
       }
     }
     return { closed, errors };
@@ -937,22 +970,33 @@ export async function startGateway(
     let localInteractiveClosed = 0;
     let localInteractiveFailed = 0;
     const errors: string[] = [];
-    try {
-      const localInteractive = await stopLocalInteractiveSessions({
-        stateDir: paths.stateDir,
-        ownerSessionId: sessionId ?? null,
-      });
-      localInteractiveClosed = localInteractive.closed;
-      localInteractiveFailed = localInteractive.failed;
-      errors.push(...localInteractive.errors.map((entry) => `local shell ${entry}`));
-    } catch (err) {
-      errors.push(`local shell cleanup: ${err instanceof Error ? err.message : String(err)}`);
+
+    const [localInteractiveResult, remoteInteractiveResult, processStopsResult] =
+      await Promise.allSettled([
+        stopLocalInteractiveSessions({
+          stateDir: paths.stateDir,
+          ownerSessionId: sessionId ?? null,
+        }),
+        stopRemoteInteractiveSessions(sessionId),
+        stopManagedProcesses(sessionId, params.reason),
+      ]);
+
+    if (localInteractiveResult.status === "fulfilled") {
+      localInteractiveClosed = localInteractiveResult.value.closed;
+      localInteractiveFailed = localInteractiveResult.value.failed;
+      errors.push(...localInteractiveResult.value.errors.map((entry) => `local shell ${entry}`));
+    } else {
+      errors.push(`local shell cleanup: ${localInteractiveResult.reason instanceof Error ? localInteractiveResult.reason.message : String(localInteractiveResult.reason)}`);
     }
 
-    const remoteInteractive = await stopRemoteInteractiveSessions(sessionId);
+    const remoteInteractive = remoteInteractiveResult.status === "fulfilled"
+      ? remoteInteractiveResult.value
+      : { closed: 0, errors: [`remote shell cleanup: ${remoteInteractiveResult.reason instanceof Error ? remoteInteractiveResult.reason.message : String(remoteInteractiveResult.reason)}`] };
     errors.push(...remoteInteractive.errors);
 
-    const processStops = await stopManagedProcesses(sessionId, params.reason);
+    const processStops = processStopsResult.status === "fulfilled"
+      ? processStopsResult.value
+      : { local: 0, remote: 0, errors: [`process cleanup: ${processStopsResult.reason instanceof Error ? processStopsResult.reason.message : String(processStopsResult.reason)}`] };
     errors.push(...processStops.errors);
 
     if (params.scope === "all" && params.cooldownMs && params.cooldownMs > 0) {

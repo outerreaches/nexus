@@ -708,6 +708,7 @@ export async function stopLocalInteractiveSessions(params: {
   const closedSessions: string[] = [];
   const errors: string[] = [];
 
+  const candidates: { sessionId: string; meta: Awaited<ReturnType<typeof readSessionMeta>> }[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
     const sessionId = entry.slice(0, -5);
@@ -717,22 +718,32 @@ export async function stopLocalInteractiveSessions(params: {
       skipped += 1;
       continue;
     }
-    try {
-      const running = await tmuxHasSession(meta.tmuxSession);
+    candidates.push({ sessionId, meta });
+  }
+
+  const results = await Promise.allSettled(
+    candidates.map(async ({ sessionId, meta }) => {
+      const running = await tmuxHasSession(meta!.tmuxSession);
       if (running) {
-        await runTmux(["kill-session", "-t", meta.tmuxSession]);
+        await runTmux(["kill-session", "-t", meta!.tmuxSession]);
       }
       await deleteSessionMeta(params.stateDir, sessionId);
       try {
-        await fs.rm(meta.logPath, { force: true });
+        await fs.rm(meta!.logPath, { force: true });
       } catch {
         // ignore
       }
+      return sessionId;
+    }),
+  );
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
       closed += 1;
-      closedSessions.push(sessionId);
-    } catch (err) {
+      closedSessions.push(result.value);
+    } else {
       failed += 1;
-      errors.push(`${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+      errors.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
     }
   }
 
