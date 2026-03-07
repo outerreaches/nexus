@@ -21,6 +21,7 @@ import { getBuiltInTools } from "../tools/index.js";
 import { getPreset } from "./presets.js";
 import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
+import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
 import { filterToolsBySkillAccess } from "../state/skill-policy.js";
 import { inspectDeployWorktree } from "./deploy-policy.js";
 import type { Tool, ToolContext } from "./tools.js";
@@ -218,7 +219,7 @@ process.on("message", async (msg: ParentMessage) => {
     });
 
     const calls = collectToolCallRecords(result.newMessages);
-    let deployApplied = calls.some((call) => isApplyDeployCall(call) && isSuccessfulResult(call.result));
+    let deployApplied = calls.some((call) => isApplyDeployCall(call) && isSuccessfulApplyDeployResult(call.result));
     const readOnlyTask = isReadOnlyCoderTaskType(cfg.taskType);
 
     // Coder safeguard: if code was edited and built but ha_deploy was never
@@ -257,7 +258,7 @@ process.on("message", async (msg: ParentMessage) => {
               const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
               log(`auto ha_deploy: ${deployResult.slice(0, 200)}`);
               result.output += `\n\n[AUTO-DEPLOY] ${deployResult}`;
-              if (isSuccessfulResult(deployResult)) {
+              if (isSuccessfulApplyDeployResult(deployResult)) {
                 deployApplied = true;
               }
             } catch (err) {
@@ -519,11 +520,6 @@ function parseJsonObject(raw: string): Record<string, unknown> {
   }
 }
 
-function isSuccessfulResult(result: string | undefined): boolean {
-  if (typeof result !== "string") return false;
-  return !result.trimStart().startsWith("ERROR:");
-}
-
 function isApplyDeployCall(call: ToolCallRecord): boolean {
   if (call.name !== "ha_deploy") return false;
   return call.args.action === "apply";
@@ -552,7 +548,7 @@ function collectSuccessfulBuildCommands(calls: ToolCallRecord[]): { typecheckCom
   const buildCommands: string[] = [];
   for (const call of calls) {
     if (call.name !== "shell_exec") continue;
-    if (!isSuccessfulResult(call.result)) continue;
+    if (typeof call.result !== "string" || call.result.trimStart().startsWith("ERROR:")) continue;
     const command = typeof call.args.command === "string" ? call.args.command : "";
     if (/\bnpm\s+run\s+typecheck\b/.test(command)) {
       typecheckCommands.push(command);

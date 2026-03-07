@@ -118,6 +118,16 @@ test("toolResultIndicatesDeployApplied detects direct ha_deploy apply success", 
   assert.equal(didApply, true);
 });
 
+test("toolResultIndicatesDeployApplied ignores approval-required ha_deploy apply results", () => {
+  const call = makeCall("ha_deploy");
+  const didApply = toolResultIndicatesDeployApplied(
+    call,
+    { action: "apply" },
+    "APPROVAL REQUIRED: created deploy approval request HA123.",
+  );
+  assert.equal(didApply, false);
+});
+
 test("toolResultIndicatesDeployApplied ignores ha_deploy status action", () => {
   const call = makeCall("ha_deploy");
   const didApply = toolResultIndicatesDeployApplied(call, { action: "status" }, "LAST_STATUS=ok");
@@ -177,6 +187,57 @@ test("AgentRunner retries once when final assistant output is empty", async () =
   assert.equal(result.status, "complete");
   assert.equal(result.output, "non-empty");
   assert.equal(result.iterationsUsed, 2);
+});
+
+test("AgentRunner does not hand off the run when ha_deploy returns approval required", async () => {
+  let step = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step === 0) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call-ha-deploy-apply",
+              name: "ha_deploy",
+              arguments: JSON.stringify({ action: "apply", commitMessage: "test" }),
+            },
+          ],
+        };
+      }
+      return { content: "approval still pending", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "ha_deploy",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => "APPROVAL REQUIRED: created deploy approval request HA123.",
+      },
+    ],
+    budget: { maxIterations: 3, maxToolCalls: 4 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "deploy this change",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "approval still pending");
+  assert.equal(
+    result.newMessages.some(
+      (msg) => msg.role === "assistant" && typeof msg.content === "string" && msg.content.includes("Deploy applied"),
+    ),
+    false,
+  );
 });
 
 test("AgentRunner fails when repeated final output remains empty", async () => {
@@ -463,4 +524,167 @@ test("AgentRunner still cancels run when abortSignal is aborted during tool exec
       return true;
     },
   );
+});
+
+test("AgentRunner clears identical-call blocks after a successful file mutation", async () => {
+  let step = 0;
+  let shellExecCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      switch (step++) {
+        case 0:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-build-1",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "npm --prefix /tmp/repo run build" }),
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-edit-1",
+                name: "file_write",
+                arguments: JSON.stringify({ path: "/tmp/repo/src/example.ts", content: "export const ok = true;\n" }),
+              },
+            ],
+          };
+        case 2:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-build-2",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "npm --prefix /tmp/repo run build" }),
+              },
+            ],
+          };
+        default:
+          return { content: "done", toolCalls: [] };
+      }
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_exec",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          shellExecCalls += 1;
+          if (shellExecCalls === 1) return "ERROR: build failed";
+          return "build ok";
+        },
+      },
+      {
+        name: "file_write",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => "OK: wrote file",
+      },
+    ],
+    budget: { maxIterations: 6, maxToolCalls: 8 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "fix the build and rerun it",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(shellExecCalls, 2);
+});
+
+test("AgentRunner keeps identical-call blocks when only read-only tools succeed in between", async () => {
+  let step = 0;
+  let shellExecCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      switch (step++) {
+        case 0:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-build-1",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "npm --prefix /tmp/repo run build" }),
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-read-1",
+                name: "file_read",
+                arguments: JSON.stringify({ path: "/tmp/repo/src/example.ts" }),
+              },
+            ],
+          };
+        case 2:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-build-2",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "npm --prefix /tmp/repo run build" }),
+              },
+            ],
+          };
+        default:
+          return { content: "done", toolCalls: [] };
+      }
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_exec",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          shellExecCalls += 1;
+          return "ERROR: build failed";
+        },
+      },
+      {
+        name: "file_read",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => "export const value = 1;\n",
+      },
+    ],
+    budget: { maxIterations: 6, maxToolCalls: 8 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "read the file and retry the same build",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(shellExecCalls, 1);
+  const blockedToolMessage = result.newMessages.find(
+    (msg) => msg.role === "tool" && msg.name === "shell_exec" && String(msg.content).includes("blocked by retry policy"),
+  );
+  assert.ok(blockedToolMessage);
 });

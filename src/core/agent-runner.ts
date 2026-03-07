@@ -3,6 +3,7 @@ import type { ChatMessage, ChatUserContent } from "./types.js";
 import { OpenAICompatClient, type LLMClient, type LLMUsage } from "../llm/openai-compat.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { createHash } from "node:crypto";
+import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
 import {
   estimateTotalTokens,
   compactContext,
@@ -197,6 +198,37 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
   return `${call.name}:${hash}`;
 }
 
+const RETRY_GUARD_RESETTING_FILE_TOOLS = new Set(["file_write", "file_edit", "file_edit_lines", "file_patch"]);
+
+function isVerificationShellCommand(command: string, task: "typecheck" | "build" | "test"): boolean {
+  const normalized = command.trim();
+  if (!normalized) return false;
+  switch (task) {
+    case "typecheck":
+      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?typecheck\b/.test(normalized);
+    case "build":
+      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?build\b/.test(normalized);
+    case "test":
+      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?test\b/.test(normalized);
+  }
+}
+
+function successfulToolCallClearsRetryGuards(
+  call: import("./types.js").ToolCall,
+  args: unknown,
+  result: string,
+): boolean {
+  if (result.trimStart().startsWith("ERROR:")) return false;
+  if (RETRY_GUARD_RESETTING_FILE_TOOLS.has(call.name)) return true;
+  if (call.name !== "shell_exec" || !isPlainObject(args)) return false;
+  const command = typeof args.command === "string" ? args.command.trim() : "";
+  return (
+    isVerificationShellCommand(command, "typecheck") ||
+    isVerificationShellCommand(command, "build") ||
+    isVerificationShellCommand(command, "test")
+  );
+}
+
 const DEPLOY_HANDOFF_LINE_1 =
   "Deploy applied. Stopping this run to avoid post-deploy tool calls on a stale process image.";
 const DEPLOY_HANDOFF_LINE_2 =
@@ -388,7 +420,7 @@ export function toolResultIndicatesDeployApplied(call: ToolCall, args: unknown, 
 
   if (call.name === "ha_deploy") {
     const action = args && typeof args === "object" ? (args as Record<string, unknown>).action : undefined;
-    return action === "apply";
+    return action === "apply" && isSuccessfulApplyDeployResult(result);
   }
 
   if (call.name === "spawn_agent") {
@@ -887,8 +919,8 @@ export class AgentRunner {
           }
           if (call.name === "shell_exec") {
             const command = typeof args.command === "string" ? args.command.trim() : "";
-            if (/\bnpm\s+run\s+typecheck\b/.test(command)) typecheckOk = true;
-            if (/\bnpm\s+run\s+build\b/.test(command)) buildOk = true;
+            if (isVerificationShellCommand(command, "typecheck")) typecheckOk = true;
+            if (isVerificationShellCommand(command, "build")) buildOk = true;
           }
         }
 
@@ -978,6 +1010,12 @@ export class AgentRunner {
           // doing productive work between retries (e.g. rewriting a file before
           // re-running a command).  Budget caps still prevent infinite loops.
           repeatedFailures.clear();
+          if (successfulToolCallClearsRetryGuards(call, args, result) && blockedToolCalls.size > 0) {
+            blockedToolCalls.clear();
+            this.deps.onLog?.(
+              `retry_guard_reset name=${call.name} reason=successful_state_change_or_verification`,
+            );
+          }
         }
 
         // Inject low-budget warning when approaching limits.

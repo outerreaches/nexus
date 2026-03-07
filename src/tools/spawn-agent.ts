@@ -30,6 +30,7 @@ import type { ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
 import type { McpManager } from "../mcp/manager.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
+import { isSuccessfulApplyDeployResult } from "../core/deploy-result.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODER_TASK_TYPES = ["plan", "review", "walkthrough", "write"] as const;
@@ -1681,7 +1682,7 @@ function didRunApplyDeploy(messages: ChatMessage[]): boolean {
   for (const call of callById.values()) {
     if (call.name !== "ha_deploy") continue;
     if (call.args.action !== "apply") continue;
-    if (!call.result || call.result.trimStart().startsWith("ERROR:")) continue;
+    if (!isSuccessfulApplyDeployResult(call.result)) continue;
     return true;
   }
 
