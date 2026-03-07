@@ -30,6 +30,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: sidecar
     command: secret-sidecar --socket-path /run/nexus/secret-sidecar.sock
     volumes:
       - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus
