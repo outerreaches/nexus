@@ -13,12 +13,20 @@ import type { DataSource } from "../types.js";
 // Bank of Canada Valet API response types
 type BocSeriesResponse = {
   seriesDetail?: {
-    label?: string;
-    description?: string;
+    [key: string]: {
+      label?: string;
+      description?: string;
+      dimension?: {
+        key: string;
+        name: string;
+      };
+    };
   };
   observations?: Array<{
     d: string; // date
-    v: string | number; // value (can be ".." for missing)
+    [key: string]: {
+      v: string | number; // value (can be ".." for missing)
+    } | string; // the date field 'd' is a string
   }>;
 };
 
@@ -71,12 +79,20 @@ export const bankOfCanadaPolicyRateSource: DataSource = {
     const json = raw as BocSeriesResponse;
     const observations = json?.observations ?? [];
     
-    // Filter out missing values ("..") and parse
+    // Extract values from nested structure: obs[BOC_SERIES_ID].v
     const validObservations = observations
-      .filter((obs) => obs.v !== ".." && obs.v !== "" && obs.v !== null && obs.v !== undefined)
+      .map((obs) => {
+        const seriesData = obs[BOC_SERIES_ID] as { v: string | number } | undefined;
+        const rawValue = seriesData?.v;
+        return {
+          date: obs.d,
+          rawValue,
+        };
+      })
+      .filter((obs) => obs.rawValue !== ".." && obs.rawValue !== "" && obs.rawValue !== null && obs.rawValue !== undefined)
       .map((obs) => ({
-        date: obs.d,
-        rate: typeof obs.v === "string" ? parseFloat(obs.v) : obs.v,
+        date: obs.date,
+        rate: typeof obs.rawValue === "string" ? parseFloat(obs.rawValue) : obs.rawValue as number,
       }))
       .filter((obs) => !isNaN(obs.rate));
     
@@ -94,6 +110,9 @@ export const bankOfCanadaPolicyRateSource: DataSource = {
     const change = previous ? latest.rate - previous.rate : undefined;
     const changePercent = previous ? ((change! / previous.rate) * 100) : undefined;
     
+    // Get series detail from the nested structure
+    const seriesInfo = json?.seriesDetail?.[BOC_SERIES_ID];
+    
     return [
       {
         subject: "bankofcanada.policy-rate.latest",
@@ -104,8 +123,8 @@ export const bankOfCanadaPolicyRateSource: DataSource = {
           change: change,
           changePercent: changePercent,
           history: validObservations.slice(0, 10), // Last 10 observations
-          seriesLabel: json?.seriesDetail?.label,
-          seriesDescription: json?.seriesDetail?.description,
+          seriesLabel: seriesInfo?.label,
+          seriesDescription: seriesInfo?.description,
         },
         collectedAtMs: ctx.nowMs(),
         metadata: {
