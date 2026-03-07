@@ -38,7 +38,22 @@ function isPresetAllowed(allowList: string[], preset: string): boolean {
 export function canInjectSkillsPrompt(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
   if (!config) return true;
   if (!config.prompt.enabled) return false;
-  return !isSkillAccessBlocked(config, ctx);
+  if (isSkillAccessBlocked(config, ctx)) return false;
+  const preset = normalize(ctx.preset);
+  return isPresetAllowed(config.access.promptAllowedPresets, preset);
+}
+
+/**
+ * Whether a preset can see its own preset-scoped skills in the prompt,
+ * even if not listed in promptAllowedPresets. Requires presetSelfAccess=true
+ * and the preset must not be blocked.
+ */
+export function canInjectPresetScopedSkills(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
+  if (!config) return true;
+  if (!config.prompt.enabled) return false;
+  if (!config.access.presetSelfAccess) return false;
+  if (isSkillAccessBlocked(config, ctx)) return false;
+  return Boolean(normalize(ctx.preset));
 }
 
 export function canUseSkillReadTools(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
@@ -69,6 +84,19 @@ export function isSkillToolAllowed(params: {
     return canUseSkillManageTools(params.config, params.ctx);
   }
   return false;
+}
+
+export type SkillScopes = { global: boolean; preset: boolean };
+
+/**
+ * Resolve which skill scopes a caller can see in the prompt.
+ * Collapses canInjectSkillsPrompt + canInjectPresetScopedSkills into one call.
+ */
+export function resolveSkillScopes(config: SkillsConfig | undefined, ctx: SkillAccessContext): SkillScopes {
+  return {
+    global: canInjectSkillsPrompt(config, ctx),
+    preset: canInjectPresetScopedSkills(config, ctx),
+  };
 }
 
 export function filterToolsBySkillAccess(params: {

@@ -7,13 +7,17 @@ RUN apt-get update \
     chromium \
     ca-certificates \
     curl \
+    dnsutils \
     fonts-liberation \
     git \
     jq \
+    nikto \
+    nmap \
     openssh-client \
     ripgrep \
     tmux \
     wget \
+    whois \
     python3 \
     python3-pip \
     python3-venv \
@@ -35,6 +39,42 @@ RUN set -eux; \
   install -m 0755 /tmp/himalaya /usr/local/bin/himalaya; \
   rm -f /tmp/himalaya /tmp/himalaya.tgz; \
   himalaya --version
+
+# Security recon tools (ProjectDiscovery + ffuf) — pre-built Go binaries.
+ARG SUBFINDER_VERSION=v2.7.1
+ARG HTTPX_VERSION=v1.6.10
+ARG NUCLEI_VERSION=v3.3.7
+ARG FFUF_VERSION=v2.1.0
+
+RUN set -eux; \
+  arch="$(uname -m)"; \
+  case "$arch" in \
+    x86_64)  goarch="amd64" ;; \
+    aarch64|arm64) goarch="arm64" ;; \
+    *) echo "Unsupported arch for security tools: $arch" >&2; exit 1 ;; \
+  esac; \
+  # subfinder
+  curl -fsSL -o /tmp/subfinder.zip "https://github.com/projectdiscovery/subfinder/releases/download/${SUBFINDER_VERSION}/subfinder_${SUBFINDER_VERSION#v}_linux_${goarch}.zip" \
+  && python3 -c "import zipfile; zipfile.ZipFile('/tmp/subfinder.zip').extractall('/tmp/subfinder')" \
+  && install -m 0755 /tmp/subfinder/subfinder /usr/local/bin/subfinder \
+  && rm -rf /tmp/subfinder /tmp/subfinder.zip; \
+  # httpx
+  curl -fsSL -o /tmp/httpx.zip "https://github.com/projectdiscovery/httpx/releases/download/${HTTPX_VERSION}/httpx_${HTTPX_VERSION#v}_linux_${goarch}.zip" \
+  && python3 -c "import zipfile; zipfile.ZipFile('/tmp/httpx.zip').extractall('/tmp/httpx')" \
+  && install -m 0755 /tmp/httpx/httpx /usr/local/bin/httpx \
+  && rm -rf /tmp/httpx /tmp/httpx.zip; \
+  # nuclei
+  curl -fsSL -o /tmp/nuclei.zip "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION#v}_linux_${goarch}.zip" \
+  && python3 -c "import zipfile; zipfile.ZipFile('/tmp/nuclei.zip').extractall('/tmp/nuclei')" \
+  && install -m 0755 /tmp/nuclei/nuclei /usr/local/bin/nuclei \
+  && rm -rf /tmp/nuclei /tmp/nuclei.zip; \
+  # ffuf
+  curl -fsSL -o /tmp/ffuf.tar.gz "https://github.com/ffuf/ffuf/releases/download/${FFUF_VERSION}/ffuf_${FFUF_VERSION#v}_linux_${goarch}.tar.gz" \
+  && tar -xzf /tmp/ffuf.tar.gz -C /tmp ffuf \
+  && install -m 0755 /tmp/ffuf /usr/local/bin/ffuf \
+  && rm -f /tmp/ffuf /tmp/ffuf.tar.gz; \
+  # verify
+  subfinder -version && httpx -version && nuclei -version && ffuf -V
 
 # Configure git for container environment (safe.directory for mounted volumes,
 # identity for automated commits by coder agents)

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { getPreset } from "../core/presets.js";
 import { defineTool, type ToolContext } from "../core/tools.js";
 import { canUseSkillManageTools, canUseSkillReadTools } from "../state/skill-policy.js";
 import { loadSkills, normalizeSkillReference, resolveSkillReferencePath } from "../state/skills.js";
@@ -10,6 +11,7 @@ import { loadSkills, normalizeSkillReference, resolveSkillReferencePath } from "
 const MAX_SKILL_REFERENCES = 20;
 const DEFAULT_REFERENCE_CHAR_LIMIT = 1600;
 const MAX_REFERENCE_CHAR_LIMIT = 16_000;
+type SkillScope = "global" | "preset";
 
 function sanitizeName(name: string): string {
   return name
@@ -63,6 +65,65 @@ function skillAccessContext(ctx: ToolContext): { agentId?: string; preset?: stri
   };
 }
 
+function resolvePresetSkillTarget(ctx: ToolContext, targetPreset?: string): { presetName?: string; error?: string } {
+  const requested = targetPreset?.trim();
+  if (requested) {
+    const preset = getPreset(requested);
+    if (!preset) {
+      return { error: `ERROR: target preset "${requested}" not found.` };
+    }
+    return { presetName: preset.name };
+  }
+
+  const callerPreset = ctx.request?.preset?.trim();
+  if (callerPreset) {
+    return { presetName: callerPreset };
+  }
+
+  return { error: "ERROR: preset-scoped skills require a preset context or targetPreset." };
+}
+
+function resolveSkillScopeTarget(
+  ctx: ToolContext,
+  scope: SkillScope,
+  targetPreset?: string,
+): { skillsRoot?: string; scopeLabel?: string; presetName?: string; error?: string } {
+  if (scope === "global") {
+    if (targetPreset?.trim()) {
+      return { error: "ERROR: targetPreset is only valid when scope='preset'." };
+    }
+    return {
+      skillsRoot: path.join(ctx.stateDir, "skills"),
+      scopeLabel: "global",
+    };
+  }
+
+  const resolved = resolvePresetSkillTarget(ctx, targetPreset);
+  if (resolved.error) return resolved;
+  return {
+    presetName: resolved.presetName,
+    skillsRoot: path.join(ctx.stateDir, "presets", resolved.presetName!, "skills"),
+    scopeLabel: `preset:${resolved.presetName}`,
+  };
+}
+
+function defaultScope(ctx: ToolContext): SkillScope {
+  const preset = ctx.request?.preset;
+  if (!preset || preset === "orchestrator") return "global";
+  return "preset";
+}
+
+async function loadSkillsForScope(ctx: ToolContext, scope: SkillScope, targetPreset?: string) {
+  if (scope === "global") {
+    return loadSkills(ctx.stateDir);
+  }
+  const resolved = resolvePresetSkillTarget(ctx, targetPreset);
+  if (resolved.error) {
+    return resolved.error;
+  }
+  return loadSkills(ctx.stateDir, undefined, resolved.presetName, { excludeGlobal: true });
+}
+
 function requireSkillReadAccess(ctx: ToolContext): string | null {
   if (canUseSkillReadTools(ctx.skillsConfig, skillAccessContext(ctx))) return null;
   return "ERROR: skill read tools are disabled for this agent/preset.";
@@ -87,6 +148,8 @@ export const skillCreate = defineTool({
       .default([])
       .describe("Relative file paths under the skill directory (e.g. references/runbook.md)"),
     instructions: z.string().min(1).max(4000).describe("Detailed instructions for executing this skill"),
+    scope: z.enum(["global", "preset"]).optional().describe("Skill scope: 'global' for shared skills, 'preset' for preset-specific. Defaults based on caller preset."),
+    targetPreset: z.string().min(1).max(80).optional().describe("When scope='preset', write the skill for this preset instead of the caller preset."),
   }),
   execute: async (args, ctx) => {
     const blocked = requireSkillManageAccess(ctx);
@@ -99,7 +162,11 @@ export const skillCreate = defineTool({
       return `ERROR: invalid reference path(s): ${refs.invalid.join(", ")}. Use relative paths under the skill directory.`;
     }
 
-    const skillDir = path.join(ctx.stateDir, "skills", dirName);
+    const scope: SkillScope = args.scope ?? (args.targetPreset ? "preset" : defaultScope(ctx));
+    const target = resolveSkillScopeTarget(ctx, scope, args.targetPreset);
+    if (target.error) return target.error;
+    const skillsRoot = target.skillsRoot!;
+    const skillDir = path.join(skillsRoot, dirName);
 
     try {
       await fs.access(path.join(skillDir, "SKILL.md"));
@@ -121,7 +188,7 @@ export const skillCreate = defineTool({
         }),
         "utf8",
       );
-      return `OK: created skill "${dirName}" at skills/${dirName}/SKILL.md`;
+      return `OK: created skill "${dirName}" (scope=${target.scopeLabel})`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -137,7 +204,8 @@ export const skillList = defineTool({
     if (blocked) return blocked;
 
     const agentId = ctx.request?.agentId;
-    const skills = await loadSkills(ctx.stateDir, agentId);
+    const presetName = ctx.request?.preset;
+    const skills = await loadSkills(ctx.stateDir, agentId, presetName);
 
     if (skills.length === 0) return "No skills found. Use skill_create to teach reusable capabilities.";
 
@@ -178,7 +246,7 @@ export const skillGet = defineTool({
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
 
-    const skills = await loadSkills(ctx.stateDir, ctx.request?.agentId);
+    const skills = await loadSkills(ctx.stateDir, ctx.request?.agentId, ctx.request?.preset);
     const skill =
       skills.find((entry) => sanitizeName(entry.name) === dirName) ??
       skills.find((entry) => entry.name.trim().toLowerCase() === dirName);
@@ -243,6 +311,8 @@ export const skillUpdate = defineTool({
     triggers: z.array(z.string().max(50)).max(10).optional(),
     references: z.array(z.string().max(200)).max(MAX_SKILL_REFERENCES).optional(),
     instructions: z.string().min(1).max(4000).optional(),
+    scope: z.enum(["global", "preset"]).optional().describe("Optional scope filter when updating a specific shared or preset-scoped skill."),
+    targetPreset: z.string().min(1).max(80).optional().describe("When scope='preset', update the skill owned by this preset."),
   }),
   execute: async (args, ctx) => {
     const blocked = requireSkillManageAccess(ctx);
@@ -251,17 +321,14 @@ export const skillUpdate = defineTool({
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
 
-    const skillFile = path.join(ctx.stateDir, "skills", dirName, "SKILL.md");
-
-    try {
-      await fs.access(skillFile);
-    } catch {
-      return `ERROR: skill "${dirName}" not found`;
+    const scope: SkillScope | undefined = args.scope ?? (args.targetPreset ? "preset" : undefined);
+    const loadedSkills = scope
+      ? await loadSkillsForScope(ctx, scope, args.targetPreset)
+      : await loadSkills(ctx.stateDir, ctx.request?.agentId, ctx.request?.preset);
+    if (typeof loadedSkills === "string") {
+      return loadedSkills;
     }
-
-    // Parse existing
-    const agentId = ctx.request?.agentId;
-    const skills = await loadSkills(ctx.stateDir, agentId);
+    const skills = loadedSkills;
     const current = skills.find((s) => sanitizeName(s.name) === dirName);
     if (!current) return `ERROR: skill "${dirName}" not found or unparseable`;
     const refs = normalizeReferences(args.references ?? current.references);
@@ -278,7 +345,7 @@ export const skillUpdate = defineTool({
     });
 
     try {
-      await fs.writeFile(skillFile, updated, "utf8");
+      await fs.writeFile(current.skillFile, updated, "utf8");
       return `OK: updated skill "${dirName}"`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;

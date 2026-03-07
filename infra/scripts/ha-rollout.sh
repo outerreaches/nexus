@@ -279,6 +279,33 @@ compose() {
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
+ensure_runtime_dir_ownership() {
+  local runtime_uid runtime_gid dir
+  runtime_uid="${NEXUS_GATEWAY_UID:-$(stat -c '%u' "$CODE_DIR" 2>/dev/null || id -u)}"
+  runtime_gid="${NEXUS_GATEWAY_GID:-$(stat -c '%g' "$CODE_DIR" 2>/dev/null || id -g)}"
+  for dir in "$HOST_STATE_DIR" "$HOST_STATE_DIR/candidates" "$HOST_STATE_DIR/interactive-shell" "$HOST_WORKSPACE_DIR"; do
+    if ! mkdir -p "$dir" 2>/dev/null; then
+      if command -v sudo >/dev/null 2>&1 && sudo -n mkdir -p "$dir" 2>/dev/null; then
+        :
+      else
+        fail "unable to create runtime directory: ${dir}"
+      fi
+    fi
+
+    if [ "$(stat -c '%u:%g' "$dir" 2>/dev/null || printf '')" != "${runtime_uid}:${runtime_gid}" ]; then
+      if ! chown "${runtime_uid}:${runtime_gid}" "$dir" 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n chown "${runtime_uid}:${runtime_gid}" "$dir" 2>/dev/null; then
+          :
+        elif [ ! -w "$dir" ]; then
+          fail "runtime directory is not writable and ownership repair failed: ${dir}"
+        else
+          warn "could not change ownership for ${dir}; continuing because it is already writable"
+        fi
+      fi
+    fi
+  done
+}
+
 compose_has_service() {
   local service="$1"
   compose config --services 2>/dev/null | grep -Fxq "$service"
@@ -1266,6 +1293,7 @@ main() {
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
       resolve_control_plane_api_key
       init_compose_files
+      ensure_runtime_dir_ownership
       ensure_tls_preflight
       ensure_secrets_preflight
       acquire_lock

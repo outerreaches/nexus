@@ -17,7 +17,7 @@ import type { ChatMessage } from "../core/types.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { appendMessage, getOrCreateSessionId } from "../storage/sessions.js";
 import { getNodeById, type NodeRecord } from "../storage/nodes.js";
-import { canInjectSkillsPrompt, filterToolsBySkillAccess } from "../state/skill-policy.js";
+import { resolveSkillScopes, filterToolsBySkillAccess } from "../state/skill-policy.js";
 import type {
   ParentMessage,
   WorkerMessage,
@@ -375,17 +375,16 @@ export const spawnAgent = defineTool({
     );
     try {
       const hasSpawnAgent = preset.tools.includes("spawn_agent");
+      const workerSkillCtx = { agentId, preset: preset.name };
       const basePrompt = await buildPresetSystemPrompt({
         stateDir: workerCtx.stateDir,
         agentId,
+        presetName: preset.name,
         promptFiles: preset.promptFiles,
         systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
         includePresets: hasSpawnAgent,
         presetFilter: preset.spawnAllowlist,
-        includeSkills: canInjectSkillsPrompt(workerCtx.skillsConfig, {
-          agentId,
-          preset: preset.name,
-        }),
+        skillScopes: resolveSkillScopes(workerCtx.skillsConfig, workerSkillCtx),
         skillsOptions: workerCtx.skillsConfig?.prompt,
       });
       systemPrompt = [

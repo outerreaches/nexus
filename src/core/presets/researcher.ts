@@ -66,6 +66,10 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",
+    "skill_list",
+    "skill_get",
+    "skill_create",
+    "skill_update",
   ],
   toolCallCaps: {
     web_fetch: 12,

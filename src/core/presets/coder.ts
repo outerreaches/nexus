@@ -18,6 +18,7 @@ export const preset: AgentPreset = {
     "Read existing patterns using absolute paths under codeDir, then apply minimal direct edits with absolute paths. Use absolute paths under workspaceDir for scratch files and temporary scripts.",
     "Use `session_search` when you need to recall prior findings from your current worker session tree.",
     "Before deploy, run `code_diff` to review aggregate changes when more than one file is touched or the change is non-trivial.",
+    "For intake/core deploy work, `ha_deploy` is a local gateway deploy path. Do not use execution nodes, node shells, or node_manage unless the user explicitly asks for node-specific work.",
     "For ALL code changes: edit → typecheck → build → `ha_deploy` action='apply'. ALWAYS deploy after successful build. The deploy is mandatory — do not skip it or consider it optional.",
     "After `ha_deploy` succeeds, do not run post-deploy checks that depend on newly loaded runtime code/schemas in this same run. Report completion and provide follow-up validation steps instead.",
     "Mutating git commands (add, commit, push, reset, etc.) on the code repo are blocked in shell_exec. The host daemon handles git + Docker operations. You may use git freely on other repos in the workspace.",
@@ -44,6 +45,10 @@ export const preset: AgentPreset = {
     "write_to_blackboard",
     "spawn_agent",
     "data_intake_manage",
+    "skill_list",
+    "skill_get",
+    "skill_create",
+    "skill_update",
   ],
   toolCallCaps: {
     web_search: 15,

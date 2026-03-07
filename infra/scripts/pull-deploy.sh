@@ -70,6 +70,25 @@ export NEXUS_HOST_STATE_DIR="${HOST_STATE_DIR}"
 export NEXUS_HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR}"
 export NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}"
 
+RUNTIME_UID="${NEXUS_GATEWAY_UID:-$(id -u)}"
+RUNTIME_GID="${NEXUS_GATEWAY_GID:-$(id -g)}"
+export NEXUS_GATEWAY_UID="${RUNTIME_UID}"
+export NEXUS_GATEWAY_GID="${RUNTIME_GID}"
+
+ensure_runtime_dir() {
+  local dir="$1"
+  [ -n "$dir" ] || return 0
+  mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"
+  if ! chown "${RUNTIME_UID}:${RUNTIME_GID}" "$dir" 2>/dev/null; then
+    sudo chown "${RUNTIME_UID}:${RUNTIME_GID}" "$dir"
+  fi
+}
+
+ensure_runtime_dir "${HOST_STATE_DIR}"
+ensure_runtime_dir "${HOST_STATE_DIR}/candidates"
+ensure_runtime_dir "${HOST_STATE_DIR}/interactive-shell"
+ensure_runtime_dir "${HOST_WORKSPACE_DIR}"
+
 cd "$CODE_DIR"
 git fetch origin main
 target_sha="$(git rev-parse origin/main)"

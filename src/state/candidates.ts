@@ -177,6 +177,19 @@ async function runGit(args: string[], cwd?: string): Promise<{ stdout: string; s
   }
 }
 
+function withCandidatePermissionHint(err: unknown, targetDir: string): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+  if (code === "EACCES" || code === "EPERM" || /\bEACCES\b|\bEPERM\b|permission denied/i.test(message)) {
+    return new Error(
+      `${message}\n` +
+      `candidate workspace is not writable: ${targetDir}\n` +
+      "Fix host ownership/permissions for the candidate root (typically <stateDir>/candidates) so the gateway runtime user can create and remove candidate workspaces.",
+    );
+  }
+  return err instanceof Error ? err : new Error(message);
+}
+
 async function resolveGitHeadSha(repoDir: string): Promise<string> {
   const { stdout } = await runGit(["rev-parse", "HEAD"], repoDir);
   if (!stdout) throw new Error(`git rev-parse HEAD returned no output for ${repoDir}`);
@@ -205,7 +218,11 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
   const nowMs = Math.max(0, Math.floor(params.nowMs ?? Date.now()));
   const gcPolicy = resolveCandidateGcPolicy(params.gcPolicy);
 
-  await fs.mkdir(candidateRootDir, { recursive: true });
+  try {
+    await fs.mkdir(candidateRootDir, { recursive: true });
+  } catch (err) {
+    throw withCandidatePermissionHint(err, candidateRootDir);
+  }
   await pruneCandidates(candidateRootDir, { nowMs, gcPolicy });
 
   const candidates = await listCandidates(candidateRootDir);
@@ -220,7 +237,11 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
   }
 
   const baseSha = await resolveGitHeadSha(liveCodeDir);
-  await fs.mkdir(candidateDir, { recursive: false });
+  try {
+    await fs.mkdir(candidateDir, { recursive: false });
+  } catch (err) {
+    throw withCandidatePermissionHint(err, candidateDir);
+  }
 
   try {
     await runGit(["clone", "--quiet", "--no-hardlinks", liveCodeDir, repoDir], candidateRootDir);
@@ -251,7 +272,7 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
     return record;
   } catch (err) {
     await fs.rm(candidateDir, { recursive: true, force: true });
-    throw err;
+    throw withCandidatePermissionHint(err, candidateDir);
   }
 }
 

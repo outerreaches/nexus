@@ -264,6 +264,85 @@ async function copyIfMissing(sourcePath: string, targetPath: string): Promise<vo
   await writeText(targetPath, "");
 }
 
+async function seedSkills(codeDir: string, stateDir: string): Promise<number> {
+  const srcRoot = path.join(codeDir, "skills");
+
+  if (!(await fileExists(srcRoot))) return 0;
+
+  let copied = 0;
+
+  async function walkSkillTree(root: string, destRoot: string): Promise<void> {
+    async function walk(dir: string): Promise<void> {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const hasSkillFile = entries.some((e) => e.isFile() && e.name === "SKILL.md");
+
+      if (hasSkillFile) {
+        const relDir = path.relative(root, dir);
+        const destDir = path.join(destRoot, relDir);
+        await ensureDir(destDir);
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          const src = path.join(dir, entry.name);
+          const dest = path.join(destDir, entry.name);
+          if (!(await fileExists(dest))) {
+            await fs.copyFile(src, dest);
+          }
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          await copyTree(path.join(dir, entry.name), path.join(destDir, entry.name));
+        }
+        copied++;
+        return;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name.startsWith("_")) continue;
+        await walk(path.join(dir, entry.name));
+      }
+    }
+
+    await walk(root);
+  }
+
+  async function copyTree(src: string, dest: string): Promise<void> {
+    let entries;
+    try {
+      entries = await fs.readdir(src, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await ensureDir(dest);
+    for (const entry of entries) {
+      const s = path.join(src, entry.name);
+      const d = path.join(dest, entry.name);
+      if (entry.isDirectory()) {
+        await copyTree(s, d);
+      } else if (entry.isFile() && !(await fileExists(d))) {
+        await fs.copyFile(s, d);
+      }
+    }
+  }
+
+  // Seed global skills: skills/ → {stateDir}/skills/
+  await walkSkillTree(srcRoot, path.join(stateDir, "skills"));
+
+  // Seed preset-scoped skills: skills/_presets/{name}/ → {stateDir}/presets/{name}/skills/
+  const presetsDir = path.join(srcRoot, "_presets");
+  if (await fileExists(presetsDir)) {
+    const presetEntries = await fs.readdir(presetsDir, { withFileTypes: true });
+    for (const entry of presetEntries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      await walkSkillTree(
+        path.join(presetsDir, entry.name),
+        path.join(stateDir, "presets", entry.name, "skills"),
+      );
+    }
+  }
+
+  return copied;
+}
+
 function upsertEnvContent(existing: string, entries: Record<string, string>): string {
   const lines = existing.length > 0 ? existing.split(/\r?\n/) : [];
   for (const [key, value] of Object.entries(entries)) {
@@ -1219,6 +1298,11 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     await ensureDir(state.paths.storeDir);
     ok("directory layout prepared");
     completedPhases.push("Prepare Directories");
+
+    section("Seed Skills");
+    const seededCount = await seedSkills(state.paths.codeDir, state.paths.stateDir);
+    ok(seededCount > 0 ? `seeded ${seededCount} skill(s) from repo` : "no skills to seed (or all already present)");
+    completedPhases.push("Seed Skills");
 
     section("Write Config + Env");
     if (!dryRun) {

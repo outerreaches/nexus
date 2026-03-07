@@ -1,6 +1,7 @@
 import { loadPersonalizationContext, readPersonalizationFile, type PersonalizationContext } from "../state/personalization.js";
 import { loadSkills, formatSkillsPromptSection } from "../state/skills.js";
 import type { SkillsConfig } from "../state/config.js";
+import type { SkillScopes } from "../state/skill-policy.js";
 import { formatPresetsForPrompt } from "./presets.js";
 
 type SkillsPromptOptions = SkillsConfig["prompt"];
@@ -8,18 +9,20 @@ type SkillsPromptOptions = SkillsConfig["prompt"];
 export async function buildSystemPrompt(params: {
   stateDir: string;
   agentId?: string;
+  presetName?: string;
   presetSystemPrompt?: string;
-  includeSkills?: boolean;
+  skillScopes?: SkillScopes;
   skillsOptions?: SkillsPromptOptions;
 }): Promise<string> {
-  const includeSkills = params.includeSkills ?? true;
+  const scopes = params.skillScopes ?? { global: true, preset: false };
+  const shouldLoad = scopes.global || scopes.preset;
   const [ctx, skills] = await Promise.all([
     loadPersonalizationContext(params.stateDir, params.agentId),
-    includeSkills ? loadSkills(params.stateDir, params.agentId) : Promise.resolve([]),
+    shouldLoad ? loadSkills(params.stateDir, params.agentId, scopes.preset ? params.presetName : undefined, { excludeGlobal: !scopes.global }) : Promise.resolve([]),
   ]);
   return formatSystemPrompt(
     ctx,
-    includeSkills ? formatSkillsPromptSection(skills, params.skillsOptions) : null,
+    shouldLoad ? formatSkillsPromptSection(skills, params.skillsOptions) : null,
     params.presetSystemPrompt,
   );
 }
@@ -27,22 +30,24 @@ export async function buildSystemPrompt(params: {
 export async function buildPresetSystemPrompt(params: {
   stateDir: string;
   agentId?: string;
+  presetName?: string;
   promptFiles?: string[];
   systemPrompt?: string;
   includePresets?: boolean;
   /** When set, only these preset names are listed. Omit for full list. */
   presetFilter?: string[];
-  includeSkills?: boolean;
+  skillScopes?: SkillScopes;
   skillsOptions?: SkillsPromptOptions;
 }): Promise<string> {
   const promptFiles = params.promptFiles ?? [];
   const sections: string[] = [];
-  const includeSkills = params.includeSkills ?? false;
+  const scopes = params.skillScopes ?? { global: false, preset: false };
+  const shouldLoad = scopes.global || scopes.preset;
   const loadedPromptFilesPromise = promptFiles.length > 0
     ? Promise.all(promptFiles.map((filename) => readPersonalizationFile(params.stateDir, filename, params.agentId)))
     : Promise.resolve<string[]>([]);
-  const loadedSkillsPromise = includeSkills
-    ? loadSkills(params.stateDir, params.agentId)
+  const loadedSkillsPromise = shouldLoad
+    ? loadSkills(params.stateDir, params.agentId, scopes.preset ? params.presetName : undefined, { excludeGlobal: !scopes.global })
     : Promise.resolve([]);
 
   const [loadedPromptFiles, loadedSkills] = await Promise.all([loadedPromptFilesPromise, loadedSkillsPromise]);
@@ -58,7 +63,7 @@ export async function buildPresetSystemPrompt(params: {
   if (params.systemPrompt?.trim()) {
     sections.push(params.systemPrompt.trim());
   }
-  if (includeSkills) {
+  if (shouldLoad) {
     const skillsSection = formatSkillsPromptSection(loadedSkills, params.skillsOptions);
     if (skillsSection) {
       sections.push(skillsSection);

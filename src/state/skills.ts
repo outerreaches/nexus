@@ -125,14 +125,20 @@ async function discoverSkillDirs(rootDir: string, maxDepth: number = 6): Promise
 }
 
 /**
- * Load all skills from `{stateDir}/skills/` (or agent-specific override).
+ * Load all skills from `{stateDir}/skills/` (or agent/preset-specific override).
  * Skills are discovered recursively so categorized trees like
  * `skills/operations/node-ops/SKILL.md` are supported.
+ *
+ * Lookup order (first match wins via dedup):
+ * 1. `{stateDir}/agents/{agentId}/skills/` (agent override)
+ * 2. `{stateDir}/presets/{presetName}/skills/` (preset-scoped)
+ * 3. `{stateDir}/skills/` (global)
  */
-export async function loadSkills(stateDir: string, agentId?: string): Promise<SkillEntry[]> {
+export async function loadSkills(stateDir: string, agentId?: string, presetName?: string, opts?: { excludeGlobal?: boolean }): Promise<SkillEntry[]> {
   const roots = [
     ...(agentId ? [path.join(stateDir, "agents", agentId, "skills")] : []),
-    path.join(stateDir, "skills"),
+    ...(presetName ? [path.join(stateDir, "presets", presetName, "skills")] : []),
+    ...(!opts?.excludeGlobal ? [path.join(stateDir, "skills")] : []),
   ];
 
   const skills: SkillEntry[] = [];

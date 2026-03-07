@@ -1,7 +1,6 @@
 import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
-import { preset as intakeManager } from "./presets/intake-manager.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
 import { preset as processManager } from "./presets/process-manager.js";
 import { preset as researcher } from "./presets/researcher.js";
@@ -82,7 +81,6 @@ const PRESETS: Record<string, AgentPreset> = {
   trader,
   analyst,
   "graphic-designer": graphicDesigner,
-  "intake-manager": intakeManager,
 };
 
 const DYNAMIC_PRESETS = new Map<string, AgentPreset>();

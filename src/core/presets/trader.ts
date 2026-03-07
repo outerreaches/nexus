@@ -31,6 +31,10 @@ export const preset: AgentPreset = {
     "query_data",
     "read_from_blackboard",
     "write_to_blackboard",
+    "skill_list",
+    "skill_get",
+    "skill_create",
+    "skill_update",
   ],
   budget: { maxIterations: 40, maxToolCalls: 80 },
 };

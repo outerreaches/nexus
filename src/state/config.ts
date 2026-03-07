@@ -91,6 +91,10 @@ const SkillsAccessSchema = z
       .array(z.string().min(1))
       .default([])
       .describe("Preset names that are denied all skill prompt/tool access."),
+    promptAllowedPresets: z
+      .array(z.string().min(1))
+      .default(["orchestrator"])
+      .describe("Preset names allowed to receive learned skills in their prompt. Empty means all presets."),
     manageAllowedPresets: z
       .array(z.string().min(1))
       .default(["orchestrator"])
@@ -99,6 +103,10 @@ const SkillsAccessSchema = z
       .array(z.string().min(1))
       .default([])
       .describe("Preset names allowed to run skill read tools (list/get). Empty means all presets."),
+    presetSelfAccess: z
+      .boolean()
+      .default(true)
+      .describe("When true, presets always see their own preset-scoped skills regardless of allowlists."),
   })
   .default({});
 
@@ -437,8 +445,10 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
           access: {
             blockedAgents: [],
             blockedPresets: [],
+            promptAllowedPresets: ["orchestrator"],
             manageAllowedPresets: ["orchestrator"],
             readAllowedPresets: [],
+            presetSelfAccess: true,
           },
         },
         maintenance: {

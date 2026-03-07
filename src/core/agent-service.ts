@@ -18,7 +18,7 @@ import type { AgentTracker } from "./agent-tracker.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import type { SkillsConfig } from "../state/config.js";
-import { canInjectSkillsPrompt, filterToolsBySkillAccess } from "../state/skill-policy.js";
+import { resolveSkillScopes, filterToolsBySkillAccess } from "../state/skill-policy.js";
 
 type ExecutionLane = "interactive" | "background";
 type TopLevelCoderTaskType = "plan" | "review" | "walkthrough" | "write";
@@ -478,27 +478,25 @@ export class AgentService {
       const preset = presetName ? getPreset(presetName) : undefined;
       const runModelMode: ModelRoutingMode = params.modelMode ?? this.deps.circuitBreaker?.getEffectiveMode() ?? "default";
 
+      const skillAccessCtx = { agentId: params.agentId, preset: preset?.name ?? presetName };
+      const skillScopes = resolveSkillScopes(this.deps.skillsConfig, skillAccessCtx);
       const systemPrompt = !preset || preset.name === "orchestrator"
         ? await buildSystemPrompt({
           stateDir: this.deps.stateDir,
           agentId: params.agentId,
+          presetName: preset?.name ?? presetName,
           presetSystemPrompt: preset?.systemPrompt,
-          includeSkills: canInjectSkillsPrompt(this.deps.skillsConfig, {
-            agentId: params.agentId,
-            preset: preset?.name ?? presetName,
-          }),
+          skillScopes,
           skillsOptions: this.deps.skillsConfig?.prompt,
         })
         : await buildPresetSystemPrompt({
           stateDir: this.deps.stateDir,
           agentId: params.agentId,
+          presetName: preset.name,
           promptFiles: preset.promptFiles,
           systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
           includePresets: false,
-          includeSkills: canInjectSkillsPrompt(this.deps.skillsConfig, {
-            agentId: params.agentId,
-            preset: preset?.name ?? presetName,
-          }),
+          skillScopes,
           skillsOptions: this.deps.skillsConfig?.prompt,
         });
 

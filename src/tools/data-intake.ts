@@ -281,7 +281,7 @@ export const dataIntakeScheduleAll = defineTool({
       "",
       "Steps:",
       "1) Call data_intake_manage with action='source_list' and args={ includeDisabled: false }.",
-      "2) For each source instance, spawn intake-manager to run that specific source by instance id.",
+      "2) For each source instance, call data_intake_manage with action='run' and args={ instanceId: <id> }.",
       "3) Report any failures.",
       "",
       "Data format notes:",
