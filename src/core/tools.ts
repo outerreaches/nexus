@@ -5,12 +5,16 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { AgentTracker } from "./agent-tracker.js";
 import type { LLMClient, OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { ModelRouter, ModelRoutingMode } from "../llm/model-router.js";
+import type { CandidateBinding } from "../state/candidates.js";
 import type { LlmToolRouting, SkillsConfig } from "../state/config.js";
 
 export type ToolContext = {
   workspaceDir: string;
   stateDir: string;
   codeDir: string;
+  liveCodeDir?: string;
+  candidateRootDir?: string;
+  candidate?: CandidateBinding;
   llm?: LLMClient;
   /** Serializable LLM config for passing to isolated workers. */
   llmConfig?: OpenAICompatConfig;

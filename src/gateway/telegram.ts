@@ -10,10 +10,11 @@ import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
 import { Semaphore } from "../core/semaphore.js";
 import type { ChatUserContentPart } from "../core/types.js";
+import { syncCandidateForDeployApproval } from "../core/deploy-approval.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
-import { fulfillHumanAction } from "../storage/human-actions.js";
+import { fulfillHumanAction, getHumanAction } from "../storage/human-actions.js";
 import {
   detectMimeType,
   extensionFromMime,
@@ -1023,6 +1024,7 @@ export async function startTelegramBot(deps: {
   config: NexusConfig;
   agent: AgentService;
   configPath: string;
+  candidateRootDir: string;
   db: NexusDatabase;
   app: Hono;
   onPreDispatchCommand?: (params: {
@@ -1347,6 +1349,18 @@ export async function startTelegramBot(deps: {
         if (!actionRes.ok) {
           await ctx.reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
           return;
+        }
+        const actionRow = getHumanAction(deps.db, { id, nowMs: Date.now() });
+        if (actionRow) {
+          await syncCandidateForDeployApproval({
+            candidateRootDir: deps.candidateRootDir,
+            approvalId: actionRow.id,
+            metadataJson: actionRow.metadataJson,
+            status: actionRow.status,
+            responseText: actionRow.responseText,
+            nowMs: Date.now(),
+            log: deps.log,
+          });
         }
 
         await ctx.reply(`OK: recorded action ${id}`);

@@ -42,6 +42,10 @@ ROLLOUT_SCRIPT="${SCRIPT_DIR}/ha-rollout.sh"
 log() { echo "[ha-deployer] $(date -Iseconds) $*"; }
 warn() { echo "[ha-deployer] $(date -Iseconds) WARN: $*" >&2; }
 
+sanitize_state_value() {
+  printf '%s' "${1:-}" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g'
+}
+
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { warn "missing required command: $1"; exit 1; }; }
 
 require_cmd jq
@@ -96,6 +100,40 @@ read_last_deploy_sha() {
   awk -F= '/^LAST_DEPLOY_SHA=/{print $2}' "$STATE_FILE" | tail -n 1
 }
 
+read_state_value() {
+  local key="$1"
+  [ -f "$STATE_FILE" ] || return 0
+  awk -F= -v key="$key" '$1 == key {print substr($0, length(key) + 2)}' "$STATE_FILE" | tail -n 1
+}
+
+extract_last_nonempty_line() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  awk 'NF { line = $0 } END { print line }' "$file"
+}
+
+write_failure_state() {
+  local status="$1"
+  local reason="$2"
+  local last_good_sha last_deploy_sha last_active_slot last_effective_sha
+  last_good_sha="$(read_state_value "LAST_GOOD_SHA")"
+  last_deploy_sha="$(read_state_value "LAST_DEPLOY_SHA")"
+  last_active_slot="$(read_state_value "LAST_ACTIVE_SLOT")"
+  last_effective_sha="$(read_state_value "LAST_EFFECTIVE_SHA")"
+  [ -n "$last_effective_sha" ] || last_effective_sha="${last_good_sha}"
+
+  cat >"$STATE_FILE" <<EOF
+LAST_GOOD_SHA=${last_good_sha}
+LAST_DEPLOY_SHA=${last_deploy_sha}
+LAST_STATUS=${status}
+LAST_ACTIVE_SLOT=${last_active_slot}
+LAST_UPDATED_AT=$(date +%s)
+LAST_DEPLOY_PID=
+LAST_EFFECTIVE_SHA=$(sanitize_state_value "${last_effective_sha}")
+LAST_FAILURE_REASON=$(sanitize_state_value "${reason}")
+EOF
+}
+
 ack_matches_trigger() {
   local expected_trigger="$1"
   [ -f "$ACK_FILE" ] || return 1
@@ -106,9 +144,9 @@ ack_matches_trigger() {
 }
 
 process_trigger() {
-  local msg remote branch trigger_id
+  local action msg remote branch trigger_id source_code_dir source_base_sha target_ref
   local request_channel request_channel_key request_agent_id request_session_id request_run_id request_parent_run_id
-  local expected_ack_run_id deployed_sha
+  local expected_ack_run_id deployed_sha rollout_log apply_status state_before_updated state_after_updated state_after_status failure_reason
 
   # Atomically claim the trigger
   if ! mv "$TRIGGER_FILE" "$PROCESSING_FILE" 2>/dev/null; then
@@ -122,7 +160,11 @@ process_trigger() {
   fi
   remote="$(jq -r '.remote // "host"' "$PROCESSING_FILE" 2>/dev/null || echo "host")"
   branch="$(jq -r '.branch // "main"' "$PROCESSING_FILE" 2>/dev/null || echo "main")"
+  action="$(jq -r '.action // "apply"' "$PROCESSING_FILE" 2>/dev/null || echo "apply")"
   trigger_id="$(jq -r '.id // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  source_code_dir="$(jq -r '.sourceCodeDir // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  source_base_sha="$(jq -r '.sourceBaseSha // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  target_ref="$(jq -r '.targetRef // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_channel="$(jq -r '.request.channel // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_channel_key="$(jq -r '.request.channelKey // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_agent_id="$(jq -r '.request.agentId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
@@ -136,11 +178,30 @@ process_trigger() {
   # Clean up stale ack/pending from previous deploys
   rm -f "$ACK_FILE" "$FINALIZE_PENDING"
 
-  log "processing deploy: id=${trigger_id:-unknown} msg='${msg}' remote=${remote} branch=${branch}"
+  log "processing ${action}: id=${trigger_id:-unknown} msg='${msg}' remote=${remote} branch=${branch} source=${source_code_dir:-default} target_ref=${target_ref:-default}"
+  state_before_updated="$(read_state_value "LAST_UPDATED_AT")"
+  rollout_log="$(mktemp "${STATE_DIR}/ha-deployer-apply-local.XXXXXX.log")"
 
-  if "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch"; then
+  if {
+    if [ "$action" = "rollback" ]; then
+      if [ -n "$target_ref" ]; then
+        "$ROLLOUT_SCRIPT" rollback "$target_ref" 2>&1 | tee "$rollout_log"
+      else
+        "$ROLLOUT_SCRIPT" rollback 2>&1 | tee "$rollout_log"
+      fi
+    else
+      "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch" "$source_code_dir" "$source_base_sha" 2>&1 | tee "$rollout_log"
+    fi
+  }; then
+    if [ "$action" = "rollback" ]; then
+      log "rollback succeeded"
+      rm -f "$PROCESSING_FILE"
+      rm -f "$rollout_log"
+      return 0
+    fi
     log "deploy succeeded — waiting for orchestrator ack before rebuilding old primary"
     rm -f "$PROCESSING_FILE"
+    rm -f "$rollout_log"
 
     deployed_sha="$(read_last_deploy_sha)"
     if [ -z "$deployed_sha" ]; then
@@ -209,8 +270,30 @@ process_trigger() {
       warn "old primary rebuild failed (non-fatal — new active is serving)"
     fi
   else
-    warn "deploy failed (exit $?)"
+    apply_status=$?
+    state_after_updated="$(read_state_value "LAST_UPDATED_AT")"
+    state_after_status="$(read_state_value "LAST_STATUS")"
+    failure_reason="$(extract_last_nonempty_line "$rollout_log")"
+    if [ -z "$failure_reason" ]; then
+      if [ "$action" = "rollback" ]; then
+        failure_reason="rollback exited with status ${apply_status}"
+      else
+        failure_reason="apply-local exited with status ${apply_status}"
+      fi
+    fi
+    if [ "$action" = "rollback" ]; then
+      if [ "$state_after_updated" = "$state_before_updated" ] || [ -z "$state_after_status" ] || [ "$state_after_status" = "rolling_back" ]; then
+        write_failure_state "rollback_failed" "$failure_reason"
+      fi
+      warn "rollback failed (exit ${apply_status}): ${failure_reason}"
+    else
+      if [ "$state_after_updated" = "$state_before_updated" ] || [ -z "$state_after_status" ] || [ "$state_after_status" = "applying_local" ]; then
+        write_failure_state "apply_local_failed" "$failure_reason"
+      fi
+      warn "deploy failed (exit ${apply_status}): ${failure_reason}"
+    fi
     rm -f "$PROCESSING_FILE"
+    rm -f "$rollout_log"
   fi
 }
 

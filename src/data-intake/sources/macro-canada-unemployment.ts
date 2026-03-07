@@ -80,19 +80,21 @@ export const canadaUnemploymentSource: DataSource = {
     };
 
     const observations: Observation[] = vectorDataPoints
-      .map((point) => {
+      .flatMap((point) => {
         const parsedRate = typeof point.value === "string" ? Number.parseFloat(point.value) : point.value;
         const date = point.refPerRaw ?? point.refPer;
-        if (typeof date !== "string" || !Number.isFinite(parsedRate)) {
-          return null;
+        if (typeof date !== "string" || typeof parsedRate !== "number" || !Number.isFinite(parsedRate)) {
+          return [];
         }
-        return {
+        const observation: Observation = {
           date,
           rate: parsedRate,
-          releaseTime: point.releaseTime,
         };
+        if (typeof point.releaseTime === "string" && point.releaseTime.trim()) {
+          observation.releaseTime = point.releaseTime;
+        }
+        return [observation];
       })
-      .filter((obs): obs is Observation => obs !== null)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     if (observations.length === 0) {

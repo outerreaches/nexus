@@ -268,6 +268,8 @@ export const ConfigSchema = z.object({
   stateDir: EnvString.optional(),
   workspaceDir: EnvString.optional(),
   codeDir: EnvString.optional(),
+  liveCodeDir: EnvString.optional(),
+  candidateRootDir: EnvString.optional(),
   runtime: RuntimeSchema,
   federation: FederationSchema,
   secrets: SecretsSchema,

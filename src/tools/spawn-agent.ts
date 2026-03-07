@@ -10,6 +10,7 @@ import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
 import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
+import { resolveRunCodeContext } from "../core/run-code-context.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
 import type { ToolRegistry } from "../core/tool-registry.js";
 import type { ChatMessage } from "../core/types.js";
@@ -303,51 +304,6 @@ export const spawnAgent = defineTool({
 
     const { title: blackboardTitle, cleanedTask } = parseBlackboardTitle(args.task, preset.name);
     const agentId = parent?.agentId ? `${parent.agentId}:${preset.name}` : `worker:${preset.name}`;
-
-    // Build worker system prompt
-    const hasSpawnAgent = preset.tools.includes("spawn_agent");
-    const basePrompt = await buildPresetSystemPrompt({
-      stateDir: ctx.stateDir,
-      agentId,
-      promptFiles: preset.promptFiles,
-      systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
-      includePresets: hasSpawnAgent,
-      presetFilter: preset.spawnAllowlist,
-      includeSkills: canInjectSkillsPrompt(ctx.skillsConfig, {
-        agentId,
-        preset: preset.name,
-      }),
-      skillsOptions: ctx.skillsConfig?.prompt,
-    });
-    const systemPrompt = [
-      basePrompt,
-      contextText,
-      "",
-      "## Instructions",
-      "For time-sensitive queries, include explicit years/dates in searches. For historical topics, use the relevant time period.",
-      "",
-      "**File system roots:**",
-      `- workspace: ${ctx.workspaceDir} (use absolute paths for file tools)`,
-      `- state: ${ctx.stateDir} (config files, HEARTBEAT.md, etc.; use absolute paths)`,
-      `- code: ${ctx.codeDir} (source code, if enabled; use absolute paths)`,
-      "",
-      ...coderTaskPolicy.promptLines,
-      coderTaskPolicy.promptLines.length > 0 ? "" : undefined,
-      ...executionPromptLines,
-      executionPromptLines.length > 0 ? "" : undefined,
-      "We have a large list of verified data sources available via data intake tools. Use them when possible.",
-      `Blackboard title: ${blackboardTitle}`,
-      "When writing your primary result to the blackboard, use the exact Blackboard title above.",
-      "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
-      "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
-      "Before first tool use, infer what has already been checked from task/context and avoid repeating the same URLs/queries/commands.",
-      "When spawning sub-agents, assign disjoint scopes and include explicit `Scope:` and `Do NOT repeat:` sections in each child task.",
-      isMaxDepth
-        ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
-        : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}.`,
-    ].filter((line): line is string => typeof line === "string").join("\n");
-
-    // Start run tracking BEFORE execution (so DB row exists for isolated workers)
     const workerSessionId = resolveWorkerSessionId({
       db,
       parent,
@@ -364,45 +320,142 @@ export const spawnAgent = defineTool({
       sessionId: workerSessionId,
       task: args.task,
     });
-
-    const mcpGrantIds = Array.from(new Set((args.mcpGrantIds ?? []).map((id) => id.trim()).filter(Boolean)));
-    if (mcpGrantIds.length > 0 && runId && db) {
-      for (const grantId of mcpGrantIds) {
-        bindMcpGrantToRun(db, grantId, { runId, parentRunId: effectiveParentRunId }, ctx.nowMs());
+    const finishSetupFailure = (output: string): string => {
+      if (runId && tracker) {
+        tracker.completeRun(runId, {
+          status: "failed",
+          outputPreview: output,
+          endedAt: ctx.nowMs(),
+        });
       }
+      return attachBlackboardReference(
+        ctx,
+        attachExecutionTarget(
+          attachBlackboardTitle(
+            JSON.stringify({
+              status: "failed",
+              output,
+              toolCallsUsed: 0,
+              iterationsUsed: 0,
+              deployApplied: false,
+              sessionId: workerSessionId,
+            }),
+            blackboardTitle,
+          ),
+          executionTarget,
+        ),
+        blackboardTitle,
+        spawnStartedAtMs,
+      );
+    };
+    let workerCtx: ToolContext;
+    try {
+      workerCtx = await resolveRunCodeContext({
+        baseContext: ctx,
+        presetName: preset.name,
+        taskType: coderTaskPolicy.taskType,
+        runId: runId ?? null,
+        sessionId: workerSessionId,
+        executionTarget,
+        log: (line) => ctx.log(`worker[${preset.name}] ${line}`),
+      });
+    } catch (err) {
+      return finishSetupFailure(
+        `ERROR: failed to create candidate workspace: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    const grantedTools = resolveMcpGrantTools({
-      ctx,
-      presetName: preset.name,
-      runId: runId ?? null,
-      grantIds: mcpGrantIds,
-    });
+
+    let systemPrompt: string;
+    let mcpGrantIds: string[];
+    let workerTools: ReturnType<ToolRegistry["list"]>;
+    let workerAllowShellExec: boolean;
+    let workerAllowCodeWrite: boolean;
     const combinedBlockedToolNames = Array.from(
       new Set<string>([...coderTaskPolicy.blockedToolNames, ...executionBlockedToolNames]),
     );
-    const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(combinedBlockedToolNames));
-    const workerTools = filterToolsBySkillAccess({
-      tools: mergeToolsByName(baseTools, grantedTools),
-      config: ctx.skillsConfig,
-      ctx: {
+    try {
+      const hasSpawnAgent = preset.tools.includes("spawn_agent");
+      const basePrompt = await buildPresetSystemPrompt({
+        stateDir: workerCtx.stateDir,
         agentId,
-        preset: preset.name,
-      },
-    });
-    if (executionTarget.target === "node" && !workerTools.some((tool) => tool.name === "shell_interactive")) {
-      return "ERROR: node-target worker requires shell_interactive, but it is unavailable after policy filtering.";
-    }
-    const workerAllowShellExec = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowShellExec ?? false);
-    const workerAllowCodeWrite = coderTaskPolicy.enforceHardReadOnly ? false : (ctx.allowCodeWrite ?? false);
-    if (executionTarget.target === "node" && !workerAllowShellExec) {
-      return "ERROR: node-target worker requires shell execution capability.";
+        promptFiles: preset.promptFiles,
+        systemPrompt: preset.systemPrompt ?? `You are a ${preset.name} agent.`,
+        includePresets: hasSpawnAgent,
+        presetFilter: preset.spawnAllowlist,
+        includeSkills: canInjectSkillsPrompt(workerCtx.skillsConfig, {
+          agentId,
+          preset: preset.name,
+        }),
+        skillsOptions: workerCtx.skillsConfig?.prompt,
+      });
+      systemPrompt = [
+        basePrompt,
+        contextText,
+        "",
+        "## Instructions",
+        "For time-sensitive queries, include explicit years/dates in searches. For historical topics, use the relevant time period.",
+        "",
+        "**File system roots:**",
+        `- workspace: ${workerCtx.workspaceDir} (use absolute paths for file tools)`,
+        `- state: ${workerCtx.stateDir} (config files, HEARTBEAT.md, etc.; use absolute paths)`,
+        `- code: ${workerCtx.codeDir} (source code, if enabled; use absolute paths)`,
+        "",
+        ...coderTaskPolicy.promptLines,
+        coderTaskPolicy.promptLines.length > 0 ? "" : undefined,
+        ...executionPromptLines,
+        executionPromptLines.length > 0 ? "" : undefined,
+        "We have a large list of verified data sources available via data intake tools. Use them when possible.",
+        `Blackboard title: ${blackboardTitle}`,
+        "When writing your primary result to the blackboard, use the exact Blackboard title above.",
+        "Complete the task below. When done, write your results to the blackboard using `write_to_blackboard`.",
+        "For binary outputs (files, images), write them to disk and reference paths in blackboard attachments.",
+        "Before first tool use, infer what has already been checked from task/context and avoid repeating the same URLs/queries/commands.",
+        "When spawning sub-agents, assign disjoint scopes and include explicit `Scope:` and `Do NOT repeat:` sections in each child task.",
+        isMaxDepth
+          ? "You are at the maximum delegation depth. Do NOT spawn sub-agents. Complete the task yourself as-is."
+          : `You may spawn sub-agents only when necessary. Maximum delegation depth is ${maxDepth}.`,
+      ].filter((line): line is string => typeof line === "string").join("\n");
+
+      mcpGrantIds = Array.from(new Set((args.mcpGrantIds ?? []).map((id) => id.trim()).filter(Boolean)));
+      if (mcpGrantIds.length > 0 && runId && db) {
+        for (const grantId of mcpGrantIds) {
+          bindMcpGrantToRun(db, grantId, { runId, parentRunId: effectiveParentRunId }, ctx.nowMs());
+        }
+      }
+      const grantedTools = resolveMcpGrantTools({
+        ctx: workerCtx,
+        presetName: preset.name,
+        runId: runId ?? null,
+        grantIds: mcpGrantIds,
+      });
+      const baseTools = filterToolsForPreset(registry.list(), preset, isMaxDepth, new Set(combinedBlockedToolNames));
+      workerTools = filterToolsBySkillAccess({
+        tools: mergeToolsByName(baseTools, grantedTools),
+        config: workerCtx.skillsConfig,
+        ctx: {
+          agentId,
+          preset: preset.name,
+        },
+      });
+      if (executionTarget.target === "node" && !workerTools.some((tool) => tool.name === "shell_interactive")) {
+        return finishSetupFailure(
+          "ERROR: node-target worker requires shell_interactive, but it is unavailable after policy filtering.",
+        );
+      }
+      workerAllowShellExec = coderTaskPolicy.enforceHardReadOnly ? false : (workerCtx.allowShellExec ?? false);
+      workerAllowCodeWrite = coderTaskPolicy.enforceHardReadOnly ? false : (workerCtx.allowCodeWrite ?? false);
+      if (executionTarget.target === "node" && !workerAllowShellExec) {
+        return finishSetupFailure("ERROR: node-target worker requires shell execution capability.");
+      }
+    } catch (err) {
+      return finishSetupFailure(`ERROR: worker setup failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Branch: isolated process vs in-process
     let workerResult: string;
     if (preset.isolated) {
       workerResult = await runIsolated({
-        ctx,
+        ctx: workerCtx,
         preset,
         systemPrompt,
         task: cleanedTask,
@@ -426,7 +479,7 @@ export const spawnAgent = defineTool({
       });
     } else {
       workerResult = await runInProcess({
-        ctx,
+        ctx: workerCtx,
         preset,
         systemPrompt,
         task: cleanedTask,
@@ -943,6 +996,9 @@ async function runIsolated(params: {
       stateDir: ctx.stateDir,
       workspaceDir: ctx.workspaceDir,
       codeDir: ctx.codeDir,
+      liveCodeDir: ctx.liveCodeDir,
+      candidateRootDir: ctx.candidateRootDir,
+      candidate: ctx.candidate,
       dbPath: path.join(ctx.stateDir, "nexus.db"),
       llmConfig,
       modelRouterConfig,

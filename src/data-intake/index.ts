@@ -1,10 +1,11 @@
-import { registerBuiltInSources } from "./sources/index.js";
+import { registerDataSources } from "./registry.js";
+import { GENERATED_DATA_SOURCES } from "./generated-sources.js";
 
 let initialized = false;
 
 export function initDataIntake(): void {
   if (initialized) return;
-  registerBuiltInSources();
+  registerDataSources([...GENERATED_DATA_SOURCES]);
   initialized = true;
 }
 

@@ -9,6 +9,8 @@ export const RuntimePathsSchema = z.object({
   stateDir: z.string(),
   workspaceDir: z.string(),
   codeDir: z.string(),
+  liveCodeDir: z.string(),
+  candidateRootDir: z.string(),
   dbPath: z.string(),
 });
 
@@ -28,20 +30,28 @@ export function getDefaultConfigPath(): string {
   return expandHome(process.env.NEXUS_CONFIG_PATH ?? path.join(getDefaultStateDir(), "nexus.json"));
 }
 
+const ENV_REFERENCE_RE = /^\$\{[A-Z0-9_]+\}$/;
+
+function resolveConfiguredPath(rawValue: string | undefined, fallback: string): string {
+  const source = rawValue && ENV_REFERENCE_RE.test(rawValue) ? fallback : rawValue ?? fallback;
+  return path.resolve(expandHome(source));
+}
+
 export async function resolveRuntimePaths(config: {
   stateDir?: string;
   workspaceDir?: string;
   codeDir?: string;
+  liveCodeDir?: string;
+  candidateRootDir?: string;
 }): Promise<RuntimePaths> {
   const stateDir = path.resolve(expandHome(config.stateDir ?? getDefaultStateDir()));
   const workspaceDefault = process.env.NEXUS_WORKSPACE_DIR ?? path.join(stateDir, "workspace");
-  const workspaceDir = path.resolve(expandHome(config.workspaceDir ?? workspaceDefault));
-  const codeDirRaw = config.codeDir;
-  const codeDirDefault = process.env.NEXUS_CODE_DIR ?? (await inferCodeDir());
-  const codeDir =
-    codeDirRaw && /^\$\{[A-Z0-9_]+\}$/.test(codeDirRaw)
-      ? path.resolve(expandHome(codeDirDefault))
-      : path.resolve(expandHome(codeDirRaw ?? codeDirDefault));
+  const workspaceDir = resolveConfiguredPath(config.workspaceDir, workspaceDefault);
+  const liveCodeDirDefault = process.env.NEXUS_LIVE_CODE_DIR ?? process.env.NEXUS_CODE_DIR ?? (await inferCodeDir());
+  const liveCodeDir = resolveConfiguredPath(config.liveCodeDir ?? config.codeDir, liveCodeDirDefault);
+  const candidateRootDefault = process.env.NEXUS_CANDIDATE_ROOT_DIR ?? path.join(stateDir, "candidates");
+  const candidateRootDir = resolveConfiguredPath(config.candidateRootDir, candidateRootDefault);
+  const codeDir = liveCodeDir;
   const dbPath = path.join(stateDir, "nexus.db");
-  return RuntimePathsSchema.parse({ stateDir, workspaceDir, codeDir, dbPath });
+  return RuntimePathsSchema.parse({ stateDir, workspaceDir, codeDir, liveCodeDir, candidateRootDir, dbPath });
 }

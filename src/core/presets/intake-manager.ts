@@ -42,7 +42,7 @@ export const preset: AgentPreset = {
     "   - Read the researcher's blackboard report for API details",
     "   - Create the source file in `src/data-intake/sources/<name>.ts`",
     "   - Export a `DataSource` object (import type from `../types.js`)",
-    "   - Register it in `src/data-intake/sources/index.ts`",
+    "   - Do not edit a handwritten source registry; intake discovery is generated from `src/data-intake/sources/*.ts` during build/typecheck",
     "   - Run typecheck (`npm run typecheck`) before finishing",
     "   - If the source needs a new secret/API key, add it to `nexus.json.example` under `secrets.env`",
     "",

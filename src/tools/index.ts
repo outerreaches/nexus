@@ -37,6 +37,7 @@ import { sessionSearch } from "./session-search.js";
 import { shellInteractive } from "./shell-interactive.js";
 import { mcpManage } from "./mcp.js";
 import { dataIntakeManage } from "./data-intake.js";
+import { GENERATED_RUNTIME_TOOLS } from "./generated-runtime-tools.js";
 
 export function getBuiltInTools(): Tool[] {
   return [
@@ -95,5 +96,6 @@ export function getBuiltInTools(): Tool[] {
     dbMaintenance,
     dbBackup,
     mcpManage,
+    ...GENERATED_RUNTIME_TOOLS,
   ];
 }

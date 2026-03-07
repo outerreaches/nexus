@@ -134,12 +134,15 @@ export async function startGateway(
       process.stdout.write(`[nexus] log file error: ${msg}\n`);
     }
   }
-  log(`paths: state=${paths.stateDir} workspace=${paths.workspaceDir} code=${paths.codeDir}`);
-  const envCodeDir = process.env.NEXUS_CODE_DIR;
+  log(
+    `paths: state=${paths.stateDir} workspace=${paths.workspaceDir} code=${paths.codeDir} ` +
+      `live=${paths.liveCodeDir} candidates=${paths.candidateRootDir}`,
+  );
+  const envCodeDir = process.env.NEXUS_LIVE_CODE_DIR ?? process.env.NEXUS_CODE_DIR;
   if (envCodeDir) {
     const resolvedEnvCodeDir = path.resolve(envCodeDir);
-    if (resolvedEnvCodeDir !== paths.codeDir) {
-      log(`paths: WARN codeDir mismatch env=${resolvedEnvCodeDir} resolved=${paths.codeDir}`);
+    if (resolvedEnvCodeDir !== paths.liveCodeDir) {
+      log(`paths: WARN liveCodeDir mismatch env=${resolvedEnvCodeDir} resolved=${paths.liveCodeDir}`);
     }
   }
 
@@ -332,7 +335,7 @@ export async function startGateway(
   const builtIns = getBuiltInTools();
   const mcp = new McpManager({ db, log, stateDir: paths.stateDir });
   await mcp.init();
-  const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
+  const registry = new ToolRegistry({ builtIns, mcp });
   await registry.init();
 
   const processManager = new ProcessManager({ stateDir: paths.stateDir, db });
@@ -378,6 +381,8 @@ export async function startGateway(
     workspaceDir: paths.workspaceDir,
     stateDir: paths.stateDir,
     codeDir: paths.codeDir,
+    liveCodeDir: paths.liveCodeDir,
+    candidateRootDir: paths.candidateRootDir,
     llm,
     llmConfig,
     circuitBreaker,
@@ -1206,6 +1211,8 @@ export async function startGateway(
         stateDir: paths.stateDir,
         workspaceDir: paths.workspaceDir,
         codeDir: paths.codeDir,
+        liveCodeDir: paths.liveCodeDir,
+        candidateRootDir: paths.candidateRootDir,
         dbPath: paths.dbPath,
         runtime: {
           profile: config.runtime.profile,
@@ -1361,6 +1368,7 @@ export async function startGateway(
       config,
       agent,
       configPath: params.configPath,
+      candidateRootDir: paths.candidateRootDir,
       log,
       db,
       app: http.app,

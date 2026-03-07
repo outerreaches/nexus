@@ -22,6 +22,7 @@ import { getPreset } from "./presets.js";
 import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
 import { filterToolsBySkillAccess } from "../state/skill-policy.js";
+import { inspectDeployWorktree } from "./deploy-policy.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
@@ -94,7 +95,7 @@ process.on("message", async (msg: ParentMessage) => {
       await mcp.init();
     }
 
-    const registry = new ToolRegistry({ builtIns, stateDir: cfg.stateDir, ...(mcp ? { mcp } : {}) });
+    const registry = new ToolRegistry({ builtIns, ...(mcp ? { mcp } : {}) });
     await registry.init();
     const processManager = new ProcessManager({ stateDir: cfg.stateDir, db });
     const agentTracker = new AgentTracker({ db });
@@ -151,6 +152,9 @@ process.on("message", async (msg: ParentMessage) => {
       workspaceDir: cfg.workspaceDir,
       stateDir: cfg.stateDir,
       codeDir: cfg.codeDir,
+      liveCodeDir: cfg.liveCodeDir,
+      candidateRootDir: cfg.candidateRootDir,
+      candidate: cfg.candidate,
       llm,
       llmConfig: cfg.llmConfig,
       modelRouter,
@@ -218,7 +222,8 @@ process.on("message", async (msg: ParentMessage) => {
     const readOnlyTask = isReadOnlyCoderTaskType(cfg.taskType);
 
     // Coder safeguard: if code was edited and built but ha_deploy was never
-    // called, auto-trigger it so deploys can't be silently skipped.
+    // called, only intake-only changes are auto-deployed. Tool/core/shared
+    // changes must stop for human approval.
     // Disabled for explicit read-only coder task types.
     if (cfg.presetName === "coder" && !readOnlyTask) {
       const codeEditMatches = calls.filter((call) => isCodeEditCall(call, cfg.codeDir));
@@ -229,25 +234,51 @@ process.on("message", async (msg: ParentMessage) => {
       const deployed = deployApplied;
 
       if (builtCode && !deployed) {
+        const deployInspection = inspectDeployWorktree(cfg.codeDir);
         log(
           "coder deploy safeguard details: " +
           `code_edits=${summarizeItems(codeEditMatches.map((call) => summarizeDeployRelevantCall(call)))} ` +
           `typecheck=${summarizeItems(buildValidation.typecheckCommands)} ` +
-          `build=${summarizeItems(buildValidation.buildCommands)}`,
+          `build=${summarizeItems(buildValidation.buildCommands)} ` +
+          `policy=${deployInspection.policy} ` +
+          `approval_required=${summarizeItems(deployInspection.approvalRequired)} ` +
+          `compatibility_issues=${summarizeItems(deployInspection.intakeCompatibilityIssues)}`,
         );
-        log("coder edited code + built but skipped ha_deploy — auto-triggering deploy");
-        const haDeployTool = effectiveWorkerTools.find((t) => t.name === "ha_deploy");
-        if (haDeployTool) {
-          try {
-            const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
-            log(`auto ha_deploy: ${deployResult.slice(0, 200)}`);
-            result.output += `\n\n[AUTO-DEPLOY] ${deployResult}`;
-            if (isSuccessfulResult(deployResult)) {
-              deployApplied = true;
+        if (deployInspection.gitStatusError) {
+          log("coder edited code + built but deploy policy inspection failed — skipping auto-deploy");
+          result.output +=
+            "\n\n[DEPLOY BLOCKED] Build completed, but deploy classification failed for the candidate " +
+            `workspace: ${deployInspection.gitStatusError}`;
+        } else if (deployInspection.policy === "intake_auto_deploy") {
+          log("coder edited intake-only code + built but skipped ha_deploy — auto-triggering deploy");
+          const haDeployTool = effectiveWorkerTools.find((t) => t.name === "ha_deploy");
+          if (haDeployTool) {
+            try {
+              const deployResult = await haDeployTool.execute({ action: "apply" }, toolContext);
+              log(`auto ha_deploy: ${deployResult.slice(0, 200)}`);
+              result.output += `\n\n[AUTO-DEPLOY] ${deployResult}`;
+              if (isSuccessfulResult(deployResult)) {
+                deployApplied = true;
+              }
+            } catch (err) {
+              log(`auto ha_deploy failed: ${err instanceof Error ? err.message : String(err)}`);
             }
-          } catch (err) {
-            log(`auto ha_deploy failed: ${err instanceof Error ? err.message : String(err)}`);
           }
+        } else if (deployInspection.policy === "approval_required") {
+          log("coder edited code + built but deploy requires human approval — skipping auto-deploy");
+          const approvalReasons = [
+            ...deployInspection.approvalRequired,
+            ...deployInspection.intakeCompatibilityIssues,
+          ];
+          result.output +=
+            "\n\n[DEPLOY APPROVAL REQUIRED] Build completed, but deploy was not auto-triggered because " +
+            `approval-gated changes or compatibility issues were detected: ${summarizeItems(approvalReasons)}. ` +
+            "Call ha_deploy and follow the approval instructions.";
+        } else {
+          log("coder edited code + built but only non-deployable changes remain — skipping auto-deploy");
+          result.output +=
+            "\n\n[DEPLOY SKIPPED] Build completed, but the remaining changes do not require a deploy " +
+            `(non-deployable only: ${summarizeItems(deployInspection.skipped)}).`;
         }
       }
     }

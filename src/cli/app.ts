@@ -333,7 +333,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const builtIns = getBuiltInTools();
       const mcp = new McpManager({ db, log, stateDir: paths.stateDir });
       await mcp.init();
-      const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
+      const registry = new ToolRegistry({ builtIns, mcp });
       await registry.init();
       const agentTracker = new AgentTracker({ db });
 
@@ -344,6 +344,8 @@ export async function runCli(argv: string[]): Promise<void> {
         workspaceDir: paths.workspaceDir,
         stateDir: paths.stateDir,
         codeDir: paths.codeDir,
+        liveCodeDir: paths.liveCodeDir,
+        candidateRootDir: paths.candidateRootDir,
         llm,
         llmConfig: startupRoute.primary,
         modelRouter,
@@ -996,7 +998,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const builtIns = getBuiltInTools();
         mcp = new McpManager({ db, log, stateDir: paths.stateDir });
         await mcp.init();
-        const registry = new ToolRegistry({ builtIns, stateDir: paths.stateDir, mcp });
+        const registry = new ToolRegistry({ builtIns, mcp });
         await registry.init();
 
         let raw = String(argsJson ?? "{}").trim();
@@ -1031,6 +1033,8 @@ export async function runCli(argv: string[]): Promise<void> {
           workspaceDir: paths.workspaceDir,
           stateDir: paths.stateDir,
           codeDir: paths.codeDir,
+          liveCodeDir: paths.liveCodeDir,
+          candidateRootDir: paths.candidateRootDir,
           llm,
           llmConfig: startupRoute.primary,
           modelRouter,
@@ -1180,6 +1184,8 @@ export async function runCli(argv: string[]): Promise<void> {
             stateDir: paths.stateDir,
             workspaceDir: paths.workspaceDir,
             codeDir: paths.codeDir,
+            liveCodeDir: paths.liveCodeDir,
+            candidateRootDir: paths.candidateRootDir,
           },
           null,
           2,
@@ -1247,7 +1253,8 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { fulfillHumanAction } = await import("../storage/human-actions.js");
+      const { syncCandidateForDeployApproval } = await import("../core/deploy-approval.js");
+      const { fulfillHumanAction, getHumanAction } = await import("../storage/human-actions.js");
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
       const paths = await resolveRuntimePaths(config);
@@ -1259,6 +1266,17 @@ export async function runCli(argv: string[]): Promise<void> {
           process.stderr.write(`ERROR: unable to record action (${res.error ?? "unknown"})\n`);
           process.exitCode = 1;
           return;
+        }
+        const row = getHumanAction(db, { id: String(id), nowMs: Date.now() });
+        if (row) {
+          await syncCandidateForDeployApproval({
+            candidateRootDir: paths.candidateRootDir,
+            approvalId: row.id,
+            metadataJson: row.metadataJson,
+            status: row.status,
+            responseText: row.responseText,
+            nowMs: Date.now(),
+          });
         }
         process.stdout.write("OK\n");
       } finally {
@@ -1275,7 +1293,8 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { cancelHumanAction } = await import("../storage/human-actions.js");
+      const { syncCandidateForDeployApproval } = await import("../core/deploy-approval.js");
+      const { cancelHumanAction, getHumanAction } = await import("../storage/human-actions.js");
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
       const paths = await resolveRuntimePaths(config);
@@ -1286,6 +1305,17 @@ export async function runCli(argv: string[]): Promise<void> {
           process.stderr.write("ERROR: not found or not pending\n");
           process.exitCode = 1;
           return;
+        }
+        const row = getHumanAction(db, { id: String(id), nowMs: Date.now() });
+        if (row) {
+          await syncCandidateForDeployApproval({
+            candidateRootDir: paths.candidateRootDir,
+            approvalId: row.id,
+            metadataJson: row.metadataJson,
+            status: row.status,
+            responseText: row.responseText,
+            nowMs: Date.now(),
+          });
         }
         process.stdout.write("OK\n");
       } finally {

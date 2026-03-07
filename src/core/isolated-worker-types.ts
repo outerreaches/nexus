@@ -1,4 +1,5 @@
 import type { ModelRouterConfig, SerializableOpenAICompatConfig } from "../llm/model-router.js";
+import type { CandidateBinding } from "../state/candidates.js";
 import type { LlmToolRouting, SkillsConfig } from "../state/config.js";
 
 // IPC message types for process-isolated worker agents
@@ -16,6 +17,9 @@ export type WorkerConfig = {
   stateDir: string;
   workspaceDir: string;
   codeDir: string;
+  liveCodeDir?: string;
+  candidateRootDir?: string;
+  candidate?: CandidateBinding;
   dbPath: string;
 
   // LLM configuration (serializable subset of OpenAICompatConfig)

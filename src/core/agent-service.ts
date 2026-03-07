@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { AgentRunner, RunCancelledError } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
+import { resolveRunCodeContext } from "./run-code-context.js";
 import type { Tool, ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContentPart } from "./types.js";
 import type { LLMClient } from "../llm/openai-compat.js";
@@ -20,6 +21,7 @@ import type { SkillsConfig } from "../state/config.js";
 import { canInjectSkillsPrompt, filterToolsBySkillAccess } from "../state/skill-policy.js";
 
 type ExecutionLane = "interactive" | "background";
+type TopLevelCoderTaskType = "plan" | "review" | "walkthrough" | "write";
 type NudgeConfig = {
   enabled: boolean;
   channels: string[];
@@ -119,6 +121,15 @@ function buildCompactionSummarySystemMessage(params: { summary: string; updatedA
     "",
     truncateWithMarker(params.summary, COMPACTION_SUMMARY_HINT_MAX_CHARS),
   ].join("\n");
+}
+
+function inferTopLevelCoderTaskType(text: string): TopLevelCoderTaskType | undefined {
+  const match = text.match(/(?:^|\n)\s*Task type:\s*(plan|review|walkthrough|write)\b/i);
+  if (!match?.[1]) return undefined;
+  const normalized = match[1].trim().toLowerCase();
+  return normalized === "plan" || normalized === "review" || normalized === "walkthrough" || normalized === "write"
+    ? normalized
+    : undefined;
 }
 
 export class AgentService {
@@ -393,6 +404,8 @@ export class AgentService {
     contentParts?: ChatUserContentPart[];
     /** Override preset for this invocation. */
     preset?: string;
+    /** Optional top-level coder task mode. */
+    taskType?: TopLevelCoderTaskType;
     /** Override model routing mode (default/local_only). */
     modelMode?: ModelRoutingMode;
     /** Queue lane for this run. Defaults by channel (telegram/cli=interactive, others=background). */
@@ -692,6 +705,29 @@ export class AgentService {
         sessionId: writeSessionId,
         task: params.text,
       });
+      let runBaseContext: ToolContext;
+      const topLevelCoderTaskType =
+        preset?.name === "coder" ? params.taskType ?? inferTopLevelCoderTaskType(params.text) : undefined;
+      try {
+        runBaseContext = await resolveRunCodeContext({
+          baseContext: this.deps.toolContext,
+          presetName: preset?.name ?? presetName,
+          taskType: topLevelCoderTaskType,
+          runId: runId ?? null,
+          sessionId: writeSessionId,
+          log: onRunnerLog,
+        });
+      } catch (err) {
+        if (runId && this.deps.agentTracker) {
+          this.deps.agentTracker.completeRun(runId, {
+            status: "failed",
+            outputPreview: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+            endedAt: this.deps.toolContext.nowMs(),
+          });
+        }
+        finalizeTurnNudges({ iterationsUsed: 0, messages: [] });
+        throw err;
+      }
       const abortController = new AbortController();
       const cancellationKey = runId ?? `runless:${crypto.randomUUID()}`;
       this.activeRunCancels.set(cancellationKey, {
@@ -705,7 +741,7 @@ export class AgentService {
       });
 
       const toolContext: ToolContext = {
-        ...this.deps.toolContext,
+        ...runBaseContext,
         llm,
         llmConfig,
         modelRouter: this.deps.modelRouter,

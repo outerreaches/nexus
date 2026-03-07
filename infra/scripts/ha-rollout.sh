@@ -4,7 +4,7 @@
 # Commands:
 #   deploy [<target-ref>]               Build/recreate inactive slot, switch traffic, smoke test.
 #                                       On failure, auto-rollback to last-good commit.
-#   apply-local [<msg>] [<remote>] [<branch>]
+#   apply-local [<msg>] [<remote>] [<branch>] [<source-code-dir>] [<source-base-sha>]
 #                                       Deploy current local working-tree changes:
 #                                       build candidate (standby) -> health check -> commit ->
 #                                       switch traffic -> smoke -> push.
@@ -104,12 +104,14 @@ LAST_STATUS=""
 LAST_ACTIVE_SLOT=""
 LAST_UPDATED_AT=""
 LAST_DEPLOY_PID=""
+LAST_EFFECTIVE_SHA=""
+LAST_FAILURE_REASON=""
 
 usage() {
   cat <<'EOF'
 Usage:
   ha-rollout.sh deploy [<target-ref>]
-  ha-rollout.sh apply-local [<commit-message>] [<target-remote>] [<target-branch>]
+  ha-rollout.sh apply-local [<commit-message>] [<target-remote>] [<target-branch>] [<source-code-dir>] [<source-base-sha>]
   ha-rollout.sh rollback [<target-ref>]
   ha-rollout.sh finalize [<target-ref>]
   ha-rollout.sh status
@@ -138,6 +140,10 @@ warn() {
 fail() {
   echo "[ha-rollout] ERROR: $*" >&2
   exit 1
+}
+
+sanitize_state_value() {
+  printf '%s' "${1:-}" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g'
 }
 
 require_cmd() {
@@ -317,6 +323,8 @@ load_state() {
   LAST_STATUS=""
   LAST_ACTIVE_SLOT=""
   LAST_UPDATED_AT=""
+  LAST_EFFECTIVE_SHA=""
+  LAST_FAILURE_REASON=""
   [ -f "$STATE_FILE" ] || return 0
   while IFS='=' read -r key value; do
     case "$key" in
@@ -326,6 +334,8 @@ load_state() {
       LAST_ACTIVE_SLOT) LAST_ACTIVE_SLOT="$value" ;;
       LAST_UPDATED_AT) LAST_UPDATED_AT="$value" ;;
       LAST_DEPLOY_PID) LAST_DEPLOY_PID="$value" ;;
+      LAST_EFFECTIVE_SHA) LAST_EFFECTIVE_SHA="$value" ;;
+      LAST_FAILURE_REASON) LAST_FAILURE_REASON="$value" ;;
     esac
   done <"$STATE_FILE"
 }
@@ -339,6 +349,8 @@ LAST_STATUS=${LAST_STATUS}
 LAST_ACTIVE_SLOT=${LAST_ACTIVE_SLOT}
 LAST_UPDATED_AT=${LAST_UPDATED_AT}
 LAST_DEPLOY_PID=${LAST_DEPLOY_PID}
+LAST_EFFECTIVE_SHA=$(sanitize_state_value "${LAST_EFFECTIVE_SHA}")
+LAST_FAILURE_REASON=$(sanitize_state_value "${LAST_FAILURE_REASON}")
 EOF
 }
 
@@ -353,6 +365,7 @@ check_interrupted_deploy() {
     warn "previous deploy was interrupted (status=deploying, pid=${LAST_DEPLOY_PID:-unknown} not running)"
     warn "setting status to 'interrupted' — review state before proceeding"
     LAST_STATUS="interrupted"
+    LAST_FAILURE_REASON="previous deploy was interrupted"
     LAST_DEPLOY_PID=""
     LAST_UPDATED_AT="$(date +%s)"
     write_state
@@ -361,6 +374,78 @@ check_interrupted_deploy() {
 
 current_head_sha() {
   git -C "$CODE_DIR" rev-parse HEAD
+}
+
+repo_head_sha() {
+  local repo_dir="$1"
+  git -C "$repo_dir" rev-parse HEAD
+}
+
+sync_source_worktree_to_code_dir() {
+  local source_dir="$1"
+  local expected_base_sha="${2:-}"
+  local source_abs code_abs code_head source_head patch_file rel target_path
+
+  [ -n "$source_dir" ] || return 0
+  [ -d "$source_dir" ] || fail "source code dir does not exist: $source_dir"
+  git -C "$source_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "source code dir is not a git repo: $source_dir"
+
+  source_abs="$(cd "$source_dir" && pwd -P)"
+  code_abs="$(cd "$CODE_DIR" && pwd -P)"
+  if [ "$source_abs" = "$code_abs" ]; then
+    return 0
+  fi
+
+  if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+    fail "live code dir is dirty; cannot sync candidate source into ${CODE_DIR}"
+  fi
+
+  code_head="$(current_head_sha)"
+  if [ -n "$expected_base_sha" ] && [ "$code_head" != "$expected_base_sha" ]; then
+    fail "live code dir HEAD (${code_head}) does not match expected source base (${expected_base_sha})"
+  fi
+
+  source_head="$(repo_head_sha "$source_dir")"
+  if [ "$source_head" != "$code_head" ]; then
+    fail "source repo HEAD (${source_head}) does not match live code dir HEAD (${code_head})"
+  fi
+
+  patch_file="$(mktemp "${STATE_DIR}/candidate-sync.XXXXXX.patch")"
+
+  log "syncing candidate source ${source_abs} into live code dir ${code_abs}"
+  git -C "$source_dir" diff --binary HEAD >"$patch_file"
+  if [ -s "$patch_file" ]; then
+    if ! git -C "$CODE_DIR" apply --binary "$patch_file"; then
+      rm -f "$patch_file"
+      reset_clean_to_commit "$code_head"
+      fail "failed to apply candidate patch into live code dir"
+    fi
+  fi
+
+  while IFS= read -r -d '' rel; do
+    target_path="${CODE_DIR}/${rel}"
+    mkdir -p "$(dirname "$target_path")"
+    if ! cp -a "${source_dir}/${rel}" "$target_path"; then
+      rm -f "$patch_file"
+      reset_clean_to_commit "$code_head"
+      fail "failed to copy candidate file into live code dir: ${rel}"
+    fi
+  done < <(git -C "$source_dir" ls-files --others --exclude-standard -z)
+  rm -f "$patch_file"
+}
+
+record_failure_state() {
+  local status="$1"
+  local reason="$2"
+  local effective_sha="${3:-}"
+  LAST_STATUS="$status"
+  LAST_FAILURE_REASON="$reason"
+  if [ -n "$effective_sha" ]; then
+    LAST_EFFECTIVE_SHA="$effective_sha"
+  fi
+  LAST_DEPLOY_PID=""
+  LAST_UPDATED_AT="$(date +%s)"
+  write_state
 }
 
 current_upstream_ref() {
@@ -761,10 +846,13 @@ rollback_after_failure() {
   LAST_DEPLOY_SHA="$target_sha"
   if [ "$rollback_ok" = "1" ]; then
     LAST_STATUS="rollback_after_failure"
+    LAST_EFFECTIVE_SHA="$rollback_sha"
   else
     LAST_STATUS="rollback_failed"
+    LAST_EFFECTIVE_SHA=""
     warn "ROLLBACK INCOMPLETE — manual intervention may be required"
   fi
+  LAST_FAILURE_REASON="$reason"
   LAST_ACTIVE_SLOT="$old_active"
   LAST_GOOD_SHA="$rollback_sha"
   LAST_DEPLOY_PID=""
@@ -821,6 +909,8 @@ cmd_status() {
   echo "last_good_sha=${LAST_GOOD_SHA}"
   echo "last_deploy_sha=${LAST_DEPLOY_SHA}"
   echo "last_status=${LAST_STATUS}"
+  echo "last_effective_sha=${LAST_EFFECTIVE_SHA}"
+  echo "last_failure_reason=${LAST_FAILURE_REASON}"
   echo "last_active_slot=${LAST_ACTIVE_SLOT}"
   echo "last_updated_at=${LAST_UPDATED_AT}"
   compose ps
@@ -830,17 +920,22 @@ cmd_apply_local() {
   local commit_message="${1:-}"
   local target_remote="${2:-}"
   local target_branch="${3:-main}"
+  local source_code_dir="${4:-}"
+  local source_base_sha="${5:-}"
   local base_sha rollback_sha old_active candidate switched new_sha standby_mode
   switched=0
 
   check_interrupted_deploy
   load_state
+  base_sha="$(current_head_sha)"
+
+  if [ -n "$source_code_dir" ]; then
+    sync_source_worktree_to_code_dir "$source_code_dir" "$source_base_sha"
+  fi
 
   if [ -z "$(git -C "$CODE_DIR" status --porcelain)" ]; then
     fail "git working tree is clean; nothing to apply"
   fi
-
-  base_sha="$(current_head_sha)"
   rollback_sha="${LAST_GOOD_SHA:-$base_sha}"
 
   detect_slots
@@ -850,8 +945,10 @@ cmd_apply_local() {
 
   LAST_DEPLOY_SHA="$base_sha"
   LAST_STATUS="applying_local"
+  LAST_FAILURE_REASON=""
   LAST_ACTIVE_SLOT="$old_active"
   LAST_DEPLOY_PID="$$"
+  LAST_EFFECTIVE_SHA="$rollback_sha"
   [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$rollback_sha"
   LAST_UPDATED_AT="$(date +%s)"
   write_state
@@ -947,10 +1044,14 @@ cmd_apply_local() {
 
   if [ "$push_failed" = "1" ]; then
     LAST_STATUS="applied_local_push_failed"
+    LAST_FAILURE_REASON="push failed for ${push_remote}/${push_branch}"
+    LAST_EFFECTIVE_SHA="$new_sha"
     write_state
     warn "apply-local complete but push to ${push_remote}/${push_branch} failed"
   else
     LAST_STATUS="applied_local"
+    LAST_FAILURE_REASON=""
+    LAST_EFFECTIVE_SHA="$new_sha"
     write_state
   fi
 
@@ -978,8 +1079,10 @@ cmd_deploy() {
 
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deploying"
+  LAST_FAILURE_REASON=""
   LAST_ACTIVE_SLOT="$old_active"
   LAST_DEPLOY_PID="$$"
+  LAST_EFFECTIVE_SHA="$rollback_sha"
   [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$rollback_sha"
   LAST_UPDATED_AT="$(date +%s)"
   write_state
@@ -1016,7 +1119,9 @@ cmd_deploy() {
   LAST_GOOD_SHA="$target_sha"
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deployed"
+  LAST_FAILURE_REASON=""
   LAST_ACTIVE_SLOT="$candidate"
+  LAST_EFFECTIVE_SHA="$target_sha"
   LAST_DEPLOY_PID=""
   LAST_UPDATED_AT="$(date +%s)"
   write_state
@@ -1045,6 +1150,16 @@ cmd_rollback() {
   candidate="$INACTIVE_SLOT"
   verify_control_plane_auth
 
+  LAST_DEPLOY_SHA="$target_sha"
+  LAST_STATUS="rolling_back"
+  LAST_FAILURE_REASON=""
+  LAST_ACTIVE_SLOT="$old_active"
+  LAST_DEPLOY_PID="$$"
+  LAST_EFFECTIVE_SHA="$head_sha"
+  [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$head_sha"
+  LAST_UPDATED_AT="$(date +%s)"
+  write_state
+
   if ! refresh_secret_sidecar_if_present; then
     fail "rollback failed during secret-sidecar refresh"
   fi
@@ -1060,7 +1175,9 @@ cmd_rollback() {
   LAST_GOOD_SHA="$target_sha"
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="rolled_back"
+  LAST_FAILURE_REASON=""
   LAST_ACTIVE_SLOT="$candidate"
+  LAST_EFFECTIVE_SHA="$target_sha"
   LAST_UPDATED_AT="$(date +%s)"
   write_state
 
@@ -1114,7 +1231,9 @@ cmd_finalize() {
 
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="finalized"
+  LAST_FAILURE_REASON=""
   LAST_ACTIVE_SLOT="$active"
+  LAST_EFFECTIVE_SHA="$target_sha"
   [ -n "$LAST_GOOD_SHA" ] || LAST_GOOD_SHA="$target_sha"
   LAST_UPDATED_AT="$(date +%s)"
   write_state

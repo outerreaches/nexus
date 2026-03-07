@@ -11,6 +11,10 @@
     "nexus": "dist/index.js"
   },
   "scripts": {
+    "generate:manifests": "tsx scripts/generate-runtime-manifests.ts",
+    "predev": "npm run generate:manifests",
+    "prebuild": "npm run generate:manifests",
+    "pretypecheck": "npm run generate:manifests",
     "dev": "tsx src/index.ts",
     "build": "tsup",
     "start": "node dist/index.js",
