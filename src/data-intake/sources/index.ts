@@ -19,6 +19,7 @@ import { weatherSource } from "./weather.js";
 import { birdSource } from "./social-bird.js";
 import { birdBatchSource } from "./social-bird-batch.js";
 import { canadaCPISource } from "./macro-canada-cpi.js";
+import { bankOfCanadaPolicyRateSource } from "./macro-bankofcanada-policy-rate.js";
 import { googleNewsSource } from "./news-google.js";
 import { hackerNewsSource } from "./news-hackernews.js";
 import { ontarioHydroSource } from "./utilities-ontario-hydro.js";
@@ -47,6 +48,7 @@ export function registerBuiltInSources(): void {
   registerDataSource(birdSource);
   registerDataSource(birdBatchSource); // Batch Twitter/X fetching
   registerDataSource(canadaCPISource); // Canadian inflation data
+  registerDataSource(bankOfCanadaPolicyRateSource); // Bank of Canada policy rate
   registerDataSource(ontarioHydroSource);
   registerDataSource(ontario511TrafficSource);
   registerDataSource(barrieAqiSource);
