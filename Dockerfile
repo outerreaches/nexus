@@ -1,6 +1,7 @@
 FROM node:22-bookworm-slim
 
 ARG HIMALAYA_VERSION=v1.1.0
+ARG NIKTO_VERSION=2.6.0
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -11,9 +12,11 @@ RUN apt-get update \
     fonts-liberation \
     git \
     jq \
-    nikto \
+    libio-socket-ssl-perl \
+    libnet-ssleay-perl \
     nmap \
     openssh-client \
+    perl \
     ripgrep \
     tmux \
     wget \
@@ -39,6 +42,16 @@ RUN set -eux; \
   install -m 0755 /tmp/himalaya /usr/local/bin/himalaya; \
   rm -f /tmp/himalaya /tmp/himalaya.tgz; \
   himalaya --version
+
+# Install pinned Nikto release from upstream GitHub archive.
+RUN set -eux; \
+  mkdir -p /opt/nikto; \
+  curl -fsSL -o /tmp/nikto.tar.gz "https://github.com/sullo/nikto/archive/refs/tags/${NIKTO_VERSION}.tar.gz"; \
+  tar -xzf /tmp/nikto.tar.gz -C /opt/nikto --strip-components=1; \
+  printf '%s\n' '#!/bin/sh' 'exec perl /opt/nikto/program/nikto.pl "$@"' > /usr/local/bin/nikto; \
+  chmod +x /usr/local/bin/nikto; \
+  nikto -Version >/dev/null 2>&1; \
+  rm -f /tmp/nikto.tar.gz
 
 # Security recon tools (ProjectDiscovery + ffuf) — pre-built Go binaries.
 ARG SUBFINDER_VERSION=v2.7.1
