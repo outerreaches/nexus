@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import type { ToolContext } from "../core/tools.js";
 import { createCandidate, loadCandidate } from "../state/candidates.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
+import { setHomeSession } from "../storage/sessions.js";
 import { fulfillHumanAction, listHumanActions } from "../storage/human-actions.js";
 import { haDeploy } from "./ha-deploy.js";
 
@@ -63,6 +64,7 @@ function createContext(params: {
   repoDir: string;
   stateDir: string;
   nowMs: () => number;
+  telegram?: ToolContext["telegram"];
 }): ToolContext {
   return {
     db: params.db,
@@ -80,6 +82,7 @@ function createContext(params: {
       parentRunId: undefined,
       modelMode: "default",
     },
+    telegram: params.telegram,
     nowMs: params.nowMs,
     log: () => undefined,
   };
@@ -132,6 +135,7 @@ test("ha_deploy creates a human approval request for approval-gated changes", as
     );
 
     assert.match(result, /APPROVAL REQUIRED/);
+    assert.match(result, /There is no dashboard approval UI/i);
     const pending = listHumanActions(db, {
       nowMs: nowMs(),
       status: "pending",
@@ -142,6 +146,74 @@ test("ha_deploy creates a human approval request for approval-gated changes", as
     const metadata = JSON.parse(pending[0]?.metadataJson ?? "{}") as Record<string, unknown>;
     assert.equal(metadata.kind, "ha_deploy_approval");
     assert.equal(metadata.policy, "approval_required");
+  });
+});
+
+test("ha_deploy notifies the home telegram chat when creating an approval request", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await writeFile(repoDir, "src/tools/example.ts", "export const example = 1;\n");
+    setHomeSession({
+      db,
+      agentId: "agent:test",
+      channel: "telegram",
+      channelKey: "12345",
+      nowMs: nowMs(),
+    });
+    const sent: Array<{ chatId: number; text: string }> = [];
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({
+        db,
+        repoDir,
+        stateDir,
+        nowMs,
+        telegram: {
+          sendOutput: async (chatId: number, output: string) => {
+            sent.push({ chatId, text: output });
+          },
+          allowFrom: [12345],
+          allowAll: false,
+        },
+      }),
+    );
+
+    assert.match(result, /Operator notification: sent to Telegram chat 12345/i);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.chatId, 12345);
+    assert.match(sent[0]?.text ?? "", /Deploy approval required/i);
+    assert.match(sent[0]?.text ?? "", /\/act HA[A-Z0-9]+ approve/i);
+  });
+});
+
+test("ha_deploy creates a fresh approval request when the first apply call supplies a bogus approvalId", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await writeFile(repoDir, "src/tools/example.ts", "export const example = 1;\n");
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        approvalId: "core-cosmetic-change-2026",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({ db, repoDir, stateDir, nowMs }),
+    );
+
+    assert.match(result, /APPROVAL REQUIRED/);
+    assert.match(result, /Provided approvalId 'core-cosmetic-change-2026' was not found/i);
+    const pending = listHumanActions(db, {
+      nowMs: nowMs(),
+      status: "pending",
+      sessionId: "session-1",
+    });
+    assert.equal(pending.length, 1);
   });
 });
 

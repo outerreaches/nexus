@@ -23,6 +23,7 @@ export const preset: AgentPreset = {
     "Before deploy, run `code_diff` to review aggregate changes when more than one file is touched or the change is non-trivial.",
     "For intake/core deploy work, `ha_deploy` is a local gateway deploy path. Do not use execution nodes, node shells, or node_manage unless the user explicitly asks for node-specific work.",
     "For ALL code changes: edit → typecheck → build → `ha_deploy` action='apply'. ALWAYS deploy after successful build. The deploy is mandatory — do not skip it or consider it optional.",
+    "For approval-gated deploys, the first `ha_deploy` apply call must omit `approvalId`. If it returns `APPROVAL REQUIRED`, do not invent or guess approval IDs, do not mention a dashboard, and do not probe with fake status IDs. Wait for the returned approval request or the operator's Telegram/CLI response, then rerun `ha_deploy` with that exact approvalId.",
     "After `ha_deploy` succeeds, do not run post-deploy checks that depend on newly loaded runtime code/schemas in this same run. Report completion and provide follow-up validation steps instead.",
     "Mutating git commands (add, commit, push, reset, etc.) on the code repo are blocked in shell_exec. The host daemon handles git + Docker operations. You may use git freely on other repos in the workspace.",
     "If delegating via `spawn_agent`, only use coder/researcher/analyst/graphic-designer with explicit `Blackboard title:` lines, then synthesize child outputs into your final response.",

@@ -16,8 +16,10 @@ import {
 } from "../core/deploy-approval.js";
 import { defineTool } from "../core/tools.js";
 import { inspectDeployWorktree, type DeployChangeInspection } from "../core/deploy-policy.js";
+import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { createHumanAction, getHumanAction, listHumanActions } from "../storage/human-actions.js";
+import { getHomeSession } from "../storage/sessions.js";
 import { loadCandidate, updateCandidate } from "../state/candidates.js";
 
 function parseStateValue(content: string, key: string): string | undefined {
@@ -159,6 +161,13 @@ function truncateDetail(text: string, maxChars: number = 2_000): string {
   return `${compact.slice(0, maxChars)}\n...(+${compact.length - maxChars} chars)`;
 }
 
+function parsePositiveTelegramChatId(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 function formatCommandFailure(command: string, err: unknown): string {
   const stdout =
     typeof err === "object" && err !== null && "stdout" in err && typeof (err as { stdout?: unknown }).stdout === "string"
@@ -254,12 +263,14 @@ function formatApprovalRequiredMessage(params: {
   approvalId: string;
   changes: DeployChangeInspection;
   created: boolean;
+  notes?: string[];
 }): string {
   const heading = params.created
     ? `APPROVAL REQUIRED: created deploy approval request ${params.approvalId}.`
     : `APPROVAL REQUIRED: deploy approval request ${params.approvalId} is still pending.`;
   const lines = [
     heading,
+    ...(params.notes && params.notes.length > 0 ? ["", ...params.notes] : []),
     "",
     "Approval-gated deployable paths:",
     ...(params.changes.approvalRequired.length > 0
@@ -284,9 +295,106 @@ function formatApprovalRequiredMessage(params: {
     "",
     `Approve via CLI: nexus actions respond ${params.approvalId} approve`,
     `Approve via Telegram: /act ${params.approvalId} approve`,
+    "There is no dashboard approval UI for deploy approvals.",
     `After approval, rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
   );
   return lines.join("\n");
+}
+
+type DeployApprovalNotificationContext = {
+  db: NexusDatabase;
+  telegram?: {
+    sendOutput: (chatId: number, output: string) => Promise<void>;
+    allowFrom?: number[];
+    allowAll?: boolean;
+  };
+  agentId?: string;
+  changes: DeployChangeInspection;
+  approvalId: string;
+  log: (msg: string) => void;
+};
+
+function resolveApprovalNotificationChat(params: {
+  db: NexusDatabase;
+  agentId: string;
+}): { chatId: number; source: "home" | "latest_telegram_for_agent" } | null {
+  const home = getHomeSession({ db: params.db, agentId: params.agentId });
+  if (home?.channel === "telegram") {
+    const homeChatId = parsePositiveTelegramChatId(home.channelKey);
+    if (homeChatId) return { chatId: homeChatId, source: "home" };
+  }
+
+  const latestTelegram = params.db.db
+    .prepare(
+      `SELECT s.channel_key AS channel_key
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.id
+        WHERE s.channel = 'telegram' AND s.agent_id = ?
+        GROUP BY s.id
+        ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
+        LIMIT 1`,
+    )
+    .get(params.agentId) as { channel_key: string } | undefined;
+  const latestChatId = parsePositiveTelegramChatId(latestTelegram?.channel_key);
+  if (!latestChatId) return null;
+  return { chatId: latestChatId, source: "latest_telegram_for_agent" };
+}
+
+async function notifyDeployApproval(params: DeployApprovalNotificationContext): Promise<string> {
+  if (!params.telegram) return "Operator notification: telegram is not configured in this runtime.";
+  if (!params.agentId) return "Operator notification: missing agent context for home-channel delivery.";
+
+  const destination = resolveApprovalNotificationChat({
+    db: params.db,
+    agentId: params.agentId,
+  });
+  if (!destination) {
+    return "Operator notification: no home or recent Telegram chat is available for this agent.";
+  }
+
+  const allowed = isTelegramUserAllowed(params.db, {
+    userId: destination.chatId,
+    staticAllowFrom: params.telegram.allowFrom ?? [],
+    allowAll: Boolean(params.telegram.allowAll),
+  });
+  if (!allowed) {
+    return `Operator notification: Telegram chat ${destination.chatId} is not allowlisted.`;
+  }
+
+  const lines = [
+    "Deploy approval required.",
+    `ID: ${params.approvalId}`,
+    "",
+    "Approval-gated paths:",
+    ...(params.changes.approvalRequired.length > 0
+      ? params.changes.approvalRequired.slice(0, 10).map((entry) => `- ${entry}`)
+      : ["- (none)"]),
+  ];
+  if (params.changes.approvalRequired.length > 10) {
+    lines.push(`- (+${params.changes.approvalRequired.length - 10} more)`);
+  }
+  if (params.changes.intakeCompatibilityIssues.length > 0) {
+    lines.push(
+      "",
+      "Compatibility issues forcing approval:",
+      ...params.changes.intakeCompatibilityIssues.slice(0, 8).map((entry) => `- ${entry}`),
+    );
+  }
+  lines.push(
+    "",
+    `Approve: /act ${params.approvalId} approve`,
+    `Reject: /act ${params.approvalId} reject`,
+  );
+
+  try {
+    await params.telegram.sendOutput(destination.chatId, lines.join("\n"));
+    params.log(`deploy approval notification sent id=${params.approvalId} chat=${destination.chatId} source=${destination.source}`);
+    return `Operator notification: sent to Telegram chat ${destination.chatId} (${destination.source}).`;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    params.log(`deploy approval notification failed id=${params.approvalId}: ${detail}`);
+    return `Operator notification: failed to send Telegram notification (${detail}).`;
+  }
 }
 
 function findReusablePendingApproval(
@@ -322,6 +430,11 @@ async function ensureDeployApproval(params: {
       channelKey: string;
       agentId: string;
     };
+    telegram?: {
+      sendOutput: (chatId: number, output: string) => Promise<void>;
+      allowFrom?: number[];
+      allowAll?: boolean;
+    };
     codeDir: string;
     liveCodeDir?: string;
     candidateRootDir?: string;
@@ -338,6 +451,7 @@ async function ensureDeployApproval(params: {
   });
   const nowMs = params.ctx.nowMs();
   const requestedApprovalId = params.approvalId?.trim();
+  const notes: string[] = [];
 
   if (requestedApprovalId) {
     if (!db) {
@@ -350,65 +464,65 @@ async function ensureDeployApproval(params: {
     }
     const row = getHumanAction(db, { id: requestedApprovalId, nowMs });
     if (!row) {
-      await updateBoundCandidateState(params.ctx, {
-        status: "failed",
-        classification: "approval_required",
-        lastError: `deploy approval '${requestedApprovalId}' was not found`,
-      });
-      return `ERROR: deploy approval '${requestedApprovalId}' was not found.`;
-    }
-    if (row.kind !== "confirm") {
-      await updateBoundCandidateState(params.ctx, {
-        status: "failed",
-        classification: "approval_required",
+      notes.push(
+        `Provided approvalId '${requestedApprovalId}' was not found; creating or reusing the correct approval request instead.`,
+      );
+      params.ctx.log(`deploy approval '${requestedApprovalId}' not found; falling back to fresh approval request`);
+    } else {
+      if (row.kind !== "confirm") {
+        await updateBoundCandidateState(params.ctx, {
+          status: "failed",
+          classification: "approval_required",
+          approvalId: row.id,
+          lastError: `human action '${requestedApprovalId}' is not a deploy approval confirmation`,
+        });
+        return `ERROR: human action '${requestedApprovalId}' is not a deploy approval confirmation.`;
+      }
+      if (!metadataMatchesApproval(parseMetadataJson(row.metadataJson), expected)) {
+        await updateBoundCandidateState(params.ctx, {
+          status: "failed",
+          classification: "approval_required",
+          approvalId: row.id,
+          lastError: `deploy approval '${requestedApprovalId}' no longer matches the current code changes`,
+        });
+        return (
+          `ERROR: deploy approval '${requestedApprovalId}' no longer matches the current code changes. ` +
+          "Request a fresh approval for this candidate snapshot."
+        );
+      }
+      await syncCandidateForDeployApproval({
+        candidateRootDir: params.ctx.candidateRootDir,
         approvalId: row.id,
-        lastError: `human action '${requestedApprovalId}' is not a deploy approval confirmation`,
+        metadataJson: row.metadataJson,
+        status: row.status,
+        responseText: row.responseText,
+        nowMs,
+        log: params.ctx.log,
       });
-      return `ERROR: human action '${requestedApprovalId}' is not a deploy approval confirmation.`;
-    }
-    if (!metadataMatchesApproval(parseMetadataJson(row.metadataJson), expected)) {
-      await updateBoundCandidateState(params.ctx, {
-        status: "failed",
-        classification: "approval_required",
-        approvalId: row.id,
-        lastError: `deploy approval '${requestedApprovalId}' no longer matches the current code changes`,
-      });
+      if (row.status === "pending") {
+        return formatApprovalRequiredMessage({
+          approvalId: row.id,
+          changes: params.changes,
+          created: false,
+          notes,
+        });
+      }
+      if (row.status !== "fulfilled") {
+        return `ERROR: deploy approval '${requestedApprovalId}' is ${row.status}. Request a fresh approval.`;
+      }
+
+      const responseText = row.responseText ?? "";
+      if (isAffirmativeApprovalResponse(responseText)) {
+        return null;
+      }
+      if (isNegativeApprovalResponse(responseText)) {
+        return `ERROR: deploy approval '${requestedApprovalId}' was denied.`;
+      }
       return (
-        `ERROR: deploy approval '${requestedApprovalId}' no longer matches the current code changes. ` +
-        "Request a fresh approval for this candidate snapshot."
+        `ERROR: deploy approval '${requestedApprovalId}' has an unrecognized response ` +
+        `(${JSON.stringify(responseText)}). Use an explicit approval like 'approve'.`
       );
     }
-    await syncCandidateForDeployApproval({
-      candidateRootDir: params.ctx.candidateRootDir,
-      approvalId: row.id,
-      metadataJson: row.metadataJson,
-      status: row.status,
-      responseText: row.responseText,
-      nowMs,
-      log: params.ctx.log,
-    });
-    if (row.status === "pending") {
-      return formatApprovalRequiredMessage({
-        approvalId: row.id,
-        changes: params.changes,
-        created: false,
-      });
-    }
-    if (row.status !== "fulfilled") {
-      return `ERROR: deploy approval '${requestedApprovalId}' is ${row.status}. Request a fresh approval.`;
-    }
-
-    const responseText = row.responseText ?? "";
-    if (isAffirmativeApprovalResponse(responseText)) {
-      return null;
-    }
-    if (isNegativeApprovalResponse(responseText)) {
-      return `ERROR: deploy approval '${requestedApprovalId}' was denied.`;
-    }
-    return (
-      `ERROR: deploy approval '${requestedApprovalId}' has an unrecognized response ` +
-      `(${JSON.stringify(responseText)}). Use an explicit approval like 'approve'.`
-    );
   }
 
   if (!db) {
@@ -435,6 +549,7 @@ async function ensureDeployApproval(params: {
       approvalId: reusable.id,
       changes: params.changes,
       created: false,
+      notes,
     });
   }
 
@@ -470,10 +585,21 @@ async function ensureDeployApproval(params: {
     lastError: null,
   });
 
+  const notificationNote = await notifyDeployApproval({
+    db,
+    telegram: params.ctx.telegram,
+    agentId: params.ctx.request?.agentId,
+    changes: params.changes,
+    approvalId: row.id,
+    log: params.ctx.log,
+  });
+  notes.push(notificationNote);
+
   return formatApprovalRequiredMessage({
     approvalId: row.id,
     changes: params.changes,
     created: true,
+    notes,
   });
 }
 
@@ -708,6 +834,13 @@ export const haDeploy = defineTool({
                   agentId: ctx.request.agentId,
                 }
               : undefined,
+            telegram: ctx.telegram as
+              | {
+                  sendOutput: (chatId: number, output: string) => Promise<void>;
+                  allowFrom?: number[];
+                  allowAll?: boolean;
+                }
+              | undefined,
             codeDir: ctx.codeDir,
             liveCodeDir: ctx.liveCodeDir,
             candidateRootDir: ctx.candidateRootDir,
