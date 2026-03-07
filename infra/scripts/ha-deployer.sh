@@ -39,8 +39,9 @@ ACK_TIMEOUT="${ACK_TIMEOUT:-600}"
 PROCESSING_STALE_SEC="${PROCESSING_STALE_SEC:-900}"
 ROLLOUT_SCRIPT="${SCRIPT_DIR}/ha-rollout.sh"
 
-log() { echo "[ha-deployer] $(date -Iseconds) $*"; }
-warn() { echo "[ha-deployer] $(date -Iseconds) WARN: $*" >&2; }
+iso_timestamp() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+log() { echo "[ha-deployer] $(iso_timestamp) $*"; }
+warn() { echo "[ha-deployer] $(iso_timestamp) WARN: $*" >&2; }
 
 sanitize_state_value() {
   printf '%s' "${1:-}" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g'
@@ -220,7 +221,7 @@ process_trigger() {
       --arg sessionId "${request_session_id}" \
       --arg runId "${request_run_id}" \
       --arg parentRunId "${request_parent_run_id}" \
-      --arg createdAt "$(date -Iseconds)" \
+      --arg createdAt "$(iso_timestamp)" \
       '{
         triggerId: (if $triggerId == "" then null else $triggerId end),
         expectedSha: (if $expectedSha == "" then null else $expectedSha end),

@@ -12,6 +12,11 @@ fail() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOST_OS="${NEXUS_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+IS_DARWIN=0
+if [ "$HOST_OS" = "Darwin" ]; then
+  IS_DARWIN=1
+fi
 
 if [ -n "${NEXUS_HOME:-}" ]; then
   DEFAULT_NEXUS_HOME="$NEXUS_HOME"
@@ -46,6 +51,7 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 BASE_COMPOSE="${BASE_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.yml}"
 SIDECAR_COMPOSE="${SIDECAR_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
 TLS_COMPOSE="${TLS_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.tls.yml}"
+MACOS_COMPOSE="${MACOS_COMPOSE:-${CODE_DIR}/infra/docker-compose.ha.macos.yml}"
 TLS_CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
 SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
@@ -74,6 +80,33 @@ RUNTIME_UID="${NEXUS_GATEWAY_UID:-$(id -u)}"
 RUNTIME_GID="${NEXUS_GATEWAY_GID:-$(id -g)}"
 export NEXUS_GATEWAY_UID="${RUNTIME_UID}"
 export NEXUS_GATEWAY_GID="${RUNTIME_GID}"
+
+restart_ha_deployer() {
+  local service_label plist_path uid domain
+  if command -v systemctl >/dev/null 2>&1; then
+    log "ha-deployer changed; reloading unit + restarting service"
+    sudo systemctl daemon-reload
+    sudo systemctl restart ha-deployer
+    return 0
+  fi
+
+  if [ "$IS_DARWIN" -eq 1 ] && command -v launchctl >/dev/null 2>&1; then
+    service_label="${NEXUS_HA_DEPLOYER_LABEL:-io.outerreaches.nexus.ha-deployer}"
+    plist_path="${NEXUS_HA_DEPLOYER_PLIST:-${HOME}/Library/LaunchAgents/${service_label}.plist}"
+    if [ ! -f "$plist_path" ]; then
+      log "ha-deployer changed; launchd plist not found at ${plist_path}, skipping restart"
+      return 0
+    fi
+    uid="$(id -u)"
+    for domain in "gui/${uid}" "user/${uid}"; do
+      if launchctl kickstart -k "${domain}/${service_label}" >/dev/null 2>&1; then
+        log "ha-deployer changed; restarted launchd job ${domain}/${service_label}"
+        return 0
+      fi
+    done
+    log "ha-deployer changed; launchd restart failed for ${service_label}"
+  fi
+}
 
 ensure_runtime_dir() {
   local dir="$1"
@@ -118,11 +151,7 @@ new_sha="$(git rev-parse HEAD)"
 log "synced code to origin/main: ${old_sha} -> ${new_sha}"
 
 if git diff --name-only "$old_sha" "$new_sha" | grep -Eq '^(infra/scripts/ha-deployer\.sh|infra/systemd/ha-deployer\.service)$'; then
-  if command -v systemctl >/dev/null 2>&1; then
-    log "ha-deployer changed; reloading unit + restarting service"
-    sudo systemctl daemon-reload
-    sudo systemctl restart ha-deployer
-  fi
+  restart_ha_deployer
 fi
 
 declare -a compose_files=(
@@ -130,6 +159,10 @@ declare -a compose_files=(
   "$SIDECAR_COMPOSE"
   "$TLS_COMPOSE"
 )
+if [ "$IS_DARWIN" -eq 1 ]; then
+  [ -f "$MACOS_COMPOSE" ] || fail "missing macOS compose overlay: ${MACOS_COMPOSE}"
+  compose_files+=("$MACOS_COMPOSE")
+fi
 
 if [ ! -r "$TLS_CERT_PEM" ]; then
   log "TLS cert is not readable; attempting chmod 644: ${TLS_CERT_PEM}"

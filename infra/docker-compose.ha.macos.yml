@@ -1,10 +1,16 @@
 # macOS local override for HA + sidecar + TLS deployment.
 #
-# Remaps all /data/* bind mounts to ~/.nexus/* paths and sets
-# UID/GID to match the macOS host user (501:20 by default).
+# Remaps all /data/* bind mounts to host paths and runs the gateway as the
+# current host user. `pull-deploy.sh`, `ha-rollout.sh`, and the setup wizard
+# export these values automatically on macOS.
 #
-# Required shell exports before running:
-#   export NEXUS_MACOS_HOME="$HOME"
+# Required shell exports before running docker compose directly:
+#   export NEXUS_HOST_CODE_DIR="$HOME/Workspace/Nexus"
+#   export NEXUS_HOST_STATE_DIR="$HOME/.nexus/state"
+#   export NEXUS_HOST_WORKSPACE_DIR="$HOME/.nexus/workspace"
+#   export NEXUS_HOST_SECRETS_DIR="$HOME/.nexus/secrets"
+#   export NEXUS_GATEWAY_UID="$(id -u)"
+#   export NEXUS_GATEWAY_GID="$(id -g)"
 #   export NEXUS_GATEWAY_ENV_FILE="$HOME/.nexus/config/gateway/nexus.env"
 #   export NEXUS_SIDECAR_ENV_FILE="$HOME/.nexus/config/sidecar/nexus.env"
 #   export NEXUS_WATCHDOG_ENV_FILE="$HOME/.nexus/config/watchdog/nexus.env"
@@ -24,27 +30,27 @@
 
 services:
   nexus-primary:
-    user: "501:20"
+    user: "${NEXUS_GATEWAY_UID:-501}:${NEXUS_GATEWAY_GID:-20}"
     volumes:
-      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
-      - ${NEXUS_MACOS_HOME}/Workspace/Nexus:/data/code
-      - ${NEXUS_MACOS_HOME}/.nexus/workspace:/data/workspace
+      - ${NEXUS_HOST_STATE_DIR}:/data/nexus
+      - ${NEXUS_HOST_CODE_DIR}:/data/code
+      - ${NEXUS_HOST_WORKSPACE_DIR}:/data/workspace
 
   nexus-standby:
-    user: "501:20"
+    user: "${NEXUS_GATEWAY_UID:-501}:${NEXUS_GATEWAY_GID:-20}"
     volumes:
-      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
-      - ${NEXUS_MACOS_HOME}/Workspace/Nexus:/data/code
-      - ${NEXUS_MACOS_HOME}/.nexus/workspace:/data/workspace
+      - ${NEXUS_HOST_STATE_DIR}:/data/nexus
+      - ${NEXUS_HOST_CODE_DIR}:/data/code
+      - ${NEXUS_HOST_WORKSPACE_DIR}:/data/workspace
 
   secret-sidecar:
     environment:
-      NEXUS_SECRET_SIDECAR_SOCKET_GID: "20"
+      NEXUS_SECRET_SIDECAR_SOCKET_GID: "${NEXUS_GATEWAY_GID:-20}"
     volumes:
-      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus
-      - ${NEXUS_MACOS_HOME}/.nexus/secrets:/data/nexus-secrets
+      - ${NEXUS_HOST_STATE_DIR}:/data/nexus
+      - ${NEXUS_HOST_SECRETS_DIR}:/data/nexus-secrets
       - secret-sidecar-run:/run/nexus
 
   watchdog:
     volumes:
-      - ${NEXUS_MACOS_HOME}/.nexus/state:/data/nexus:ro
+      - ${NEXUS_HOST_STATE_DIR}:/data/nexus:ro

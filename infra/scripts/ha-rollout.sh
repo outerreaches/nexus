@@ -41,6 +41,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CODE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOST_OS="${NEXUS_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+IS_DARWIN=0
+if [ "$HOST_OS" = "Darwin" ]; then
+  IS_DARWIN=1
+fi
 
 if [ -n "${NEXUS_HOME:-}" ]; then
   DEFAULT_NEXUS_HOME="$NEXUS_HOME"
@@ -67,7 +72,11 @@ CONFIG_ROOT="${CONFIG_ROOT:-${DEFAULT_CONFIG_ROOT}}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
 SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
 WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
+DEFAULT_MACOS_COMPOSE="${CODE_DIR}/infra/docker-compose.ha.macos.yml"
 DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml:${CODE_DIR}/infra/docker-compose.ha.tls.yml"
+if [ "$IS_DARWIN" -eq 1 ] && [ -f "$DEFAULT_MACOS_COMPOSE" ]; then
+  DEFAULT_COMPOSE_FILES="${DEFAULT_COMPOSE_FILES}:${DEFAULT_MACOS_COMPOSE}"
+fi
 COMPOSE_FILES_RAW="${COMPOSE_FILES:-${DEFAULT_COMPOSE_FILES}}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
 STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
@@ -106,6 +115,37 @@ LAST_UPDATED_AT=""
 LAST_DEPLOY_PID=""
 LAST_EFFECTIVE_SHA=""
 LAST_FAILURE_REASON=""
+
+detect_stat_value() {
+  local format_linux="$1"
+  local format_bsd="$2"
+  local target="$3"
+  local value=""
+  if value="$(stat -c "$format_linux" "$target" 2>/dev/null)"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  if value="$(stat -f "$format_bsd" "$target" 2>/dev/null)"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  return 1
+}
+
+RUNTIME_UID="${NEXUS_GATEWAY_UID:-$(detect_stat_value '%u' '%u' "$CODE_DIR" || true)}"
+[ -n "$RUNTIME_UID" ] || RUNTIME_UID="$(id -u)"
+RUNTIME_GID="${NEXUS_GATEWAY_GID:-$(detect_stat_value '%g' '%g' "$CODE_DIR" || true)}"
+[ -n "$RUNTIME_GID" ] || RUNTIME_GID="$(id -g)"
+export NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}"
+export NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}"
+export NEXUS_WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE}"
+export NEXUS_HA_API_KEY="${CONTROL_PLANE_API_KEY}"
+export NEXUS_GATEWAY_UID="${RUNTIME_UID}"
+export NEXUS_GATEWAY_GID="${RUNTIME_GID}"
+export NEXUS_HOST_CODE_DIR="${HOST_CODE_DIR}"
+export NEXUS_HOST_STATE_DIR="${HOST_STATE_DIR}"
+export NEXUS_HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR}"
+export NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}"
 
 usage() {
   cat <<'EOF'
@@ -263,26 +303,55 @@ init_compose_files() {
 }
 
 compose() {
-  local runtime_uid runtime_gid
-  runtime_uid="${NEXUS_GATEWAY_UID:-$(stat -c '%u' "$CODE_DIR" 2>/dev/null || id -u)}"
-  runtime_gid="${NEXUS_GATEWAY_GID:-$(stat -c '%g' "$CODE_DIR" 2>/dev/null || id -g)}"
-  NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}" \
-  NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}" \
-  NEXUS_WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE}" \
-  NEXUS_HA_API_KEY="${CONTROL_PLANE_API_KEY}" \
-  NEXUS_GATEWAY_UID="${runtime_uid}" \
-  NEXUS_GATEWAY_GID="${runtime_gid}" \
-  NEXUS_HOST_CODE_DIR="${HOST_CODE_DIR}" \
-  NEXUS_HOST_STATE_DIR="${HOST_STATE_DIR}" \
-  NEXUS_HOST_WORKSPACE_DIR="${HOST_WORKSPACE_DIR}" \
-  NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}" \
   "${COMPOSE_BASE_CMD[@]}" "$@"
 }
 
+run_with_timeout() {
+  local timeout_secs="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_secs" "$@"
+    return $?
+  fi
+
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$timeout_secs" "$@"
+    return $?
+  fi
+
+  local timeout_marker killer_pid cmd_pid status
+  timeout_marker="$(mktemp "${STATE_DIR}/timeout-marker.XXXXXX")"
+  rm -f "$timeout_marker"
+
+  "$@" &
+  cmd_pid=$!
+  (
+    sleep "$timeout_secs"
+    if kill -0 "$cmd_pid" 2>/dev/null; then
+      printf '1' >"$timeout_marker"
+      kill -TERM "$cmd_pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$cmd_pid" 2>/dev/null || true
+    fi
+  ) &
+  killer_pid=$!
+
+  status=0
+  wait "$cmd_pid" || status=$?
+  kill "$killer_pid" 2>/dev/null || true
+  wait "$killer_pid" 2>/dev/null || true
+
+  if [ -f "$timeout_marker" ]; then
+    rm -f "$timeout_marker"
+    return 124
+  fi
+  rm -f "$timeout_marker"
+  return "$status"
+}
+
 ensure_runtime_dir_ownership() {
-  local runtime_uid runtime_gid dir
-  runtime_uid="${NEXUS_GATEWAY_UID:-$(stat -c '%u' "$CODE_DIR" 2>/dev/null || id -u)}"
-  runtime_gid="${NEXUS_GATEWAY_GID:-$(stat -c '%g' "$CODE_DIR" 2>/dev/null || id -g)}"
+  local dir current_owner
   for dir in "$HOST_STATE_DIR" "$HOST_STATE_DIR/candidates" "$HOST_STATE_DIR/interactive-shell" "$HOST_WORKSPACE_DIR"; do
     if ! mkdir -p "$dir" 2>/dev/null; then
       if command -v sudo >/dev/null 2>&1 && sudo -n mkdir -p "$dir" 2>/dev/null; then
@@ -292,9 +361,10 @@ ensure_runtime_dir_ownership() {
       fi
     fi
 
-    if [ "$(stat -c '%u:%g' "$dir" 2>/dev/null || printf '')" != "${runtime_uid}:${runtime_gid}" ]; then
-      if ! chown "${runtime_uid}:${runtime_gid}" "$dir" 2>/dev/null; then
-        if command -v sudo >/dev/null 2>&1 && sudo -n chown "${runtime_uid}:${runtime_gid}" "$dir" 2>/dev/null; then
+    current_owner="$(detect_stat_value '%u:%g' '%u:%g' "$dir" || true)"
+    if [ "$current_owner" != "${RUNTIME_UID}:${RUNTIME_GID}" ]; then
+      if ! chown "${RUNTIME_UID}:${RUNTIME_GID}" "$dir" 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n chown "${RUNTIME_UID}:${RUNTIME_GID}" "$dir" 2>/dev/null; then
           :
         elif [ ! -w "$dir" ]; then
           fail "runtime directory is not writable and ownership repair failed: ${dir}"
@@ -712,13 +782,13 @@ detect_slots() {
 build_slot() {
   local service="$1"
   log "building ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" build "$service"
+  run_with_timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" build "$service"
 }
 
 recreate_slot() {
   local service="$1"
   log "recreating ${service} (timeout=${BUILD_TIMEOUT}s)"
-  timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" up -d --no-deps --force-recreate "$service"
+  run_with_timeout "$BUILD_TIMEOUT" "${COMPOSE_BASE_CMD[@]}" up -d --no-deps --force-recreate "$service"
 }
 
 switch_to_slot() {

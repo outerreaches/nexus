@@ -26,7 +26,8 @@ Use for:
 
 Notes:
 - Includes compose up/recreate flow and optional prune behavior.
-- If `ha-deployer` files changed, it reloads/restarts the systemd unit.
+- On macOS, auto-includes `infra/docker-compose.ha.macos.yml`.
+- If `ha-deployer` files changed, it reloads/restarts the host autostart integration (`systemd` on Linux, `launchd` on macOS).
 
 ### `ha-rollout.sh`
 Primary HA rollout manager for controlled slot-based deployments.
@@ -49,7 +50,8 @@ Use for:
 - autonomous agent deploy pipeline (trigger -> apply-local -> ack wait -> finalize)
 
 Run model:
-- normally started via `infra/systemd/ha-deployer.service`
+- normally started via `infra/systemd/ha-deployer.service` on Linux
+- or via the setup wizard's `launchd` job on macOS
 
 ## Directory Layout
 
