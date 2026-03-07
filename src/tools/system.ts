@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import { z } from "zod";
@@ -27,8 +28,25 @@ const MUTATING_GIT_SUBCMDS = new Set([
  * different repo). Read-only commands like status/log/diff are allowed.
  */
 function isUnderRoot(targetPath: string, rootPath: string): boolean {
-  const rel = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+  const rel = path.relative(resolveComparisonPath(rootPath), resolveComparisonPath(targetPath));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function resolveComparisonPath(targetPath: string): string {
+  let cursor = path.resolve(targetPath);
+  const tail: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    tail.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+  const base = existsSync(cursor) ? realpathSync.native(cursor) : path.resolve(cursor);
+  return tail.length > 0 ? path.join(base, ...tail) : base;
+}
+
+export function isPathUnderRoot(targetPath: string, rootPath: string): boolean {
+  return isUnderRoot(targetPath, rootPath);
 }
 
 function resolveCommandPath(input: string, cwd: string): string {
@@ -70,6 +88,12 @@ export function isMutatingGitOnCodeDir(command: string, codeDir: string, options
   return false;
 }
 
+const ORCHESTRATOR_SHELL_DELEGATE_RE = /(^|[;&|]\s*|\s)(node|npm|npx|pnpm|yarn|bun|tsx|ts-node)\b/i;
+
+export function isOrchestratorShellDelegationCommand(command: string): boolean {
+  return ORCHESTRATOR_SHELL_DELEGATE_RE.test(command);
+}
+
 export const shellExec = defineTool({
   name: "shell_exec",
   description:
@@ -94,6 +118,12 @@ export const shellExec = defineTool({
   execute: async ({ command, timeoutMs }, ctx) => {
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";
     if (ctx.abortSignal?.aborted) return "ERROR: run cancelled";
+    if (ctx.request?.preset === "orchestrator" && isOrchestratorShellDelegationCommand(command)) {
+      return (
+        "ERROR: orchestrator must not use shell_exec to run local Node/package-manager commands. " +
+        "Spawn a coder worker for code/deploy workflows, or use a different tool for the task."
+      );
+    }
 
     // Block mutating git commands that target the code repository.
     // Read-only commands (status, log, diff, show) are allowed.

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { paginateUtf8Chunk, shellInteractive } from "./shell-interactive.js";
+import { orchestratorCodeShellPolicyError, paginateUtf8Chunk, shellInteractive } from "./shell-interactive.js";
 
 test("paginateUtf8Chunk advances only returned bytes for ASCII output", () => {
   const source = Buffer.from("abcdefghij", "utf8");
@@ -81,6 +81,35 @@ test("security-researcher preset is allowed to use shell_interactive", async () 
     const parsed = JSON.parse(result) as Record<string, unknown>;
     assert.equal(parsed.ok, true);
     assert.equal(parsed.action, "list");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("orchestrator cannot open shell_interactive in repository code root", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-shell-interactive-test-"));
+  try {
+    const codeDir = path.join(tempDir, "repo");
+    await fs.mkdir(codeDir, { recursive: true });
+    const result = orchestratorCodeShellPolicyError(
+      {
+        workspaceDir: tempDir,
+        stateDir: tempDir,
+        codeDir,
+        allowShellExec: true,
+        request: {
+          channel: "cli",
+          channelKey: "test",
+          agentId: "main",
+          sessionId: "s-1",
+          preset: "orchestrator",
+        },
+        nowMs: () => Date.now(),
+        log: () => {},
+      },
+      codeDir,
+    );
+    assert.match(result ?? "", /must not use shell_interactive inside the repository code root/i);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

@@ -12,6 +12,9 @@ type TestCtx = {
   codeDir: string;
   allowCodeEdit: boolean;
   allowCodeWrite: boolean;
+  request?: {
+    preset?: string;
+  };
   nowMs: () => number;
   log: (msg: string) => void;
 };
@@ -146,5 +149,28 @@ test("file_patch applies a simple unified diff", async () => {
     assert.match(result, /^OK: patch applied/);
     const updated = await fs.readFile(filePath, "utf8");
     assert.equal(updated, "after\n");
+  });
+});
+
+test("orchestrator cannot edit repository code directly", async () => {
+  await withToolCtx(async (ctx) => {
+    const filePath = path.join(ctx.codeDir, "blocked.ts");
+    await fs.writeFile(filePath, "export const value = 1;\n", "utf8");
+
+    const result = await fileEdit.execute(
+      {
+        path: filePath,
+        find: "1",
+        replace: "2",
+      },
+      {
+        ...ctx,
+        request: { preset: "orchestrator" },
+      } as any,
+    );
+
+    assert.match(result, /orchestrator must not edit repository code directly/i);
+    const unchanged = await fs.readFile(filePath, "utf8");
+    assert.equal(unchanged, "export const value = 1;\n");
   });
 });

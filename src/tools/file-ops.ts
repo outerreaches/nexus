@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -23,14 +24,31 @@ type FileToolContext = {
   stateDir: string;
   codeDir: string;
   allowCodeEdit?: boolean;
+  allowCodeWrite?: boolean;
+  request?: {
+    preset?: string;
+  };
 };
 
 function allowedRoots(ctx: FileToolContext): string[] {
   return [ctx.stateDir, ctx.workspaceDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
 }
 
+function resolveComparisonPath(targetPath: string): string {
+  let cursor = path.resolve(targetPath);
+  const tail: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    tail.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+  const base = existsSync(cursor) ? realpathSync.native(cursor) : path.resolve(cursor);
+  return tail.length > 0 ? path.join(base, ...tail) : base;
+}
+
 function isUnderRoot(targetPath: string, rootDir: string): boolean {
-  const rel = path.relative(path.resolve(rootDir), path.resolve(targetPath));
+  const rel = path.relative(resolveComparisonPath(rootDir), resolveComparisonPath(targetPath));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -53,6 +71,26 @@ function resolveAbsolutePath(params: {
   } catch (err) {
     return { ok: false, error: `ERROR: ${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+function codeWritePolicyError(params: {
+  ctx: FileToolContext;
+  targetPath: string;
+}): string | null {
+  if (!isUnderRoot(params.targetPath, params.ctx.codeDir)) return null;
+  if (params.ctx.request?.preset === "orchestrator") {
+    return (
+      "ERROR: orchestrator must not edit repository code directly. " +
+      "Spawn a coder worker with taskType='write' for code changes, or taskType='review'/'walkthrough' for read-only code tasks."
+    );
+  }
+  if (!params.ctx.allowCodeWrite) {
+    return (
+      "ERROR: code root is read-only in this runtime. " +
+      "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
+    );
+  }
+  return null;
 }
 
 function truncateByBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
@@ -495,12 +533,8 @@ export const fileWrite = defineTool({
     const resolved = resolveAbsolutePath({ ctx, inputPath });
     if (!resolved.ok) return resolved.error;
     const fullPath = resolved.fullPath;
-    if (isUnderRoot(fullPath, ctx.codeDir) && !ctx.allowCodeWrite) {
-      return (
-        "ERROR: code root is read-only in this runtime. " +
-        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
-      );
-    }
+    const policyError = codeWritePolicyError({ ctx, targetPath: fullPath });
+    if (policyError) return policyError;
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
 
     if (mode === "create") {
@@ -592,12 +626,8 @@ export const fileEdit = defineTool({
     const resolved = resolveAbsolutePath({ ctx, inputPath });
     if (!resolved.ok) return resolved.error;
     const fullPath = resolved.fullPath;
-    if (isUnderRoot(fullPath, ctx.codeDir) && !ctx.allowCodeWrite) {
-      return (
-        "ERROR: code root is read-only in this runtime. " +
-        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
-      );
-    }
+    const policyError = codeWritePolicyError({ ctx, targetPath: fullPath });
+    if (policyError) return policyError;
     if (find.length === 0) {
       return "ERROR: find text must be non-empty.";
     }
@@ -672,12 +702,8 @@ export const filePatch = defineTool({
       if (!isUnderRoot(targetPath, fullRootPath)) {
         return `ERROR: patch path escapes rootPath: ${relPatchPath}`;
       }
-      if (isUnderRoot(targetPath, ctx.codeDir) && !ctx.allowCodeWrite) {
-        return (
-          "ERROR: code root is read-only in this runtime. " +
-          "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
-        );
-      }
+      const policyError = codeWritePolicyError({ ctx, targetPath });
+      if (policyError) return policyError;
     }
 
     const tempDir = path.join(ctx.stateDir, "tmp", "file-patch");
@@ -728,12 +754,8 @@ export const fileEditLines = defineTool({
     const resolved = resolveAbsolutePath({ ctx, inputPath });
     if (!resolved.ok) return resolved.error;
     const fullPath = resolved.fullPath;
-    if (isUnderRoot(fullPath, ctx.codeDir) && !ctx.allowCodeWrite) {
-      return (
-        "ERROR: code root is read-only in this runtime. " +
-        "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
-      );
-    }
+    const policyError = codeWritePolicyError({ ctx, targetPath: fullPath });
+    if (policyError) return policyError;
     const text = await fs.readFile(fullPath, "utf8");
     const rawLines = text.split(/\r?\n/);
     const hadTrailingNewline = text.endsWith("\n");

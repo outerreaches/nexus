@@ -9,7 +9,7 @@ import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getNodeById } from "../storage/nodes.js";
 import { resolveWithinRoots } from "./path-utils.js";
-import { isMutatingGitOnCodeDir, truncateShellOutput } from "./system.js";
+import { isMutatingGitOnCodeDir, isPathUnderRoot, truncateShellOutput } from "./system.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -138,6 +138,15 @@ function resolveShellCwd(requestedCwd: string | undefined, ctx: ToolContext): st
     roots: allowedRoots(ctx),
     defaultRoot: ctx.workspaceDir,
   });
+}
+
+export function orchestratorCodeShellPolicyError(ctx: ToolContext, cwd: string): string | null {
+  if (ctx.request?.preset !== "orchestrator") return null;
+  if (!isPathUnderRoot(cwd, ctx.codeDir)) return null;
+  return (
+    "ERROR: orchestrator must not use shell_interactive inside the repository code root. " +
+    "Spawn a coder worker for code inspection, edits, or deploy workflow tests."
+  );
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -427,6 +436,8 @@ async function openLocalSession(params: {
     }
   })();
   if (resolvedCwd.startsWith("ERROR:")) return resolvedCwd;
+  const shellPolicyError = orchestratorCodeShellPolicyError(params.ctx, resolvedCwd);
+  if (shellPolicyError) return shellPolicyError;
 
   const logPath = shellLogPath(params.ctx.stateDir, params.sessionId);
   await fs.mkdir(shellMetaDir(params.ctx.stateDir), { recursive: true });
@@ -521,6 +532,8 @@ async function sendLocalInput(params: {
   if (liveCwd) {
     meta.cwd = liveCwd;
   }
+  const shellPolicyError = orchestratorCodeShellPolicyError(params.ctx, cwdForPolicy);
+  if (shellPolicyError) return shellPolicyError;
 
   if (params.enter && isMutatingGitOnCodeDir(params.input, params.ctx.codeDir, { cwd: cwdForPolicy })) {
     return "ERROR: Mutating git commands on the code repository are not allowed from agents. Use ha_deploy to queue a deploy.";
