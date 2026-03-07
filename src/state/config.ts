@@ -81,35 +81,6 @@ const NudgesSchema = z
   })
   .default({});
 
-const SkillsAccessSchema = z
-  .object({
-    blockedAgents: z
-      .array(z.string().min(1))
-      .default([])
-      .describe("Agent IDs that are denied all skill prompt/tool access."),
-    blockedPresets: z
-      .array(z.string().min(1))
-      .default([])
-      .describe("Preset names that are denied all skill prompt/tool access."),
-    promptAllowedPresets: z
-      .array(z.string().min(1))
-      .default(["orchestrator"])
-      .describe("Preset names allowed to receive learned skills in their prompt. Empty means all presets."),
-    manageAllowedPresets: z
-      .array(z.string().min(1))
-      .default(["orchestrator"])
-      .describe("Preset names allowed to run skill management tools (create/update)."),
-    readAllowedPresets: z
-      .array(z.string().min(1))
-      .default([])
-      .describe("Preset names allowed to run skill read tools (list/get). Empty means all presets."),
-    presetSelfAccess: z
-      .boolean()
-      .default(true)
-      .describe("When true, presets always see their own preset-scoped skills regardless of allowlists."),
-  })
-  .default({});
-
 const SkillsPromptSchema = z
   .object({
     enabled: z.boolean().default(true),
@@ -124,7 +95,6 @@ const SkillsSchema = z
   .object({
     enabled: z.boolean().default(true),
     prompt: SkillsPromptSchema,
-    access: SkillsAccessSchema,
   })
   .default({});
 
@@ -323,6 +293,181 @@ export type LlmToolRouting = z.infer<typeof LlmToolRoutingSchema>;
 export type LlmToolRouteTarget = z.infer<typeof LlmToolRouteTargetSchema>;
 export type SkillsConfig = z.infer<typeof SkillsSchema>;
 
+export function buildBootstrapConfigTemplate(): Record<string, unknown> {
+  return {
+    port: 18789,
+    secrets: {
+      env: {
+        FIREWORKS_API_KEY: "{{secret:sidecar-main/llm.fireworks.api#password}}",
+        BASETEN_API_KEY: "{{secret:sidecar-main/llm.baseten.k2.5.api#password}}",
+        OPENROUTER_API_KEY: "{{secret:sidecar-main/llm.openrouter.api#password}}",
+        QUIVER_SVG_API_KEY: "{{secret:sidecar-main/quiver.svg.api#password}}",
+        FIRECRAWL_API_KEY: "{{secret:sidecar-main/search.firecrawl.api#password}}",
+        BRAVE_API_KEY: "{{secret:sidecar-main/search.brave.api#password}}",
+        PERPLEXITY_API_KEY: "{{secret:sidecar-main/search.perplexity.api#password}}",
+        TELEGRAM_BOT_TOKEN: "{{secret:sidecar-main/telegram.bot.token#password}}",
+        GOOGLE_CLIENT_ID: "{{secret:sidecar-main/google.oauth#username}}",
+        GOOGLE_CLIENT_SECRET: "{{secret:sidecar-main/google.oauth#password}}",
+        ALPHAVANTAGE_API_KEY: "{{secret:sidecar-main/data.alphavantage.api#password}}",
+        MARKETSTACK_API_KEY: "{{secret:sidecar-main/data.marketstack.api#password}}",
+        TWELVEDATA_API_KEY: "{{secret:sidecar-main/data.twelvedata.api#password}}",
+        COINLAYER_API_KEY: "{{secret:sidecar-main/data.coinlayer.api#password}}",
+        CRYPTOCOMPARE_API_KEY: "{{secret:sidecar-main/data.cryptocompare.api#password}}",
+        OPEN_METALS_API_KEY: "{{secret:sidecar-main/data.openmetals.api#password}}",
+        AUTH_TOKEN: "{{secret:sidecar-main/twitter.auth.auth_token#password}}",
+        CT0: "{{secret:sidecar-main/twitter.auth.ct0#password}}",
+      },
+    },
+    runtime: {
+      profile: "primary",
+    },
+    llm: {
+      openaiCompat: {
+        baseUrl: "https://api.fireworks.ai/inference/v1",
+        apiKey: "${FIREWORKS_API_KEY}",
+        model: "accounts/fireworks/models/kimi-k2p5",
+        stream: true,
+        stripCacheControl: true,
+      },
+      providers: {
+        local: {
+          baseUrl: "${NEXUS_LOCAL_LLM_BASE_URL}",
+          apiKey: "${NEXUS_LOCAL_LLM_API_KEY}",
+          model: "${NEXUS_LOCAL_LLM_MODEL}",
+        },
+        baseten: {
+          baseUrl: "https://inference.baseten.co/v1",
+          apiKey: "${BASETEN_API_KEY}",
+          model: "moonshotai/Kimi-K2.5",
+        },
+        openrouter: {
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: "${OPENROUTER_API_KEY}",
+          model: "moonshotai/kimi-k2.5",
+        },
+      },
+      routing: {
+        default: {
+          primary: { provider: "default" },
+          fallback: { provider: "local" },
+        },
+        byPreset: {
+          "security-researcher": { primary: { provider: "openrouter", model: "openai/gpt-5.3-codex" }, fallback: { provider: "local" } },
+          "intake-manager": { primary: { provider: "openrouter", model: "minimax/minimax-m2.5" }, fallback: { provider: "local" } },
+          "process-manager": { primary: { provider: "openrouter", model: "minimax/minimax-m2.5" }, fallback: { provider: "local" } },
+          coder: { primary: { provider: "openrouter", model: "openai/gpt-5.3-codex" }, fallback: { provider: "local" } },
+          trader: { primary: { provider: "openrouter", model: "minimax/minimax-m2.5" }, fallback: { provider: "local" } },
+          analyst: { primary: { provider: "openrouter", model: "google/gemini-3.1-pro-preview" }, fallback: { provider: "local" } },
+          "graphic-designer": { primary: { provider: "openrouter", model: "minimax/minimax-m2.5" }, fallback: { provider: "local" } },
+        },
+        byAgent: {},
+        localProvider: "local",
+      },
+      toolRouting: {
+        default: {
+          image_generate: { provider: "openrouter", model: "google/gemini-3.1-flash-image-preview" },
+          image_edit: { provider: "openrouter", model: "google/gemini-3.1-flash-image-preview" },
+          video_analyze: { provider: "openrouter", model: "google/gemini-2.5-flash-lite" },
+          generate_svg: { provider: "quiver", model: "arrow-preview" },
+          vectorize: { provider: "quiver", model: "arrow-preview" },
+        },
+        byPreset: {
+          "graphic-designer": {
+            image_generate: { provider: "openrouter", model: "google/gemini-3-pro-image-preview" },
+            image_edit: { provider: "openrouter", model: "google/gemini-3-pro-image-preview" },
+            generate_svg: { provider: "quiver", model: "arrow-preview" },
+            vectorize: { provider: "quiver", model: "arrow-preview" },
+          },
+        },
+        byAgent: {},
+      },
+      transientRetries: 5,
+    },
+    channels: {
+      telegram: {
+        enabled: true,
+        token: "${TELEGRAM_BOT_TOKEN}",
+        mode: "polling",
+        allowFrom: [],
+        requireMentionInGroups: true,
+        agentId: "main",
+        streaming: {
+          enabled: true,
+          serializePerChat: true,
+          maxConcurrentPerChat: 1,
+          previewTransport: "message",
+          previewThrottleMs: 650,
+          fallbackToSendOutput: true,
+          emitFallbackNotice: true,
+        },
+        pairing: {
+          enabled: true,
+          codeTtlMs: 3600000,
+          maxPending: 3,
+        },
+      },
+    },
+    proactive: {
+      enabled: true,
+      agentId: "main",
+      intervalMs: 900000,
+      maxIntervalMs: 3600000,
+      jitterMs: 5000,
+      notifyTelegram: true,
+      pauseOnActiveTelegram: true,
+      activeTelegramQuietMs: 120000,
+    },
+    scheduler: {
+      enabled: true,
+      tickIntervalMs: 15000,
+      maxRunsPerTick: 5,
+      concurrency: 5,
+      leaseTtlMs: 600000,
+      maxConsecutiveFailures: 5,
+      notifyAgentOnFailure: true,
+      notifyCooldownMs: 300000,
+      contextMode: "delta",
+    },
+    nudges: {
+      enabled: true,
+      channels: ["cli", "telegram"],
+      memoryTurnInterval: 10,
+      skillIterationInterval: 20,
+    },
+    skills: {
+      enabled: true,
+      prompt: {
+        enabled: true,
+        maxInlineSkills: 5,
+        includeReferences: true,
+        maxReferencesPerSkill: 2,
+        maxReferenceChars: 1600,
+      },
+    },
+    maintenance: {
+      enabled: true,
+      archiveRetentionDays: 180,
+      jobRunRetentionDays: 60,
+      ttlCleanupEnabled: true,
+    },
+    permissions: {
+      allowShellExec: true,
+      allowCodeEdit: true,
+      allowCodeWrite: true,
+    },
+    limits: {
+      maxConcurrentAgents: 5,
+      maxToolCallsPerRun: 200,
+      maxIterationsPerRun: 100,
+      maxContextTokens: 128000,
+    },
+    federation: {
+      enabled: true,
+      localInstanceId: "local",
+    },
+  };
+}
+
 export async function loadConfig(configPath: string = getDefaultConfigPath()): Promise<NexusConfig> {
   const raw = await fs.readFile(configPath, "utf8");
   const parsed = JSON5.parse(raw) as unknown;
@@ -338,129 +483,9 @@ export async function ensureConfigExists(configPath: string): Promise<void> {
   }
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
-  const defaultConfig: NexusConfig = ConfigSchema.parse({});
   await fs.writeFile(
     configPath,
-    JSON.stringify(
-      {
-        ...defaultConfig,
-        channels: {
-          telegram: {
-            enabled: false,
-            token: "${TELEGRAM_BOT_TOKEN}",
-            mode: "polling",
-            webhookUrl: "${NEXUS_TELEGRAM_WEBHOOK_URL}",
-            webhookPublicUrl: "${NEXUS_TELEGRAM_WEBHOOK_PUBLIC_URL}",
-            webhookPath: "/telegram-webhook",
-            webhookSecretToken: "${NEXUS_TELEGRAM_WEBHOOK_SECRET}",
-            allowFrom: [],
-            requireMentionInGroups: true,
-            agentId: "main",
-            streaming: {
-              enabled: true,
-              serializePerChat: true,
-              maxConcurrentPerChat: 1,
-              previewTransport: "message",
-              previewThrottleMs: 650,
-              fallbackToSendOutput: true,
-              emitFallbackNotice: true
-            },
-            pairing: {
-              enabled: true,
-              codeTtlMs: 3600000,
-              maxPending: 3
-            }
-          },
-        },
-        llm: {
-          openaiCompat: {
-            baseUrl: "https://openrouter.ai/api/v1",
-            apiKey: "${OPENROUTER_API_KEY}",
-            model: "moonshotai/kimi-k2.5",
-          },
-          providers: {
-            local: {
-              baseUrl: "${NEXUS_LOCAL_LLM_BASE_URL}",
-              apiKey: "${NEXUS_LOCAL_LLM_API_KEY}",
-              model: "${NEXUS_LOCAL_LLM_MODEL}",
-            },
-          },
-          routing: {
-            default: {
-              primary: {
-                provider: "default",
-              },
-            },
-            byPreset: {},
-            byAgent: {},
-            localProvider: "local",
-          },
-          toolRouting: {
-            default: {},
-            byPreset: {},
-            byAgent: {},
-          },
-        },
-        permissions: {
-          allowShellExec: false,
-          allowCodeEdit: true,
-          allowCodeWrite: false,
-        },
-        proactive: {
-          enabled: false,
-          agentId: "main",
-          intervalMs: 900000,
-          maxIntervalMs: 3600000,
-          jitterMs: 5000,
-          notifyTelegram: true,
-          pauseOnActiveTelegram: true,
-          activeTelegramQuietMs: 45000,
-        },
-        scheduler: {
-          enabled: true,
-          tickIntervalMs: 15000,
-          maxRunsPerTick: 5,
-          concurrency: 5,
-          leaseTtlMs: 600000,
-          maxConsecutiveFailures: 5,
-          notifyAgentOnFailure: true,
-          notifyCooldownMs: 300000,
-          contextMode: "delta",
-        },
-        nudges: {
-          enabled: true,
-          channels: ["cli", "telegram"],
-          memoryTurnInterval: 10,
-          skillIterationInterval: 20,
-        },
-        skills: {
-          enabled: true,
-          prompt: {
-            enabled: true,
-            maxInlineSkills: 5,
-            includeReferences: true,
-            maxReferencesPerSkill: 2,
-            maxReferenceChars: 1600,
-          },
-          access: {
-            blockedAgents: [],
-            blockedPresets: [],
-            promptAllowedPresets: ["orchestrator"],
-            manageAllowedPresets: ["orchestrator"],
-            readAllowedPresets: [],
-            presetSelfAccess: true,
-          },
-        },
-        maintenance: {
-          enabled: true,
-          archiveRetentionDays: 180,
-          jobRunRetentionDays: 60,
-          ttlCleanupEnabled: true,
-        },
-      },
-      null,
-      2,
-    ) + "\n",
+    JSON.stringify(buildBootstrapConfigTemplate(), null, 2) + "\n",
     "utf8",
   );
 }

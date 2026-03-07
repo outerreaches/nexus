@@ -15,14 +15,6 @@ function makeSkillsConfig(overrides?: Partial<SkillsConfig>): SkillsConfig {
       maxReferencesPerSkill: 2,
       maxReferenceChars: 1600,
     },
-    access: {
-      blockedAgents: [],
-      blockedPresets: [],
-      promptAllowedPresets: ["orchestrator"],
-      manageAllowedPresets: ["orchestrator"],
-      readAllowedPresets: [],
-      presetSelfAccess: true,
-    },
   };
   return {
     ...base,
@@ -30,10 +22,6 @@ function makeSkillsConfig(overrides?: Partial<SkillsConfig>): SkillsConfig {
     prompt: {
       ...base.prompt,
       ...(overrides?.prompt ?? {}),
-    },
-    access: {
-      ...base.access,
-      ...(overrides?.access ?? {}),
     },
   };
 }
@@ -53,48 +41,19 @@ test("skill policy defaults to allow when config missing", () => {
   assert.equal(canUseSkillManageTools(undefined, { agentId: "main", preset: "coder" }), true);
 });
 
-test("prompt skill injection defaults to orchestrator only", () => {
+test("prompt skill injection follows preset metadata", () => {
   const config = makeSkillsConfig();
   assert.equal(canInjectSkillsPrompt(config, { agentId: "main", preset: "orchestrator" }), true);
   assert.equal(canInjectSkillsPrompt(config, { agentId: "main", preset: "coder" }), false);
 });
 
-test("blocked agents and presets deny prompt/read/manage access", () => {
-  const config = makeSkillsConfig({
-    access: {
-      blockedAgents: ["main"],
-      blockedPresets: ["coder"],
-      promptAllowedPresets: ["orchestrator"],
-      manageAllowedPresets: ["orchestrator"],
-      readAllowedPresets: [],
-      presetSelfAccess: true,
-    },
-  });
-
-  assert.equal(canInjectSkillsPrompt(config, { agentId: "main", preset: "orchestrator" }), false);
-  assert.equal(canUseSkillReadTools(config, { agentId: "other", preset: "coder" }), false);
+test("skills enabled flag still gates read/manage tools", () => {
+  const config = makeSkillsConfig({ enabled: false });
+  assert.equal(canUseSkillReadTools(config, { agentId: "main", preset: "coder" }), false);
   assert.equal(canUseSkillManageTools(config, { agentId: "main", preset: "orchestrator" }), false);
 });
 
-test("manage allowlist applies independently from read allowlist", () => {
-  const config = makeSkillsConfig({
-    access: {
-      blockedAgents: [],
-      blockedPresets: [],
-      promptAllowedPresets: ["orchestrator", "coder"],
-      manageAllowedPresets: ["orchestrator"],
-      readAllowedPresets: ["orchestrator", "coder"],
-      presetSelfAccess: true,
-    },
-  });
-
-  assert.equal(canInjectSkillsPrompt(config, { agentId: "main", preset: "coder" }), true);
-  assert.equal(canUseSkillReadTools(config, { agentId: "main", preset: "coder" }), true);
-  assert.equal(canUseSkillManageTools(config, { agentId: "main", preset: "coder" }), false);
-  assert.equal(canUseSkillManageTools(config, { agentId: "main", preset: "orchestrator" }), true);
-});
-
-test("tool filtering removes disallowed skill tools but keeps non-skill tools", () => {
+test("tool filtering only strips skill tools when skills are disabled", () => {
   const tools = [
     fakeTool("file_read"),
     fakeTool("skill_list"),
@@ -102,20 +61,9 @@ test("tool filtering removes disallowed skill tools but keeps non-skill tools", 
     fakeTool("skill_create"),
     fakeTool("skill_update"),
   ];
-  const config = makeSkillsConfig({
-    access: {
-      blockedAgents: [],
-      blockedPresets: [],
-      promptAllowedPresets: ["orchestrator"],
-      manageAllowedPresets: ["orchestrator"],
-      readAllowedPresets: ["orchestrator"],
-      presetSelfAccess: true,
-    },
-  });
-
   const filtered = filterToolsBySkillAccess({
     tools,
-    config,
+    config: makeSkillsConfig({ enabled: false }),
     ctx: { agentId: "main", preset: "coder" },
   });
   const names = new Set(filtered.map((tool) => tool.name));
@@ -126,25 +74,33 @@ test("tool filtering removes disallowed skill tools but keeps non-skill tools", 
   assert.equal(names.has("skill_update"), false);
 });
 
-test("canInjectPresetScopedSkills allows non-orchestrator presets with presetSelfAccess", () => {
+test("tool filtering keeps skill tools when runtime skills are enabled", () => {
+  const tools = [
+    fakeTool("file_read"),
+    fakeTool("skill_list"),
+    fakeTool("skill_get"),
+    fakeTool("skill_create"),
+    fakeTool("skill_update"),
+  ];
+  const filtered = filterToolsBySkillAccess({
+    tools,
+    config: makeSkillsConfig(),
+    ctx: { agentId: "main", preset: "coder" },
+  });
+  const names = new Set(filtered.map((tool) => tool.name));
+  assert.equal(names.has("file_read"), true);
+  assert.equal(names.has("skill_list"), true);
+  assert.equal(names.has("skill_get"), true);
+  assert.equal(names.has("skill_create"), true);
+  assert.equal(names.has("skill_update"), true);
+});
+
+test("canInjectPresetScopedSkills follows preset metadata", () => {
   const config = makeSkillsConfig();
-  // coder is not in promptAllowedPresets, but presetSelfAccess=true
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "coder" }), true);
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "security-researcher" }), true);
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "orchestrator" }), true);
-});
-
-test("canInjectPresetScopedSkills denied when presetSelfAccess is false", () => {
-  const config = makeSkillsConfig({ access: { ...makeSkillsConfig().access, presetSelfAccess: false } });
-  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "coder" }), false);
-});
-
-test("canInjectPresetScopedSkills denied for blocked presets even with presetSelfAccess", () => {
-  const config = makeSkillsConfig({
-    access: { ...makeSkillsConfig().access, blockedPresets: ["coder"], presetSelfAccess: true },
-  });
-  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "coder" }), false);
-  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "researcher" }), true);
+  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "process-manager" }), false);
 });
 
 test("canInjectPresetScopedSkills requires a preset name", () => {
@@ -155,10 +111,8 @@ test("canInjectPresetScopedSkills requires a preset name", () => {
 
 test("resolveSkillScopes combines global and preset checks", () => {
   const config = makeSkillsConfig();
-  // orchestrator: global=true (in promptAllowedPresets), preset=true (presetSelfAccess)
   assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "orchestrator" }), { global: true, preset: true });
-  // coder: global=false (not in promptAllowedPresets), preset=true (presetSelfAccess)
   assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "coder" }), { global: false, preset: true });
-  // no preset: global=false (empty preset fails allowlist), preset=false (no preset name)
-  assert.deepEqual(resolveSkillScopes(config, { agentId: "main" }), { global: false, preset: false });
+  assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "process-manager" }), { global: false, preset: false });
+  assert.deepEqual(resolveSkillScopes(config, { agentId: "main" }), { global: true, preset: false });
 });

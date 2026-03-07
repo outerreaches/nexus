@@ -47,6 +47,13 @@ export interface AgentPreset {
   systemPrompt?: string;
   /** Optional prompt files to append to this preset's system prompt. */
   promptFiles?: string[];
+  /** Skill prompt loading policy for this preset. Tool access remains controlled by `tools`. */
+  skillAccess?: {
+    /** Include shared/global skills from stateDir/skills in this preset's prompt. */
+    promptGlobal?: boolean;
+    /** Include preset-scoped skills from stateDir/presets/<name>/skills in this preset's prompt. */
+    promptPreset?: boolean;
+  };
   /** Tool name whitelist — only these tools are available to this preset. */
   tools: string[];
   /** Optional per-run hard caps for specific tool names (enforced by AgentRunner). */

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
-import { ConfigSchema } from "./config.js";
+import JSON5 from "json5";
+
+import { ConfigSchema, buildBootstrapConfigTemplate } from "./config.js";
 
 test("config federation defaults are safe/off", () => {
   const parsed = ConfigSchema.parse({});
@@ -52,4 +56,13 @@ test("config rejects signed-only transport unless insecure override is explicit"
       },
     }),
   );
+});
+
+test("bootstrap config template matches nexus.json.example and parses cleanly", async () => {
+  const examplePath = path.resolve(process.cwd(), "nexus.json.example");
+  const example = JSON5.parse(await fs.readFile(examplePath, "utf8")) as unknown;
+  const template = buildBootstrapConfigTemplate();
+
+  assert.deepEqual(template, example);
+  assert.doesNotThrow(() => ConfigSchema.parse(template));
 });

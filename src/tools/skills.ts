@@ -5,7 +5,6 @@ import { z } from "zod";
 
 import { getPreset } from "../core/presets.js";
 import { defineTool, type ToolContext } from "../core/tools.js";
-import { canUseSkillManageTools, canUseSkillReadTools } from "../state/skill-policy.js";
 import { loadSkills, normalizeSkillReference, resolveSkillReferencePath } from "../state/skills.js";
 
 const MAX_SKILL_REFERENCES = 20;
@@ -61,13 +60,6 @@ function buildSkillMd(params: {
     "---",
   ];
   return [...frontmatterLines, "", params.instructions, ""].join("\n");
-}
-
-function skillAccessContext(ctx: ToolContext): { agentId?: string; preset?: string } {
-  return {
-    agentId: ctx.request?.agentId,
-    preset: ctx.request?.preset,
-  };
 }
 
 function resolvePresetSkillTarget(ctx: ToolContext, targetPreset?: string): { presetName?: string; error?: string } {
@@ -129,16 +121,6 @@ async function loadSkillsForScope(ctx: ToolContext, scope: SkillScope, targetPre
   return loadSkills(ctx.stateDir, undefined, resolved.presetName, { excludeGlobal: true });
 }
 
-function requireSkillReadAccess(ctx: ToolContext): string | null {
-  if (canUseSkillReadTools(ctx.skillsConfig, skillAccessContext(ctx))) return null;
-  return "ERROR: skill read tools are disabled for this agent/preset.";
-}
-
-function requireSkillManageAccess(ctx: ToolContext): string | null {
-  if (canUseSkillManageTools(ctx.skillsConfig, skillAccessContext(ctx))) return null;
-  return "ERROR: skill management tools are disabled for this agent/preset.";
-}
-
 export const skillCreate = defineTool({
   name: "skill_create",
   description:
@@ -158,8 +140,7 @@ export const skillCreate = defineTool({
     targetPreset: z.string().min(1).max(80).optional().describe("When scope='preset', write the skill for this preset instead of the caller preset."),
   }),
   execute: async (args, ctx) => {
-    const blocked = requireSkillManageAccess(ctx);
-    if (blocked) return blocked;
+    if (ctx.skillsConfig?.enabled === false) return "ERROR: skills are disabled in runtime config.";
 
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
@@ -216,8 +197,7 @@ export const skillList = defineTool({
   description: "List learned skills with descriptions, category paths, triggers, and reference metadata.",
   parameters: z.object({}),
   execute: async (_args, ctx) => {
-    const blocked = requireSkillReadAccess(ctx);
-    if (blocked) return blocked;
+    if (ctx.skillsConfig?.enabled === false) return "ERROR: skills are disabled in runtime config.";
 
     const agentId = ctx.request?.agentId;
     const presetName = ctx.request?.preset;
@@ -258,8 +238,7 @@ export const skillGet = defineTool({
       .describe("Per-reference content cap when includeReferenceContents=true."),
   }),
   execute: async (args, ctx) => {
-    const blocked = requireSkillReadAccess(ctx);
-    if (blocked) return blocked;
+    if (ctx.skillsConfig?.enabled === false) return "ERROR: skills are disabled in runtime config.";
 
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";
@@ -335,8 +314,7 @@ export const skillUpdate = defineTool({
     targetPreset: z.string().min(1).max(80).optional().describe("When scope='preset', update the skill owned by this preset."),
   }),
   execute: async (args, ctx) => {
-    const blocked = requireSkillManageAccess(ctx);
-    if (blocked) return blocked;
+    if (ctx.skillsConfig?.enabled === false) return "ERROR: skills are disabled in runtime config.";
 
     const dirName = sanitizeName(args.name);
     if (!dirName) return "ERROR: invalid skill name";

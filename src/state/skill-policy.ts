@@ -1,3 +1,4 @@
+import { getPreset } from "../core/presets.js";
 import type { Tool } from "../core/tools.js";
 import type { SkillsConfig } from "./config.js";
 
@@ -6,68 +7,38 @@ export type SkillAccessContext = {
   preset?: string | null;
 };
 
-const SKILL_READ_TOOLS = new Set(["skill_list", "skill_get"]);
-const SKILL_MANAGE_TOOLS = new Set(["skill_create", "skill_update"]);
-const SKILL_TOOL_NAMES = new Set([...SKILL_READ_TOOLS, ...SKILL_MANAGE_TOOLS]);
+const SKILL_TOOL_NAMES = new Set(["skill_list", "skill_get", "skill_create", "skill_update"]);
 
 function normalize(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-function hasMatch(values: string[], candidate: string): boolean {
-  if (!candidate) return false;
-  return values.some((value) => normalize(value) === candidate);
-}
-
-function isSkillAccessBlocked(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
-  if (!config) return false;
-  if (!config.enabled) return true;
-  const agentId = normalize(ctx.agentId);
-  const preset = normalize(ctx.preset);
-  if (hasMatch(config.access.blockedAgents, agentId)) return true;
-  if (hasMatch(config.access.blockedPresets, preset)) return true;
-  return false;
-}
-
-function isPresetAllowed(allowList: string[], preset: string): boolean {
-  if (allowList.length === 0) return true;
-  if (!preset) return false;
-  return hasMatch(allowList, preset);
+function resolvePreset(ctx: SkillAccessContext) {
+  const presetName = normalize(ctx.preset);
+  if (!presetName) return undefined;
+  return getPreset(presetName);
 }
 
 export function canInjectSkillsPrompt(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
-  if (!config) return true;
-  if (!config.prompt.enabled) return false;
-  if (isSkillAccessBlocked(config, ctx)) return false;
-  const preset = normalize(ctx.preset);
-  return isPresetAllowed(config.access.promptAllowedPresets, preset);
+  const preset = resolvePreset(ctx);
+  if (config?.enabled === false || config?.prompt.enabled === false) return false;
+  if (!preset) return true;
+  return preset.skillAccess?.promptGlobal === true;
 }
 
-/**
- * Whether a preset can see its own preset-scoped skills in the prompt,
- * even if not listed in promptAllowedPresets. Requires presetSelfAccess=true
- * and the preset must not be blocked.
- */
 export function canInjectPresetScopedSkills(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
-  if (!config) return true;
-  if (!config.prompt.enabled) return false;
-  if (!config.access.presetSelfAccess) return false;
-  if (isSkillAccessBlocked(config, ctx)) return false;
-  return Boolean(normalize(ctx.preset));
+  const preset = resolvePreset(ctx);
+  if (config?.enabled === false || config?.prompt.enabled === false) return false;
+  if (!preset) return false;
+  return preset.skillAccess?.promptPreset === true;
 }
 
 export function canUseSkillReadTools(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
-  if (!config) return true;
-  if (isSkillAccessBlocked(config, ctx)) return false;
-  const preset = normalize(ctx.preset);
-  return isPresetAllowed(config.access.readAllowedPresets, preset);
+  return config?.enabled !== false;
 }
 
 export function canUseSkillManageTools(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
-  if (!config) return true;
-  if (isSkillAccessBlocked(config, ctx)) return false;
-  const preset = normalize(ctx.preset);
-  return isPresetAllowed(config.access.manageAllowedPresets, preset);
+  return config?.enabled !== false;
 }
 
 export function isSkillToolAllowed(params: {
@@ -77,13 +48,7 @@ export function isSkillToolAllowed(params: {
 }): boolean {
   const toolName = normalize(params.toolName);
   if (!SKILL_TOOL_NAMES.has(toolName)) return true;
-  if (SKILL_READ_TOOLS.has(toolName)) {
-    return canUseSkillReadTools(params.config, params.ctx);
-  }
-  if (SKILL_MANAGE_TOOLS.has(toolName)) {
-    return canUseSkillManageTools(params.config, params.ctx);
-  }
-  return false;
+  return params.config?.enabled !== false;
 }
 
 export type SkillScopes = { global: boolean; preset: boolean };

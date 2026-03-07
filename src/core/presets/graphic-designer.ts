@@ -3,6 +3,9 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "graphic-designer",
   description: "Visual design specialist for image concepts, vector/SVG assets, art direction, and creative delivery",
+  skillAccess: {
+    promptPreset: true,
+  },
   imageModel: "google/gemini-3-pro-image-preview",
   imageProvider: "openrouter",
   systemPrompt: [

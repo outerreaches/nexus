@@ -22,7 +22,7 @@ export type ToolContext = {
   modelRouter?: ModelRouter;
   /** Optional tool-specific routing config (separate from agent reasoning routing). */
   llmToolRouting?: LlmToolRouting;
-  /** Runtime skill-system controls (prompt injection and tool access). */
+  /** Runtime skill-system controls (global enable + prompt formatting options). */
   skillsConfig?: SkillsConfig;
   /** Optional circuit breaker for global LLM provider health tracking. */
   circuitBreaker?: import("../llm/circuit-breaker.js").LlmCircuitBreaker;

@@ -3,6 +3,9 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "researcher",
   description: "Web research, document analysis, knowledge synthesis",
+  skillAccess: {
+    promptPreset: true,
+  },
   videoModel: "google/gemini-2.5-flash-lite",
   videoProvider: "openrouter",
   systemPrompt: [

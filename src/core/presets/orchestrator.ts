@@ -3,6 +3,10 @@ import type { AgentPreset } from "../presets.js";
 export const preset: AgentPreset = {
   name: "orchestrator",
   description: "Plans tasks, spawns and coordinates worker agents, manages memory and jobs",
+  skillAccess: {
+    promptGlobal: true,
+    promptPreset: true,
+  },
   videoModel: "google/gemini-2.5-flash-lite",
   videoProvider: "openrouter",
   systemPrompt: [
