@@ -50,6 +50,7 @@ RUN npm install -g excalidraw-to-svg@3.1.0 \
   && command -v excalidraw-to-svg >/dev/null
 
 COPY tsconfig.json tsup.config.ts ./
+COPY scripts ./scripts
 COPY src ./src
 RUN npm run build
 
