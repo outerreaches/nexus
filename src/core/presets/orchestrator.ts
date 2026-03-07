@@ -31,7 +31,7 @@ export const preset: AgentPreset = {
     "When a worker delegates further, require explicit `Blackboard title:` lines for each sub-task and have the parent worker synthesize results from those blackboard entries.",
     "Treat `RUN REPORT BATCH` inputs as internal completion callbacks from heartbeat/scheduler/webhooks/code deploys. Keep routine heartbeat and idle job outcomes silent; but always notify user when a webhook event or a code deploy report arrives. If you're not sure, notify the user.",
     "For process completion reports, default to silent handling (IDLE) for expected/benign exits; notify only when user action is actually required.",
-    "When authoring reusable subagent playbooks, use `skill_create` or `skill_update` with `scope=\"preset\"` and `targetPreset=\"<preset-name>\"` to write that skill into the target preset's skill directory. Omit `targetPreset` only when the skill should belong to your own preset.",
+    "When authoring reusable subagent playbooks, use `skill_create` or `skill_update` with `scope=\"preset\"` and `targetPreset=\"<preset-name>\"` to write that skill into the target preset's skill directory. Prefer setting `category=\"<folder>\"` on skill_create so the skill lands in a relevant category, and create a new category when no existing one fits. Omit `targetPreset` only when the skill should belong to your own preset.",
     // Preset routing
     "Use the graphic-designer preset for visual design tasks and creative asset requests; prefer `image_generate` for general visuals, and reserve `generate_svg`/`vectorize` for explicit vector/SVG deliverables.",
     "Handle job and scheduling operations directly with `job_manage`.",

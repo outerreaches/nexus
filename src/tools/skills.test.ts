@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { ToolContext } from "../core/tools.js";
-import { skillCreate, skillUpdate } from "./skills.js";
+import { skillCreate, skillList, skillUpdate } from "./skills.js";
 
 async function withSkillContext(
   fn: (params: {
@@ -53,6 +53,7 @@ test("skill_create can target another preset", async () => {
         description: "Review chart output",
         triggers: ["chart"],
         instructions: "Inspect the chart before publishing.",
+        category: "design-system",
         scope: "preset",
         targetPreset: "graphic-designer",
         references: [],
@@ -60,11 +61,34 @@ test("skill_create can target another preset", async () => {
       ctx,
     );
 
-    assert.match(result, /scope=preset:graphic-designer/);
-    const skillPath = path.join(stateDir, "presets", "graphic-designer", "skills", "chart-qa", "SKILL.md");
+    assert.match(result, /scope=preset:graphic-designer, category=design-system/);
+    const skillPath = path.join(stateDir, "presets", "graphic-designer", "skills", "design-system", "chart-qa", "SKILL.md");
     const created = await fs.readFile(skillPath, "utf8");
     assert.match(created, /name: chart-qa/);
     assert.match(created, /Review chart output/);
+  });
+});
+
+test("skill_create allows creating a new category and skill_list reports it", async () => {
+  await withSkillContext(async ({ ctx }) => {
+    const result = await skillCreate.execute(
+      {
+        name: "api-ops",
+        description: "API operations workflow",
+        triggers: ["api"],
+        instructions: "Use this for API lifecycle work.",
+        category: "operations/api",
+        references: [],
+      },
+      ctx,
+    );
+
+    assert.match(result, /category=operations\/api/);
+
+    const listed = await skillList.execute({}, ctx);
+    const parsed = JSON.parse(listed) as Array<Record<string, unknown>>;
+    assert.equal(parsed[0]?.category_path, "operations/api");
+    assert.equal(parsed[0]?.category_label, "operations/api");
   });
 });
 

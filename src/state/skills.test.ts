@@ -33,6 +33,7 @@ test("loadSkills parses references and resolves safe reference paths", async () 
     const skill = skills[0]!;
     assert.equal(skill.name, "codex-cli");
     assert.deepEqual(skill.references, ["references/usage.md", "references/examples.md"]);
+    assert.equal(skill.categoryPath, null);
 
     const resolved = resolveSkillReferencePath(skill, "references/usage.md");
     assert.equal(resolved, path.join(skillDir, "references", "usage.md"));
@@ -50,6 +51,7 @@ test("formatSkillsPromptSection includes reference hints and fallback guidance",
       triggers: ["alpha"],
       instructions: "do A",
       references: ["references/a.md"],
+      categoryPath: "operations",
       skillDir: "/tmp/skills/a",
       skillFile: "/tmp/skills/a/SKILL.md",
     },
@@ -59,6 +61,7 @@ test("formatSkillsPromptSection includes reference hints and fallback guidance",
       triggers: [],
       instructions: "do B",
       references: [],
+      categoryPath: null,
       skillDir: "/tmp/skills/b",
       skillFile: "/tmp/skills/b/SKILL.md",
     },
@@ -66,9 +69,11 @@ test("formatSkillsPromptSection includes reference hints and fallback guidance",
 
   const inline = formatSkillsPromptSection(skills, { maxInlineSkills: 5, includeReferences: true, maxReferencesPerSkill: 1 });
   assert.match(inline ?? "", /References: references\/a\.md/);
+  assert.match(inline ?? "", /Category: operations/);
 
   const summarized = formatSkillsPromptSection(skills, { maxInlineSkills: 1, includeReferences: true, maxReferencesPerSkill: 1 });
   assert.match(summarized ?? "", /Use `skill_list` to browse skills and `skill_get` for full instructions\/references\./);
+  assert.match(summarized ?? "", /\[category: operations\]/);
   assert.match(summarized ?? "", /\[refs: 1\]/);
 });
 
@@ -95,6 +100,7 @@ test("loadSkills discovers nested categorized skill directories", async () => {
     const skills = await loadSkills(root);
     assert.equal(skills.length, 1);
     assert.equal(skills[0]?.name, "node-ops");
+    assert.equal(skills[0]?.categoryPath, "operations");
     assert.equal(skills[0]?.skillDir, nestedSkillDir);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

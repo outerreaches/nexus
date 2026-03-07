@@ -40,6 +40,11 @@ function normalizeReferences(raw: string[] | undefined): { references: string[];
   return { references, invalid };
 }
 
+function normalizeCategory(raw: string | undefined): string | null {
+  if (!raw) return null;
+  return normalizeSkillReference(raw);
+}
+
 function buildSkillMd(params: {
   name: string;
   description: string;
@@ -137,7 +142,7 @@ function requireSkillManageAccess(ctx: ToolContext): string | null {
 export const skillCreate = defineTool({
   name: "skill_create",
   description:
-    "Create a reusable skill (playbook) that persists across sessions. Skills are loaded into the system prompt and can be triggered by keywords. Use this to teach yourself new capabilities.",
+    "Create a reusable skill (playbook) that persists across sessions. Skills are loaded into the system prompt and can be triggered by keywords. Prefer placing new skills in a relevant category directory instead of the root; create a new category when no existing one fits.",
   parameters: z.object({
     name: z.string().min(1).max(60).describe("Skill name (lowercase, dashes allowed)"),
     description: z.string().min(1).max(200).describe("Short description of what the skill does"),
@@ -148,6 +153,7 @@ export const skillCreate = defineTool({
       .default([])
       .describe("Relative file paths under the skill directory (e.g. references/runbook.md)"),
     instructions: z.string().min(1).max(4000).describe("Detailed instructions for executing this skill"),
+    category: z.string().min(1).max(120).optional().describe("Optional category path under the skills root, such as 'operations', 'data', or 'creative/svg'. New category directories will be created if needed."),
     scope: z.enum(["global", "preset"]).optional().describe("Skill scope: 'global' for shared skills, 'preset' for preset-specific. Defaults based on caller preset."),
     targetPreset: z.string().min(1).max(80).optional().describe("When scope='preset', write the skill for this preset instead of the caller preset."),
   }),
@@ -161,12 +167,22 @@ export const skillCreate = defineTool({
     if (refs.invalid.length > 0) {
       return `ERROR: invalid reference path(s): ${refs.invalid.join(", ")}. Use relative paths under the skill directory.`;
     }
+    const category = normalizeCategory(args.category);
+    if (args.category && !category) {
+      return `ERROR: invalid category path "${args.category}". Use a relative path like operations, data, or creative/svg.`;
+    }
 
     const scope: SkillScope = args.scope ?? (args.targetPreset ? "preset" : defaultScope(ctx));
     const target = resolveSkillScopeTarget(ctx, scope, args.targetPreset);
     if (target.error) return target.error;
     const skillsRoot = target.skillsRoot!;
-    const skillDir = path.join(skillsRoot, dirName);
+    const scopeSkills = await loadSkillsForScope(ctx, scope, args.targetPreset);
+    if (typeof scopeSkills === "string") return scopeSkills;
+    const existing = scopeSkills.find((entry) => sanitizeName(entry.name) === dirName);
+    if (existing) {
+      return `ERROR: skill "${dirName}" already exists in category=${existing.categoryPath ?? "root"}. Use skill_update to modify it.`;
+    }
+    const skillDir = category ? path.join(skillsRoot, category, dirName) : path.join(skillsRoot, dirName);
 
     try {
       await fs.access(path.join(skillDir, "SKILL.md"));
@@ -188,7 +204,7 @@ export const skillCreate = defineTool({
         }),
         "utf8",
       );
-      return `OK: created skill "${dirName}" (scope=${target.scopeLabel})`;
+      return `OK: created skill "${dirName}" (scope=${target.scopeLabel}, category=${category ?? "root"})`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -197,7 +213,7 @@ export const skillCreate = defineTool({
 
 export const skillList = defineTool({
   name: "skill_list",
-  description: "List learned skills with descriptions, triggers, and reference metadata.",
+  description: "List learned skills with descriptions, category paths, triggers, and reference metadata.",
   parameters: z.object({}),
   execute: async (_args, ctx) => {
     const blocked = requireSkillReadAccess(ctx);
@@ -212,6 +228,8 @@ export const skillList = defineTool({
     const entries = skills.map((s) => ({
       name: s.name,
       description: s.description,
+      category_path: s.categoryPath,
+      category_label: s.categoryPath ?? "root",
       triggers: s.triggers,
       references: s.references,
       reference_count: s.references.length,
@@ -263,6 +281,8 @@ export const skillGet = defineTool({
     const payload: Record<string, unknown> = {
       name: skill.name,
       description: skill.description,
+      category_path: skill.categoryPath,
+      category_label: skill.categoryPath ?? "root",
       triggers: skill.triggers,
       reference_count: skill.references.length,
     };

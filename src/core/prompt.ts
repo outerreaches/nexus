@@ -118,7 +118,7 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
       "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup.",
       "- Credential vault management is operator-only via sidecar workflows (`infra/scripts/ha-secretctl.sh` / `infra/scripts/setup/ha-secrets-onboard.sh`). Never ask users for raw secrets in chat; use secret refs and runbook handoff (`infra/internal-doc`).",
       "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
-      "- Use `memory_store`/`memory_recall`/`memory_search` to persist learnings; use `skill_create` for reusable playbooks.",
+      "- Use `memory_store`/`memory_recall`/`memory_search` to persist learnings; use `skill_create` for reusable playbooks, and prefer a relevant skill category instead of the root when saving them.",
       "- Tool availability is determined by the runtime function-calling schema for this run. Do not claim a tool is unavailable from memory; if uncertain, attempt the tool call and rely on explicit runtime errors.",
       "- Tool errors include `[ERROR_CLASS=... retry=...]` tags. Do not retry `validation_error`/`not_found`/`capability_mismatch` without fixing inputs. Retry `transient_provider_error` once with reduced scope; back off for `rate_limited`.",
       "- For exploratory shell probes, avoid shell control operators by default. Run a single command, then treat expected no-match/not-found outcomes as signal in your analysis.",

@@ -81,6 +81,7 @@ function buildSkillNudgeSystemMessage(params: { iterationInterval: number }): st
     "Skill capture nudge (ephemeral):",
     `- Multiple iterations elapsed without a new skill action (interval=${params.iterationInterval}).`,
     "- If you are repeating a stable workflow, capture it using skill_create or update it with skill_update.",
+    "- Prefer saving skills in a relevant category directory instead of the skills root; use the `category` field on skill_create, and create a new category when none fits.",
     "- Keep skills concise and reusable; do not store one-off task details.",
   ].join("\n");
 }

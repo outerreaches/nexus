@@ -8,6 +8,7 @@ export type SkillEntry = {
   triggers: string[];
   instructions: string;
   references: string[];
+  categoryPath: string | null;
   skillDir: string;
   skillFile: string;
 };
@@ -86,9 +87,20 @@ function parseSkillMd(raw: string, paths: { skillDir: string; skillFile: string 
     triggers,
     instructions: body,
     references,
+    categoryPath: null,
     skillDir: paths.skillDir,
     skillFile: paths.skillFile,
   };
+}
+
+function resolveSkillCategoryPath(skillDir: string, skillsRoot: string): string | null {
+  const relative = path.relative(skillsRoot, skillDir);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return null;
+  }
+  const parts = relative.split(path.sep).filter(Boolean);
+  if (parts.length <= 1) return null;
+  return parts.slice(0, -1).join("/");
 }
 
 async function discoverSkillDirs(rootDir: string, maxDepth: number = 6): Promise<string[]> {
@@ -152,6 +164,7 @@ export async function loadSkills(stateDir: string, agentId?: string, presetName?
         const raw = await fs.readFile(skillPath, "utf8");
         const skill = parseSkillMd(raw, { skillDir, skillFile: skillPath });
         if (skill && !seen.has(skill.name)) {
+          skill.categoryPath = resolveSkillCategoryPath(skillDir, skillsRoot);
           seen.add(skill.name);
           skills.push(skill);
         }
@@ -181,6 +194,7 @@ export function formatSkillsPromptSection(skills: SkillEntry[], opts: SkillPromp
       lines.push("");
       lines.push(`### ${s.name}`);
       if (s.description) lines.push(s.description);
+      lines.push(`Category: ${s.categoryPath ?? "root"}`);
       if (s.triggers.length > 0) lines.push(`Triggers: ${s.triggers.join(", ")}`);
       if (includeReferences && s.references.length > 0) {
         const refs = s.references.slice(0, maxReferencesPerSkill);
@@ -201,7 +215,8 @@ export function formatSkillsPromptSection(skills: SkillEntry[], opts: SkillPromp
     for (const s of skills) {
       const triggerHint = s.triggers.length > 0 ? ` (triggers: ${s.triggers.join(", ")})` : "";
       const referenceHint = includeReferences && s.references.length > 0 ? ` [refs: ${s.references.length}]` : "";
-      lines.push(`- **${s.name}**: ${s.description}${triggerHint}${referenceHint}`);
+      const categoryHint = ` [category: ${s.categoryPath ?? "root"}]`;
+      lines.push(`- **${s.name}**: ${s.description}${categoryHint}${triggerHint}${referenceHint}`);
     }
   }
 
