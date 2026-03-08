@@ -1,3 +1,4 @@
+// CoinGecko-based crypto pricing source: fetches and normalizes spot prices for configured assets.
 import { z } from "zod";
 
 import type { DataSource } from "../types.js";
