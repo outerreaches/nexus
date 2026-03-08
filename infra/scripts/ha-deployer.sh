@@ -35,6 +35,7 @@ FINALIZE_PENDING="${STATE_DIR}/finalize-pending"
 ACK_DIR="${STATE_DIR}/deploy-acks"
 STATE_FILE="${STATE_DIR}/deploy-state.env"
 LOCK_DIR="${STATE_DIR}/ha-rollout.lock"
+DAEMON_LOCK_DIR="${STATE_DIR}/ha-deployer.instance.lock"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 ACK_TIMEOUT="${ACK_TIMEOUT:-600}"
 PROCESSING_STALE_SEC="${PROCESSING_STALE_SEC:-900}"
@@ -73,11 +74,46 @@ file_age_seconds() {
 }
 
 lock_is_active() {
-  [ -d "$LOCK_DIR" ] || return 1
+  local dir="${1:-$LOCK_DIR}"
+  [ -d "$dir" ] || return 1
   local owner_pid
-  owner_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo "")"
+  owner_pid="$(cat "${dir}/pid" 2>/dev/null || echo "")"
   [ -n "$owner_pid" ] || return 1
   kill -0 "$owner_pid" 2>/dev/null
+}
+
+release_daemon_lock() {
+  if [ -d "$DAEMON_LOCK_DIR" ]; then
+    local owner_pid
+    owner_pid="$(cat "${DAEMON_LOCK_DIR}/pid" 2>/dev/null || echo "")"
+    if [ -z "$owner_pid" ] || [ "$owner_pid" = "$$" ]; then
+      rm -rf "$DAEMON_LOCK_DIR" 2>/dev/null || true
+    fi
+  fi
+}
+
+acquire_daemon_lock() {
+  local attempts=0
+  while ! mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; do
+    if lock_is_active "$DAEMON_LOCK_DIR"; then
+      local owner_pid
+      owner_pid="$(cat "${DAEMON_LOCK_DIR}/pid" 2>/dev/null || echo unknown)"
+      warn "another ha-deployer instance is already running for ${STATE_DIR} (pid=${owner_pid})"
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 3 ]; then
+      warn "unable to recover stale daemon lock at ${DAEMON_LOCK_DIR}"
+      return 1
+    fi
+    warn "recovering stale daemon lock at ${DAEMON_LOCK_DIR}"
+    rm -rf "$DAEMON_LOCK_DIR" 2>/dev/null || true
+    sleep 1
+  done
+
+  printf '%s\n' "$$" > "${DAEMON_LOCK_DIR}/pid"
+  trap release_daemon_lock EXIT INT TERM
+  return 0
 }
 
 recover_stale_processing() {
@@ -527,6 +563,10 @@ EOF
     rm -f "$rollout_log"
   fi
 }
+
+if ! acquire_daemon_lock; then
+  exit 1
+fi
 
 log "starting (poll_interval=${POLL_INTERVAL}s state_dir=${STATE_DIR})"
 
