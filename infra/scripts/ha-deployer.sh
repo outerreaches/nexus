@@ -30,6 +30,7 @@ fi
 STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
 TRIGGER_FILE="${STATE_DIR}/deploy-trigger.json"
 PROCESSING_FILE="${STATE_DIR}/deploy-trigger.processing.json"
+COMPLETIONS_DIR="${STATE_DIR}/deploy-completions"
 FINALIZE_PENDING="${STATE_DIR}/finalize-pending"
 ACK_FILE="${STATE_DIR}/deploy-ack"
 STATE_FILE="${STATE_DIR}/deploy-state.env"
@@ -135,6 +136,73 @@ LAST_FAILURE_REASON=$(sanitize_state_value "${reason}")
 EOF
 }
 
+write_completion_artifact() {
+  local action="$1"
+  local status="$2"
+  local trigger_id="$3"
+  local approval_id="$4"
+  local candidate_id="$5"
+  local request_channel="$6"
+  local request_channel_key="$7"
+  local request_agent_id="$8"
+  local request_home_agent_id="$9"
+  local request_session_id="${10}"
+  local request_run_id="${11}"
+  local request_parent_run_id="${12}"
+  local effective_sha="${13}"
+  local last_good_sha="${14}"
+  local failure_reason="${15}"
+  local created_at completion_id final_file tmp_file
+
+  mkdir -p "$COMPLETIONS_DIR"
+  created_at="$(iso_timestamp)"
+  completion_id="DC$(date +%s)-$$-$RANDOM"
+  final_file="${COMPLETIONS_DIR}/${completion_id}.json"
+  tmp_file="${final_file}.tmp"
+
+  jq -n \
+    --arg id "$completion_id" \
+    --arg action "$action" \
+    --arg status "$status" \
+    --arg triggerId "$trigger_id" \
+    --arg approvalId "$approval_id" \
+    --arg candidateId "$candidate_id" \
+    --arg effectiveSha "$effective_sha" \
+    --arg lastGoodSha "$last_good_sha" \
+    --arg failureReason "$failure_reason" \
+    --arg createdAt "$created_at" \
+    --arg channel "$request_channel" \
+    --arg channelKey "$request_channel_key" \
+    --arg agentId "$request_agent_id" \
+    --arg homeAgentId "$request_home_agent_id" \
+    --arg sessionId "$request_session_id" \
+    --arg runId "$request_run_id" \
+    --arg parentRunId "$request_parent_run_id" \
+    '{
+      id: $id,
+      action: $action,
+      status: $status,
+      triggerId: (if $triggerId == "" then null else $triggerId end),
+      approvalId: (if $approvalId == "" then null else $approvalId end),
+      candidateId: (if $candidateId == "" then null else $candidateId end),
+      effectiveSha: (if $effectiveSha == "" then null else $effectiveSha end),
+      lastGoodSha: (if $lastGoodSha == "" then null else $lastGoodSha end),
+      failureReason: (if $failureReason == "" then null else $failureReason end),
+      createdAt: $createdAt,
+      request: {
+        channel: (if $channel == "" then null else $channel end),
+        channelKey: (if $channelKey == "" then null else $channelKey end),
+        agentId: (if $agentId == "" then null else $agentId end),
+        homeAgentId: (if $homeAgentId == "" then null else $homeAgentId end),
+        sessionId: (if $sessionId == "" then null else $sessionId end),
+        runId: (if $runId == "" then null else $runId end),
+        parentRunId: (if $parentRunId == "" then null else $parentRunId end)
+      }
+    }' > "$tmp_file"
+  mv "$tmp_file" "$final_file"
+  log "wrote deploy completion artifact ${final_file}"
+}
+
 ack_matches_trigger() {
   local expected_trigger="$1"
   [ -f "$ACK_FILE" ] || return 1
@@ -146,7 +214,8 @@ ack_matches_trigger() {
 
 process_trigger() {
   local action msg remote branch trigger_id source_code_dir source_base_sha target_ref
-  local request_channel request_channel_key request_agent_id request_session_id request_run_id request_parent_run_id
+  local request_channel request_channel_key request_agent_id request_home_agent_id request_session_id request_run_id request_parent_run_id
+  local approval_id candidate_id
   local expected_ack_run_id deployed_sha rollout_log apply_status state_before_updated state_after_updated state_after_status failure_reason
 
   # Atomically claim the trigger
@@ -166,9 +235,12 @@ process_trigger() {
   source_code_dir="$(jq -r '.sourceCodeDir // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   source_base_sha="$(jq -r '.sourceBaseSha // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   target_ref="$(jq -r '.targetRef // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  approval_id="$(jq -r '.approvalId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  candidate_id="$(jq -r '.candidateId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_channel="$(jq -r '.request.channel // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_channel_key="$(jq -r '.request.channelKey // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_agent_id="$(jq -r '.request.agentId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
+  request_home_agent_id="$(jq -r '.request.homeAgentId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_session_id="$(jq -r '.request.sessionId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_run_id="$(jq -r '.request.runId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
   request_parent_run_id="$(jq -r '.request.parentRunId // empty' "$PROCESSING_FILE" 2>/dev/null || true)"
@@ -195,11 +267,43 @@ process_trigger() {
     fi
   }; then
     if [ "$action" = "rollback" ]; then
+      write_completion_artifact \
+        "$action" \
+        "$(read_state_value "LAST_STATUS")" \
+        "$trigger_id" \
+        "$approval_id" \
+        "$candidate_id" \
+        "$request_channel" \
+        "$request_channel_key" \
+        "$request_agent_id" \
+        "$request_home_agent_id" \
+        "$request_session_id" \
+        "$request_run_id" \
+        "$request_parent_run_id" \
+        "$(read_state_value "LAST_EFFECTIVE_SHA")" \
+        "$(read_state_value "LAST_GOOD_SHA")" \
+        "$(read_state_value "LAST_FAILURE_REASON")"
       log "rollback succeeded"
       rm -f "$PROCESSING_FILE"
       rm -f "$rollout_log"
       return 0
     fi
+    write_completion_artifact \
+      "$action" \
+      "$(read_state_value "LAST_STATUS")" \
+      "$trigger_id" \
+      "$approval_id" \
+      "$candidate_id" \
+      "$request_channel" \
+      "$request_channel_key" \
+      "$request_agent_id" \
+      "$request_home_agent_id" \
+      "$request_session_id" \
+      "$request_run_id" \
+      "$request_parent_run_id" \
+      "$(read_state_value "LAST_EFFECTIVE_SHA")" \
+      "$(read_state_value "LAST_GOOD_SHA")" \
+      "$(read_state_value "LAST_FAILURE_REASON")"
     log "deploy succeeded — waiting for orchestrator ack before rebuilding old primary"
     rm -f "$PROCESSING_FILE"
     rm -f "$rollout_log"
@@ -286,11 +390,43 @@ process_trigger() {
       if [ "$state_after_updated" = "$state_before_updated" ] || [ -z "$state_after_status" ] || [ "$state_after_status" = "rolling_back" ]; then
         write_failure_state "rollback_failed" "$failure_reason"
       fi
+      write_completion_artifact \
+        "$action" \
+        "$(read_state_value "LAST_STATUS")" \
+        "$trigger_id" \
+        "$approval_id" \
+        "$candidate_id" \
+        "$request_channel" \
+        "$request_channel_key" \
+        "$request_agent_id" \
+        "$request_home_agent_id" \
+        "$request_session_id" \
+        "$request_run_id" \
+        "$request_parent_run_id" \
+        "$(read_state_value "LAST_EFFECTIVE_SHA")" \
+        "$(read_state_value "LAST_GOOD_SHA")" \
+        "$failure_reason"
       warn "rollback failed (exit ${apply_status}): ${failure_reason}"
     else
       if [ "$state_after_updated" = "$state_before_updated" ] || [ -z "$state_after_status" ] || [ "$state_after_status" = "applying_local" ]; then
         write_failure_state "apply_local_failed" "$failure_reason"
       fi
+      write_completion_artifact \
+        "$action" \
+        "$(read_state_value "LAST_STATUS")" \
+        "$trigger_id" \
+        "$approval_id" \
+        "$candidate_id" \
+        "$request_channel" \
+        "$request_channel_key" \
+        "$request_agent_id" \
+        "$request_home_agent_id" \
+        "$request_session_id" \
+        "$request_run_id" \
+        "$request_parent_run_id" \
+        "$(read_state_value "LAST_EFFECTIVE_SHA")" \
+        "$(read_state_value "LAST_GOOD_SHA")" \
+        "$failure_reason"
       warn "deploy failed (exit ${apply_status}): ${failure_reason}"
     fi
     rm -f "$PROCESSING_FILE"

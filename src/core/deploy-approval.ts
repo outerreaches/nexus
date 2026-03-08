@@ -10,6 +10,21 @@ export type DeployApprovalMetadata = {
   changeFingerprint: string | null;
   candidateId: string | null;
   sourceBaseSha: string | null;
+  continuation?: {
+    commitMessage: string | null;
+    remote: string | null;
+    branch: string | null;
+    liveCodeDir: string | null;
+    request?: {
+      channel: string | null;
+      channelKey: string | null;
+      agentId: string | null;
+      homeAgentId: string | null;
+      sessionId: string | null;
+      runId: string | null;
+      parentRunId: string | null;
+    } | null;
+  } | null;
 };
 
 export function isDeployApprovalMetadata(metadata: Record<string, unknown> | null): metadata is DeployApprovalMetadata {
@@ -50,6 +65,7 @@ export function buildDeployApprovalMetadata(params: {
   policy: DeployPolicy;
   changeFingerprint: string | null;
   candidate?: { candidateId: string; baseSha: string };
+  continuation?: DeployApprovalMetadata["continuation"];
 }): DeployApprovalMetadata {
   return {
     kind: DEPLOY_APPROVAL_METADATA_KIND,
@@ -57,6 +73,7 @@ export function buildDeployApprovalMetadata(params: {
     changeFingerprint: params.changeFingerprint,
     candidateId: params.candidate?.candidateId ?? null,
     sourceBaseSha: params.candidate?.baseSha ?? null,
+    continuation: params.continuation ?? null,
   };
 }
 

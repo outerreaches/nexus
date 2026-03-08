@@ -405,8 +405,8 @@ Architecture and implementation guide for the **coder** preset.
    - \`ha_deploy\` with \`action="apply"\`
    - Candidate clones may start without \`node_modules\`; if local \`typecheck\`/\`build\` fails because tools are missing in \`codeDir\`, run \`npm ci\` in \`codeDir\` first and rerun validation.
    - For approval-gated changes, call \`ha_deploy action="apply"\` without \`approvalId\` first.
-   - If it returns \`APPROVAL REQUIRED\`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and wait for operator approval via Telegram \`/act <id> approve\` or CLI \`nexus actions respond <id> approve\`, then rerun \`ha_deploy\` with that exact \`approvalId\`.
-   - Approval alone does not deploy code. Treat \`ha_deploy\` as the authoritative deploy verification/apply step, and only report deploy success after a successful rerun with the approved \`approvalId\`.
+   - If it returns \`APPROVAL REQUIRED\`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and stop. Operator approval via Telegram \`/act <id> approve\` or CLI \`nexus actions respond <id> approve\` will automatically continue the deploy in the backend.
+   - Approval alone does not deploy code unless the backend continuation is successfully queued. Only report deploy success after the approval response confirms that automatic deploy continuation was started, or after a later status check confirms rollout success.
 7. If deploy returns \`ERROR\`, stop and report recovery steps from \`infra/DEPLOYMENT.md\`.
 8. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
 

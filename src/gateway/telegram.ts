@@ -12,10 +12,12 @@ import { Semaphore } from "../core/semaphore.js";
 import type { ChatUserContentPart } from "../core/types.js";
 import {
   formatDeployApprovalFulfillmentMessage,
+  isAffirmativeApprovalResponse,
   isDeployApprovalMetadata,
   parseMetadataJson,
   syncCandidateForDeployApproval,
 } from "../core/deploy-approval.js";
+import { continueApprovedDeployAfterApproval } from "../tools/ha-deploy.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
@@ -1029,6 +1031,7 @@ export async function startTelegramBot(deps: {
   config: NexusConfig;
   agent: AgentService;
   configPath: string;
+  stateDir: string;
   candidateRootDir: string;
   db: NexusDatabase;
   app: Hono;
@@ -1371,9 +1374,22 @@ export async function startTelegramBot(deps: {
         await ctx.reply(`OK: recorded action ${id}`);
         const metadata = parseMetadataJson(actionRow?.metadataJson ?? null);
         if (isDeployApprovalMetadata(metadata)) {
+          const responseText = actionRow?.responseText ?? response;
+          if (actionRow?.status === "fulfilled" && isAffirmativeApprovalResponse(responseText)) {
+            const continuation = await continueApprovedDeployAfterApproval({
+              approvalId: id,
+              metadataJson: actionRow?.metadataJson ?? null,
+              stateDir: deps.stateDir,
+              candidateRootDir: deps.candidateRootDir,
+              nowMs: Date.now(),
+              log: deps.log,
+            });
+            await sendOutput(chatId, continuation.message);
+            return;
+          }
           await sendOutput(chatId, formatDeployApprovalFulfillmentMessage({
             approvalId: id,
-            responseText: actionRow?.responseText ?? response,
+            responseText,
           }));
           return;
         }

@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
+import { startDeployCompletionWorker, type DeployCompletionWorker } from "../core/deploy-completion-worker.js";
 import { startRunReportBroker, type RunReportBroker } from "../core/run-report-broker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
@@ -1362,12 +1363,14 @@ export async function startGateway(
   let tg: Awaited<ReturnType<typeof startTelegramBot>> = null;
   let scheduler: ReturnType<typeof startJobScheduler> = null;
   let processNotifier: ReturnType<typeof startProcessNotifier> = null;
+  let deployCompletionWorker: DeployCompletionWorker | null = null;
 
   const startServices = async () => {
     tg = await startTelegramBot({
       config,
       agent,
       configPath: params.configPath,
+      stateDir: paths.stateDir,
       candidateRootDir: paths.candidateRootDir,
       log,
       db,
@@ -1402,6 +1405,17 @@ export async function startGateway(
     void runReportBroker?.tick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log(`run_report_broker: initial tick failed: ${message}`);
+    });
+
+    deployCompletionWorker?.stop();
+    deployCompletionWorker = startDeployCompletionWorker({
+      db,
+      stateDir: paths.stateDir,
+      log,
+    });
+    void deployCompletionWorker?.tick().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`deploy_completion_worker: initial tick failed: ${message}`);
     });
 
     // Process lifecycle callbacks (best-effort). Requires db + agent + telegram.
@@ -1525,6 +1539,8 @@ export async function startGateway(
     federationOutboxWorker = null;
     webhookDeliveryWorker?.stop();
     webhookDeliveryWorker = null;
+    deployCompletionWorker?.stop();
+    deployCompletionWorker = null;
     runReportBroker?.stop();
     runReportBroker = null;
     processNotifier?.stop();

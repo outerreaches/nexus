@@ -7,12 +7,14 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import type { ToolContext } from "../core/tools.js";
+import { buildDeployApprovalMetadata } from "../core/deploy-approval.js";
+import { inspectDeployWorktree } from "../core/deploy-policy.js";
 import { createCandidate, loadCandidate } from "../state/candidates.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { setHomeSession } from "../storage/sessions.js";
 import { fulfillHumanAction, listHumanActions } from "../storage/human-actions.js";
 import { getRunReportById } from "../storage/run-reports.js";
-import { haDeploy } from "./ha-deploy.js";
+import { continueApprovedDeployAfterApproval, haDeploy } from "./ha-deploy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -489,5 +491,59 @@ test("ha_deploy bootstraps candidate dependencies before verification", async ()
     assert.match(result, /APPROVAL REQUIRED/);
     const installedModule = path.join(repoDir, "node_modules", "bootstrap-ok", "typecheck.js");
     await fs.access(installedModule);
+  });
+});
+
+test("continueApprovedDeployAfterApproval queues the deploy trigger automatically", async () => {
+  await withRepoAndDb(async ({ repoDir, stateDir, nowMs }) => {
+    const candidateRootDir = path.join(stateDir, "candidates");
+    const candidate = await createCandidate({
+      liveCodeDir: repoDir,
+      candidateRootDir,
+      candidateId: "cand-auto-continue",
+      nowMs: nowMs(),
+    });
+    await writeFile(candidate.repoDir, "src/tools/example.ts", "export const example = 1;\n");
+    const changes = inspectDeployWorktree(candidate.repoDir);
+
+    const metadata = buildDeployApprovalMetadata({
+      policy: "approval_required",
+      changeFingerprint: changes.fingerprint,
+      candidate: {
+        candidateId: candidate.candidateId,
+        baseSha: candidate.baseSha,
+      },
+      continuation: {
+        commitMessage: "test auto continuation",
+        remote: "host",
+        branch: "main",
+        liveCodeDir: repoDir,
+        request: {
+          channel: "telegram",
+          channelKey: "12345",
+          agentId: "main:coder",
+          homeAgentId: "main",
+          sessionId: "session-1",
+          runId: "run-1",
+          parentRunId: null,
+        },
+      },
+    });
+
+    const result = await continueApprovedDeployAfterApproval({
+      approvalId: "HATEST",
+      metadataJson: JSON.stringify(metadata),
+      stateDir,
+      candidateRootDir,
+      nowMs: nowMs(),
+      log: () => undefined,
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.message, /Automatic deploy continuation has been queued/i);
+    const trigger = JSON.parse(await fs.readFile(path.join(stateDir, "deploy-trigger.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(trigger.action, "apply");
+    assert.equal(trigger.candidateId, candidate.candidateId);
+    assert.equal(trigger.sourceCodeDir, candidate.repoDir);
   });
 });

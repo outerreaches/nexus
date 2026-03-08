@@ -321,7 +321,7 @@ function formatApprovalRequiredMessage(params: {
     `Approve via CLI: nexus actions respond ${params.approvalId} approve`,
     `Approve via Telegram: /act ${params.approvalId} approve`,
     "There is no dashboard approval UI for deploy approvals.",
-    `After approval, rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
+    `After approval, Nexus will automatically continue the deploy. If auto-continuation fails, rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
   );
   return lines.join("\n");
 }
@@ -340,6 +340,49 @@ type DeployApprovalNotificationContext = {
   approvalId: string;
   log: (msg: string) => void;
 };
+
+type ParsedDeployApprovalContinuation = {
+  commitMessage: string | null;
+  remote: string | null;
+  branch: string | null;
+  liveCodeDir: string | null;
+  request: {
+    channel: string | null;
+    channelKey: string | null;
+    agentId: string | null;
+    homeAgentId: string | null;
+    sessionId: string | null;
+    runId: string | null;
+    parentRunId: string | null;
+  } | null;
+};
+
+function parseDeployApprovalContinuation(metadata: Record<string, unknown> | null): ParsedDeployApprovalContinuation | null {
+  const raw = metadata?.continuation;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const continuation = raw as Record<string, unknown>;
+  const requestRaw =
+    continuation.request && typeof continuation.request === "object" && !Array.isArray(continuation.request)
+      ? continuation.request as Record<string, unknown>
+      : null;
+  return {
+    commitMessage: typeof continuation.commitMessage === "string" ? continuation.commitMessage : null,
+    remote: typeof continuation.remote === "string" ? continuation.remote : null,
+    branch: typeof continuation.branch === "string" ? continuation.branch : null,
+    liveCodeDir: typeof continuation.liveCodeDir === "string" ? continuation.liveCodeDir : null,
+    request: requestRaw
+      ? {
+          channel: typeof requestRaw.channel === "string" ? requestRaw.channel : null,
+          channelKey: typeof requestRaw.channelKey === "string" ? requestRaw.channelKey : null,
+          agentId: typeof requestRaw.agentId === "string" ? requestRaw.agentId : null,
+          homeAgentId: typeof requestRaw.homeAgentId === "string" ? requestRaw.homeAgentId : null,
+          sessionId: typeof requestRaw.sessionId === "string" ? requestRaw.sessionId : null,
+          runId: typeof requestRaw.runId === "string" ? requestRaw.runId : null,
+          parentRunId: typeof requestRaw.parentRunId === "string" ? requestRaw.parentRunId : null,
+        }
+      : null,
+  };
+}
 
 function buildDeployApprovalNotificationBody(params: {
   approvalId: string;
@@ -405,6 +448,277 @@ async function queueDeployApprovalNotification(params: DeployApprovalNotificatio
   }
 }
 
+function clearStaleProcessingTrigger(stateDir: string, log: (msg: string) => void): void {
+  const triggerFile = path.join(stateDir, "deploy-trigger.json");
+  const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
+  const lockDir = path.join(stateDir, "ha-rollout.lock");
+  if (!existsSync(triggerFile) && existsSync(processingFile) && !existsSync(lockDir)) {
+    const ageMs = fileAgeMs(processingFile);
+    if (ageMs !== null && ageMs > 120_000) {
+      rmSync(processingFile, { force: true });
+      log(`removed stale processing trigger (${Math.round(ageMs / 1000)}s old)`);
+    }
+  }
+}
+
+function canQueueDeployTrigger(stateDir: string): string | null {
+  const triggerFile = path.join(stateDir, "deploy-trigger.json");
+  const processingFile = path.join(stateDir, "deploy-trigger.processing.json");
+  if (existsSync(triggerFile) || existsSync(processingFile)) {
+    return "ERROR: A deploy is already pending or in progress. Use action='status' to check.";
+  }
+  return null;
+}
+
+function writeApplyDeployTrigger(params: {
+  stateDir: string;
+  codeDir: string;
+  liveCodeDir: string;
+  candidate?: { candidateId: string; baseSha: string } | null;
+  approvalId?: string | null;
+  commitMessage: string;
+  remote: string;
+  branch: string;
+  request?: {
+    channel?: string | null;
+    channelKey?: string | null;
+    agentId?: string | null;
+    homeAgentId?: string | null;
+    sessionId?: string | null;
+    runId?: string | null;
+    parentRunId?: string | null;
+  } | null;
+  nowMs: number;
+  log: (msg: string) => void;
+}): string {
+  const triggerFile = path.join(params.stateDir, "deploy-trigger.json");
+  const trigger = {
+    id: randomUUID(),
+    action: "apply",
+    commitMessage: params.commitMessage,
+    remote: params.remote,
+    branch: params.branch,
+    sourceCodeDir: params.codeDir,
+    liveCodeDir: params.liveCodeDir,
+    sourceBaseSha: params.candidate?.baseSha ?? null,
+    candidateId: params.candidate?.candidateId ?? null,
+    approvalId: params.approvalId ?? null,
+    requestedAt: new Date(params.nowMs).toISOString(),
+    request: params.request
+      ? {
+          channel: params.request.channel ?? null,
+          channelKey: params.request.channelKey ?? null,
+          agentId: params.request.agentId ?? null,
+          homeAgentId: params.request.homeAgentId ?? null,
+          sessionId: params.request.sessionId ?? null,
+          runId: params.request.runId ?? null,
+          parentRunId: params.request.parentRunId ?? null,
+        }
+      : undefined,
+  };
+
+  mkdirSync(params.stateDir, { recursive: true });
+  writeFileSync(triggerFile, JSON.stringify(trigger, null, 2) + "\n");
+  params.log(`apply trigger written: ${String(trigger.id)}`);
+  return String(trigger.id);
+}
+
+export async function continueApprovedDeployAfterApproval(params: {
+  approvalId: string;
+  metadataJson: string | null;
+  stateDir: string;
+  candidateRootDir?: string;
+  nowMs: number;
+  log: (msg: string) => void;
+}): Promise<{ ok: boolean; message: string }> {
+  const metadata = parseMetadataJson(params.metadataJson);
+  const continuation = parseDeployApprovalContinuation(metadata);
+  if (!metadataMatchesApproval(metadata, buildDeployApprovalMetadata({
+    policy: typeof metadata?.policy === "string" ? metadata.policy as DeployChangeInspection["policy"] : "approval_required",
+    changeFingerprint: typeof metadata?.changeFingerprint === "string" ? metadata.changeFingerprint : null,
+    candidate:
+      typeof metadata?.candidateId === "string" && metadata.candidateId &&
+      typeof metadata?.sourceBaseSha === "string" && metadata.sourceBaseSha
+        ? { candidateId: metadata.candidateId, baseSha: metadata.sourceBaseSha }
+        : undefined,
+    continuation: continuation ?? undefined,
+  }))) {
+    return {
+      ok: false,
+      message: `Deploy approval '${params.approvalId}' metadata is invalid. Rerun ha_deploy manually if needed.`,
+    };
+  }
+
+  clearStaleProcessingTrigger(params.stateDir, params.log);
+  const busyMessage = canQueueDeployTrigger(params.stateDir);
+  if (busyMessage) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation could not start.\n` +
+        `${busyMessage}\n` +
+        `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}' after the current deploy finishes.`,
+    };
+  }
+
+  let candidate: { candidateId: string; baseSha: string; repoDir: string } | null = null;
+  let codeDir = continuation?.liveCodeDir ?? "";
+  let liveCodeDir = continuation?.liveCodeDir ?? "";
+
+  const candidateId =
+    typeof metadata?.candidateId === "string" && metadata.candidateId.trim().length > 0
+      ? metadata.candidateId.trim()
+      : "";
+  if (candidateId) {
+    if (!params.candidateRootDir) {
+      return {
+        ok: false,
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but candidate storage is unavailable. ` +
+          `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
+      };
+    }
+    const record = await loadCandidate(params.candidateRootDir, candidateId);
+    candidate = {
+      candidateId: record.candidateId,
+      baseSha: record.baseSha,
+      repoDir: record.repoDir,
+    };
+    codeDir = record.repoDir;
+    liveCodeDir = record.liveCodeDir;
+  }
+
+  if (!codeDir) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but the source code directory is unknown. ` +
+        `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
+    };
+  }
+
+  const changes = inspectDeployWorktree(codeDir);
+  if (changes.gitStatusError) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed ` +
+        `while inspecting changes: ${changes.gitStatusError}`,
+    };
+  }
+  if (changes.deployable.length === 0) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but there are no longer deployable changes in the candidate.`,
+    };
+  }
+  if (changes.policy !== "approval_required") {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate no longer matches an approval-gated deploy state.`,
+    };
+  }
+
+  const expected = buildDeployApprovalMetadata({
+    policy: changes.policy,
+    changeFingerprint: changes.fingerprint,
+    candidate: candidate ? { candidateId: candidate.candidateId, baseSha: candidate.baseSha } : undefined,
+    continuation: continuation ?? undefined,
+  });
+  if (!metadataMatchesApproval(metadata, expected)) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate changed after approval. ` +
+        `Request a fresh approval for the new snapshot.`,
+    };
+  }
+
+  const verificationResult = await verifyDeployCandidate({
+    changes,
+    ctx: {
+      codeDir,
+      candidateRootDir: params.candidateRootDir,
+      candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
+      nowMs: () => params.nowMs,
+      log: params.log,
+    },
+  });
+  if (verificationResult) {
+    return {
+      ok: false,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed verification.\n\n` +
+        verificationResult,
+    };
+  }
+
+  const target = resolveDeployGitTarget(codeDir, continuation?.remote ?? "host", continuation?.branch ?? "main");
+  for (const note of target.notes) params.log(note);
+
+  await updateBoundCandidateState(
+    {
+      candidateRootDir: params.candidateRootDir,
+      candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
+      nowMs: () => params.nowMs,
+      log: params.log,
+    },
+    {
+      status: "approved",
+      classification: "approval_required",
+      approvalStatus: "approved",
+      verificationStatus: "passed",
+      verificationFingerprint: changes.fingerprint ?? null,
+      verifiedAt: params.nowMs,
+      lastError: null,
+    },
+  );
+
+  writeApplyDeployTrigger({
+    stateDir: params.stateDir,
+    codeDir,
+    liveCodeDir: liveCodeDir || codeDir,
+    candidate,
+    approvalId: params.approvalId,
+    commitMessage:
+      continuation?.commitMessage?.trim() ||
+      `ha-rollout: apply approved changes ${new Date(params.nowMs).toISOString()}`,
+    remote: target.remote,
+    branch: target.branch,
+    request: continuation?.request ?? null,
+    nowMs: params.nowMs,
+    log: params.log,
+  });
+
+  await updateBoundCandidateState(
+    {
+      candidateRootDir: params.candidateRootDir,
+      candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
+      nowMs: () => params.nowMs,
+      log: params.log,
+    },
+    {
+      status: "auto_deploying",
+      classification: "approval_required",
+      approvalStatus: "approved",
+      verificationStatus: "passed",
+      verificationFingerprint: changes.fingerprint ?? null,
+      verifiedAt: params.nowMs,
+      lastError: null,
+    },
+  );
+
+  return {
+    ok: true,
+    message:
+      `Deploy approval '${params.approvalId}' has been fulfilled.\n` +
+      "Automatic deploy continuation has been queued.\n" +
+      "Use ha_deploy action='status' if you need rollout status.",
+  };
+}
+
 function findReusablePendingApproval(
   db: NexusDatabase,
   sessionId: string | undefined,
@@ -429,6 +743,9 @@ function findReusablePendingApproval(
 
 async function ensureDeployApproval(params: {
   approvalId?: string;
+  commitMessage: string;
+  remote: string;
+  branch: string;
   changes: DeployChangeInspection;
   ctx: {
     db?: unknown;
@@ -454,6 +771,23 @@ async function ensureDeployApproval(params: {
     policy: params.changes.policy,
     changeFingerprint: params.changes.fingerprint,
     candidate: params.ctx.candidate,
+    continuation: {
+      commitMessage: params.commitMessage,
+      remote: params.remote,
+      branch: params.branch,
+      liveCodeDir: params.ctx.liveCodeDir ?? params.ctx.codeDir,
+      request: params.ctx.request
+        ? {
+            channel: params.ctx.request.channel,
+            channelKey: params.ctx.request.channelKey,
+            agentId: params.ctx.request.agentId,
+            homeAgentId: params.ctx.request.homeAgentId ?? null,
+            sessionId: params.ctx.request.sessionId,
+            runId: params.ctx.request.runId ?? null,
+            parentRunId: params.ctx.request.parentRunId ?? null,
+          }
+        : null,
+    },
   });
   const nowMs = params.ctx.nowMs();
   const requestedApprovalId = params.approvalId?.trim();
@@ -580,7 +914,26 @@ async function ensureDeployApproval(params: {
     agentId: params.ctx.request?.agentId,
     kind: "confirm",
     prompt,
-    metadata: expected,
+    metadata: {
+      ...expected,
+      continuation: {
+        commitMessage: params.commitMessage,
+        remote: params.remote,
+        branch: params.branch,
+        liveCodeDir: params.ctx.liveCodeDir ?? params.ctx.codeDir,
+        request: params.ctx.request
+          ? {
+              channel: params.ctx.request.channel,
+              channelKey: params.ctx.request.channelKey,
+              agentId: params.ctx.request.agentId,
+              homeAgentId: params.ctx.request.homeAgentId ?? null,
+              sessionId: params.ctx.request.sessionId,
+              runId: params.ctx.request.runId ?? null,
+              parentRunId: params.ctx.request.parentRunId ?? null,
+            }
+          : null,
+      },
+    },
   });
 
   await updateBoundCandidateState(params.ctx, {
@@ -827,9 +1180,15 @@ export const haDeploy = defineTool({
         return verificationResult;
       }
 
+      const msg =
+        commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
+
       if (changes.policy === "approval_required") {
         const approvalResult = await ensureDeployApproval({
           approvalId,
+          commitMessage: msg,
+          remote,
+          branch,
           changes,
           ctx: {
             db: ctx.db,
@@ -857,9 +1216,6 @@ export const haDeploy = defineTool({
         }
         ctx.log(`deploy approval accepted for ${summarizeItems(changes.approvalRequired)}`);
       }
-
-      const msg =
-        commitMessage?.trim() || `ha-rollout: apply local changes ${new Date(ctx.nowMs()).toISOString()}`;
 
       await updateBoundCandidateState(
         {
@@ -891,12 +1247,14 @@ export const haDeploy = defineTool({
         liveCodeDir: ctx.liveCodeDir ?? ctx.codeDir,
         sourceBaseSha: ctx.candidate?.baseSha ?? null,
         candidateId: ctx.candidate?.candidateId ?? null,
+        approvalId: approvalId?.trim() || null,
         requestedAt: new Date(ctx.nowMs()).toISOString(),
         request: ctx.request
           ? {
               channel: ctx.request.channel,
               channelKey: ctx.request.channelKey,
               agentId: ctx.request.agentId,
+              homeAgentId: ctx.request.homeAgentId ?? null,
               sessionId: ctx.request.sessionId,
               runId: ctx.request.runId ?? null,
               parentRunId: ctx.request.parentRunId ?? null,
