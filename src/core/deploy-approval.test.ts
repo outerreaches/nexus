@@ -6,7 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { buildDeployApprovalMetadata, syncCandidateForDeployApproval } from "./deploy-approval.js";
+import {
+  buildDeployApprovalMetadata,
+  formatDeployApprovalFulfillmentMessage,
+  syncCandidateForDeployApproval,
+} from "./deploy-approval.js";
 import { createCandidate, loadCandidate } from "../state/candidates.js";
 
 const execFileAsync = promisify(execFile);
@@ -69,4 +73,13 @@ test("syncCandidateForDeployApproval updates candidate state immediately on reje
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("formatDeployApprovalFulfillmentMessage clarifies that approval does not auto-deploy", () => {
+  const text = formatDeployApprovalFulfillmentMessage({
+    approvalId: "HA123",
+    responseText: "approve",
+  });
+  assert.match(text, /does not deploy by itself/i);
+  assert.match(text, /approvalId='HA123'/i);
 });

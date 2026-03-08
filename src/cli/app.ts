@@ -1253,7 +1253,12 @@ export async function runCli(argv: string[]): Promise<void> {
       const { ensureConfigExists, loadConfig } = await import("../state/config.js");
       const { resolveRuntimePaths } = await import("../state/paths.js");
       const { openDatabase } = await import("../storage/database.js");
-      const { syncCandidateForDeployApproval } = await import("../core/deploy-approval.js");
+      const {
+        formatDeployApprovalFulfillmentMessage,
+        isDeployApprovalMetadata,
+        parseMetadataJson,
+        syncCandidateForDeployApproval,
+      } = await import("../core/deploy-approval.js");
       const { fulfillHumanAction, getHumanAction } = await import("../storage/human-actions.js");
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
@@ -1277,6 +1282,14 @@ export async function runCli(argv: string[]): Promise<void> {
             responseText: row.responseText,
             nowMs: Date.now(),
           });
+        }
+        const metadata = parseMetadataJson(row?.metadataJson ?? null);
+        if (isDeployApprovalMetadata(metadata)) {
+          process.stdout.write(`${formatDeployApprovalFulfillmentMessage({
+            approvalId: String(id),
+            responseText: row?.responseText ?? response,
+          })}\n`);
+          return;
         }
         process.stdout.write("OK\n");
       } finally {

@@ -12,6 +12,28 @@ export type DeployApprovalMetadata = {
   sourceBaseSha: string | null;
 };
 
+export function isDeployApprovalMetadata(metadata: Record<string, unknown> | null): metadata is DeployApprovalMetadata {
+  return metadata?.kind === DEPLOY_APPROVAL_METADATA_KIND;
+}
+
+export function formatDeployApprovalFulfillmentMessage(params: {
+  approvalId: string;
+  responseText?: string | null;
+}): string {
+  const responseText = params.responseText ?? "";
+  if (isAffirmativeApprovalResponse(responseText)) {
+    return [
+      `Deploy approval '${params.approvalId}' has been fulfilled.`,
+      "Approval only records operator consent; it does not deploy by itself.",
+      `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}' to continue the deploy.`,
+    ].join("\n");
+  }
+  if (isNegativeApprovalResponse(responseText)) {
+    return `Deploy approval '${params.approvalId}' has been rejected. No deploy will run.`;
+  }
+  return `Deploy approval '${params.approvalId}' has been recorded with response ${JSON.stringify(responseText)}.`;
+}
+
 export function parseMetadataJson(raw: string | null): Record<string, unknown> | null {
   if (!raw) return null;
   try {
@@ -90,7 +112,7 @@ export async function syncCandidateForDeployApproval(params: {
 }): Promise<void> {
   if (!params.candidateRootDir) return;
   const metadata = parseMetadataJson(params.metadataJson);
-  if (!metadata || metadata.kind !== DEPLOY_APPROVAL_METADATA_KIND) return;
+  if (!isDeployApprovalMetadata(metadata)) return;
   const candidateId =
     typeof metadata.candidateId === "string" && metadata.candidateId.trim().length > 0
       ? metadata.candidateId.trim()

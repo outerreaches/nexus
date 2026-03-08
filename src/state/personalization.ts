@@ -403,8 +403,10 @@ Architecture and implementation guide for the **coder** preset.
 5. Review aggregate changes with \`code_diff\` before deploy (especially for multi-file edits).
 6. Deploy in the same coder run:
    - \`ha_deploy\` with \`action="apply"\`
+   - Candidate clones may start without \`node_modules\`; if local \`typecheck\`/\`build\` fails because tools are missing in \`codeDir\`, run \`npm ci\` in \`codeDir\` first and rerun validation.
    - For approval-gated changes, call \`ha_deploy action="apply"\` without \`approvalId\` first.
    - If it returns \`APPROVAL REQUIRED\`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and wait for operator approval via Telegram \`/act <id> approve\` or CLI \`nexus actions respond <id> approve\`, then rerun \`ha_deploy\` with that exact \`approvalId\`.
+   - Approval alone does not deploy code. Treat \`ha_deploy\` as the authoritative deploy verification/apply step, and only report deploy success after a successful rerun with the approved \`approvalId\`.
 7. If deploy returns \`ERROR\`, stop and report recovery steps from \`infra/DEPLOYMENT.md\`.
 8. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
 

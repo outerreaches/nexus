@@ -10,7 +10,12 @@ import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
 import { Semaphore } from "../core/semaphore.js";
 import type { ChatUserContentPart } from "../core/types.js";
-import { syncCandidateForDeployApproval } from "../core/deploy-approval.js";
+import {
+  formatDeployApprovalFulfillmentMessage,
+  isDeployApprovalMetadata,
+  parseMetadataJson,
+  syncCandidateForDeployApproval,
+} from "../core/deploy-approval.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
@@ -1364,6 +1369,14 @@ export async function startTelegramBot(deps: {
         }
 
         await ctx.reply(`OK: recorded action ${id}`);
+        const metadata = parseMetadataJson(actionRow?.metadataJson ?? null);
+        if (isDeployApprovalMetadata(metadata)) {
+          await sendOutput(chatId, formatDeployApprovalFulfillmentMessage({
+            approvalId: id,
+            responseText: actionRow?.responseText ?? response,
+          }));
+          return;
+        }
         const res = await deps.agent.handleUserMessage({
           channel: "telegram",
           channelKey: String(chatId),
