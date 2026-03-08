@@ -63,6 +63,8 @@ export const preset: AgentPreset = {
     "shell_interactive",
     "image_analyze",
     "video_analyze",
+    "web_fetch",
+    "web_search",
     // Swarm coordination
     "spawn_agent",
     "mcp_manage",

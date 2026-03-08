@@ -73,6 +73,11 @@ export const preset: AgentPreset = {
     "skill_get",
     "skill_create",
     "skill_update",
+    "read_file",
+    "file_write",
+    "edit_file",
+    "file_list",
+    "file_glob"
   ],
   toolCallCaps: {
     web_fetch: 12,
