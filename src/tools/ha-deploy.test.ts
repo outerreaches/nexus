@@ -60,6 +60,51 @@ async function createRepo(root: string): Promise<string> {
   return repoDir;
 }
 
+async function configureOfflineInstallableVerificationRepo(repoDir: string): Promise<void> {
+  await writeFile(
+    repoDir,
+    "vendor/bootstrap-ok/package.json",
+    JSON.stringify(
+      {
+        name: "bootstrap-ok",
+        version: "1.0.0",
+        private: true,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  await writeFile(repoDir, "vendor/bootstrap-ok/typecheck.js", "process.exit(0);\n");
+  await writeFile(repoDir, "vendor/bootstrap-ok/build.js", "process.exit(0);\n");
+  await writeFile(
+    repoDir,
+    "package.json",
+    JSON.stringify(
+      {
+        name: "nexus-ha-deploy-test",
+        private: true,
+        dependencies: {
+          "bootstrap-ok": "file:vendor/bootstrap-ok",
+        },
+        scripts: {
+          typecheck: "node node_modules/bootstrap-ok/typecheck.js",
+          build: "node node_modules/bootstrap-ok/build.js",
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  await execFileAsync("npm", ["install", "--package-lock-only"], {
+    cwd: repoDir,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  await fs.rm(path.join(repoDir, "node_modules"), { recursive: true, force: true });
+  await git(["add", "."], repoDir);
+  await git(["commit", "-m", "offline deps"], repoDir);
+}
+
 function latestRunReportId(db: NexusDatabase): string | null {
   const row = db.db
     .prepare("SELECT id FROM run_reports ORDER BY created_at DESC LIMIT 1")
@@ -423,5 +468,26 @@ test("ha_deploy blocks deploy when verification fails", async () => {
       sessionId: "session-1",
     });
     assert.equal(pending.length, 0);
+  });
+});
+
+test("ha_deploy bootstraps candidate dependencies before verification", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await configureOfflineInstallableVerificationRepo(repoDir);
+    await writeFile(repoDir, "src/tools/example.ts", "export const example = 1;\n");
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({ db, repoDir, stateDir, nowMs }),
+    );
+
+    assert.match(result, /APPROVAL REQUIRED/);
+    const installedModule = path.join(repoDir, "node_modules", "bootstrap-ok", "typecheck.js");
+    await fs.access(installedModule);
   });
 });

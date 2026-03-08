@@ -183,6 +183,21 @@ function runVerificationCommand(codeDir: string, args: string[]): void {
   });
 }
 
+function detectDependencyBootstrapCommand(codeDir: string): { label: string; args: string[] } | null {
+  if (!existsSync(path.join(codeDir, "package.json"))) return null;
+  if (existsSync(path.join(codeDir, "node_modules"))) return null;
+  if (existsSync(path.join(codeDir, "pnpm-lock.yaml"))) {
+    return { label: "dependency bootstrap", args: ["pnpm", "install", "--frozen-lockfile"] };
+  }
+  if (existsSync(path.join(codeDir, "yarn.lock"))) {
+    return { label: "dependency bootstrap", args: ["yarn", "install", "--frozen-lockfile"] };
+  }
+  if (existsSync(path.join(codeDir, "package-lock.json")) || existsSync(path.join(codeDir, "npm-shrinkwrap.json"))) {
+    return { label: "dependency bootstrap", args: ["npm", "ci"] };
+  }
+  return { label: "dependency bootstrap", args: ["npm", "install", "--package-lock=false"] };
+}
+
 async function verifyDeployCandidate(params: {
   changes: DeployChangeInspection;
   ctx: {
@@ -216,6 +231,24 @@ async function verifyDeployCandidate(params: {
         `deploy verification cache lookup failed for ${params.ctx.candidate.candidateId}: ` +
         `${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  const dependencyBootstrap = detectDependencyBootstrapCommand(params.ctx.codeDir);
+  if (dependencyBootstrap) {
+    params.ctx.log(`deploy verification: running ${dependencyBootstrap.args.join(" ")}`);
+    try {
+      runVerificationCommand(params.ctx.codeDir, dependencyBootstrap.args);
+    } catch (err) {
+      const detail = formatCommandFailure(dependencyBootstrap.args.join(" "), err);
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "failed",
+        verificationStatus: "failed",
+        verificationFingerprint: params.changes.fingerprint ?? null,
+        verifiedAt: null,
+        lastError: `verification failed during dependency bootstrap: ${detail}`,
+      });
+      return `ERROR: deploy verification failed during dependency bootstrap.\n\n${detail}`;
     }
   }
 

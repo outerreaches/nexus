@@ -132,8 +132,17 @@ export const shellExec = defineTool({
       return "ERROR: Mutating git commands on the code repository are not allowed from agents. Use ha_deploy to queue a deploy.";
     }
 
+    const cwd = ctx.codeDir;
     return await new Promise((resolve) => {
-      exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, signal: ctx.abortSignal }, (err, stdout, stderr) => {
+      exec(
+        command,
+        {
+          cwd,
+          timeout: timeoutMs,
+          maxBuffer: 10 * 1024 * 1024,
+          signal: ctx.abortSignal,
+        },
+        (err, stdout, stderr) => {
         if (err) {
           if (ctx.abortSignal?.aborted) {
             resolve("ERROR: run cancelled");
@@ -151,7 +160,8 @@ export const shellExec = defineTool({
           resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));
         }
         else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n")));
-      });
+        },
+      );
     });
   },
 });

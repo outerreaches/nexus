@@ -58,3 +58,33 @@ test("shell_exec blocks orchestrator from local Node execution", async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("shell_exec runs commands in codeDir by default", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-system-test-"));
+  const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-system-workspace-"));
+  try {
+    const result = await shellExec.execute(
+      { command: "pwd", timeoutMs: 5_000 },
+      {
+        workspaceDir,
+        stateDir: workspaceDir,
+        codeDir: tempDir,
+        allowShellExec: true,
+        request: {
+          channel: "cli",
+          channelKey: "test",
+          agentId: "coder",
+          sessionId: "s-2",
+          preset: "coder",
+        },
+        nowMs: () => Date.now(),
+        log: () => {},
+      },
+    );
+    const resolvedTempDir = await fs.realpath(tempDir);
+    assert.equal(result.trim(), resolvedTempDir);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    await fs.rm(workspaceDir, { recursive: true, force: true });
+  }
+});
