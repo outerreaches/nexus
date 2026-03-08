@@ -47,7 +47,6 @@ const pendingNodeRouteRequests = new Map<
     timer: NodeJS.Timeout;
   }
 >();
-
 process.on("message", async (msg: ParentMessage) => {
   if (msg.type === "node_route_response") {
     resolveNodeRouteResponse(msg);
@@ -543,6 +542,17 @@ function isReadOnlyCoderTaskType(taskType: WorkerConfig["taskType"]): boolean {
   return taskType === "plan" || taskType === "review" || taskType === "walkthrough";
 }
 
+function isVerificationCommand(command: string, task: "typecheck" | "build"): boolean {
+  const normalized = command.trim();
+  if (!normalized) return false;
+  switch (task) {
+    case "typecheck":
+      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?typecheck\b/.test(normalized);
+    case "build":
+      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?build\b/.test(normalized);
+  }
+}
+
 function collectSuccessfulBuildCommands(calls: ToolCallRecord[]): { typecheckCommands: string[]; buildCommands: string[] } {
   const typecheckCommands: string[] = [];
   const buildCommands: string[] = [];
@@ -550,10 +560,10 @@ function collectSuccessfulBuildCommands(calls: ToolCallRecord[]): { typecheckCom
     if (call.name !== "shell_exec") continue;
     if (typeof call.result !== "string" || call.result.trimStart().startsWith("ERROR:")) continue;
     const command = typeof call.args.command === "string" ? call.args.command : "";
-    if (/\bnpm\s+run\s+typecheck\b/.test(command)) {
+    if (isVerificationCommand(command, "typecheck")) {
       typecheckCommands.push(command);
     }
-    if (/\bnpm\s+run\s+build\b/.test(command)) {
+    if (isVerificationCommand(command, "build")) {
       buildCommands.push(command);
     }
   }

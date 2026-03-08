@@ -7,6 +7,7 @@ import test from "node:test";
 import { startRunReportBroker } from "./run-report-broker.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { enqueueRunReport, getRunReportById } from "../storage/run-reports.js";
+import { setHomeSession } from "../storage/sessions.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-run-report-broker-test-"));
@@ -103,5 +104,51 @@ test("run report broker dead-letters telegram target reports", async () => {
     const row = getRunReportById(db, reportId);
     assert.equal(row?.status, "dead_letter");
     assert.match(row?.lastError ?? "", /unsupported_target_channel:telegram/);
+  });
+});
+
+test("run report broker delivers home_channel reports to the home telegram chat", async () => {
+  await withDb(async (db) => {
+    const sent: Array<{ chatId: number; text: string }> = [];
+    setHomeSession({
+      db,
+      agentId: "main",
+      channel: "telegram",
+      channelKey: "12345",
+      nowMs: Date.now(),
+    });
+
+    const broker = startRunReportBroker({
+      db,
+      agent: null,
+      telegram: {
+        sendOutput: async (chatId: number, output: string) => {
+          sent.push({ chatId, text: output });
+        },
+        allowFrom: [12345],
+        allowAll: false,
+      },
+      log: () => {},
+    });
+    assert.ok(broker, "broker should start");
+
+    const reportId = enqueueRunReport(db, {
+      kind: "deploy_approval",
+      title: "Deploy approval required",
+      body: "Approve: /act HATEST approve",
+      targetAgentId: "main",
+      targetChannel: "home_channel",
+      nowMs: Date.now(),
+    });
+
+    const processed = await broker.tick();
+    broker.stop();
+
+    assert.equal(processed, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.chatId, 12345);
+    assert.match(sent[0]?.text ?? "", /HATEST/);
+    const row = getRunReportById(db, reportId);
+    assert.equal(row?.status, "sent");
   });
 });

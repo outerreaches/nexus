@@ -160,7 +160,11 @@ export type ParentNodeRouteResponseMessage = {
 };
 
 /** Messages sent from worker to parent */
-export type WorkerMessage = WorkerLogMessage | WorkerResultMessage | WorkerErrorMessage | WorkerNodeRouteRequestMessage;
+export type WorkerMessage =
+  | WorkerLogMessage
+  | WorkerResultMessage
+  | WorkerErrorMessage
+  | WorkerNodeRouteRequestMessage;
 
 /** Messages sent from parent to worker */
 export type ParentMessage = WorkerTaskMessage | ParentNodeRouteResponseMessage;

@@ -16,10 +16,9 @@ import {
 } from "../core/deploy-approval.js";
 import { defineTool } from "../core/tools.js";
 import { inspectDeployWorktree, type DeployChangeInspection } from "../core/deploy-policy.js";
-import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { createHumanAction, getHumanAction, listHumanActions } from "../storage/human-actions.js";
-import { getHomeSession } from "../storage/sessions.js";
+import { enqueueRunReport } from "../storage/run-reports.js";
 import { loadCandidate, updateCandidate } from "../state/candidates.js";
 
 function parseStateValue(content: string, key: string): string | undefined {
@@ -161,13 +160,6 @@ function truncateDetail(text: string, maxChars: number = 2_000): string {
   return `${compact.slice(0, maxChars)}\n...(+${compact.length - maxChars} chars)`;
 }
 
-function parsePositiveTelegramChatId(raw: string | null | undefined): number | null {
-  if (!raw) return null;
-  const parsed = Number(raw);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
-  return parsed;
-}
-
 function formatCommandFailure(command: string, err: unknown): string {
   const stdout =
     typeof err === "object" && err !== null && "stdout" in err && typeof (err as { stdout?: unknown }).stdout === "string"
@@ -303,64 +295,22 @@ function formatApprovalRequiredMessage(params: {
 
 type DeployApprovalNotificationContext = {
   db: NexusDatabase;
-  telegram?: {
-    sendOutput: (chatId: number, output: string) => Promise<void>;
-    allowFrom?: number[];
-    allowAll?: boolean;
-  };
   agentId?: string;
+  request?: {
+    runId?: string;
+    parentRunId?: string;
+    channel?: string;
+    channelKey?: string;
+  };
   changes: DeployChangeInspection;
   approvalId: string;
   log: (msg: string) => void;
 };
 
-function resolveApprovalNotificationChat(params: {
-  db: NexusDatabase;
-  agentId: string;
-}): { chatId: number; source: "home" | "latest_telegram_for_agent" } | null {
-  const home = getHomeSession({ db: params.db, agentId: params.agentId });
-  if (home?.channel === "telegram") {
-    const homeChatId = parsePositiveTelegramChatId(home.channelKey);
-    if (homeChatId) return { chatId: homeChatId, source: "home" };
-  }
-
-  const latestTelegram = params.db.db
-    .prepare(
-      `SELECT s.channel_key AS channel_key
-         FROM sessions s
-         LEFT JOIN messages m ON m.session_id = s.id
-        WHERE s.channel = 'telegram' AND s.agent_id = ?
-        GROUP BY s.id
-        ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
-        LIMIT 1`,
-    )
-    .get(params.agentId) as { channel_key: string } | undefined;
-  const latestChatId = parsePositiveTelegramChatId(latestTelegram?.channel_key);
-  if (!latestChatId) return null;
-  return { chatId: latestChatId, source: "latest_telegram_for_agent" };
-}
-
-async function notifyDeployApproval(params: DeployApprovalNotificationContext): Promise<string> {
-  if (!params.telegram) return "Operator notification: telegram is not configured in this runtime.";
-  if (!params.agentId) return "Operator notification: missing agent context for home-channel delivery.";
-
-  const destination = resolveApprovalNotificationChat({
-    db: params.db,
-    agentId: params.agentId,
-  });
-  if (!destination) {
-    return "Operator notification: no home or recent Telegram chat is available for this agent.";
-  }
-
-  const allowed = isTelegramUserAllowed(params.db, {
-    userId: destination.chatId,
-    staticAllowFrom: params.telegram.allowFrom ?? [],
-    allowAll: Boolean(params.telegram.allowAll),
-  });
-  if (!allowed) {
-    return `Operator notification: Telegram chat ${destination.chatId} is not allowlisted.`;
-  }
-
+function buildDeployApprovalNotificationBody(params: {
+  approvalId: string;
+  changes: DeployChangeInspection;
+}): string {
   const lines = [
     "Deploy approval required.",
     `ID: ${params.approvalId}`,
@@ -385,15 +335,38 @@ async function notifyDeployApproval(params: DeployApprovalNotificationContext): 
     `Approve: /act ${params.approvalId} approve`,
     `Reject: /act ${params.approvalId} reject`,
   );
+  return lines.join("\n");
+}
+
+async function queueDeployApprovalNotification(params: DeployApprovalNotificationContext): Promise<string> {
+  if (!params.agentId) return "Operator notification: missing agent context for home-channel delivery.";
 
   try {
-    await params.telegram.sendOutput(destination.chatId, lines.join("\n"));
-    params.log(`deploy approval notification sent id=${params.approvalId} chat=${destination.chatId} source=${destination.source}`);
-    return `Operator notification: sent to Telegram chat ${destination.chatId} (${destination.source}).`;
+    enqueueRunReport(params.db, {
+      kind: "deploy_approval",
+      title: `Deploy approval required: ${params.approvalId}`,
+      body: buildDeployApprovalNotificationBody({
+        approvalId: params.approvalId,
+        changes: params.changes,
+      }),
+      sourceRunId: params.request?.runId ?? null,
+      parentRunId: params.request?.parentRunId ?? null,
+      sourceAgentId: params.agentId,
+      sourceChannel: params.request?.channel ?? null,
+      sourceChannelKey: params.request?.channelKey ?? null,
+      targetAgentId: params.agentId,
+      targetChannel: "home_channel",
+      metadata: {
+        approvalId: params.approvalId,
+        deliveryKind: "deploy_approval",
+      },
+    });
+    params.log(`deploy approval notification queued id=${params.approvalId} target=home_channel`);
+    return "Operator notification: queued for home-channel delivery.";
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    params.log(`deploy approval notification failed id=${params.approvalId}: ${detail}`);
-    return `Operator notification: failed to send Telegram notification (${detail}).`;
+    params.log(`deploy approval notification queue failed id=${params.approvalId}: ${detail}`);
+    return `Operator notification: failed to queue home-channel notification (${detail}).`;
   }
 }
 
@@ -429,11 +402,8 @@ async function ensureDeployApproval(params: {
       channel: string;
       channelKey: string;
       agentId: string;
-    };
-    telegram?: {
-      sendOutput: (chatId: number, output: string) => Promise<void>;
-      allowFrom?: number[];
-      allowAll?: boolean;
+      runId?: string;
+      parentRunId?: string;
     };
     codeDir: string;
     liveCodeDir?: string;
@@ -585,10 +555,10 @@ async function ensureDeployApproval(params: {
     lastError: null,
   });
 
-  const notificationNote = await notifyDeployApproval({
+  const notificationNote = await queueDeployApprovalNotification({
     db,
-    telegram: params.ctx.telegram,
     agentId: params.ctx.request?.agentId,
+    request: params.ctx.request,
     changes: params.changes,
     approvalId: row.id,
     log: params.ctx.log,
@@ -832,15 +802,10 @@ export const haDeploy = defineTool({
                   channel: ctx.request.channel,
                   channelKey: ctx.request.channelKey,
                   agentId: ctx.request.agentId,
+                  runId: ctx.request.runId,
+                  parentRunId: ctx.request.parentRunId,
                 }
               : undefined,
-            telegram: ctx.telegram as
-              | {
-                  sendOutput: (chatId: number, output: string) => Promise<void>;
-                  allowFrom?: number[];
-                  allowAll?: boolean;
-                }
-              | undefined,
             codeDir: ctx.codeDir,
             liveCodeDir: ctx.liveCodeDir,
             candidateRootDir: ctx.candidateRootDir,

@@ -11,6 +11,7 @@ import { createCandidate, loadCandidate } from "../state/candidates.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { setHomeSession } from "../storage/sessions.js";
 import { fulfillHumanAction, listHumanActions } from "../storage/human-actions.js";
+import { getRunReportById } from "../storage/run-reports.js";
 import { haDeploy } from "./ha-deploy.js";
 
 const execFileAsync = promisify(execFile);
@@ -57,6 +58,13 @@ async function createRepo(root: string): Promise<string> {
   await git(["add", "."], repoDir);
   await git(["commit", "-m", "seed"], repoDir);
   return repoDir;
+}
+
+function latestRunReportId(db: NexusDatabase): string | null {
+  const row = db.db
+    .prepare("SELECT id FROM run_reports ORDER BY created_at DESC LIMIT 1")
+    .get() as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 function createContext(params: {
@@ -149,7 +157,7 @@ test("ha_deploy creates a human approval request for approval-gated changes", as
   });
 });
 
-test("ha_deploy notifies the home telegram chat when creating an approval request", async () => {
+test("ha_deploy queues a home-channel notification when creating an approval request", async () => {
   await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
     await writeFile(repoDir, "src/tools/example.ts", "export const example = 1;\n");
     setHomeSession({
@@ -159,7 +167,6 @@ test("ha_deploy notifies the home telegram chat when creating an approval reques
       channelKey: "12345",
       nowMs: nowMs(),
     });
-    const sent: Array<{ chatId: number; text: string }> = [];
 
     const result = await haDeploy.execute(
       {
@@ -168,26 +175,18 @@ test("ha_deploy notifies the home telegram chat when creating an approval reques
         branch: "main",
         timeoutMs: 1_000,
       },
-      createContext({
-        db,
-        repoDir,
-        stateDir,
-        nowMs,
-        telegram: {
-          sendOutput: async (chatId: number, output: string) => {
-            sent.push({ chatId, text: output });
-          },
-          allowFrom: [12345],
-          allowAll: false,
-        },
-      }),
+      createContext({ db, repoDir, stateDir, nowMs }),
     );
 
-    assert.match(result, /Operator notification: sent to Telegram chat 12345/i);
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0]?.chatId, 12345);
-    assert.match(sent[0]?.text ?? "", /Deploy approval required/i);
-    assert.match(sent[0]?.text ?? "", /\/act HA[A-Z0-9]+ approve/i);
+    assert.match(result, /Operator notification: queued for home-channel delivery/i);
+    const reportId = latestRunReportId(db);
+    assert.ok(reportId, "expected a queued run report");
+    const report = getRunReportById(db, reportId!);
+    assert.equal(report?.kind, "deploy_approval");
+    assert.equal(report?.targetChannel, "home_channel");
+    assert.equal(report?.targetAgentId, "agent:test");
+    assert.match(report?.body ?? "", /Deploy approval required/i);
+    assert.match(report?.body ?? "", /\/act HA[A-Z0-9]+ approve/i);
   });
 });
 
