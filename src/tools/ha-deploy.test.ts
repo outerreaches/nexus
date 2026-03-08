@@ -236,6 +236,8 @@ test("ha_deploy queues a home-channel notification when creating an approval req
     assert.equal(report?.targetChannel, "home_channel");
     assert.equal(report?.targetAgentId, "agent:test");
     assert.match(report?.body ?? "", /Deploy approval required/i);
+    assert.match(report?.body ?? "", /Change summary:/i);
+    assert.match(report?.body ?? "", /All deployable changed paths:/i);
     assert.match(report?.body ?? "", /\/act HA[A-Z0-9]+ approve/i);
   });
 });

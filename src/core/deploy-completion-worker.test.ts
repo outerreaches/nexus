@@ -122,3 +122,88 @@ test("deploy completion worker enqueues and broker delivers home-channel complet
     await assert.rejects(fs.access(path.join(completionsDir, "completion.json")));
   });
 });
+
+test("deploy completion worker delivers deploy-started notifications", async () => {
+  await withDbAndState(async ({ db, stateDir }) => {
+    const nowMs = Date.now();
+    setHomeSession({
+      db,
+      agentId: "main",
+      channel: "telegram",
+      channelKey: "12345",
+      nowMs,
+    });
+
+    const completionsDir = path.join(stateDir, "deploy-completions");
+    await fs.mkdir(completionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(completionsDir, "started.json"),
+      JSON.stringify(
+        {
+          id: "DC_TEST_002",
+          action: "apply",
+          status: "started",
+          triggerId: "trigger-2",
+          approvalId: "HASTART123",
+          candidateId: "cand-2",
+          lastGoodSha: "def456",
+          request: {
+            channel: "telegram",
+            channelKey: "12345",
+            agentId: "main:coder",
+            homeAgentId: "main",
+            sessionId: "session-1",
+            runId: "run-2",
+            parentRunId: null,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const worker = startDeployCompletionWorker({
+      db,
+      stateDir,
+      log: () => {},
+    });
+    assert.ok(worker, "worker should start");
+
+    const sent: Array<{ chatId: number; text: string }> = [];
+    const broker = startRunReportBroker({
+      db,
+      agent: null,
+      telegram: {
+        sendOutput: async (chatId: number, output: string) => {
+          sent.push({ chatId, text: output });
+        },
+        allowFrom: [12345],
+        allowAll: false,
+      },
+      log: () => {},
+    });
+    assert.ok(broker, "broker should start");
+
+    const workerProcessed = await worker.tick();
+    const brokerProcessed = await broker.tick();
+
+    worker.stop();
+    broker.stop();
+
+    assert.equal(workerProcessed, 1);
+    assert.equal(brokerProcessed, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.chatId, 12345);
+    assert.match(sent[0]?.text ?? "", /Deploy started on the host/i);
+    assert.match(sent[0]?.text ?? "", /building the inactive slot/i);
+    assert.match(sent[0]?.text ?? "", /Approval ID: HASTART123/i);
+
+    const reportId = latestRunReportId(db);
+    assert.ok(reportId, "expected a run report");
+    const report = getRunReportById(db, reportId!);
+    assert.equal(report?.kind, "deploy_completion");
+    assert.equal(report?.title, "Deploy started");
+    assert.equal(report?.status, "sent");
+  });
+});

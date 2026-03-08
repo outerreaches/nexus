@@ -85,6 +85,7 @@ function detectUpstreamTarget(codeDir: string): { remote: string; branch: string
     const upstream = execFileSync("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], {
       cwd: codeDir,
       encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
       timeout: 10_000,
     }).trim();
     const slash = upstream.indexOf("/");
@@ -118,6 +119,51 @@ function resolveDeployGitTarget(
   }
 
   return { remote: remote || requestedRemote, branch, notes };
+}
+
+function buildDeployChangeSummaryLines(
+  changes: DeployChangeInspection,
+  options?: {
+    deployableHeading?: string;
+    deployableLimit?: number;
+    includeSkipped?: boolean;
+    skippedLimit?: number;
+  },
+): string[] {
+  const deployableHeading = options?.deployableHeading ?? "Changed deployable paths:";
+  const deployableLimit = options?.deployableLimit ?? 10;
+  const skippedLimit = options?.skippedLimit ?? 6;
+  const lines = [
+    "Change summary:",
+    `- Total changed paths: ${changes.all.length}`,
+    `- Deployable paths: ${changes.deployable.length}`,
+    `- Approval-gated paths: ${changes.approvalRequired.length}`,
+    `- Intake-only deployable paths: ${changes.intakeDeployable.length}`,
+  ];
+  if (changes.skipped.length > 0 || options?.includeSkipped) {
+    lines.push(`- Non-deployable/skipped paths: ${changes.skipped.length}`);
+  }
+  if (changes.deployable.length > 0) {
+    lines.push(
+      "",
+      deployableHeading,
+      ...changes.deployable.slice(0, deployableLimit).map((entry) => `- ${entry}`),
+    );
+    if (changes.deployable.length > deployableLimit) {
+      lines.push(`- (+${changes.deployable.length - deployableLimit} more)`);
+    }
+  }
+  if (changes.skipped.length > 0 && options?.includeSkipped) {
+    lines.push(
+      "",
+      "Skipped non-deployable paths:",
+      ...changes.skipped.slice(0, skippedLimit).map((entry) => `- ${entry}`),
+    );
+    if (changes.skipped.length > skippedLimit) {
+      lines.push(`- (+${changes.skipped.length - skippedLimit} more)`);
+    }
+  }
+  return lines;
 }
 
 async function updateBoundCandidateState(
@@ -297,6 +343,13 @@ function formatApprovalRequiredMessage(params: {
     heading,
     ...(params.notes && params.notes.length > 0 ? ["", ...params.notes] : []),
     "",
+    ...buildDeployChangeSummaryLines(params.changes, {
+      deployableHeading: "All deployable changed paths:",
+      deployableLimit: 12,
+      includeSkipped: true,
+      skippedLimit: 8,
+    }),
+    "",
     "Approval-gated deployable paths:",
     ...(params.changes.approvalRequired.length > 0
       ? params.changes.approvalRequired.map((entry) => `- ${entry}`)
@@ -391,6 +444,12 @@ function buildDeployApprovalNotificationBody(params: {
   const lines = [
     "Deploy approval required.",
     `ID: ${params.approvalId}`,
+    "",
+    ...buildDeployChangeSummaryLines(params.changes, {
+      deployableHeading: "All deployable changed paths:",
+      deployableLimit: 8,
+      includeSkipped: false,
+    }),
     "",
     "Approval-gated paths:",
     ...(params.changes.approvalRequired.length > 0
@@ -655,7 +714,7 @@ export async function continueApprovedDeployAfterApproval(params: {
     };
   }
 
-  const target = resolveDeployGitTarget(codeDir, continuation?.remote ?? "host", continuation?.branch ?? "main");
+  const target = resolveDeployGitTarget(liveCodeDir || codeDir, continuation?.remote ?? "host", continuation?.branch ?? "main");
   for (const note of target.notes) params.log(note);
 
   await updateBoundCandidateState(
@@ -1234,7 +1293,7 @@ export const haDeploy = defineTool({
         },
       );
 
-      const target = resolveDeployGitTarget(ctx.codeDir, remote, branch);
+      const target = resolveDeployGitTarget(ctx.liveCodeDir ?? ctx.codeDir, remote, branch);
       for (const note of target.notes) ctx.log(note);
 
       trigger = {

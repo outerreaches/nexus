@@ -743,6 +743,7 @@ type TelegramStreamPreviewState = {
   mode: TelegramStreamPreviewMode;
   failed: boolean;
   hadPreview: boolean;
+  toolSummaryText: string;
   messageId?: number;
 };
 
@@ -755,6 +756,36 @@ type TelegramStreamPreview = {
   clear: () => Promise<void>;
   state: () => TelegramStreamPreviewState;
 };
+
+const TELEGRAM_TOOL_SUMMARY_MAX_ENTRIES = 16;
+const TELEGRAM_TOOL_SUMMARY_PREVIEW_MAX_CHARS = 160;
+
+function compactTelegramToolPreview(preview: string): string {
+  const compact = preview.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= TELEGRAM_TOOL_SUMMARY_PREVIEW_MAX_CHARS) return compact;
+  return `${compact.slice(0, TELEGRAM_TOOL_SUMMARY_PREVIEW_MAX_CHARS - 12)}...(+${compact.length - (TELEGRAM_TOOL_SUMMARY_PREVIEW_MAX_CHARS - 12)} chars)`;
+}
+
+function buildTelegramToolSummaryText(entries: Array<{ name: string; preview: string }>, omittedCount: number): string {
+  if (entries.length === 0) return "";
+  const lines = ["Tool activity:"];
+  for (const entry of entries) {
+    lines.push(entry.preview ? `- ${entry.name}: ${entry.preview}` : `- ${entry.name}`);
+  }
+  if (omittedCount > 0) {
+    lines.push(`- (+${omittedCount} more tool calls)`);
+  }
+  return lines.join("\n");
+}
+
+export function mergeTelegramFinalTextWithToolSummary(finalText: string, toolSummaryText: string): string {
+  const summary = toolSummaryText.trim();
+  const body = finalText.trim();
+  if (!summary) return body;
+  if (!body) return summary;
+  return `${summary}\n\n${body}`;
+}
 
 function createTelegramStreamPreview(params: {
   api: Bot["api"];
@@ -788,6 +819,8 @@ function createTelegramStreamPreview(params: {
   let ending = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let flushing = false;
+  const toolSummaryEntries: Array<{ name: string; preview: string }> = [];
+  let omittedToolSummaryEntries = 0;
   const idleWaiters: Array<() => void> = [];
 
   const resolveIdleWaiters = () => {
@@ -935,6 +968,12 @@ function createTelegramStreamPreview(params: {
       appendText(delta);
     },
     onToolStart: (name, preview) => {
+      const compactPreview = compactTelegramToolPreview(preview);
+      if (toolSummaryEntries.length < TELEGRAM_TOOL_SUMMARY_MAX_ENTRIES) {
+        toolSummaryEntries.push({ name, preview: compactPreview });
+      } else {
+        omittedToolSummaryEntries += 1;
+      }
       const label = preview
         ? `\n[ ${name}: ${preview} ]`
         : `\n[ ${name} ]`;
@@ -950,6 +989,7 @@ function createTelegramStreamPreview(params: {
       mode,
       failed,
       hadPreview,
+      toolSummaryText: buildTelegramToolSummaryText(toolSummaryEntries, omittedToolSummaryEntries),
       ...(typeof previewMessageId === "number" ? { messageId: previewMessageId } : {}),
     }),
   };
@@ -1598,6 +1638,7 @@ export async function startTelegramBot(deps: {
           const shouldFallbackSend =
             (previewState.failed && streamingFallbackToSendOutput)
             || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
+          const finalText = mergeTelegramFinalTextWithToolSummary(extracted.text, previewState.toolSummaryText);
           if (shouldFallbackSend) {
             await streamPreview.clear();
             if (previewState.failed && streamingEmitFallbackNotice && !previewState.hadPreview) {
@@ -1610,19 +1651,19 @@ export async function startTelegramBot(deps: {
                 previewState.failed ? "stream_error" : "no_preview_updates"
               }`,
             );
-            await sendOutput(chatId, res.output, { messageThreadId });
+            await sendOutput(chatId, mergeTelegramFinalTextWithToolSummary(res.output, previewState.toolSummaryText), { messageThreadId });
           } else {
             const textDelivered = await finalizeTelegramStreamPreviewText({
               api: bot.api,
               chatId,
               messageThreadId,
-              text: extracted.text,
+              text: finalText,
               preview: previewState,
               log: deps.log,
             });
-            if (!textDelivered && extracted.text.trim().length > 0) {
+            if (!textDelivered && finalText.trim().length > 0) {
               deps.log(`telegram: stream_finalize_fallback_send_output chat_id=${chatId}`);
-              await sendOutput(chatId, extracted.text, { messageThreadId });
+              await sendOutput(chatId, finalText, { messageThreadId });
             }
             // Send images as follow-up messages (they can't be part of a text stream)
             for (const img of extracted.imagePaths) {

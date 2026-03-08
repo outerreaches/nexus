@@ -252,6 +252,22 @@ process_trigger() {
   rm -f "$ACK_FILE" "$FINALIZE_PENDING"
 
   log "processing ${action}: id=${trigger_id:-unknown} msg='${msg}' remote=${remote} branch=${branch} source=${source_code_dir:-default} target_ref=${target_ref:-default}"
+  write_completion_artifact \
+    "$action" \
+    "started" \
+    "$trigger_id" \
+    "$approval_id" \
+    "$candidate_id" \
+    "$request_channel" \
+    "$request_channel_key" \
+    "$request_agent_id" \
+    "$request_home_agent_id" \
+    "$request_session_id" \
+    "$request_run_id" \
+    "$request_parent_run_id" \
+    "" \
+    "$(read_state_value "LAST_GOOD_SHA")" \
+    ""
   state_before_updated="$(read_state_value "LAST_UPDATED_AT")"
   rollout_log="$(mktemp "${STATE_DIR}/ha-deployer-apply-local.XXXXXX.log")"
 

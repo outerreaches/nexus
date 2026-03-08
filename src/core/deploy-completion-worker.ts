@@ -101,6 +101,9 @@ function parseArtifact(raw: string): DeployCompletionArtifact {
 }
 
 function formatDeployCompletionTitle(artifact: DeployCompletionArtifact): string {
+  if (artifact.status === "started") {
+    return artifact.action === "rollback" ? "Rollback started" : "Deploy started";
+  }
   if (artifact.action === "rollback") {
     return artifact.status === "rolled_back" ? "Rollback completed" : "Rollback failed";
   }
@@ -111,7 +114,14 @@ function formatDeployCompletionTitle(artifact: DeployCompletionArtifact): string
 
 function formatDeployCompletionBody(artifact: DeployCompletionArtifact): string {
   const lines: string[] = [];
-  if (artifact.action === "rollback") {
+  if (artifact.status === "started") {
+    if (artifact.action === "rollback") {
+      lines.push("Rollback started on the host.");
+    } else {
+      lines.push("Deploy started on the host.");
+      lines.push("Nexus is building the inactive slot and will switch traffic after health checks pass.");
+    }
+  } else if (artifact.action === "rollback") {
     lines.push(
       artifact.status === "rolled_back"
         ? "Rollback completed."
