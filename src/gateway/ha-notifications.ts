@@ -1,3 +1,4 @@
+// Gateway module — HA notification helpers
 import type { NexusConfig } from "../state/config.js";
 import type { NexusDatabase } from "../storage/database.js";
 
