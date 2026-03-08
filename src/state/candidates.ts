@@ -139,6 +139,17 @@ function isOpenCandidateStatus(status: CandidateStatus): boolean {
   return status !== "deployed" && status !== "rejected" && status !== "expired";
 }
 
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(targetPath);
+    return true;
+  } catch (err) {
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+    if (code === "ENOENT") return false;
+    throw err;
+  }
+}
+
 function resolveCandidateGcPolicy(overrides: Partial<CandidateGcPolicy> = {}): CandidateGcPolicy {
   const activeTtlMs = overrides.activeTtlMs ?? envInt("NEXUS_CANDIDATE_ACTIVE_TTL_MS") ?? DEFAULT_ACTIVE_TTL_MS;
   const deployedRetentionMs =
@@ -196,6 +207,42 @@ async function resolveGitHeadSha(repoDir: string): Promise<string> {
   return stdout;
 }
 
+async function ensureCandidateGitExclude(repoDir: string, pattern: string): Promise<void> {
+  const excludePath = path.join(repoDir, ".git", "info", "exclude");
+  let existing = "";
+  try {
+    existing = await fs.readFile(excludePath, "utf8");
+  } catch (err) {
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+    if (code !== "ENOENT") throw err;
+  }
+  const normalized = existing.replace(/\r\n/g, "\n");
+  const lines = new Set(
+    normalized
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  if (lines.has(pattern)) return;
+  const next = normalized.length > 0 && !normalized.endsWith("\n") ? `${normalized}\n${pattern}\n` : `${normalized}${pattern}\n`;
+  await fs.mkdir(path.dirname(excludePath), { recursive: true });
+  await fs.writeFile(excludePath, next, "utf8");
+}
+
+async function seedCandidateDependencies(liveCodeDir: string, repoDir: string): Promise<void> {
+  const liveNodeModulesDir = path.join(liveCodeDir, "node_modules");
+  const candidateNodeModulesDir = path.join(repoDir, "node_modules");
+  if (!(await pathExists(liveNodeModulesDir))) return;
+  if (await pathExists(candidateNodeModulesDir)) return;
+  await ensureCandidateGitExclude(repoDir, "/node_modules");
+  await fs.cp(liveNodeModulesDir, candidateNodeModulesDir, {
+    recursive: true,
+    dereference: false,
+    errorOnExist: true,
+    force: false,
+  });
+}
+
 export function resolveCandidateDir(candidateRootDir: string, candidateId: string): string {
   return path.join(path.resolve(candidateRootDir), candidateId);
 }
@@ -246,6 +293,7 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
   try {
     await runGit(["clone", "--quiet", "--no-hardlinks", liveCodeDir, repoDir], candidateRootDir);
     await runGit(["checkout", "--quiet", baseSha], repoDir);
+    await seedCandidateDependencies(liveCodeDir, repoDir);
 
     const record = CandidateRecordSchema.parse({
       candidateId,

@@ -403,7 +403,7 @@ Architecture and implementation guide for the **coder** preset.
 5. Review aggregate changes with \`code_diff\` before deploy (especially for multi-file edits).
 6. Deploy in the same coder run:
    - \`ha_deploy\` with \`action="apply"\`
-   - Candidate clones may start without \`node_modules\`; if local \`typecheck\`/\`build\` fails because tools are missing in \`codeDir\`, run \`npm ci\` in \`codeDir\` first and rerun validation.
+   - Candidate clones may be seeded with a private candidate-local dependency tree copied from the live checkout when available. For ordinary edit flows, do not run manual package-manager bootstrap commands like \`npm ci\` in \`codeDir\` just to recover missing tools; rely on local validation plus the authoritative \`ha_deploy\` verification step unless the task explicitly changes dependencies.
    - For approval-gated changes, call \`ha_deploy action="apply"\` without \`approvalId\` first.
    - If it returns \`APPROVAL REQUIRED\`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and stop. Operator approval via Telegram \`/act <id> approve\` or CLI \`nexus actions respond <id> approve\` will automatically continue the deploy in the backend.
    - Approval alone does not deploy code unless the backend continuation is successfully queued. Only report deploy success after the approval response confirms that automatic deploy continuation was started, or after a later status check confirms rollout success.

@@ -77,6 +77,41 @@ test("createCandidate clones the live repo and persists metadata", async () => {
   }
 });
 
+test("createCandidate seeds a private node_modules copy into the candidate and excludes it from git status", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-candidates-node-modules-test-"));
+  try {
+    const { liveCodeDir } = await createLiveRepo(root);
+    const liveNodeModulesDir = path.join(liveCodeDir, "node_modules");
+    await fs.mkdir(path.join(liveNodeModulesDir, ".bin"), { recursive: true });
+    await fs.writeFile(path.join(liveNodeModulesDir, ".bin", "tsx"), "#!/bin/sh\n", "utf8");
+
+    const candidateRootDir = path.join(root, "candidates");
+    const record = await createCandidate({
+      liveCodeDir,
+      candidateRootDir,
+      candidateId: "cand-node-modules",
+    });
+
+    const candidateNodeModulesDir = path.join(record.repoDir, "node_modules");
+    const stat = await fs.lstat(candidateNodeModulesDir);
+    assert.equal(stat.isDirectory(), true);
+    assert.equal(stat.isSymbolicLink(), false);
+    assert.equal(await fs.readFile(path.join(candidateNodeModulesDir, ".bin", "tsx"), "utf8"), "#!/bin/sh\n");
+
+    await fs.rm(liveNodeModulesDir, { recursive: true, force: true });
+    await fs.access(path.join(candidateNodeModulesDir, ".bin", "tsx"));
+
+    const excludePath = path.join(record.repoDir, ".git", "info", "exclude");
+    const excludeText = await fs.readFile(excludePath, "utf8");
+    assert.match(excludeText, /^\/node_modules$/m);
+
+    const status = await git(["status", "--short"], record.repoDir);
+    assert.equal(status, "");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("updateCandidate persists lifecycle metadata", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-candidates-update-test-"));
   try {

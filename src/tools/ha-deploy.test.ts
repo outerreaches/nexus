@@ -122,13 +122,19 @@ function createContext(params: {
   telegram?: ToolContext["telegram"];
   agentId?: string;
   homeAgentId?: string;
+  codeDir?: string;
+  liveCodeDir?: string;
+  candidateRootDir?: string;
+  candidate?: ToolContext["candidate"];
 }): ToolContext {
   return {
     db: params.db,
     workspaceDir: params.stateDir,
     stateDir: params.stateDir,
-    codeDir: params.repoDir,
-    liveCodeDir: params.repoDir,
+    codeDir: params.codeDir ?? params.repoDir,
+    liveCodeDir: params.liveCodeDir ?? params.repoDir,
+    candidateRootDir: params.candidateRootDir,
+    candidate: params.candidate,
     request: {
       channel: "cli",
       channelKey: "local",
@@ -493,6 +499,57 @@ test("ha_deploy bootstraps candidate dependencies before verification", async ()
     assert.match(result, /APPROVAL REQUIRED/);
     const installedModule = path.join(repoDir, "node_modules", "bootstrap-ok", "typecheck.js");
     await fs.access(installedModule);
+  });
+});
+
+test("ha_deploy refreshes candidate-local node_modules when dependency manifests change", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await configureOfflineInstallableVerificationRepo(repoDir);
+    await execFileAsync("npm", ["ci"], {
+      cwd: repoDir,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+
+    const candidateRootDir = path.join(stateDir, "candidates");
+    const candidate = await createCandidate({
+      liveCodeDir: repoDir,
+      candidateRootDir,
+      candidateId: "cand-bootstrap-detach",
+      nowMs: nowMs(),
+    });
+    await writeFile(candidate.repoDir, "package-lock.json", `${await fs.readFile(path.join(candidate.repoDir, "package-lock.json"), "utf8")} \n`);
+
+    const candidateNodeModulesDir = path.join(candidate.repoDir, "node_modules");
+    assert.equal((await fs.lstat(candidateNodeModulesDir)).isSymbolicLink(), false);
+    await fs.rm(path.join(candidateNodeModulesDir, "bootstrap-ok"), { recursive: true, force: true });
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({
+        db,
+        repoDir,
+        stateDir,
+        nowMs,
+        codeDir: candidate.repoDir,
+        liveCodeDir: repoDir,
+        candidateRootDir,
+        candidate: {
+          candidateId: candidate.candidateId,
+          baseSha: candidate.baseSha,
+          repoDir: candidate.repoDir,
+        },
+      }),
+    );
+
+    assert.match(result, /APPROVAL REQUIRED/);
+    assert.equal((await fs.lstat(candidateNodeModulesDir)).isSymbolicLink(), false);
+    await fs.access(path.join(candidateNodeModulesDir, "bootstrap-ok", "typecheck.js"));
   });
 });
 

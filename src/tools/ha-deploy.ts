@@ -229,9 +229,26 @@ function runVerificationCommand(codeDir: string, args: string[]): void {
   });
 }
 
-function detectDependencyBootstrapCommand(codeDir: string): { label: string; args: string[] } | null {
+const DEPENDENCY_MANIFEST_PATHS = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+]);
+
+function dependencyManifestsChanged(changes: DeployChangeInspection): boolean {
+  return changes.all.some((relativePath) => DEPENDENCY_MANIFEST_PATHS.has(relativePath));
+}
+
+function detectDependencyBootstrapCommand(
+  codeDir: string,
+  changes: DeployChangeInspection,
+): { label: string; args: string[] } | null {
   if (!existsSync(path.join(codeDir, "package.json"))) return null;
-  if (existsSync(path.join(codeDir, "node_modules"))) return null;
+  const hasNodeModules = existsSync(path.join(codeDir, "node_modules"));
+  const manifestsChanged = dependencyManifestsChanged(changes);
+  if (hasNodeModules && !manifestsChanged) return null;
   if (existsSync(path.join(codeDir, "pnpm-lock.yaml"))) {
     return { label: "dependency bootstrap", args: ["pnpm", "install", "--frozen-lockfile"] };
   }
@@ -280,7 +297,7 @@ async function verifyDeployCandidate(params: {
     }
   }
 
-  const dependencyBootstrap = detectDependencyBootstrapCommand(params.ctx.codeDir);
+  const dependencyBootstrap = detectDependencyBootstrapCommand(params.ctx.codeDir, params.changes);
   if (dependencyBootstrap) {
     params.ctx.log(`deploy verification: running ${dependencyBootstrap.args.join(" ")}`);
     try {
