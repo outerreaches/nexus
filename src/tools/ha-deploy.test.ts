@@ -553,6 +553,60 @@ test("ha_deploy refreshes candidate-local node_modules when dependency manifests
   });
 });
 
+test("ha_deploy refreshes a stale seeded dependency tree when verification hits missing modules", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await configureOfflineInstallableVerificationRepo(repoDir);
+    await execFileAsync("npm", ["ci"], {
+      cwd: repoDir,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+
+    const liveSeedDir = path.join(repoDir, "node_modules", "bootstrap-ok");
+    await fs.rm(liveSeedDir, { recursive: true, force: true });
+    await fs.mkdir(liveSeedDir, { recursive: true });
+    await fs.writeFile(path.join(liveSeedDir, "package.json"), "{\"name\":\"bootstrap-ok\"}\n", "utf8");
+
+    const candidateRootDir = path.join(stateDir, "candidates");
+    const candidate = await createCandidate({
+      liveCodeDir: repoDir,
+      candidateRootDir,
+      candidateId: "cand-stale-seed-refresh",
+      nowMs: nowMs(),
+    });
+
+    await writeFile(candidate.repoDir, "src/tools/example.ts", "export const example = 1;\n");
+    const candidateNodeModulesDir = path.join(candidate.repoDir, "node_modules");
+    await assert.rejects(fs.access(path.join(candidateNodeModulesDir, "bootstrap-ok", "typecheck.js")));
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({
+        db,
+        repoDir,
+        stateDir,
+        nowMs,
+        codeDir: candidate.repoDir,
+        liveCodeDir: repoDir,
+        candidateRootDir,
+        candidate: {
+          candidateId: candidate.candidateId,
+          baseSha: candidate.baseSha,
+          repoDir: candidate.repoDir,
+        },
+      }),
+    );
+
+    assert.match(result, /APPROVAL REQUIRED/);
+    await fs.access(path.join(candidateNodeModulesDir, "bootstrap-ok", "typecheck.js"));
+  });
+});
+
 test("continueApprovedDeployAfterApproval queues the deploy trigger automatically", async () => {
   await withRepoAndDb(async ({ repoDir, stateDir, nowMs }) => {
     const candidateRootDir = path.join(stateDir, "candidates");

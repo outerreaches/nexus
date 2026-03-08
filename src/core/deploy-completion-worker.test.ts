@@ -211,3 +211,86 @@ test("deploy completion worker delivers deploy-started notifications", async () 
     await fs.access(path.join(completionsDir, "started.json.processing.notified"));
   });
 });
+
+test("deploy completion worker delivers finalize-timeout notifications", async () => {
+  await withDbAndState(async ({ db, stateDir }) => {
+    const nowMs = Date.now();
+    setHomeSession({
+      db,
+      agentId: "main",
+      channel: "telegram",
+      channelKey: "12345",
+      nowMs,
+    });
+
+    const completionsDir = path.join(stateDir, "deploy-completions");
+    await fs.mkdir(completionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(completionsDir, "finalized-timeout.json"),
+      JSON.stringify(
+        {
+          id: "DC_TEST_003",
+          action: "apply",
+          status: "finalized_without_ack",
+          triggerId: "trigger-3",
+          approvalId: "HAFINAL123",
+          candidateId: "cand-3",
+          effectiveSha: "abc123",
+          lastGoodSha: "abc123",
+          failureReason: "finalize proceeded after ack timeout (600s)",
+          request: {
+            channel: "telegram",
+            channelKey: "12345",
+            agentId: "main:coder",
+            homeAgentId: "main",
+            sessionId: "session-1",
+            runId: "run-3",
+            parentRunId: null,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const worker = startDeployCompletionWorker({
+      db,
+      stateDir,
+      log: () => {},
+    });
+    assert.ok(worker, "worker should start");
+
+    const sent: Array<{ chatId: number; text: string }> = [];
+    const broker = startRunReportBroker({
+      db,
+      agent: null,
+      telegram: {
+        sendOutput: async (chatId: number, output: string) => {
+          sent.push({ chatId, text: output });
+        },
+        allowFrom: [12345],
+        allowAll: false,
+      },
+      log: () => {},
+    });
+    assert.ok(broker, "broker should start");
+
+    const workerProcessed = await worker.tick();
+    const brokerProcessed = await broker.tick();
+
+    worker.stop();
+    broker.stop();
+
+    assert.equal(workerProcessed, 1);
+    assert.equal(brokerProcessed, 1);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.text ?? "", /Deploy finalized after waiting for operator ack timeout/i);
+    assert.match(sent[0]?.text ?? "", /ack timeout/i);
+
+    const reportId = latestRunReportId(db);
+    assert.ok(reportId, "expected a run report");
+    const report = getRunReportById(db, reportId!);
+    assert.equal(report?.title, "Deploy finalized after ack timeout");
+  });
+});

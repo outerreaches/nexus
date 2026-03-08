@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 
@@ -970,9 +970,21 @@ export class AgentService {
         return;
       }
 
-      const ackFile = path.join(stateDir, "deploy-ack");
+      const triggerId = (pending.triggerId ?? "").trim();
+      if (!triggerId) {
+        this.deps.onRunnerLog?.("deploy-ack deferred: pending deploy is missing triggerId");
+        return;
+      }
+      const ackDir = path.join(stateDir, "deploy-acks");
+      mkdirSync(ackDir, { recursive: true });
+      const ackFile = path.join(ackDir, `${triggerId}.json`);
+      if (existsSync(ackFile)) {
+        try { unlinkSync(finalizePending); } catch { /* race with ha-deployer cleanup */ }
+        this.deps.onRunnerLog?.("deploy-ack skipped: matching ack file already exists");
+        return;
+      }
       const ackPayload = {
-        triggerId: pending?.triggerId ?? null,
+        triggerId,
         expectedSha: pending?.expectedSha ?? null,
         ackedAt: new Date().toISOString(),
         by: {
@@ -983,7 +995,9 @@ export class AgentService {
           agentId: current.agentId,
         },
       };
-      writeFileSync(ackFile, JSON.stringify(ackPayload, null, 2) + "\n");
+      const ackTmp = `${ackFile}.tmp.${process.pid}.${Date.now()}`;
+      writeFileSync(ackTmp, JSON.stringify(ackPayload, null, 2) + "\n");
+      renameSync(ackTmp, ackFile);
       try { unlinkSync(finalizePending); } catch { /* race with ha-deployer cleanup */ }
       this.deps.onRunnerLog?.("deploy-ack written (matched pending deploy context)");
     } catch {
@@ -1000,6 +1014,7 @@ type FinalizePending = {
     channel?: string;
     channelKey?: string;
     agentId?: string;
+    homeAgentId?: string;
     sessionId?: string;
     runId?: string;
     parentRunId?: string;
@@ -1019,9 +1034,9 @@ function readFinalizePending(filePath: string): FinalizePending | null {
   }
 }
 
-function shouldAckPending(
+export function shouldAckPending(
   pending: FinalizePending,
-  current: { runId: string | null; sessionId: string; channel: string; channelKey: string },
+  current: { runId: string | null; sessionId: string; channel: string; channelKey: string; agentId?: string },
 ): boolean {
   const expectedRunId = (
     pending.expectedAckRunId ??
@@ -1036,17 +1051,13 @@ function shouldAckPending(
   const expectedSessionId = (pending.request?.sessionId ?? "").trim();
   if (expectedSessionId) {
     if (expectedSessionId !== current.sessionId) return false;
+    const expectedAgentId = (pending.request?.homeAgentId ?? pending.request?.agentId ?? "").trim();
+    if (expectedAgentId && expectedAgentId !== (current.agentId ?? "").trim()) return false;
     const expectedChannel = (pending.request?.channel ?? "").trim();
     const expectedChannelKey = (pending.request?.channelKey ?? "").trim();
     if (expectedChannel && expectedChannel !== current.channel) return false;
     if (expectedChannelKey && expectedChannelKey !== current.channelKey) return false;
     return true;
-  }
-
-  const expectedChannel = (pending.request?.channel ?? "").trim();
-  const expectedChannelKey = (pending.request?.channelKey ?? "").trim();
-  if (expectedChannel && expectedChannelKey) {
-    return expectedChannel === current.channel && expectedChannelKey === current.channelKey;
   }
   return false;
 }

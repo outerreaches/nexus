@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -28,6 +28,15 @@ const CandidateStatusSchema = z.enum([
 const CandidateVerificationStatusSchema = z.enum(["pending", "passed", "failed"]);
 const CandidateApprovalStatusSchema = z.enum(["pending", "approved", "rejected"]);
 const CandidateClassificationSchema = z.enum(["pending", "intake_only", "approval_required"]);
+const CandidateDependencySeedSchema = z.object({
+  source: z.literal("copied"),
+  seededAt: z.number().int().nonnegative(),
+  packageJsonHash: z.string().min(1).nullable().default(null),
+  packageLockHash: z.string().min(1).nullable().default(null),
+  npmShrinkwrapHash: z.string().min(1).nullable().default(null),
+  pnpmLockHash: z.string().min(1).nullable().default(null),
+  yarnLockHash: z.string().min(1).nullable().default(null),
+});
 
 export const CandidateBindingSchema = z.object({
   candidateId: CandidateIdSchema,
@@ -54,6 +63,7 @@ export const CandidateRecordSchema = CandidateBindingSchema.extend({
   verificationFingerprint: z.string().min(1).nullable().default(null),
   verifiedAt: z.number().int().nonnegative().nullable().default(null),
   lastError: z.string().min(1).nullable().default(null),
+  dependencySeed: CandidateDependencySeedSchema.nullable().default(null),
 });
 
 export type CandidateRecord = z.infer<typeof CandidateRecordSchema>;
@@ -132,6 +142,7 @@ function objectWithNormalizedLegacyFields(raw: unknown): Record<string, unknown>
   if (parsed.verificationFingerprint === undefined) parsed.verificationFingerprint = null;
   if (parsed.verifiedAt === undefined) parsed.verifiedAt = null;
   if (parsed.lastError === undefined) parsed.lastError = null;
+  if (parsed.dependencySeed === undefined) parsed.dependencySeed = null;
   return parsed;
 }
 
@@ -229,17 +240,68 @@ async function ensureCandidateGitExclude(repoDir: string, pattern: string): Prom
   await fs.writeFile(excludePath, next, "utf8");
 }
 
-async function seedCandidateDependencies(liveCodeDir: string, repoDir: string): Promise<void> {
+type DependencyManifestHashes = {
+  packageJsonHash: string | null;
+  packageLockHash: string | null;
+  npmShrinkwrapHash: string | null;
+  pnpmLockHash: string | null;
+  yarnLockHash: string | null;
+};
+
+async function hashFileIfPresent(filePath: string): Promise<string | null> {
+  try {
+    const buffer = await fs.readFile(filePath);
+    return createHash("sha256").update(buffer).digest("hex");
+  } catch (err) {
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+    if (code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+async function collectDependencyManifestHashes(repoDir: string): Promise<DependencyManifestHashes> {
+  return {
+    packageJsonHash: await hashFileIfPresent(path.join(repoDir, "package.json")),
+    packageLockHash: await hashFileIfPresent(path.join(repoDir, "package-lock.json")),
+    npmShrinkwrapHash: await hashFileIfPresent(path.join(repoDir, "npm-shrinkwrap.json")),
+    pnpmLockHash: await hashFileIfPresent(path.join(repoDir, "pnpm-lock.yaml")),
+    yarnLockHash: await hashFileIfPresent(path.join(repoDir, "yarn.lock")),
+  };
+}
+
+function dependencyHashesMatch(a: DependencyManifestHashes, b: DependencyManifestHashes): boolean {
+  return (
+    a.packageJsonHash === b.packageJsonHash &&
+    a.packageLockHash === b.packageLockHash &&
+    a.npmShrinkwrapHash === b.npmShrinkwrapHash &&
+    a.pnpmLockHash === b.pnpmLockHash &&
+    a.yarnLockHash === b.yarnLockHash
+  );
+}
+
+async function seedCandidateDependencies(
+  liveCodeDir: string,
+  repoDir: string,
+  nowMs: number,
+): Promise<z.infer<typeof CandidateDependencySeedSchema> | null> {
   const liveNodeModulesDir = path.join(liveCodeDir, "node_modules");
   const candidateNodeModulesDir = path.join(repoDir, "node_modules");
-  if (!(await pathExists(liveNodeModulesDir))) return;
-  if (await pathExists(candidateNodeModulesDir)) return;
+  if (!(await pathExists(liveNodeModulesDir))) return null;
+  if (await pathExists(candidateNodeModulesDir)) return null;
+  const liveHashes = await collectDependencyManifestHashes(liveCodeDir);
+  const candidateHashes = await collectDependencyManifestHashes(repoDir);
+  if (!dependencyHashesMatch(liveHashes, candidateHashes)) return null;
   await ensureCandidateGitExclude(repoDir, "/node_modules");
   await fs.cp(liveNodeModulesDir, candidateNodeModulesDir, {
     recursive: true,
     dereference: false,
     errorOnExist: true,
     force: false,
+  });
+  return CandidateDependencySeedSchema.parse({
+    source: "copied",
+    seededAt: nowMs,
+    ...liveHashes,
   });
 }
 
@@ -293,7 +355,7 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
   try {
     await runGit(["clone", "--quiet", "--no-hardlinks", liveCodeDir, repoDir], candidateRootDir);
     await runGit(["checkout", "--quiet", baseSha], repoDir);
-    await seedCandidateDependencies(liveCodeDir, repoDir);
+    const dependencySeed = await seedCandidateDependencies(liveCodeDir, repoDir, nowMs);
 
     const record = CandidateRecordSchema.parse({
       candidateId,
@@ -315,6 +377,7 @@ export async function createCandidate(params: CreateCandidateParams): Promise<Ca
       verificationFingerprint: null,
       verifiedAt: null,
       lastError: null,
+      dependencySeed,
     });
     await fs.writeFile(metadataPath, formatJson(record), "utf8");
     return record;

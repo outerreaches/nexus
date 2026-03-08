@@ -107,6 +107,10 @@ function formatDeployCompletionTitle(artifact: DeployCompletionArtifact): string
   if (artifact.action === "rollback") {
     return artifact.status === "rolled_back" ? "Rollback completed" : "Rollback failed";
   }
+  if (artifact.status === "finalized") return "Deploy finalized";
+  if (artifact.status === "finalized_without_ack") return "Deploy finalized after ack timeout";
+  if (artifact.status === "finalize_failed") return "Deploy finalize failed";
+  if (artifact.status === "finalize_failed_without_ack") return "Deploy finalize failed after ack timeout";
   if (artifact.status === "applied_local_push_failed") return "Deploy applied, push failed";
   if (artifact.status.startsWith("applied_local")) return "Deploy applied";
   return "Deploy failed";
@@ -127,6 +131,17 @@ function formatDeployCompletionBody(artifact: DeployCompletionArtifact): string 
         ? "Rollback completed."
         : "Rollback failed.",
     );
+  } else if (artifact.status === "finalized") {
+    lines.push("Deploy finalized successfully. Both active and standby slots should now be on the new code.");
+  } else if (artifact.status === "finalized_without_ack") {
+    lines.push("Deploy finalized after waiting for operator ack timeout.");
+    lines.push("The active gateway is serving the new code and the old slot was rebuilt, but the original request cycle never wrote a matching deploy ack.");
+  } else if (artifact.status === "finalize_failed") {
+    lines.push("Deploy applied, but finalizing the old standby slot failed.");
+    lines.push("The active gateway is serving the new code, but redundancy may be degraded until standby is rebuilt.");
+  } else if (artifact.status === "finalize_failed_without_ack") {
+    lines.push("Deploy applied, ack timed out, and finalizing the old standby slot failed.");
+    lines.push("The active gateway is serving the new code, but redundancy may be degraded until standby is rebuilt.");
   } else if (artifact.status === "applied_local_push_failed") {
     lines.push("Deploy applied and the active gateway switched, but push to the remote failed.");
   } else if (artifact.status.startsWith("applied_local")) {

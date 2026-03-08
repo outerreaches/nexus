@@ -32,7 +32,7 @@ TRIGGER_FILE="${STATE_DIR}/deploy-trigger.json"
 PROCESSING_FILE="${STATE_DIR}/deploy-trigger.processing.json"
 COMPLETIONS_DIR="${STATE_DIR}/deploy-completions"
 FINALIZE_PENDING="${STATE_DIR}/finalize-pending"
-ACK_FILE="${STATE_DIR}/deploy-ack"
+ACK_DIR="${STATE_DIR}/deploy-acks"
 STATE_FILE="${STATE_DIR}/deploy-state.env"
 LOCK_DIR="${STATE_DIR}/ha-rollout.lock"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
@@ -206,13 +206,10 @@ write_completion_artifact() {
   log "wrote deploy completion artifact ${final_file}"
 }
 
-ack_matches_trigger() {
-  local expected_trigger="$1"
-  [ -f "$ACK_FILE" ] || return 1
-  [ -n "$expected_trigger" ] || return 0
-  local got
-  got="$(jq -r '.triggerId // empty' "$ACK_FILE" 2>/dev/null || true)"
-  [ -n "$got" ] && [ "$got" = "$expected_trigger" ]
+ack_file_path() {
+  local trigger_id="$1"
+  local safe_trigger="${trigger_id:-legacy}"
+  printf '%s/%s.json' "$ACK_DIR" "$safe_trigger"
 }
 
 process_trigger() {
@@ -220,6 +217,7 @@ process_trigger() {
   local request_channel request_channel_key request_agent_id request_home_agent_id request_session_id request_run_id request_parent_run_id
   local approval_id candidate_id
   local expected_ack_run_id deployed_sha rollout_log apply_status state_before_updated state_after_updated state_after_status failure_reason
+  local ack_file waited acked ack_timeout_reason finalize_log finalize_status finalize_reason
 
   # Atomically claim the trigger
   if ! mv "$TRIGGER_FILE" "$PROCESSING_FILE" 2>/dev/null; then
@@ -251,8 +249,11 @@ process_trigger() {
 
   [ -n "$msg" ] || msg="ha-rollout: apply local changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+  ack_file="$(ack_file_path "$trigger_id")"
+  mkdir -p "$ACK_DIR"
+
   # Clean up stale ack/pending from previous deploys
-  rm -f "$ACK_FILE" "$FINALIZE_PENDING"
+  rm -f "$ack_file" "$FINALIZE_PENDING"
 
   log "processing ${action}: id=${trigger_id:-unknown} msg='${msg}' remote=${remote} branch=${branch} source=${source_code_dir:-default} target_ref=${target_ref:-default}"
   write_completion_artifact \
@@ -366,36 +367,107 @@ process_trigger() {
 
     # Wait for the orchestrator to write deploy-ack after its full request
     # cycle completes (coder done + orchestrator sends reply).
-    local waited=0
-    local acked=0
+    waited=0
+    acked=0
     while [ "$waited" -lt "$ACK_TIMEOUT" ]; do
-      if [ -f "$ACK_FILE" ]; then
-        if ack_matches_trigger "$trigger_id"; then
-          acked=1
-          break
-        fi
-        warn "ignoring deploy-ack that does not match trigger id=${trigger_id:-unknown}"
-        rm -f "$ACK_FILE"
+      if [ -f "$ack_file" ]; then
+        acked=1
+        break
       fi
       sleep "$POLL_INTERVAL"
       waited=$((waited + POLL_INTERVAL))
     done
-    rm -f "$ACK_FILE" "$FINALIZE_PENDING"
+    rm -f "$ack_file" "$FINALIZE_PENDING"
 
     if [ "$acked" -eq 1 ]; then
       log "orchestrator acked after ${waited}s"
+      ack_timeout_reason=""
     else
       warn "ack timeout (${ACK_TIMEOUT}s) — rebuilding old primary anyway"
+      ack_timeout_reason="finalize proceeded after ack timeout (${ACK_TIMEOUT}s)"
     fi
 
     log "rebuilding old primary with new code (target=${deployed_sha:-HEAD})"
-    if [ -n "$deployed_sha" ] && "$ROLLOUT_SCRIPT" finalize "$deployed_sha"; then
-      log "old primary rebuilt successfully — both containers up to date"
-    elif [ -z "$deployed_sha" ] && "$ROLLOUT_SCRIPT" finalize; then
+    finalize_log="$(mktemp "${STATE_DIR}/ha-deployer-finalize.XXXXXX.log")"
+    if {
+      if [ -n "$deployed_sha" ]; then
+        "$ROLLOUT_SCRIPT" finalize "$deployed_sha" 2>&1 | tee "$finalize_log"
+      else
+        "$ROLLOUT_SCRIPT" finalize 2>&1 | tee "$finalize_log"
+      fi
+    }; then
+      finalize_status="finalized"
+      finalize_reason=""
+      if [ "$acked" != "1" ]; then
+        finalize_status="finalized_without_ack"
+        finalize_reason="$ack_timeout_reason"
+      fi
+      cat >"$STATE_FILE" <<EOF
+LAST_GOOD_SHA=${deployed_sha}
+LAST_DEPLOY_SHA=${deployed_sha}
+LAST_STATUS=${finalize_status}
+LAST_ACTIVE_SLOT=$(sanitize_state_value "$(read_state_value "LAST_ACTIVE_SLOT")")
+LAST_UPDATED_AT=$(date +%s)
+LAST_DEPLOY_PID=
+LAST_EFFECTIVE_SHA=$(sanitize_state_value "${deployed_sha}")
+LAST_FAILURE_REASON=$(sanitize_state_value "${finalize_reason}")
+LAST_TRIGGER_ID=$(sanitize_state_value "${trigger_id}")
+EOF
+      write_completion_artifact \
+        "$action" \
+        "$finalize_status" \
+        "$trigger_id" \
+        "$approval_id" \
+        "$candidate_id" \
+        "$request_channel" \
+        "$request_channel_key" \
+        "$request_agent_id" \
+        "$request_home_agent_id" \
+        "$request_session_id" \
+        "$request_run_id" \
+        "$request_parent_run_id" \
+        "$deployed_sha" \
+        "$deployed_sha" \
+        "$finalize_reason"
       log "old primary rebuilt successfully — both containers up to date"
     else
-      warn "old primary rebuild failed (non-fatal — new active is serving)"
+      failure_reason="$(extract_last_nonempty_line "$finalize_log")"
+      [ -n "$failure_reason" ] || failure_reason="finalize failed rebuilding old primary"
+      finalize_status="finalize_failed"
+      if [ "$acked" != "1" ]; then
+        finalize_status="finalize_failed_without_ack"
+        failure_reason="${failure_reason}; ${ack_timeout_reason}"
+      fi
+      cat >"$STATE_FILE" <<EOF
+LAST_GOOD_SHA=${deployed_sha}
+LAST_DEPLOY_SHA=${deployed_sha}
+LAST_STATUS=${finalize_status}
+LAST_ACTIVE_SLOT=$(sanitize_state_value "$(read_state_value "LAST_ACTIVE_SLOT")")
+LAST_UPDATED_AT=$(date +%s)
+LAST_DEPLOY_PID=
+LAST_EFFECTIVE_SHA=$(sanitize_state_value "${deployed_sha}")
+LAST_FAILURE_REASON=$(sanitize_state_value "${failure_reason}")
+LAST_TRIGGER_ID=$(sanitize_state_value "${trigger_id}")
+EOF
+      write_completion_artifact \
+        "$action" \
+        "$finalize_status" \
+        "$trigger_id" \
+        "$approval_id" \
+        "$candidate_id" \
+        "$request_channel" \
+        "$request_channel_key" \
+        "$request_agent_id" \
+        "$request_home_agent_id" \
+        "$request_session_id" \
+        "$request_run_id" \
+        "$request_parent_run_id" \
+        "$deployed_sha" \
+        "$deployed_sha" \
+        "$failure_reason"
+      warn "old primary rebuild failed (new active is still serving): ${failure_reason}"
     fi
+    rm -f "$finalize_log"
   else
     apply_status=$?
     state_after_updated="$(read_state_value "LAST_UPDATED_AT")"

@@ -268,6 +268,10 @@ function formatCommandFailure(command: string, err: unknown): string {
   return detail ? `${base}\n\n${truncateDetail(detail)}` : base;
 }
 
+function looksLikeDependencySeedFailure(detail: string): boolean {
+  return /(tsx:\s*not found|command not found|ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|Cannot find module)/i.test(detail);
+}
+
 function runVerificationCommand(codeDir: string, args: string[]): void {
   execFileSync(args[0]!, args.slice(1), {
     cwd: codeDir,
@@ -292,11 +296,12 @@ function dependencyManifestsChanged(changes: DeployChangeInspection): boolean {
 function detectDependencyBootstrapCommand(
   codeDir: string,
   changes: DeployChangeInspection,
+  options?: { forceRefresh?: boolean },
 ): { label: string; args: string[] } | null {
   if (!existsSync(path.join(codeDir, "package.json"))) return null;
   const hasNodeModules = existsSync(path.join(codeDir, "node_modules"));
   const manifestsChanged = dependencyManifestsChanged(changes);
-  if (hasNodeModules && !manifestsChanged) return null;
+  if (!options?.forceRefresh && hasNodeModules && !manifestsChanged) return null;
   if (existsSync(path.join(codeDir, "pnpm-lock.yaml"))) {
     return { label: "dependency bootstrap", args: ["pnpm", "install", "--frozen-lockfile"] };
   }
@@ -307,6 +312,59 @@ function detectDependencyBootstrapCommand(
     return { label: "dependency bootstrap", args: ["npm", "ci"] };
   }
   return { label: "dependency bootstrap", args: ["npm", "install", "--package-lock=false"] };
+}
+
+async function attemptDependencySeedRecovery(params: {
+  changes: DeployChangeInspection;
+  ctx: {
+    codeDir: string;
+    candidateRootDir?: string;
+    candidate?: { candidateId: string };
+    nowMs: () => number;
+    log: (msg: string) => void;
+  };
+  candidateStateCtx: {
+    candidateRootDir?: string;
+    candidate?: { candidateId: string };
+    nowMs: () => number;
+    log: (msg: string) => void;
+  };
+  commandLabel: string;
+  detail: string;
+  attempted: boolean;
+}): Promise<{ recovered: boolean; message?: string }> {
+  if (params.attempted) return { recovered: false };
+  if (dependencyManifestsChanged(params.changes)) return { recovered: false };
+  if (!existsSync(path.join(params.ctx.codeDir, "node_modules"))) return { recovered: false };
+  if (!looksLikeDependencySeedFailure(params.detail)) return { recovered: false };
+
+  const refreshCommand = detectDependencyBootstrapCommand(params.ctx.codeDir, params.changes, {
+    forceRefresh: true,
+  });
+  if (!refreshCommand) return { recovered: false };
+
+  params.ctx.log(
+    `deploy verification: refreshing candidate dependencies after ${params.commandLabel} failed with a dependency-seed signature`,
+  );
+  try {
+    runVerificationCommand(params.ctx.codeDir, refreshCommand.args);
+    await updateBoundCandidateState(params.candidateStateCtx, { lastError: null });
+    return { recovered: true };
+  } catch (err) {
+    const refreshDetail = formatCommandFailure(refreshCommand.args.join(" "), err);
+    await updateBoundCandidateState(params.candidateStateCtx, {
+      status: "failed",
+      verificationStatus: "failed",
+      verificationFingerprint: params.changes.fingerprint ?? null,
+      verifiedAt: null,
+      lastError:
+        `verification failed during dependency seed refresh after ${params.commandLabel}: ${refreshDetail}`,
+    });
+    return {
+      recovered: false,
+      message: `ERROR: deploy verification failed during dependency seed refresh.\n\n${refreshDetail}`,
+    };
+  }
 }
 
 async function verifyDeployCandidate(params: {
@@ -368,20 +426,56 @@ async function verifyDeployCandidate(params: {
     { label: "build", args: ["npm", "run", "build"] },
   ];
 
+  let dependencySeedRecoveryAttempted = false;
   for (const command of commands) {
     params.ctx.log(`deploy verification: running ${command.args.join(" ")}`);
     try {
       runVerificationCommand(params.ctx.codeDir, command.args);
     } catch (err) {
       const detail = formatCommandFailure(command.args.join(" "), err);
+      const recovery = await attemptDependencySeedRecovery({
+        changes: params.changes,
+        ctx: params.ctx,
+        candidateStateCtx,
+        commandLabel: command.label,
+        detail,
+        attempted: dependencySeedRecoveryAttempted,
+      });
+      if (recovery.message) return recovery.message;
+      if (recovery.recovered) {
+        dependencySeedRecoveryAttempted = true;
+        params.ctx.log(`deploy verification: rerunning ${command.args.join(" ")} after dependency refresh`);
+        try {
+          runVerificationCommand(params.ctx.codeDir, command.args);
+          continue;
+        } catch (retryErr) {
+          const retryDetail = formatCommandFailure(command.args.join(" "), retryErr);
+          await updateBoundCandidateState(candidateStateCtx, {
+            status: "failed",
+            verificationStatus: "failed",
+            verificationFingerprint: params.changes.fingerprint ?? null,
+            verifiedAt: null,
+            lastError: `verification failed during ${command.label} after dependency refresh: ${retryDetail}`,
+          });
+          return `ERROR: deploy verification failed during ${command.label} after dependency refresh.\n\n${retryDetail}`;
+        }
+      }
       await updateBoundCandidateState(candidateStateCtx, {
         status: "failed",
         verificationStatus: "failed",
         verificationFingerprint: params.changes.fingerprint ?? null,
         verifiedAt: null,
-        lastError: `verification failed during ${command.label}: ${detail}`,
+        lastError:
+          `verification failed during ${command.label}: ${detail}` +
+          (looksLikeDependencySeedFailure(detail)
+            ? "\n\nCandidate dependency seed may be stale or corrupt."
+            : ""),
       });
-      return `ERROR: deploy verification failed during ${command.label}.\n\n${detail}`;
+      return `ERROR: deploy verification failed during ${command.label}.\n\n${detail}${
+        looksLikeDependencySeedFailure(detail)
+          ? "\n\nCandidate dependency seed may be stale or corrupt."
+          : ""
+      }`;
     }
   }
 
@@ -1187,6 +1281,26 @@ export const haDeploy = defineTool({
           {
             status: "deployed",
             lastError: snapshot.failureReason ?? "deploy applied locally but push to remote failed",
+          },
+        );
+      }
+      if (status === "finalized" || status === "finalized_without_ack") {
+        return await returnWithCandidateState(
+          `OK: deploy completed (status=${status})\n\n${stateContent.trim()}\n\n${postDeployNote}`,
+          {
+            status: "deployed",
+            lastError: status === "finalized_without_ack" ? snapshot.failureReason ?? null : null,
+          },
+        );
+      }
+      if (status === "finalize_failed" || status === "finalize_failed_without_ack") {
+        return await returnWithCandidateState(
+          "ERROR: deploy applied but finalizing the old standby failed " +
+            `(status=${status}). Active traffic should already be on the new code, but redundancy may be degraded.\n\n` +
+            `${stateContent.trim()}${failureSuffix}`,
+          {
+            status: "deployed",
+            lastError: snapshot.failureReason ?? `finalize failed (status=${status})`,
           },
         );
       }

@@ -1102,37 +1102,8 @@ cmd_apply_local() {
     fail "apply-local failed waiting for candidate live health"
   fi
 
-  # Phase 2: Commit the code now that we know it builds and boots
-  if [ -z "$commit_message" ]; then
-    commit_message="ha-rollout: apply local changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  fi
-
-  log "committing local code changes on host"
-  if ! git -C "$CODE_DIR" add -A; then
-    rollback_after_failure "git add failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
-    fail "apply-local failed during git add"
-  fi
-
-  # Ensure git identity is configured (needed for commit)
-  if [ -z "$(git -C "$CODE_DIR" config user.name 2>/dev/null)" ]; then
-    git -C "$CODE_DIR" config user.name "Nexus Deploy"
-  fi
-  if [ -z "$(git -C "$CODE_DIR" config user.email 2>/dev/null)" ]; then
-    git -C "$CODE_DIR" config user.email "nexus@deploy.local"
-  fi
-
-  # Commit if there are staged changes; skip gracefully if tree is clean
-  if git -C "$CODE_DIR" diff --cached --quiet; then
-    log "no staged changes to commit — proceeding with current HEAD"
-  else
-    if ! git -C "$CODE_DIR" commit -m "$commit_message" >/dev/null; then
-      rollback_after_failure "git commit failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
-      fail "apply-local failed during git commit"
-    fi
-  fi
-  new_sha="$(current_head_sha)"
-
-  # Phase 3: Switch traffic to the candidate
+  # Phase 2: Switch traffic to the candidate and verify smoke checks before
+  # mutating git history or pushing to the remote.
   switched=1
   if ! switch_to_slot "$old_active" "$candidate"; then
     rollback_after_failure "switchover failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
@@ -1144,6 +1115,34 @@ cmd_apply_local() {
     rollback_after_failure "smoke checks failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
     fail "apply-local failed during smoke checks"
   fi
+
+  # Phase 3: Commit and push only after smoke checks pass.
+  if [ -z "$commit_message" ]; then
+    commit_message="ha-rollout: apply local changes $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+
+  log "committing local code changes on host"
+  if ! git -C "$CODE_DIR" add -A; then
+    rollback_after_failure "git add failed" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+    fail "apply-local failed during git add"
+  fi
+
+  if [ -z "$(git -C "$CODE_DIR" config user.name 2>/dev/null)" ]; then
+    git -C "$CODE_DIR" config user.name "Nexus Deploy"
+  fi
+  if [ -z "$(git -C "$CODE_DIR" config user.email 2>/dev/null)" ]; then
+    git -C "$CODE_DIR" config user.email "nexus@deploy.local"
+  fi
+
+  if git -C "$CODE_DIR" diff --cached --quiet; then
+    log "no staged changes to commit — proceeding with current HEAD"
+  else
+    if ! git -C "$CODE_DIR" commit -m "$commit_message" >/dev/null; then
+      rollback_after_failure "git commit failed after smoke checks" "$old_active" "$candidate" "$rollback_sha" "$switched" "$base_sha"
+      fail "apply-local failed during git commit"
+    fi
+  fi
+  new_sha="$(current_head_sha)"
 
   # Phase 4: Push to remote (non-fatal — standby rebuild always proceeds)
   local push_failed=0

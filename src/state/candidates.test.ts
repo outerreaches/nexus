@@ -97,6 +97,9 @@ test("createCandidate seeds a private node_modules copy into the candidate and e
     assert.equal(stat.isDirectory(), true);
     assert.equal(stat.isSymbolicLink(), false);
     assert.equal(await fs.readFile(path.join(candidateNodeModulesDir, ".bin", "tsx"), "utf8"), "#!/bin/sh\n");
+    assert.equal(record.dependencySeed?.source, "copied");
+    assert.equal(record.dependencySeed?.seededAt, record.createdAt);
+    assert.equal(record.dependencySeed?.packageJsonHash ?? null, null);
 
     await fs.rm(liveNodeModulesDir, { recursive: true, force: true });
     await fs.access(path.join(candidateNodeModulesDir, ".bin", "tsx"));
