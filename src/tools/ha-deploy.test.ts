@@ -73,6 +73,8 @@ function createContext(params: {
   stateDir: string;
   nowMs: () => number;
   telegram?: ToolContext["telegram"];
+  agentId?: string;
+  homeAgentId?: string;
 }): ToolContext {
   return {
     db: params.db,
@@ -83,7 +85,8 @@ function createContext(params: {
     request: {
       channel: "cli",
       channelKey: "local",
-      agentId: "agent:test",
+      agentId: params.agentId ?? "agent:test",
+      homeAgentId: params.homeAgentId ?? params.agentId ?? "agent:test",
       preset: "coder",
       sessionId: "session-1",
       runId: "run-1",
@@ -187,6 +190,44 @@ test("ha_deploy queues a home-channel notification when creating an approval req
     assert.equal(report?.targetAgentId, "agent:test");
     assert.match(report?.body ?? "", /Deploy approval required/i);
     assert.match(report?.body ?? "", /\/act HA[A-Z0-9]+ approve/i);
+  });
+});
+
+test("ha_deploy targets the home agent when invoked from a worker agent", async () => {
+  await withRepoAndDb(async ({ db, repoDir, stateDir, nowMs }) => {
+    await writeFile(repoDir, "src/tools/example.ts", "export const example = 1;\n");
+    setHomeSession({
+      db,
+      agentId: "main",
+      channel: "telegram",
+      channelKey: "12345",
+      nowMs: nowMs(),
+    });
+
+    const result = await haDeploy.execute(
+      {
+        action: "apply",
+        remote: "host",
+        branch: "main",
+        timeoutMs: 1_000,
+      },
+      createContext({
+        db,
+        repoDir,
+        stateDir,
+        nowMs,
+        agentId: "main:coder",
+        homeAgentId: "main",
+      }),
+    );
+
+    assert.match(result, /Operator notification: queued for home-channel delivery/i);
+    const reportId = latestRunReportId(db);
+    assert.ok(reportId, "expected a queued run report");
+    const report = getRunReportById(db, reportId!);
+    assert.equal(report?.targetChannel, "home_channel");
+    assert.equal(report?.targetAgentId, "main");
+    assert.equal(report?.sourceAgentId, "main:coder");
   });
 });
 

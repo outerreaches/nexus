@@ -200,17 +200,31 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
 
 const RETRY_GUARD_RESETTING_FILE_TOOLS = new Set(["file_write", "file_edit", "file_edit_lines", "file_patch"]);
 
+function shellCommandSegments(command: string): string[] {
+  return command
+    .split("&&")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function matchesPackageManagerScriptSegment(segment: string, script: "typecheck" | "build" | "test"): boolean {
+  return (
+    new RegExp(`^(?:npm|pnpm|yarn)(?:\\s+--prefix\\s+\\S+)?\\s+(?:run\\s+)?${script}\\b`).test(segment) ||
+    new RegExp(`^(?:npm|pnpm|yarn)\\s+run\\s+(?:--prefix\\s+\\S+\\s+)?${script}\\b`).test(segment)
+  );
+}
+
 function isVerificationShellCommand(command: string, task: "typecheck" | "build" | "test"): boolean {
-  const normalized = command.trim();
-  if (!normalized) return false;
-  switch (task) {
-    case "typecheck":
-      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?typecheck\b/.test(normalized);
-    case "build":
-      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?build\b/.test(normalized);
-    case "test":
-      return /\b(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+(?:run\s+)?test\b/.test(normalized);
-  }
+  return shellCommandSegments(command).some((segment) => matchesPackageManagerScriptSegment(segment, task));
+}
+
+function isDependencyBootstrapShellCommand(command: string): boolean {
+  return shellCommandSegments(command).some((segment) =>
+    /^(?:npm)(?:\s+--prefix\s+\S+)?\s+ci\b/.test(segment) ||
+    /^(?:npm)\s+ci(?:\s+--prefix\s+\S+)?\b/.test(segment) ||
+    /^(?:npm|pnpm|yarn)(?:\s+--prefix\s+\S+)?\s+install\b/.test(segment) ||
+    /^(?:npm|pnpm|yarn)\s+install(?:\s+--prefix\s+\S+)?\b/.test(segment),
+  );
 }
 
 function successfulToolCallClearsRetryGuards(
@@ -223,6 +237,7 @@ function successfulToolCallClearsRetryGuards(
   if (call.name !== "shell_exec" || !isPlainObject(args)) return false;
   const command = typeof args.command === "string" ? args.command.trim() : "";
   return (
+    isDependencyBootstrapShellCommand(command) ||
     isVerificationShellCommand(command, "typecheck") ||
     isVerificationShellCommand(command, "build") ||
     isVerificationShellCommand(command, "test")

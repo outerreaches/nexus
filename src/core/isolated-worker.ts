@@ -175,6 +175,7 @@ process.on("message", async (msg: ParentMessage) => {
         channel: cfg.channel,
         channelKey: cfg.channelKey,
         agentId: cfg.agentId,
+        homeAgentId: cfg.homeAgentId,
         preset: cfg.presetName,
         sessionId: cfg.sessionId,
         runId: cfg.runId ?? undefined,

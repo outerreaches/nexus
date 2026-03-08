@@ -296,6 +296,7 @@ function formatApprovalRequiredMessage(params: {
 type DeployApprovalNotificationContext = {
   db: NexusDatabase;
   agentId?: string;
+  homeAgentId?: string;
   request?: {
     runId?: string;
     parentRunId?: string;
@@ -339,7 +340,8 @@ function buildDeployApprovalNotificationBody(params: {
 }
 
 async function queueDeployApprovalNotification(params: DeployApprovalNotificationContext): Promise<string> {
-  if (!params.agentId) return "Operator notification: missing agent context for home-channel delivery.";
+  const targetAgentId = params.homeAgentId ?? params.agentId;
+  if (!targetAgentId) return "Operator notification: missing agent context for home-channel delivery.";
 
   try {
     enqueueRunReport(params.db, {
@@ -354,7 +356,7 @@ async function queueDeployApprovalNotification(params: DeployApprovalNotificatio
       sourceAgentId: params.agentId,
       sourceChannel: params.request?.channel ?? null,
       sourceChannelKey: params.request?.channelKey ?? null,
-      targetAgentId: params.agentId,
+      targetAgentId,
       targetChannel: "home_channel",
       metadata: {
         approvalId: params.approvalId,
@@ -402,6 +404,7 @@ async function ensureDeployApproval(params: {
       channel: string;
       channelKey: string;
       agentId: string;
+      homeAgentId?: string;
       runId?: string;
       parentRunId?: string;
     };
@@ -558,6 +561,7 @@ async function ensureDeployApproval(params: {
   const notificationNote = await queueDeployApprovalNotification({
     db,
     agentId: params.ctx.request?.agentId,
+    homeAgentId: params.ctx.request?.homeAgentId,
     request: params.ctx.request,
     changes: params.changes,
     approvalId: row.id,
@@ -802,6 +806,7 @@ export const haDeploy = defineTool({
                   channel: ctx.request.channel,
                   channelKey: ctx.request.channelKey,
                   agentId: ctx.request.agentId,
+                  homeAgentId: ctx.request.homeAgentId,
                   runId: ctx.request.runId,
                   parentRunId: ctx.request.parentRunId,
                 }

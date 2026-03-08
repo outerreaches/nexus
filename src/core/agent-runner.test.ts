@@ -606,6 +606,89 @@ test("AgentRunner clears identical-call blocks after a successful file mutation"
   assert.equal(shellExecCalls, 2);
 });
 
+test("AgentRunner clears identical-call blocks after successful dependency bootstrap", async () => {
+  let step = 0;
+  let typecheckCalls = 0;
+  let installCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      switch (step++) {
+        case 0:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-typecheck-1",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "cd /tmp/repo && npm run typecheck" }),
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-install-1",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "cd /tmp/repo && npm ci" }),
+              },
+            ],
+          };
+        case 2:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-typecheck-2",
+                name: "shell_exec",
+                arguments: JSON.stringify({ command: "cd /tmp/repo && npm run typecheck" }),
+              },
+            ],
+          };
+        default:
+          return { content: "done", toolCalls: [] };
+      }
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_exec",
+        description: "test",
+        jsonSchema: {},
+        execute: async (args) => {
+          const command = typeof (args as { command?: unknown }).command === "string"
+            ? (args as { command: string }).command
+            : "";
+          if (command.includes("npm ci")) {
+            installCalls += 1;
+            return "install ok";
+          }
+          typecheckCalls += 1;
+          if (typecheckCalls === 1) return "ERROR: typecheck failed";
+          return "typecheck ok";
+        },
+      },
+    ],
+    budget: { maxIterations: 6, maxToolCalls: 8 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "install deps and rerun typecheck",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(installCalls, 1);
+  assert.equal(typecheckCalls, 2);
+});
+
 test("AgentRunner keeps identical-call blocks when only read-only tools succeed in between", async () => {
   let step = 0;
   let shellExecCalls = 0;

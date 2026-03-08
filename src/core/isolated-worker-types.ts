@@ -59,6 +59,7 @@ export type WorkerConfig = {
   parentRunId: string | null;
   runId: string | null;
   agentId: string;
+  homeAgentId: string;
   sessionId: string;
   channel: string;
   channelKey: string;

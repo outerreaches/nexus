@@ -1015,6 +1015,7 @@ async function runIsolated(params: {
       parentRunId: effectiveParentRunId,
       runId,
       agentId,
+      homeAgentId: ctx.request?.homeAgentId ?? ctx.request?.agentId ?? agentId,
       sessionId: workerSessionId,
       channel: ctx.request?.channel ?? "worker",
       channelKey: ctx.request?.channelKey ?? "worker",
