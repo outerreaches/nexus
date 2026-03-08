@@ -115,6 +115,7 @@ LAST_UPDATED_AT=""
 LAST_DEPLOY_PID=""
 LAST_EFFECTIVE_SHA=""
 LAST_FAILURE_REASON=""
+LAST_TRIGGER_ID=""
 
 detect_stat_value() {
   local format_linux="$1"
@@ -422,6 +423,7 @@ load_state() {
   LAST_UPDATED_AT=""
   LAST_EFFECTIVE_SHA=""
   LAST_FAILURE_REASON=""
+  LAST_TRIGGER_ID=""
   [ -f "$STATE_FILE" ] || return 0
   while IFS='=' read -r key value; do
     case "$key" in
@@ -433,6 +435,7 @@ load_state() {
       LAST_DEPLOY_PID) LAST_DEPLOY_PID="$value" ;;
       LAST_EFFECTIVE_SHA) LAST_EFFECTIVE_SHA="$value" ;;
       LAST_FAILURE_REASON) LAST_FAILURE_REASON="$value" ;;
+      LAST_TRIGGER_ID) LAST_TRIGGER_ID="$value" ;;
     esac
   done <"$STATE_FILE"
 }
@@ -448,6 +451,7 @@ LAST_UPDATED_AT=${LAST_UPDATED_AT}
 LAST_DEPLOY_PID=${LAST_DEPLOY_PID}
 LAST_EFFECTIVE_SHA=$(sanitize_state_value "${LAST_EFFECTIVE_SHA}")
 LAST_FAILURE_REASON=$(sanitize_state_value "${LAST_FAILURE_REASON}")
+LAST_TRIGGER_ID=$(sanitize_state_value "${LAST_TRIGGER_ID}")
 EOF
 }
 
@@ -540,6 +544,7 @@ record_failure_state() {
   if [ -n "$effective_sha" ]; then
     LAST_EFFECTIVE_SHA="$effective_sha"
   fi
+  LAST_TRIGGER_ID="${NEXUS_DEPLOY_TRIGGER_ID:-}"
   LAST_DEPLOY_PID=""
   LAST_UPDATED_AT="$(date +%s)"
   write_state
@@ -1043,6 +1048,7 @@ cmd_apply_local() {
   LAST_DEPLOY_SHA="$base_sha"
   LAST_STATUS="applying_local"
   LAST_FAILURE_REASON=""
+  LAST_TRIGGER_ID="${NEXUS_DEPLOY_TRIGGER_ID:-}"
   LAST_ACTIVE_SLOT="$old_active"
   LAST_DEPLOY_PID="$$"
   LAST_EFFECTIVE_SHA="$rollback_sha"
@@ -1177,6 +1183,7 @@ cmd_deploy() {
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="deploying"
   LAST_FAILURE_REASON=""
+  LAST_TRIGGER_ID="${NEXUS_DEPLOY_TRIGGER_ID:-}"
   LAST_ACTIVE_SLOT="$old_active"
   LAST_DEPLOY_PID="$$"
   LAST_EFFECTIVE_SHA="$rollback_sha"
@@ -1250,6 +1257,7 @@ cmd_rollback() {
   LAST_DEPLOY_SHA="$target_sha"
   LAST_STATUS="rolling_back"
   LAST_FAILURE_REASON=""
+  LAST_TRIGGER_ID="${NEXUS_DEPLOY_TRIGGER_ID:-}"
   LAST_ACTIVE_SLOT="$old_active"
   LAST_DEPLOY_PID="$$"
   LAST_EFFECTIVE_SHA="$head_sha"

@@ -117,12 +117,14 @@ extract_last_nonempty_line() {
 write_failure_state() {
   local status="$1"
   local reason="$2"
-  local last_good_sha last_deploy_sha last_active_slot last_effective_sha
+  local last_good_sha last_deploy_sha last_active_slot last_effective_sha last_trigger_id
   last_good_sha="$(read_state_value "LAST_GOOD_SHA")"
   last_deploy_sha="$(read_state_value "LAST_DEPLOY_SHA")"
   last_active_slot="$(read_state_value "LAST_ACTIVE_SLOT")"
   last_effective_sha="$(read_state_value "LAST_EFFECTIVE_SHA")"
+  last_trigger_id="$(read_state_value "LAST_TRIGGER_ID")"
   [ -n "$last_effective_sha" ] || last_effective_sha="${last_good_sha}"
+  [ -n "$last_trigger_id" ] || last_trigger_id="${NEXUS_DEPLOY_TRIGGER_ID:-}"
 
   cat >"$STATE_FILE" <<EOF
 LAST_GOOD_SHA=${last_good_sha}
@@ -133,6 +135,7 @@ LAST_UPDATED_AT=$(date +%s)
 LAST_DEPLOY_PID=
 LAST_EFFECTIVE_SHA=$(sanitize_state_value "${last_effective_sha}")
 LAST_FAILURE_REASON=$(sanitize_state_value "${reason}")
+LAST_TRIGGER_ID=$(sanitize_state_value "${last_trigger_id}")
 EOF
 }
 
@@ -274,12 +277,15 @@ process_trigger() {
   if {
     if [ "$action" = "rollback" ]; then
       if [ -n "$target_ref" ]; then
-        "$ROLLOUT_SCRIPT" rollback "$target_ref" 2>&1 | tee "$rollout_log"
+        NEXUS_DEPLOY_TRIGGER_ID="$trigger_id" \
+          "$ROLLOUT_SCRIPT" rollback "$target_ref" 2>&1 | tee "$rollout_log"
       else
-        "$ROLLOUT_SCRIPT" rollback 2>&1 | tee "$rollout_log"
+        NEXUS_DEPLOY_TRIGGER_ID="$trigger_id" \
+          "$ROLLOUT_SCRIPT" rollback 2>&1 | tee "$rollout_log"
       fi
     else
-      "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch" "$source_code_dir" "$source_base_sha" 2>&1 | tee "$rollout_log"
+      NEXUS_DEPLOY_TRIGGER_ID="$trigger_id" \
+        "$ROLLOUT_SCRIPT" apply-local "$msg" "$remote" "$branch" "$source_code_dir" "$source_base_sha" 2>&1 | tee "$rollout_log"
     fi
   }; then
     if [ "$action" = "rollback" ]; then

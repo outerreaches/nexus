@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -34,6 +34,7 @@ type DeployStateSnapshot = {
   lastGoodSha?: string;
   effectiveSha?: string;
   failureReason?: string;
+  triggerId?: string;
 };
 
 function parseDeployStateSnapshot(content: string): DeployStateSnapshot {
@@ -46,6 +47,7 @@ function parseDeployStateSnapshot(content: string): DeployStateSnapshot {
     lastGoodSha: parseStateValue(content, "LAST_GOOD_SHA"),
     effectiveSha: parseStateValue(content, "LAST_EFFECTIVE_SHA"),
     failureReason: parseStateValue(content, "LAST_FAILURE_REASON"),
+    triggerId: parseStateValue(content, "LAST_TRIGGER_ID"),
   };
 }
 
@@ -54,8 +56,54 @@ function formatDeployFailureSuffix(snapshot: DeployStateSnapshot): string {
   if (snapshot.failureReason) lines.push(`reason=${snapshot.failureReason}`);
   if (snapshot.effectiveSha) lines.push(`effective_sha=${snapshot.effectiveSha}`);
   if (snapshot.lastGoodSha) lines.push(`last_good_sha=${snapshot.lastGoodSha}`);
+  if (snapshot.triggerId) lines.push(`trigger_id=${snapshot.triggerId}`);
   if (lines.length === 0) return "";
   return `\n\n${lines.join("\n")}`;
+}
+
+type DeployCompletionSnapshot = {
+  status?: string;
+  effectiveSha?: string | null;
+  lastGoodSha?: string | null;
+  failureReason?: string | null;
+  triggerId?: string | null;
+};
+
+function readMatchingDeployCompletion(stateDir: string, triggerId: string): DeployCompletionSnapshot | null {
+  const completionsDir = path.join(stateDir, "deploy-completions");
+  if (!existsSync(completionsDir)) return null;
+  const candidates = readdirSync(completionsDir)
+    .filter((name) => name.endsWith(".json") || name.endsWith(".processing"))
+    .sort();
+  for (const name of candidates) {
+    const fullPath = path.join(completionsDir, name);
+    try {
+      const parsed = JSON.parse(readFileSync(fullPath, "utf8")) as Record<string, unknown>;
+      if ((parsed.triggerId ?? null) !== triggerId) continue;
+      const status = typeof parsed.status === "string" ? parsed.status : undefined;
+      if (!status || status === "started") continue;
+      return {
+        status,
+        effectiveSha: typeof parsed.effectiveSha === "string" ? parsed.effectiveSha : null,
+        lastGoodSha: typeof parsed.lastGoodSha === "string" ? parsed.lastGoodSha : null,
+        failureReason: typeof parsed.failureReason === "string" ? parsed.failureReason : null,
+        triggerId,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function completionSnapshotToState(snapshot: DeployCompletionSnapshot): DeployStateSnapshot {
+  return {
+    status: snapshot.status,
+    effectiveSha: snapshot.effectiveSha ?? undefined,
+    lastGoodSha: snapshot.lastGoodSha ?? undefined,
+    failureReason: snapshot.failureReason ?? undefined,
+    triggerId: snapshot.triggerId ?? undefined,
+  };
 }
 
 function fileAgeMs(file: string): number | null {
@@ -1342,6 +1390,7 @@ export const haDeploy = defineTool({
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(triggerFile, JSON.stringify(trigger, null, 2) + "\n");
     ctx.log(`${action} trigger written: ${String(trigger.id ?? "unknown")}`);
+    const triggerId = typeof trigger.id === "string" ? trigger.id : "";
 
     // Read initial state for comparison
     const initialState = existsSync(stateFile) ? readFileSync(stateFile, "utf-8") : "";
@@ -1365,10 +1414,31 @@ export const haDeploy = defineTool({
           if (terminal) return terminal;
         }
 
+        if (triggerId) {
+          const completion = readMatchingDeployCompletion(stateDir, triggerId);
+          if (completion) {
+            const terminal = await interpretTerminalState(
+              [
+                `LAST_STATUS=${completion.status ?? ""}`,
+                `LAST_EFFECTIVE_SHA=${completion.effectiveSha ?? ""}`,
+                `LAST_GOOD_SHA=${completion.lastGoodSha ?? ""}`,
+                `LAST_FAILURE_REASON=${completion.failureReason ?? ""}`,
+                `LAST_TRIGGER_ID=${triggerId}`,
+              ].join("\n"),
+              completionSnapshotToState(completion),
+            );
+            if (terminal) return terminal;
+          }
+        }
+
         // Defensive path for racey filesystems: if state write landed with
         // equivalent content (or shortly after trigger cleanup), use freshness
         // markers to classify outcome instead of failing immediately.
         const snapshot = parseDeployStateSnapshot(newState);
+        if (triggerId && snapshot.triggerId === triggerId) {
+          const terminal = await interpretTerminalState(newState, snapshot);
+          if (terminal) return terminal;
+        }
         const stateLooksFresh =
           typeof snapshot.updatedAt === "number" &&
           snapshot.updatedAt >= applyRequestedAtSec;
