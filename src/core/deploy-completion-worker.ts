@@ -171,6 +171,9 @@ async function enqueueCompletionReport(db: NexusDatabase, artifact: DeployComple
       approvalId: artifact.approvalId ?? null,
       candidateId: artifact.candidateId ?? null,
       triggerId: artifact.triggerId ?? null,
+      effectiveSha: artifact.effectiveSha ?? null,
+      lastGoodSha: artifact.lastGoodSha ?? null,
+      failureReason: artifact.failureReason ?? null,
       deliveryKind: "deploy_completion",
     },
     nowMs: Date.now(),
@@ -228,7 +231,7 @@ export function startDeployCompletionWorker(params: {
               throw err;
             }
           }
-          await fs.rm(claimedPath, { force: true });
+          await moveAside(claimedPath, ".notified");
           processed += 1;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

@@ -120,6 +120,7 @@ test("deploy completion worker enqueues and broker delivers home-channel complet
     assert.equal(report?.status, "sent");
 
     await assert.rejects(fs.access(path.join(completionsDir, "completion.json")));
+    await fs.access(path.join(completionsDir, "completion.json.processing.notified"));
   });
 });
 
@@ -205,5 +206,8 @@ test("deploy completion worker delivers deploy-started notifications", async () 
     assert.equal(report?.kind, "deploy_completion");
     assert.equal(report?.title, "Deploy started");
     assert.equal(report?.status, "sent");
+
+    await assert.rejects(fs.access(path.join(completionsDir, "started.json")));
+    await fs.access(path.join(completionsDir, "started.json.processing.notified"));
   });
 });

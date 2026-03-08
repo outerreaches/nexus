@@ -73,7 +73,7 @@ function readMatchingDeployCompletion(stateDir: string, triggerId: string): Depl
   const completionsDir = path.join(stateDir, "deploy-completions");
   if (!existsSync(completionsDir)) return null;
   const candidates = readdirSync(completionsDir)
-    .filter((name) => name.endsWith(".json") || name.endsWith(".processing"))
+    .filter((name) => name.endsWith(".json") || name.endsWith(".processing") || name.endsWith(".notified"))
     .sort();
   for (const name of candidates) {
     const fullPath = path.join(completionsDir, name);
@@ -1429,6 +1429,7 @@ export const haDeploy = defineTool({
             );
             if (terminal) return terminal;
           }
+
         }
 
         // Defensive path for racey filesystems: if state write landed with
