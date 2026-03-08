@@ -1448,9 +1448,17 @@ export const haDeploy = defineTool({
           if (terminal) return terminal;
         }
         if (triggerClearedPolls % 6 === 0) {
-          ctx.log(
-            `${action} trigger cleared but state unchanged; continuing to wait for stable deploy-state write`,
-          );
+          const progressStatus = snapshot.status?.trim() || "unknown";
+          const progressTriggerId = snapshot.triggerId?.trim() || "(none)";
+          if (newState !== initialState || progressTriggerId === triggerId || stateLooksFresh) {
+            ctx.log(
+              `${action} trigger cleared; rollout still in progress (status=${progressStatus} trigger_id=${progressTriggerId})`,
+            );
+          } else {
+            ctx.log(
+              `${action} trigger cleared but state unchanged; continuing to wait for stable deploy-state write`,
+            );
+          }
         }
       } else {
         triggerClearedPolls = 0;

@@ -586,6 +586,27 @@ resolve_push_target() {
   printf '%s|%s\n' "$resolved_remote" "$resolved_branch"
 }
 
+verify_push_target_fast_forwardable() {
+  local push_remote="$1"
+  local push_branch="$2"
+  local base_sha="$3"
+  local fetched_sha
+
+  [ -n "$push_remote" ] || return 0
+
+  if ! git -C "$CODE_DIR" fetch --quiet "$push_remote" "$push_branch"; then
+    fail "could not fetch push target ${push_remote}/${push_branch} before rollout"
+  fi
+
+  if ! fetched_sha="$(git -C "$CODE_DIR" rev-parse FETCH_HEAD 2>/dev/null)"; then
+    fail "could not resolve fetched push target ${push_remote}/${push_branch}"
+  fi
+
+  if ! git -C "$CODE_DIR" merge-base --is-ancestor "$fetched_sha" "$base_sha"; then
+    fail "push target ${push_remote}/${push_branch} has advanced beyond live HEAD (${base_sha}); pull/redeploy before applying local changes"
+  fi
+}
+
 resolve_commit() {
   local ref="$1"
   git -C "$CODE_DIR" rev-parse --verify "${ref}^{commit}"
@@ -1025,6 +1046,7 @@ cmd_apply_local() {
   local source_code_dir="${4:-}"
   local source_base_sha="${5:-}"
   local base_sha rollback_sha old_active candidate switched new_sha standby_mode
+  local resolved_push_remote resolved_push_branch
   switched=0
 
   check_interrupted_deploy
@@ -1033,6 +1055,11 @@ cmd_apply_local() {
 
   if [ -n "$source_code_dir" ]; then
     sync_source_worktree_to_code_dir "$source_code_dir" "$source_base_sha"
+  fi
+
+  if [ -n "$target_remote" ]; then
+    IFS='|' read -r resolved_push_remote resolved_push_branch <<< "$(resolve_push_target "$target_remote" "$target_branch")"
+    verify_push_target_fast_forwardable "$resolved_push_remote" "$resolved_push_branch" "$base_sha"
   fi
 
   if [ -z "$(git -C "$CODE_DIR" status --porcelain)" ]; then
@@ -1120,11 +1147,10 @@ cmd_apply_local() {
 
   # Phase 4: Push to remote (non-fatal — standby rebuild always proceeds)
   local push_failed=0
-  local push_remote="$target_remote"
-  local push_branch="$target_branch"
+  local push_remote="${resolved_push_remote:-$target_remote}"
+  local push_branch="${resolved_push_branch:-$target_branch}"
   local push_output
   if [ -n "$target_remote" ]; then
-    IFS='|' read -r push_remote push_branch <<< "$(resolve_push_target "$target_remote" "$target_branch")"
     log "pushing commit ${new_sha} to ${push_remote}/${push_branch}"
     if ! push_output="$(git -C "$CODE_DIR" push "$push_remote" "HEAD:${push_branch}" 2>&1)"; then
       local compact_push_output
