@@ -325,6 +325,140 @@ test("AgentRunner does not auto-route shell_interactive even in remote execution
   assert.equal(routedCalls, 0);
 });
 
+test("AgentRunner adds guidance after repeated progress-compacted shell reads", async () => {
+  let step = 0;
+  let readCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step < 3) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: `call-shell-read-${step}`,
+              name: "shell_interactive",
+              arguments: JSON.stringify({ action: "read", session: "shell-1" }),
+            },
+          ],
+        };
+      }
+      return { content: "done", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_interactive",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          readCalls += 1;
+          return JSON.stringify({
+            ok: true,
+            action: "read",
+            session: "shell-1",
+            running: true,
+            output: `[progress updates compacted batch ${readCalls}]`,
+            progressCompacted: true,
+            suppressedFrames: 8,
+          });
+        },
+      },
+    ],
+    budget: { maxIterations: 5, maxToolCalls: 6 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "monitor shell progress",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(readCalls, 3);
+  assert.equal(
+    result.newMessages.some(
+      (msg) =>
+        msg.role === "tool" &&
+        msg.name === "shell_interactive" &&
+        typeof msg.content === "string" &&
+        msg.content.includes("[SHELL READ GUIDANCE] This looks like progress monitoring"),
+    ),
+    true,
+  );
+});
+
+test("AgentRunner adds guidance after repeated empty shell reads while session stays alive", async () => {
+  let step = 0;
+  let readCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step < 2) {
+        step += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: `call-shell-empty-${step}`,
+              name: "shell_interactive",
+              arguments: JSON.stringify({ action: "read", session: "shell-1" }),
+            },
+          ],
+        };
+      }
+      return { content: "done", toolCalls: [] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "shell_interactive",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          readCalls += 1;
+          return JSON.stringify({
+            ok: true,
+            action: "read",
+            session: "shell-1",
+            running: true,
+            output: "",
+          });
+        },
+      },
+    ],
+    budget: { maxIterations: 4, maxToolCalls: 5 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "wait for shell output",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(readCalls, 2);
+  assert.equal(
+    result.newMessages.some(
+      (msg) =>
+        msg.role === "tool" &&
+        msg.name === "shell_interactive" &&
+        typeof msg.content === "string" &&
+        msg.content.includes("Recent reads returned no new output"),
+    ),
+    true,
+  );
+});
+
 test("AgentRunner auto-routes shell_exec in remote execution mode", async () => {
   let step = 0;
   let localShellExecCalls = 0;

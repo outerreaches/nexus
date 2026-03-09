@@ -2,7 +2,6 @@ import { preset as analyst } from "./presets/analyst.js";
 import { preset as coder } from "./presets/coder.js";
 import { preset as graphicDesigner } from "./presets/graphic-designer.js";
 import { preset as orchestrator } from "./presets/orchestrator.js";
-import { preset as processManager } from "./presets/process-manager.js";
 import { preset as researcher } from "./presets/researcher.js";
 import { preset as securityResearcher } from "./presets/security-researcher.js";
 import { preset as trader } from "./presets/trader.js";
@@ -81,7 +80,6 @@ export interface AgentPreset {
 
 const PRESETS: Record<string, AgentPreset> = {
   orchestrator,
-  "process-manager": processManager,
   coder,
   researcher,
   "security-researcher": securityResearcher,

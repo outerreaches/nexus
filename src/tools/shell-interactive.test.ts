@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { orchestratorCodeShellPolicyError, paginateUtf8Chunk, shellInteractive } from "./shell-interactive.js";
+import {
+  compactShellReadPayload,
+  compactProgressOutput,
+  orchestratorCodeShellPolicyError,
+  paginateUtf8Chunk,
+  shellInteractive,
+} from "./shell-interactive.js";
 
 test("paginateUtf8Chunk advances only returned bytes for ASCII output", () => {
   const source = Buffer.from("abcdefghij", "utf8");
@@ -113,4 +119,42 @@ test("orchestrator cannot open shell_interactive in repository code root", async
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("compactProgressOutput collapses carriage-return progress redraws", () => {
+  const output = "download 10%\rdownload 40%\rdownload 100%\r";
+  const compacted = compactProgressOutput(output);
+  assert.equal(compacted.compacted, true);
+  assert.equal(compacted.suppressedFrames, 2);
+  assert.equal(compacted.originalChars, output.length);
+  assert.match(compacted.output, /progress updates compacted: 2 frames; latest: download 100%/i);
+});
+
+test("compactProgressOutput leaves normal multiline output unchanged", () => {
+  const output = "line one\nline two\nline three\n";
+  const compacted = compactProgressOutput(output);
+  assert.equal(compacted.compacted, false);
+  assert.equal(compacted.suppressedFrames, 0);
+  assert.equal(compacted.output, output);
+});
+
+test("compactShellReadPayload adds progress metadata only for read payloads", () => {
+  const payload = compactShellReadPayload({
+    action: "read",
+    session: "shell-1",
+    output: "step 1\rstep 2\rstep 3\r",
+    running: true,
+  });
+  assert.equal(payload.progressCompacted, true);
+  assert.equal(payload.suppressedFrames, 2);
+  assert.equal(payload.outputOriginalChars, "step 1\rstep 2\rstep 3\r".length);
+  assert.match(String(payload.output), /latest: step 3/i);
+
+  const untouched = compactShellReadPayload({
+    action: "send",
+    session: "shell-1",
+    output: "ignored",
+  });
+  assert.equal(untouched.progressCompacted, undefined);
+  assert.equal(untouched.output, "ignored");
 });

@@ -100,7 +100,7 @@ test("canInjectPresetScopedSkills follows preset metadata", () => {
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "coder" }), true);
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "security-researcher" }), true);
   assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "orchestrator" }), true);
-  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "process-manager" }), false);
+  assert.equal(canInjectPresetScopedSkills(config, { agentId: "main", preset: "missing-preset" }), false);
 });
 
 test("canInjectPresetScopedSkills requires a preset name", () => {
@@ -113,6 +113,6 @@ test("resolveSkillScopes combines global and preset checks", () => {
   const config = makeSkillsConfig();
   assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "orchestrator" }), { global: true, preset: true });
   assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "coder" }), { global: false, preset: true });
-  assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "process-manager" }), { global: false, preset: false });
+  assert.deepEqual(resolveSkillScopes(config, { agentId: "main", preset: "missing-preset" }), { global: true, preset: false });
   assert.deepEqual(resolveSkillScopes(config, { agentId: "main" }), { global: true, preset: false });
 });

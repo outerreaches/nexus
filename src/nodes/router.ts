@@ -356,7 +356,7 @@ export class NodeToolRouter implements NodeRouter {
     if (toolName === "process_list") {
       throw new NodeRoutingError(
         "NODE_ROUTING_NOT_IMPLEMENTED",
-        "Remote process listing is not implemented yet; use explicit process_status/process_logs/process_stop.",
+        "Remote process listing is not implemented yet; use process_manage with action='status', 'logs', or 'stop' and a known processId.",
       );
     }
     return toolName;

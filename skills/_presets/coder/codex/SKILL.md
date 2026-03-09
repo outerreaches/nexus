@@ -27,8 +27,8 @@ Use this skill when a task should be delegated to Codex CLI instead of being sol
    - Never send multiple commands without reading output in between.
    - Never use sleep loops for waiting.
 3. Use process tools for long-running/background tasks:
-   - local: `process_start -> process_status/process_logs -> process_stop`
-   - node: `node_manage` action=`process_start|process_status|process_logs|process_stop`
+   - local: `process_manage` with `target="local"` and actions `start|status|logs|stop`
+   - node: `process_manage` with `target="node"` and actions `start|status|logs|stop`
 
 ## Command Patterns
 

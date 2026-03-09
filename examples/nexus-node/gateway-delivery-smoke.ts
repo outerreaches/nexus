@@ -206,7 +206,7 @@ async function main(): Promise<void> {
         notify: {
           mode: "on_failure",
           chatId: 12345,
-          preset: "process-manager",
+          preset: "orchestrator",
         },
       },
     };
@@ -260,7 +260,7 @@ async function main(): Promise<void> {
     assert.equal(row.request_parent_run_id, null);
     assert.equal(row.notify_mode, "on_failure");
     assert.equal(row.notify_chat_id, 12345);
-    assert.equal(row.notify_preset, "process-manager");
+    assert.equal(row.notify_preset, "orchestrator");
     assert.equal(row.exit_code, 2);
     assert.equal(row.signal, null);
     assert.ok(asNumber(row.ended_at), "ended_at should be set for terminal process");

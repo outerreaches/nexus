@@ -16,7 +16,7 @@ Determine what is affected before diving in.
    - `shell_exec` command=`curl -s http://localhost:<PORT>/health/ready | jq .`
    - Key signals: `ok: false`, any check with `error` field
 2. Check local processes:
-   - `process_list` — look for `exited` or `crashed` status
+   - `process_manage` action=`list` — look for `exited` or `crashed` status
 3. Check recent job failures:
    - `job_manage` action=`runs` id=`<JOB_ID>` limit=`5` — look for failed runs
 
@@ -26,8 +26,8 @@ Classify the incident: **gateway** | **process** | **job** | **external dependen
 
 ### For crashed processes
 
-1. `process_status` id=`<PROCESS_ID>` — get exit code and runtime
-2. `process_logs` id=`<PROCESS_ID>` maxChars=`20000` — capture full error output
+1. `process_manage` action=`status` processId=`<PROCESS_ID>` — get exit code and runtime
+2. `process_manage` action=`logs` processId=`<PROCESS_ID>` maxChars=`20000` — capture full error output
 3. Look for patterns: OOM, unhandled rejection, ECONNREFUSED, ENOSPC
 
 ### For gateway issues
@@ -57,7 +57,7 @@ Common root causes and their signals:
 
 ## Step 4: Remediate
 
-1. **Restart crashed process**: `process_start` with same command
+1. **Restart crashed process**: `process_manage` action=`start` with the same command
 2. **Clear disk space**: Remove old logs, tmp files, or stale data
 3. **Fix and redeploy**: If code bug, fix → build → `ha_deploy`
 

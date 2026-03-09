@@ -35,15 +35,15 @@ Valid statuses: `pending`, `approved`, `blocked`, `offline`, `online`.
 ## Remote Process Management
 
 1. Start a background process:
-   - `node_manage` action=`process_start` id=`<NODE_ID>` command=`<CMD>` notify=`{"mode":"on_failure"}`
+   - `process_manage` target=`node` nodeId=`<NODE_ID>` action=`start` command=`<CMD>` notify=`{"mode":"on_failure"}`
 2. Check process status:
-   - `node_manage` action=`process_status` id=`<NODE_ID>` processId=`<PID>`
+   - `process_manage` target=`node` nodeId=`<NODE_ID>` action=`status` processId=`<PID>`
 3. Tail process logs:
-   - `node_manage` action=`process_logs` id=`<NODE_ID>` processId=`<PID>` maxChars=`10000`
+   - `process_manage` target=`node` nodeId=`<NODE_ID>` action=`logs` processId=`<PID>` maxChars=`10000`
 4. Stop a process:
-   - `node_manage` action=`process_stop` id=`<NODE_ID>` processId=`<PID>` signal=`SIGTERM`
+   - `process_manage` target=`node` nodeId=`<NODE_ID>` action=`stop` processId=`<PID>` signal=`SIGTERM`
 5. Force kill (if SIGTERM fails):
-   - `node_manage` action=`process_stop` id=`<NODE_ID>` processId=`<PID>` signal=`SIGKILL`
+   - `process_manage` target=`node` nodeId=`<NODE_ID>` action=`stop` processId=`<PID>` signal=`SIGKILL`
 
 ## File Transfers
 
@@ -55,8 +55,8 @@ Valid statuses: `pending`, `approved`, `blocked`, `offline`, `online`.
 ## Troubleshooting Patterns
 
 1. **Node offline**: Check if the node process is running on the host. Verify network connectivity.
-2. **Command timeout**: Increase `timeoutMs` (max 300000). For long-running tasks, use `process_start` instead.
-3. **Process crash**: Check logs with `process_logs`, review exit code in `process_status`.
+2. **Command timeout**: Increase `timeoutMs` (max 300000). For long-running tasks, use `process_manage` action=`start` instead.
+3. **Process crash**: Check logs with `process_manage` action=`logs`, review exit code in `process_manage` action=`status`.
 4. **Auth failure**: Node may need re-approval. Check status with `get`, then `set_status` to `approved`.
 
 ## Guardrails

@@ -48,6 +48,11 @@ const nodeShellRoutingTool: Tool = {
   execute: async () => "ERROR: shell_interactive should be routed via node transport.",
 };
 
+const ESC_CHAR = String.fromCharCode(27);
+const BEL_CHAR = String.fromCharCode(7);
+const ANSI_ESCAPE_RE = new RegExp(`${ESC_CHAR}\\[[0-?]*[ -/]*[@-~]`, "g");
+const ANSI_OSC_RE = new RegExp(`${ESC_CHAR}\\][^${BEL_CHAR}]*(?:${BEL_CHAR}|${ESC_CHAR}\\\\)`, "g");
+
 function formatJson(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -110,6 +115,74 @@ function parseJsonObject(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function stripShellProgressFormatting(input: string): string {
+  const sanitized = input
+    .replace(ANSI_OSC_RE, "")
+    .replace(ANSI_ESCAPE_RE, "")
+    .replace(/\r/g, "");
+  let out = "";
+  for (let i = 0; i < sanitized.length; i += 1) {
+    const code = sanitized.charCodeAt(i);
+    if ((code >= 0 && code <= 8) || (code >= 11 && code <= 31) || code === 127) continue;
+    out += sanitized[i]!;
+  }
+  return out.trim();
+}
+
+export function compactProgressOutput(output: string): {
+  output: string;
+  compacted: boolean;
+  suppressedFrames: number;
+  originalChars?: number;
+} {
+  if (!output.includes("\r")) {
+    return { output, compacted: false, suppressedFrames: 0 };
+  }
+
+  const hadTrailingNewline = output.endsWith("\n");
+  const segments = output.split("\n");
+  let compacted = false;
+  let suppressedFrames = 0;
+  const rebuilt = segments.map((segment) => {
+    if (!segment.includes("\r")) return segment;
+    const frames = segment.split("\r").filter((part) => part.length > 0);
+    if (frames.length < 3) return segment;
+
+    compacted = true;
+    suppressedFrames += frames.length - 1;
+    const latest = stripShellProgressFormatting(frames[frames.length - 1] ?? "");
+    const latestSummary = truncateShellOutput(latest || "(no visible text)", 240).replace(/\r?\n/g, " ");
+    const suffix = frames.length - 1 === 1 ? "" : "s";
+    return `[progress updates compacted: ${frames.length - 1} frame${suffix}; latest: ${latestSummary}]`;
+  });
+
+  if (!compacted) {
+    return { output, compacted: false, suppressedFrames: 0 };
+  }
+
+  let compactedOutput = rebuilt.join("\n");
+  if (hadTrailingNewline && !compactedOutput.endsWith("\n")) compactedOutput += "\n";
+  return {
+    output: compactedOutput,
+    compacted: true,
+    suppressedFrames,
+    originalChars: output.length,
+  };
+}
+
+export function compactShellReadPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  if (payload.action !== "read" || typeof payload.output !== "string") return payload;
+  const compacted = compactProgressOutput(payload.output);
+  if (!compacted.compacted) return payload;
+  return {
+    ...payload,
+    output: compacted.output,
+    progressCompacted: true,
+    suppressedFrames: compacted.suppressedFrames,
+    outputOriginalChars: compacted.originalChars,
+  };
 }
 
 function requireAllowedPreset(ctx: ToolContext): string | null {
@@ -597,7 +670,7 @@ async function readLocalOutput(params: {
   meta.updatedAt = Date.now();
   await writeSessionMeta(params.ctx.stateDir, meta);
 
-  return formatJson({
+  const payload = compactShellReadPayload({
     ok: true,
     target: "local",
     action: "read",
@@ -610,6 +683,7 @@ async function readLocalOutput(params: {
     resetCursor: read.resetCursor,
     running,
   });
+  return formatJson(payload);
 }
 
 async function interruptLocalSession(params: { sessionId: string; ctx: ToolContext }): Promise<string> {
@@ -963,7 +1037,7 @@ async function executeOnNode(params: {
       }
       return `ERROR: unexpected node shell response shape (raw=${truncateShellOutput(raw, 260)}).`;
     }
-    return formatJson(parsed);
+    return formatJson(compactShellReadPayload(parsed));
   } catch (err) {
     return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -976,7 +1050,7 @@ export const shellInteractive = defineTool({
     "Workflow: open → send+read cycles → close. Use action=list to see all existing sessions before opening a new one (avoids duplicates).",
     "open returns an otherSessions array when other sessions exist, showing their name, cwd, and running status — prefer reusing a relevant session over creating a new one.",
     "IMPORTANT: send only pushes input; it does NOT return output. You MUST call read after every send to observe the result. Never chain multiple sends without reading in between.",
-    "Do not use sleep commands as a waiting strategy. For long-running/background tasks, use process tools (`process_start` / `process_status` / `process_logs` or node_manage process actions) instead of blocking an interactive foreground shell.",
+    "Do not use sleep commands as a waiting strategy. For long-running/background tasks, use `process_manage` instead of blocking an interactive foreground shell.",
     "read returns output since the given cursor; pass nextCursor from the previous read/send response. If cursor is omitted, it resumes from the session's last read cursor.",
     "Defaults to local (target=local). Use target=node only when the task specifically requires running on a remote node (e.g. node-local files, GPU, node-specific services). Node shells require nodeId, nexus-shellctl allowlisted, and firewallMode=transparent.",
   ].join(" "),

@@ -198,6 +198,97 @@ function toolCallSignature(call: import("./types.js").ToolCall): string {
   return `${call.name}:${hash}`;
 }
 
+type ShellReadLoopState = {
+  session: string | null;
+  progressReads: number;
+  emptyReads: number;
+};
+
+function resetShellReadLoopState(state: ShellReadLoopState): void {
+  state.session = null;
+  state.progressReads = 0;
+  state.emptyReads = 0;
+}
+
+function parseShellInteractiveReadPayload(result: string): {
+  session: string;
+  running: boolean;
+  output: string;
+  progressCompacted: boolean;
+} | null {
+  const trimmed = result.trimStart();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(result) as unknown;
+    if (!isPlainObject(parsed)) return null;
+    if (parsed.action !== "read") return null;
+    if (typeof parsed.session !== "string" || typeof parsed.output !== "string" || typeof parsed.running !== "boolean") {
+      return null;
+    }
+    return {
+      session: parsed.session,
+      running: parsed.running,
+      output: parsed.output,
+      progressCompacted: parsed.progressCompacted === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function maybeBuildShellReadGuidance(params: {
+  call: ToolCall;
+  args: unknown;
+  result: string;
+  state: ShellReadLoopState;
+}): string | null {
+  if (params.call.name !== "shell_interactive") return null;
+  const action = isPlainObject(params.args) && typeof params.args.action === "string" ? params.args.action.trim().toLowerCase() : "";
+  if (action !== "read") {
+    resetShellReadLoopState(params.state);
+    return null;
+  }
+
+  const payload = parseShellInteractiveReadPayload(params.result);
+  if (!payload || !payload.running) {
+    resetShellReadLoopState(params.state);
+    return null;
+  }
+
+  if (params.state.session !== payload.session) {
+    params.state.session = payload.session;
+    params.state.progressReads = 0;
+    params.state.emptyReads = 0;
+  }
+
+  if (payload.progressCompacted) {
+    params.state.progressReads += 1;
+    params.state.emptyReads = 0;
+    if (params.state.progressReads === 3) {
+      return (
+        "[SHELL READ GUIDANCE] This looks like progress monitoring rather than interactive debugging. " +
+        "Prefer `process_manage` for long-running work. If you must stay in the shell, use larger `waitMs`/`idleMs` and avoid tailing every small increment."
+      );
+    }
+    return null;
+  }
+
+  if (payload.output.trim().length === 0) {
+    params.state.emptyReads += 1;
+    params.state.progressReads = 0;
+    if (params.state.emptyReads === 2) {
+      return (
+        "[SHELL READ GUIDANCE] Recent reads returned no new output. `running=true` only means the shell session is still alive; " +
+        "it does not guarantee the foreground command is still active. Close the session, send the next command, or switch to `process_manage`."
+      );
+    }
+    return null;
+  }
+
+  resetShellReadLoopState(params.state);
+  return null;
+}
+
 const RETRY_GUARD_RESETTING_FILE_TOOLS = new Set(["file_write", "file_edit", "file_edit_lines", "file_patch"]);
 
 function shellCommandSegments(command: string): string[] {
@@ -536,6 +627,7 @@ export class AgentRunner {
     const toolCallsPerName = new Map<string, number>();
     const repeatedFailures = new Map<string, number>();
     const blockedToolCalls = new Map<string, string>();
+    const shellReadLoopState: ShellReadLoopState = { session: null, progressReads: 0, emptyReads: 0 };
     const maxSameToolFailures = 4;
     // Keep spawn_agent execution sequential so deploy handoff/retry guards are deterministic.
     const allowConcurrentSpawnBatches = false;
@@ -924,6 +1016,15 @@ export class AgentRunner {
           const guidanceLine = classification.retryGuidance ? ` ${classification.retryGuidance}` : "";
           toolResultMsg.content += `\n\n[ERROR_CLASS=${errorClass}${retryLine}]${guidanceLine}`;
         }
+        const shellReadGuidance = maybeBuildShellReadGuidance({
+          call,
+          args,
+          result,
+          state: shellReadLoopState,
+        });
+        if (shellReadGuidance) {
+          toolResultMsg.content += `\n\n${shellReadGuidance}`;
+        }
         messages.push(toolResultMsg);
         newMessages.push(toolResultMsg);
 
@@ -984,7 +1085,7 @@ export class AgentRunner {
               `Tool '${call.name}' has failed ${next} times with identical arguments. ` +
               `${remaining} more identical failure(s) will abort this run.\n` +
               `You MUST change your approach: use different arguments, a different tool, or diagnose the error first.\n` +
-              "For periodic/scheduled tasks, prefer job_manage(action='create') over process_start with scripts.\n" +
+              "For periodic/scheduled tasks, prefer job_manage(action='create') over process_manage(action='start') with scripts.\n" +
               `---`;
             toolResultMsg.content += escalation;
           }

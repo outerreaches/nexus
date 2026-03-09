@@ -97,7 +97,7 @@ export function isOrchestratorShellDelegationCommand(command: string): boolean {
 export const shellExec = defineTool({
   name: "shell_exec",
   description:
-    "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_start.",
+    "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_manage(action='start').",
   nodeRoutable: true,
   parameters: z.object({
     command: z.string(),
@@ -154,7 +154,7 @@ export const shellExec = defineTool({
             typeof timeoutMs === "number" &&
             (String(err.message).toLowerCase().includes("timed out") || anyErr?.code === "ETIMEDOUT");
           const hint = isTimeout
-            ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_start and inspect with process_logs.`
+            ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_manage(action='start') and inspect with process_manage(action='logs').`
             : "\n\nHINT: If this keeps failing with the same command, stop retrying and inspect STDERR (or switch approach)." +
               "\nFor exploratory probes, avoid shell control operators by default; run a single command and treat expected no-match/not-found outcomes as signal.";
           resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));

@@ -291,7 +291,7 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       -- Optional notification settings (best-effort)
       notify_mode TEXT NOT NULL DEFAULT 'never', -- never | on_failure | on_exit
       notify_chat_id INTEGER,                   -- telegram private-chat id (positive integer)
-      notify_preset TEXT,                       -- preset to use when notifying (e.g., "process-manager")
+      notify_preset TEXT,                       -- preset to use when notifying (e.g., "orchestrator")
       notify_attempts INTEGER NOT NULL DEFAULT 0,
       notify_last_error TEXT,
       notify_next_attempt_at INTEGER,

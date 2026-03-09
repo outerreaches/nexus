@@ -95,7 +95,7 @@ function buildCallbackTask(row: any): string {
     `command=${row.command}`,
     "",
     "Task:",
-    "- Tail logs once via process_logs (maxChars=12000).",
+    "- Tail logs once via process_manage(action='logs', processId='<process_id>', maxChars=12000).",
     "- Write a concise orchestrator-ready summary (<= 1500 chars).",
     "- Make it clear this came from process_notifier, not from a user message.",
     "- If failure: include 2-4 likely root causes and the next 3 concrete troubleshooting steps.",
@@ -257,7 +257,7 @@ export function startProcessNotifier(deps: {
       }
       if (!claimed) continue;
 
-      const preset = (row.notify_preset && String(row.notify_preset).trim()) || "process-manager";
+      const preset = (row.notify_preset && String(row.notify_preset).trim()) || "orchestrator";
       const agentId = (row.request_agent_id && String(row.request_agent_id).trim()) || "main";
       const text = buildCallbackTask(row);
 

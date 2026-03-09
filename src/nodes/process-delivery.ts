@@ -134,7 +134,7 @@ function extractNotifyConfig(payload: Record<string, unknown>, routing: Record<s
       : Number.isFinite(fallbackChannelKey) && fallbackChannelKey > 0
         ? Math.floor(fallbackChannelKey)
         : null;
-  const preset = asString(notify.preset) ?? "process-manager";
+  const preset = asString(notify.preset) ?? "orchestrator";
   return { mode, chatId, preset };
 }
 

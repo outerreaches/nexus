@@ -5,7 +5,7 @@ import { codeDiff, codeSearch, fileGlob } from "./code-intel.js";
 import { browserTool } from "./browser.js";
 import { queryData } from "./query-data.js";
 import { shellExec } from "./system.js";
-import { processList, processLogs, processStart, processStatus, processStop } from "./process.js";
+import { processManage } from "./process.js";
 import {
   nodeManage,
   nodeAuditQuery,
@@ -60,11 +60,7 @@ export function getBuiltInTools(): Tool[] {
     videoAnalyze,
     shellExec,
     shellInteractive,
-    processStart,
-    processList,
-    processStatus,
-    processLogs,
-    processStop,
+    processManage,
     nodeMcpList,
     nodeMcpCall,
     nodeMcpResources,

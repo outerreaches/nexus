@@ -217,8 +217,8 @@ Architecture and implementation guide for the **coder** preset.
   - node: \`node_manage\` action=\`system_run\`
 - Use \`shell_interactive\` for short stateful multi-step workflows (\`open -> send -> read -> close\`).
 - Use process tools for long-running/background tasks:
-  - local: \`process_start\` -> \`process_status\` / \`process_logs\` -> \`process_stop\`
-  - node: \`node_manage\` action=\`process_start|process_status|process_logs|process_stop\`
+  - local: \`process_manage\` with \`target="local"\` and actions \`start|status|logs|stop\`
+  - node: \`process_manage\` with \`target="node"\` and actions \`start|status|logs|stop\`
 - Never use sleep loops as a waiting strategy in interactive shell.
 - If a long foreground command was started accidentally in interactive shell, interrupt it and relaunch via process tools.
 

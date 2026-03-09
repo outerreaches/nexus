@@ -553,7 +553,7 @@ async function seedReplayOutbox(params: {
     notify: {
       mode: "on_exit",
       chatId: 12345,
-      preset: "process-manager",
+      preset: "orchestrator",
     },
   };
 
