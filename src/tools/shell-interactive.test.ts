@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { openDatabase } from "../storage/database.js";
+import { upsertNode } from "../storage/nodes.js";
 import {
   compactShellReadPayload,
   compactProgressOutput,
@@ -157,4 +159,72 @@ test("compactShellReadPayload adds progress metadata only for read payloads", ()
   });
   assert.equal(untouched.progressCompacted, undefined);
   assert.equal(untouched.output, "ignored");
+});
+
+test("node shell list ignores stray session and action-specific extras", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-shell-interactive-node-test-"));
+  const db = await openDatabase(path.join(tempDir, "nexus.db"));
+  try {
+    upsertNode(db, {
+      id: "node-1",
+      label: "Node 1",
+      publicKey: "pk-node-1",
+      fingerprint: "fp-node-1",
+      status: "online",
+      backend: "nexus",
+      firewallMode: "transparent",
+      capabilities: ["system.run"],
+      tags: [],
+    });
+
+    let routedCommand = "";
+    const result = await shellInteractive.execute(
+      {
+        action: "list",
+        target: "node",
+        nodeId: "node-1",
+        session: "unused",
+        cwd: "/tmp/ignored",
+        input: "ignored",
+        enter: false,
+        cursor: 0,
+        waitMs: 0,
+        idleMs: 200,
+        maxChars: 1500,
+        timeoutMs: 30_000,
+      },
+      {
+        db,
+        workspaceDir: tempDir,
+        stateDir: tempDir,
+        codeDir: tempDir,
+        allowShellExec: true,
+        request: {
+          channel: "cli",
+          channelKey: "test",
+          agentId: "main",
+          sessionId: "s-1",
+          preset: "coder",
+        },
+        nodeRouter: {
+          routeToolExecution: async (_tool, args) => {
+            routedCommand = typeof (args as { command?: unknown }).command === "string"
+              ? (args as { command: string }).command
+              : "";
+            return JSON.stringify({ ok: true, action: "list", count: 0, sessions: [] });
+          },
+        },
+        nowMs: () => Date.now(),
+        log: () => {},
+      },
+    );
+
+    assert.equal(routedCommand, "nexus-shellctl list");
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.action, "list");
+  } finally {
+    db.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });

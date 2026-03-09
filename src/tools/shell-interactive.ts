@@ -917,7 +917,7 @@ function buildNodeShellCommand(params: {
   }
 
   const tokens: string[] = ["nexus-shellctl", action];
-  if (sessionId) {
+  if (action !== "list" && sessionId) {
     tokens.push("--session", sessionId);
   }
 
