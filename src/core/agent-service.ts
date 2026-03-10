@@ -29,7 +29,7 @@ type NudgeConfig = {
   skillIterationInterval: number;
 };
 
-type HistoryScope =
+export type HistoryScope =
   | {
     mode: "exact";
     channel: string;
@@ -42,6 +42,75 @@ type HistoryScope =
   | {
     mode: "home";
   };
+
+export function resolveHistoryScopeForRequest(params: {
+  db: NexusDatabase;
+  channel: string;
+  channelKey: string;
+  agentId: string;
+  historyScope?: HistoryScope;
+}): { channel: string; channelKey: string; agentId: string; source: string } {
+  const fallback = {
+    channel: params.channel,
+    channelKey: params.channelKey,
+    agentId: params.agentId,
+    source: "request",
+  };
+
+  const scope = params.historyScope;
+  if (!scope) return fallback;
+
+  if (scope.mode === "exact") {
+    return {
+      channel: scope.channel,
+      channelKey: scope.channelKey,
+      agentId: scope.agentId ?? params.agentId,
+      source: "exact",
+    };
+  }
+
+  const home = getHomeSession({ db: params.db, agentId: params.agentId });
+  if (home) {
+    return {
+      channel: home.channel,
+      channelKey: home.channelKey,
+      agentId: params.agentId,
+      source: "home",
+    };
+  }
+
+  const latestTelegram = params.db.db
+    .prepare(
+      `SELECT s.channel_key AS channel_key
+       FROM sessions s
+       LEFT JOIN messages m ON m.session_id = s.id
+       WHERE s.channel = 'telegram' AND s.agent_id = ?
+       GROUP BY s.id
+       ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
+       LIMIT 1`,
+    )
+    .get(params.agentId) as { channel_key: string } | undefined;
+
+  if (latestTelegram?.channel_key) {
+    return {
+      channel: "telegram",
+      channelKey: latestTelegram.channel_key,
+      agentId: params.agentId,
+      source: "latest_telegram_for_agent",
+    };
+  }
+
+  const fallbackSource = scope.mode === "home" ? "home:fallback" : "latest_telegram_for_agent:fallback";
+  if (params.channel.trim().toLowerCase() === "internal_events") {
+    return {
+      channel: "agent",
+      channelKey: params.agentId,
+      agentId: params.agentId,
+      source: `${fallbackSource}:agent`,
+    };
+  }
+  return { ...fallback, source: fallbackSource };
+}
 
 function clampPositiveInt(value: number): number {
   return Math.max(1, Math.floor(value));
@@ -311,60 +380,13 @@ export class AgentService {
     agentId: string;
     historyScope?: HistoryScope;
   }): { channel: string; channelKey: string; agentId: string; source: string } {
-    const fallback = {
+    return resolveHistoryScopeForRequest({
+      db: this.deps.db,
       channel: params.channel,
       channelKey: params.channelKey,
       agentId: params.agentId,
-      source: "request",
-    };
-
-    const scope = params.historyScope;
-    if (!scope) return fallback;
-
-    if (scope.mode === "exact") {
-      return {
-        channel: scope.channel,
-        channelKey: scope.channelKey,
-        agentId: scope.agentId ?? params.agentId,
-        source: "exact",
-      };
-    }
-
-    // Both "home" and "latest_telegram_for_agent" check for an explicit home session first.
-    const home = getHomeSession({ db: this.deps.db, agentId: params.agentId });
-    if (home) {
-      return {
-        channel: home.channel,
-        channelKey: home.channelKey,
-        agentId: params.agentId,
-        source: "home",
-      };
-    }
-
-    // No home session set — fall back to latest telegram session.
-    const latestTelegram = this.deps.db.db
-      .prepare(
-        `SELECT s.channel_key AS channel_key
-         FROM sessions s
-         LEFT JOIN messages m ON m.session_id = s.id
-         WHERE s.channel = 'telegram' AND s.agent_id = ?
-         GROUP BY s.id
-         ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
-         LIMIT 1`,
-      )
-      .get(params.agentId) as { channel_key: string } | undefined;
-
-    if (latestTelegram?.channel_key) {
-      return {
-        channel: "telegram",
-        channelKey: latestTelegram.channel_key,
-        agentId: params.agentId,
-        source: "latest_telegram_for_agent",
-      };
-    }
-
-    const fallbackSource = scope.mode === "home" ? "home:fallback" : "latest_telegram_for_agent:fallback";
-    return { ...fallback, source: fallbackSource };
+      historyScope: params.historyScope,
+    });
   }
 
   private buildInternalEventSummary(params: {

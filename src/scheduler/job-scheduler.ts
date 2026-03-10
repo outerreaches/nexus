@@ -11,13 +11,25 @@ import { archiveAndDeleteJob } from "../storage/job-archive.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
 import type { Tool, ToolContext } from "../core/tools.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
+import {
+  getOneShotAtMs,
+  migrateLegacyAgentTaskJobSpecs,
+  ONE_SHOT_CRON,
+  parseJobSpec,
+  readDeliveryMode,
+  readOrigin,
+  resolveDeliveryMode,
+  type AgentTaskDeliveryMode,
+  type AgentTaskOrigin,
+} from "./job-spec.js";
 
 const execAsync = promisify(exec);
-const ONE_SHOT_CRON = "@once";
 
 const AgentTaskSpec = z.object({
   mode: z.literal("agent_task"),
   task: z.string(),
+  contextMode: z.enum(["full", "delta", "none"]).optional(),
+  deliveryMode: z.enum(["session_resume", "report_only"]).optional(),
 });
 
 const ScriptSpec = z.object({
@@ -57,14 +69,6 @@ function randomId(prefix: string): string {
   return out;
 }
 
-function safeJsonParse(input: string): unknown {
-  try {
-    return JSON.parse(input);
-  } catch {
-    return null;
-  }
-}
-
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
@@ -100,13 +104,6 @@ function isOneShotJob(job: JobRow): boolean {
   return job.cron.trim() === ONE_SHOT_CRON;
 }
 
-function getOneShotAtMs(specJson: string): number | null {
-  const raw = safeJsonParse(specJson) as { oneShotAtMs?: unknown } | null;
-  const value = raw?.oneShotAtMs;
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return Math.max(0, Math.floor(value));
-}
-
 export type JobSchedulerDeps = {
   config: NexusConfig;
   agent: AgentService;
@@ -135,7 +132,7 @@ type JobRow = {
   last_notified_at: number | null;
 };
 
-export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } | null {
+export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; tick: () => Promise<void> } | null {
   const enabled = envBool("NEXUS_SCHEDULER") ?? deps.config.scheduler.enabled;
   if (!enabled) return null;
 
@@ -166,6 +163,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   // These are orphans from a crash/restart that will never complete.
   {
     const nowMs = Date.now();
+    migrateLegacyAgentTaskJobSpecs(deps.db, (line) => deps.log(`scheduler: ${line}`));
     const swept = deps.db.db
       .prepare("UPDATE job_runs SET status = 'failed', ended_at = ?, error = 'orphaned: gateway restarted' WHERE status = 'running'")
       .run(nowMs);
@@ -231,7 +229,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   const ensureNextRunAt = (job: JobRow, nowMs: number): number | null => {
     if (!job.enabled) return null;
     if (isOneShotJob(job)) {
-      const atMs = getOneShotAtMs(job.spec_json);
+      const atMs = getOneShotAtMs(parseJobSpec(job.spec_json));
       if (atMs === null) return null;
       return Math.max(atMs, nowMs);
     }
@@ -391,8 +389,10 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
     idle: boolean;
     agentRunId: string | null;
     reportMarker: "none" | "update" | "urgent" | null;
+    deliveryMode: AgentTaskDeliveryMode | null;
+    origin: AgentTaskOrigin | null;
   }> => {
-    const raw = safeJsonParse(job.spec_json) as any;
+    const raw = parseJobSpec(job.spec_json) as any;
     const mode = raw?.mode || "agent_task";
 
     if (mode === "agent_task") {
@@ -400,7 +400,86 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       const task = parsed.success
         ? parsed.data.task.trim()
         : (raw && typeof raw === "object" && raw.task ? String(raw.task) : "").trim();
-      deps.log(`scheduler: context_disabled job=${job.id} mode=agent_task`);
+      const deliveryMode = resolveDeliveryMode({ cron: job.cron, spec: raw });
+      const origin = deliveryMode === "session_resume" ? readOrigin(raw) : null;
+
+      if (deliveryMode === "session_resume") {
+        if (!origin) throw new Error(`session_resume origin missing for job ${job.id}`);
+        const userText = [
+          "SCHEDULED FOLLOW-UP",
+          `job_id=${job.id}`,
+          `job_name=${job.name}`,
+          `run_id=${runId}`,
+          `scheduled_for=${new Date(scheduledFor).toISOString()}`,
+          "",
+          "Continue the existing user conversation using the prior session context.",
+          "If there is nothing new to report yet, respond with exactly: IDLE",
+          "Do not mention internal scheduler metadata unless it helps the user.",
+          "If the underlying work still needs monitoring, you may schedule another one-shot follow-up.",
+          "",
+          "Task:",
+          task || "(no task specified)",
+        ].join("\n");
+
+        deps.log(
+          `scheduler: session_resume job=${job.id} origin_channel=${origin.channel} origin_key=${origin.channelKey} recovered=${origin.recoveredFrom}`,
+        );
+        const res = await deps.agent.handleUserMessage({
+          channel: origin.channel,
+          channelKey: origin.channelKey,
+          agentId: origin.agentId,
+          preset: origin.preset ?? "orchestrator",
+          text: userText,
+          executionLane: "background",
+          historyScope: {
+            mode: "exact",
+            channel: origin.channel,
+            channelKey: origin.channelKey,
+            agentId: origin.agentId,
+          },
+          writeSession: {
+            channel: origin.channel,
+            channelKey: origin.channelKey,
+            agentId: origin.agentId,
+          },
+          ephemeralSessionSave: "unless_action",
+        });
+
+        if (origin.channel === "telegram") {
+          const telegram = deps.toolContext.telegram as { sendOutput?: (chatId: number, output: string) => Promise<void> } | undefined;
+          if (!origin.telegramChatId) throw new Error(`session_resume telegram origin missing chat id for job ${job.id}`);
+          if (!telegram?.sendOutput) throw new Error("telegram transport unavailable for session_resume job");
+          if (!isIdleOutput(res.output)) {
+            await telegram.sendOutput(origin.telegramChatId, res.output);
+          }
+          deps.agent.ackDeployIfPending({
+            runId: res.runId ?? null,
+            sessionId: res.sessionId,
+            channel: origin.channel,
+            channelKey: origin.channelKey,
+            agentId: origin.agentId,
+          });
+        }
+
+        const ok = res.status === "complete";
+        return {
+          status: ok ? "success" : "failed",
+          output: res.output,
+          error: ok ? null : res.output,
+          toolCalls: res.toolCallsUsed ?? null,
+          iterations: res.iterationsUsed ?? null,
+          mode: "agent_task",
+          idle: isIdleOutput(res.output),
+          agentRunId: res.runId ?? null,
+          reportMarker: null,
+          deliveryMode,
+          origin,
+        };
+      }
+
+      deps.log(
+        `scheduler: context_disabled job=${job.id} mode=agent_task delivery=${readDeliveryMode(raw) ?? deliveryMode}`,
+      );
 
       const userTextParts = [
         "SCHEDULED JOB RUN",
@@ -446,6 +525,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         idle: isIdleOutput(res.output),
         agentRunId: res.runId ?? null,
         reportMarker,
+        deliveryMode,
+        origin: null,
       };
     }
 
@@ -467,6 +548,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         idle: false,
         agentRunId: null,
         reportMarker: null,
+        deliveryMode: null,
+        origin: null,
       };
     }
 
@@ -498,6 +581,8 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         idle: false,
         agentRunId: null,
         reportMarker: null,
+        deliveryMode: null,
+        origin: null,
       };
     }
 
@@ -581,7 +666,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         )
         .run(endedAt, res.status, errText, res.output, res.toolCalls, res.iterations, runId);
 
-      if (res.mode === "agent_task") {
+      if (res.mode === "agent_task" && res.deliveryMode !== "session_resume") {
         await queueAgentTaskReport({
           job,
           runId,
@@ -622,12 +707,14 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
       // Handle application-level failure (e.g. LLM said "JOB_STATUS: error")
       const consecutiveFailures = (job.consecutive_failures ?? 0) + 1;
       if (oneShot) {
-        await notifyAgent(
-          { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
-          runId,
-          { status: res.status, output: res.output, paused: false },
-          endedAt,
-        );
+        if (res.deliveryMode !== "session_resume") {
+          await notifyAgent(
+            { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
+            runId,
+            { status: res.status, output: res.output, paused: false },
+            endedAt,
+          );
+        }
         archiveOneShot({ endedAt, runId, outcome: "failed", output: res.output });
         return;
       }
@@ -675,13 +762,31 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
         .run(endedAt, "failed", truncate(output, 800), output, runId);
 
       const consecutiveFailures = (job.consecutive_failures ?? 0) + 1;
+      const spec = parseJobSpec(job.spec_json);
+      const deliveryMode = resolveDeliveryMode({ cron: job.cron, spec });
+      const origin = deliveryMode === "session_resume" ? readOrigin(spec) : null;
       if (oneShot) {
-        await notifyAgent(
-          { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
-          runId,
-          { status: "exception", output, paused: false },
-          endedAt,
-        );
+        if (deliveryMode === "session_resume" && origin?.channel === "telegram" && origin.telegramChatId) {
+          try {
+            const telegram = deps.toolContext.telegram as { sendOutput?: (chatId: number, text: string) => Promise<void> } | undefined;
+            if (telegram?.sendOutput) {
+              await telegram.sendOutput(origin.telegramChatId, output);
+            }
+          } catch (notifyErr) {
+            deps.log(
+              `scheduler: session_resume exception delivery failed job=${job.id} run=${runId} err=${
+                notifyErr instanceof Error ? notifyErr.message : String(notifyErr)
+              }`,
+            );
+          }
+        } else if (deliveryMode !== "session_resume") {
+          await notifyAgent(
+            { ...job, consecutive_failures: consecutiveFailures, enabled: 0 },
+            runId,
+            { status: "exception", output, paused: false },
+            endedAt,
+          );
+        }
         archiveOneShot({ endedAt, runId, outcome: "exception", output });
         return;
       }
@@ -809,13 +914,14 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void } 
   };
 
   deps.log(
-    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} leaseRenewMs=${leaseRenewMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} contextMode=disabled`,
+    `scheduler: enabled tickIntervalMs=${tickIntervalMs} maxRunsPerTick=${maxRunsPerTick} concurrency=${runConcurrency} leaseTtlMs=${leaseTtlMs} leaseRenewMs=${leaseRenewMs} notifyAgentOnFailure=${notifyAgentOnFailure} notifyRunReports=${notifyRunReports} schedulerAgentId=${schedulerAgentId} agentTaskDelivery=session_resume|report_only contextMode=disabled`,
   );
 
   // Start shortly after boot.
   scheduleNext(Math.min(2000, tickIntervalMs));
 
   return {
+    tick,
     stop: () => {
       stopped = true;
       if (timer) clearTimeout(timer);

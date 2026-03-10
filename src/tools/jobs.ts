@@ -5,9 +5,22 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { archiveAndDeleteJob } from "../storage/job-archive.js";
+import { findNearestTelegramAncestorRun } from "../storage/run-reports.js";
 import { nextCronTimeMs, parseCron, validateTimeZone } from "../scheduler/cron.js";
-
-const ONE_SHOT_CRON = "@once";
+import {
+  applyOrigin,
+  clearAgentTaskDeliveryMetadata,
+  getOneShotAtMs,
+  hasResumableOrigin,
+  ONE_SHOT_CRON,
+  parseJobSpec,
+  parsePositiveTelegramChatId,
+  readDeliveryMode,
+  readOrigin,
+  type AgentTaskDeliveryMode,
+  type AgentTaskOrigin,
+  isOneShotCron,
+} from "../scheduler/job-spec.js";
 
 function randomId(prefix: string): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -33,10 +46,6 @@ function computeNextRunAt(params: { cron: string; timezone: string; afterMs: num
   return nextCronTimeMs({ schedule, afterMs: params.afterMs, timeZone: tz });
 }
 
-function isOneShotCron(cron: string): boolean {
-  return cron.trim() === ONE_SHOT_CRON;
-}
-
 function parseAtTimestamp(input: number | string): number {
   if (typeof input === "number") {
     if (!Number.isFinite(input)) throw new Error("invalid 'at' timestamp");
@@ -55,24 +64,6 @@ function parseAtTimestamp(input: number | string): number {
   const parsed = Date.parse(raw);
   if (!Number.isFinite(parsed)) throw new Error("invalid 'at' timestamp (use epoch ms or ISO-8601)");
   return Math.max(0, Math.floor(parsed));
-}
-
-function getOneShotAtMs(spec: unknown): number | null {
-  if (!spec || typeof spec !== "object") return null;
-  const value = (spec as { oneShotAtMs?: unknown }).oneShotAtMs;
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return Math.max(0, Math.floor(value));
-}
-
-function parseJobSpec(specJson: unknown): Record<string, unknown> {
-  if (typeof specJson !== "string" || !specJson.trim()) return {};
-  try {
-    const parsed = JSON.parse(specJson);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Record<string, unknown>;
-  } catch {
-    return {};
-  }
 }
 
 function cleanSpecForMode(spec: Record<string, unknown>): void {
@@ -116,6 +107,111 @@ function getNextRunAtMs(value: unknown): number | null {
   return Math.max(0, Math.floor(value));
 }
 
+function isInteractiveOriginChannel(channel: string): boolean {
+  return channel === "telegram" || channel === "cli";
+}
+
+function resolveAgentTaskOrigin(ctx: { request?: Record<string, unknown>; db?: unknown }): AgentTaskOrigin | null {
+  const db = requireDb(ctx);
+  const request = ctx.request as
+    | {
+        channel?: unknown;
+        channelKey?: unknown;
+        sessionId?: unknown;
+        agentId?: unknown;
+        runId?: unknown;
+        preset?: unknown;
+      }
+    | undefined;
+  if (!request) return null;
+
+  const channel = typeof request.channel === "string" ? request.channel.trim().toLowerCase() : "";
+  const channelKey = typeof request.channelKey === "string" ? request.channelKey.trim() : "";
+  const sessionId = typeof request.sessionId === "string" && request.sessionId.trim() ? request.sessionId.trim() : null;
+  const agentId = typeof request.agentId === "string" && request.agentId.trim() ? request.agentId.trim() : null;
+  const runId = typeof request.runId === "string" && request.runId.trim() ? request.runId.trim() : null;
+  const preset = typeof request.preset === "string" && request.preset.trim() ? request.preset.trim() : null;
+
+  if (channel && channelKey && agentId && isInteractiveOriginChannel(channel)) {
+    return {
+      channel,
+      channelKey,
+      sessionId,
+      agentId,
+      runId,
+      preset,
+      telegramChatId: channel === "telegram" ? parsePositiveTelegramChatId(channelKey) : null,
+      recoveredFrom: "direct_request",
+    };
+  }
+
+  if (db && runId) {
+    const ancestor = findNearestTelegramAncestorRun(db, runId);
+    if (ancestor) {
+      return {
+        channel: "telegram",
+        channelKey: ancestor.channelKey,
+        sessionId: ancestor.sessionId,
+        agentId: ancestor.agentId,
+        runId: ancestor.runId,
+        preset: ancestor.preset,
+        telegramChatId: parsePositiveTelegramChatId(ancestor.channelKey),
+        recoveredFrom: "telegram_ancestor",
+      };
+    }
+  }
+
+  return null;
+}
+
+function chooseAgentTaskDeliveryMode(params: {
+  explicit?: AgentTaskDeliveryMode;
+  oneShot: boolean;
+  origin: AgentTaskOrigin | null;
+}): AgentTaskDeliveryMode {
+  if (params.explicit === "session_resume") return "session_resume";
+  if (params.explicit === "report_only") return "report_only";
+  return params.oneShot && params.origin ? "session_resume" : "report_only";
+}
+
+function applyAgentTaskDeliveryDefaults(params: {
+  spec: Record<string, unknown>;
+  cron: string;
+  origin: AgentTaskOrigin | null;
+  explicit?: AgentTaskDeliveryMode;
+}): AgentTaskDeliveryMode {
+  const oneShot = isOneShotCron(params.cron);
+  const deliveryMode = chooseAgentTaskDeliveryMode({
+    explicit: params.explicit,
+    oneShot,
+    origin: params.origin,
+  });
+
+  if (deliveryMode === "session_resume") {
+    if (!oneShot) throw new Error("deliveryMode='session_resume' requires a one-shot job (`at`)");
+    if (!params.origin) {
+      throw new Error("deliveryMode='session_resume' requires a resumable interactive origin (telegram/cli or telegram ancestor)");
+    }
+  }
+
+  params.spec.deliveryMode = deliveryMode;
+  if (params.origin) {
+    applyOrigin(params.spec, params.origin);
+  } else if (deliveryMode === "session_resume") {
+    throw new Error("session_resume origin resolution failed");
+  } else {
+    applyOrigin(params.spec, null);
+  }
+
+  if (deliveryMode === "report_only" && oneShot && !hasResumableOrigin(params.spec)) {
+    params.spec.resumeUnavailable = true;
+  } else {
+    delete params.spec.resumeUnavailable;
+  }
+
+  return deliveryMode;
+}
+
 function heartbeatDeleteGuard(params: {
   nowMs: number;
   cron: string;
@@ -151,6 +247,10 @@ export const jobCreate = defineTool({
       enabled: z.boolean().default(true),
       mode: z.enum(["agent_task", "script", "tool_call"]).default("agent_task").describe("Execution mode"),
       task: z.string().max(4000).optional().describe("For agent_task mode: instructions for the agent"),
+      deliveryMode: z
+        .enum(["session_resume", "report_only"])
+        .optional()
+        .describe("For agent_task mode: session_resume continues an interactive conversation; report_only runs as detached background work."),
       contextMode: z
         .enum(["full", "delta", "none"])
         .optional()
@@ -212,6 +312,20 @@ export const jobCreate = defineTool({
       spec.oneShotAtMs = oneShotAtMs;
       spec.scheduleKind = "one_shot";
       spec.autoDeleteAfterRun = true;
+    }
+
+    if (args.mode === "agent_task") {
+      const origin = resolveAgentTaskOrigin(ctx);
+      try {
+        applyAgentTaskDeliveryDefaults({
+          spec,
+          cron,
+          origin,
+          explicit: args.deliveryMode,
+        });
+      } catch (e) {
+        return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+      }
     }
 
     try {
@@ -287,6 +401,7 @@ export const jobUpdate = defineTool({
     enabled: z.boolean().optional(),
     task: z.string().max(4000).optional(),
     mode: z.enum(["agent_task", "script", "tool_call"]).optional(),
+    deliveryMode: z.enum(["session_resume", "report_only"]).optional(),
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
@@ -330,6 +445,7 @@ export const jobUpdate = defineTool({
     // Merge updates
     if (args.mode) spec.mode = args.mode;
     if (args.task !== undefined) spec.task = args.task;
+    if (args.deliveryMode !== undefined) spec.deliveryMode = args.deliveryMode;
     if (args.command !== undefined) spec.command = args.command;
     if (args.tool !== undefined) spec.tool = args.tool;
     if (args.args !== undefined) spec.args = args.args;
@@ -364,7 +480,24 @@ export const jobUpdate = defineTool({
     if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
     if (spec.mode === "tool_call" && !spec.tool) return "ERROR: 'tool' is required for tool_call mode";
     if (args.cleanSpec) cleanSpecForMode(spec);
-    if (spec.mode !== "agent_task") delete spec.contextMode;
+    if (spec.mode !== "agent_task") {
+      clearAgentTaskDeliveryMetadata(spec);
+    } else {
+      const existingOrigin = readOrigin(spec);
+      const currentOrigin = resolveAgentTaskOrigin(ctx);
+      const mergedOrigin = currentOrigin ?? existingOrigin;
+      const persistedDeliveryMode = readDeliveryMode(spec);
+      try {
+        applyAgentTaskDeliveryDefaults({
+          spec,
+          cron,
+          origin: mergedOrigin,
+          explicit: args.deliveryMode ?? (persistedDeliveryMode === "report_only" ? "report_only" : undefined),
+        });
+      } catch (e) {
+        return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
 
     const specJson = JSON.stringify(spec ?? {});
 
@@ -598,6 +731,7 @@ export const jobManage = defineTool({
     enabled: z.boolean().optional(),
     mode: z.enum(["agent_task", "script", "tool_call"]).optional(),
     task: z.string().max(4000).optional(),
+    deliveryMode: z.enum(["session_resume", "report_only"]).optional(),
     contextMode: z.enum(["full", "delta", "none"]).optional(),
     command: z.string().optional(),
     tool: z.string().optional(),
@@ -642,6 +776,7 @@ export const jobManage = defineTool({
             ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.task !== undefined ? { task: args.task } : {}),
+            ...(args.deliveryMode !== undefined ? { deliveryMode: args.deliveryMode } : {}),
             ...(args.contextMode !== undefined ? { contextMode: args.contextMode } : {}),
             ...(args.command !== undefined ? { command: args.command } : {}),
             ...(args.tool !== undefined ? { tool: args.tool } : {}),
@@ -670,6 +805,7 @@ export const jobManage = defineTool({
             ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
             ...(args.task !== undefined ? { task: args.task } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
+            ...(args.deliveryMode !== undefined ? { deliveryMode: args.deliveryMode } : {}),
             ...(args.command !== undefined ? { command: args.command } : {}),
             ...(args.tool !== undefined ? { tool: args.tool } : {}),
             ...(args.args !== undefined ? { args: args.args } : {}),

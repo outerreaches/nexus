@@ -257,12 +257,12 @@ export function getRunReportById(db: NexusDatabase, id: string): RunReportRecord
 export function findNearestTelegramAncestorRun(
   db: NexusDatabase,
   runId: string,
-): { runId: string; agentId: string; channelKey: string; sessionId: string | null } | null {
+): { runId: string; agentId: string; channelKey: string; sessionId: string | null; preset: string | null } | null {
   let currentRunId: string | null = runId;
   for (let i = 0; i < 40 && currentRunId; i++) {
     const row = db.db
       .prepare(
-        `SELECT run_id, parent_run_id, agent_id, channel, channel_key, session_id
+        `SELECT run_id, parent_run_id, agent_id, preset, channel, channel_key, session_id
          FROM agent_runs
          WHERE run_id = ?
          LIMIT 1`,
@@ -272,6 +272,7 @@ export function findNearestTelegramAncestorRun(
           run_id: string;
           parent_run_id: string | null;
           agent_id: string;
+          preset: string | null;
           channel: string | null;
           channel_key: string | null;
           session_id: string | null;
@@ -286,6 +287,7 @@ export function findNearestTelegramAncestorRun(
         agentId: row.agent_id,
         channelKey,
         sessionId: row.session_id ?? null,
+        preset: row.preset?.trim() ? row.preset.trim() : null,
       };
     }
     currentRunId = row.parent_run_id ?? null;
