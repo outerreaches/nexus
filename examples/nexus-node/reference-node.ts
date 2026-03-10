@@ -2166,6 +2166,24 @@ class ReferenceNodeClient {
     return result.ok;
   }
 
+  private async shellCtlListOtherSessions(excludeSessionId: string): Promise<Array<{ session: string; cwd: string; running: boolean }>> {
+    try {
+      const files = await fs.readdir(this.shellCtlMetaDir());
+      const others: Array<{ session: string; cwd: string; running: boolean }> = [];
+      for (const entry of files) {
+        if (!entry.endsWith(".json")) continue;
+        const sid = entry.slice(0, -5);
+        if (sid === excludeSessionId) continue;
+        const meta = await this.shellCtlLoadMeta(sid);
+        if (!meta) continue;
+        others.push({ session: sid, cwd: meta.cwd, running: await this.shellCtlHasSession(meta.tmuxSession) });
+      }
+      return others;
+    } catch {
+      return [];
+    }
+  }
+
   private shellCtlPaginateUtf8Chunk(buffer: Buffer, maxChars: number): {
     output: string;
     consumedBytes: number;
@@ -2340,6 +2358,7 @@ class ReferenceNodeClient {
         existingMeta.lastReadCursor = cursor;
         existingMeta.updatedAt = Date.now();
         await this.shellCtlSaveMeta(existingMeta);
+        const otherSessions = await this.shellCtlListOtherSessions(parsed.sessionId);
         return JSON.stringify(
           {
             ok: true,
@@ -2348,6 +2367,7 @@ class ReferenceNodeClient {
             existed: true,
             cwd: existingMeta.cwd,
             cursor,
+            ...(otherSessions.length > 0 ? { otherSessions } : {}),
           },
           null,
           2,
@@ -2403,6 +2423,7 @@ class ReferenceNodeClient {
         ownerChannelKey: parsed.ownerChannelKey ?? null,
         ownerAgentId: parsed.ownerAgentId ?? null,
       });
+      const otherSessions = await this.shellCtlListOtherSessions(parsed.sessionId);
       return JSON.stringify(
         {
           ok: true,
@@ -2411,6 +2432,7 @@ class ReferenceNodeClient {
           existed: false,
           cwd,
           cursor: 0,
+          ...(otherSessions.length > 0 ? { otherSessions } : {}),
         },
         null,
         2,
