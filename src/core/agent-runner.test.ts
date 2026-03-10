@@ -905,3 +905,92 @@ test("AgentRunner keeps identical-call blocks when only read-only tools succeed 
   );
   assert.ok(blockedToolMessage);
 });
+
+test("AgentRunner allows one identical retry for telegram_send file-not-found results", async () => {
+  let step = 0;
+  let telegramCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      switch (step++) {
+        case 0:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-telegram-send-1",
+                name: "telegram_send",
+                arguments: JSON.stringify({
+                  text: "Atlas dashboard screenshot",
+                  path: "/home/user/.nexus-node/dashboard.png",
+                }),
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-telegram-send-2",
+                name: "telegram_send",
+                arguments: JSON.stringify({
+                  text: "Atlas dashboard screenshot",
+                  path: "/home/user/.nexus-node/dashboard.png",
+                }),
+              },
+            ],
+          };
+        default:
+          return { content: "done", toolCalls: [] };
+      }
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "telegram_send",
+        description: "test",
+        jsonSchema: {},
+        execute: async () => {
+          telegramCalls += 1;
+          if (telegramCalls === 1) return "ERROR: file not found: /home/user/.nexus-node/dashboard.png";
+          return "OK: sent dashboard.png to chat 1000000001";
+        },
+      },
+    ],
+    budget: { maxIterations: 4, maxToolCalls: 6 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "send the screenshot to telegram",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(telegramCalls, 2);
+  assert.equal(
+    result.newMessages.some(
+      (msg) =>
+        msg.role === "tool" &&
+        msg.name === "telegram_send" &&
+        typeof msg.content === "string" &&
+        msg.content.includes("One identical retry is allowed"),
+    ),
+    true,
+  );
+  assert.equal(
+    result.newMessages.some(
+      (msg) =>
+        msg.role === "tool" &&
+        msg.name === "telegram_send" &&
+        typeof msg.content === "string" &&
+        msg.content.includes("blocked by retry policy"),
+    ),
+    false,
+  );
+});

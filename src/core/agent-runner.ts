@@ -516,8 +516,22 @@ export function classifyToolResultStatus(call: ToolCall, result: string): ToolRe
   };
 }
 
-function allowedIdenticalRetries(retryPolicy?: ToolRetryPolicy): number {
-  if (retryPolicy === "yes" || retryPolicy === "after_backoff") return 1;
+function allowedIdenticalRetries(params: {
+  call: ToolCall;
+  args: unknown;
+  errorClass?: ToolErrorClass;
+  retryPolicy?: ToolRetryPolicy;
+}): number {
+  if (
+    params.call.name === "telegram_send" &&
+    params.errorClass === "not_found" &&
+    isPlainObject(params.args) &&
+    typeof params.args.path === "string" &&
+    params.args.path.trim().length > 0
+  ) {
+    return 1;
+  }
+  if (params.retryPolicy === "yes" || params.retryPolicy === "after_backoff") return 1;
   return 0;
 }
 
@@ -1045,7 +1059,12 @@ export class AgentRunner {
           const next = (repeatedFailures.get(sig) ?? 0) + 1;
           repeatedFailures.set(sig, next);
 
-          const retryBudget = allowedIdenticalRetries(retryPolicy);
+          const retryBudget = allowedIdenticalRetries({
+            call,
+            args,
+            errorClass,
+            retryPolicy,
+          });
           const maxFailuresBeforeBlock = retryBudget + 1;
           const retriesUsed = Math.max(0, next - 1);
           const retriesRemaining = Math.max(0, retryBudget - retriesUsed);
