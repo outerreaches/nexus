@@ -383,6 +383,27 @@ async function runCommand(
   });
 }
 
+async function waitForGatewayHealth(baseUrl: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const intervalMs = 2_000;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/health/live`);
+      if (res.ok) {
+        ok("gateway is healthy");
+        return;
+      }
+      lastError = `HTTP ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    process.stdout.write(tui.paint("dim", `  waiting for gateway (${lastError})...\n`));
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`gateway did not become healthy within ${Math.round(timeoutMs / 1000)}s (last: ${lastError})`);
+}
+
 function xmlEscape(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -1367,6 +1388,11 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       "ha-sidecar-bootstrap.sh",
     );
     if (state.secretOnboarding.enabled && (await fileExists(sidecarBootstrapScript))) {
+      if (!dryRun) {
+        section("Wait for Gateway Health");
+        await waitForGatewayHealth(env.API_BASE_URL ?? "http://localhost:18789", 90_000);
+        completedPhases.push("Wait for Gateway Health");
+      }
       await runCommand(
         "Bootstrap Sidecar Provider",
         "bash",
