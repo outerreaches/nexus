@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeAssistantContent, parseChatCompletionResponseBody } from "./openai-compat.js";
+import { collapseConsecutiveSystemMessages, normalizeAssistantContent, parseChatCompletionResponseBody } from "./openai-compat.js";
+
+test("collapseConsecutiveSystemMessages merges adjacent system prompts", () => {
+  const collapsed = collapseConsecutiveSystemMessages([
+    { role: "system", content: "System A" },
+    { role: "system", content: "System B", cacheControl: { type: "ephemeral" } },
+    { role: "user", content: "hello" },
+    { role: "system", content: "System C" },
+    { role: "assistant", content: "done" },
+  ]);
+
+  assert.deepEqual(collapsed, [
+    { role: "system", content: "System A\n\nSystem B", cacheControl: { type: "ephemeral" } },
+    { role: "user", content: "hello" },
+    { role: "system", content: "System C" },
+    { role: "assistant", content: "done" },
+  ]);
+});
 
 test("normalizeAssistantContent handles plain string content", () => {
   assert.equal(normalizeAssistantContent("hello"), "hello");

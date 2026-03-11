@@ -72,6 +72,31 @@ type OpenAIChatMessage =
   | { role: "assistant"; content: string | null; tool_calls?: unknown[]; cache_control?: { type: "ephemeral" } }
   | { role: "tool"; content: string; tool_call_id: string; name: string; cache_control?: { type: "ephemeral" } };
 
+export function collapseConsecutiveSystemMessages(messages: ChatMessage[]): ChatMessage[] {
+  const collapsed: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role !== "system") {
+      collapsed.push(message);
+      continue;
+    }
+
+    const previous = collapsed[collapsed.length - 1];
+    if (!previous || previous.role !== "system") {
+      collapsed.push({ ...message });
+      continue;
+    }
+
+    collapsed[collapsed.length - 1] = {
+      role: "system",
+      content: `${previous.content}\n\n${message.content}`,
+      ...(message.cacheControl ?? previous.cacheControl ? { cacheControl: message.cacheControl ?? previous.cacheControl } : {}),
+    };
+  }
+
+  return collapsed;
+}
+
 function normalizeToolCallArgumentsForRequest(raw: unknown): string {
   const toObjectString = (value: unknown): string | null => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -107,7 +132,7 @@ function normalizeToolCallArgumentsForRequest(raw: unknown): string {
 }
 
 function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatMessage[] {
-  return messages.map((m) => {
+  return collapseConsecutiveSystemMessages(messages).map((m) => {
     if (m.role === "user") {
       return {
         role: "user",

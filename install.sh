@@ -60,7 +60,7 @@ install_nexus_launcher() {
 set -euo pipefail
 
 LOCAL_ENTRYPOINT="$target"
-CONTAINER_ENTRYPOINT="\${NEXUS_CONTAINER_ENTRYPOINT:-/data/code/dist/index.js}"
+CONTAINER_ENTRYPOINT="\${NEXUS_CONTAINER_ENTRYPOINT:-/app/dist/index.js}"
 COMPOSE_PROJECT="\${COMPOSE_PROJECT:-infra}"
 CLI_TARGET="\${NEXUS_CLI_TARGET:-active-container}"
 KNOWN_SERVICES=("nexus-primary" "nexus-standby" "nexus")

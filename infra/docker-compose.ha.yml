@@ -64,6 +64,8 @@ services:
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-standby:18789
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ${NEXUS_GATEWAY_ENV_FILE:-/data/nexus-config/gateway/nexus.env}
     healthcheck:
@@ -100,6 +102,8 @@ services:
       - NEXUS_BROWSER_HEADLESS=1
       - NEXUS_BROWSER_NO_SANDBOX=1
       - NEXUS_HA_PEER_URL=http://nexus-primary:18789
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ${NEXUS_GATEWAY_ENV_FILE:-/data/nexus-config/gateway/nexus.env}
     healthcheck:

@@ -119,7 +119,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     id: "local",
     label: "Local OpenAI-Compatible",
-    baseUrl: "http://127.0.0.1:1234/v1",
+    baseUrl: "http://host.docker.internal:1234/v1",
     model: "local-model",
     envKey: "NEXUS_LOCAL_LLM_API_KEY",
     credentialId: "llm.local.api",
