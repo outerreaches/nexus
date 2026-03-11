@@ -1094,7 +1094,8 @@ export async function startTelegramBot(deps: {
   if (!tg.enabled) return null;
   const token = tg.token && !isEnvPlaceholder(tg.token) ? tg.token : getSecret("TELEGRAM_BOT_TOKEN");
   if (!token) {
-    throw new Error("Telegram is enabled but no token is configured (set TELEGRAM_BOT_TOKEN).");
+    deps.log("WARN telegram enabled but no token available (TELEGRAM_BOT_TOKEN not resolved); skipping");
+    return null;
   }
 
   const bot = new Bot<Context>(token);

@@ -1359,6 +1359,24 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     await runCommand("Deploy Stack", "bash", [deployScript], env, dryRun);
     completedPhases.push("Deploy Stack");
 
+    const sidecarBootstrapScript = path.join(
+      state.paths.codeDir,
+      "infra",
+      "scripts",
+      "setup",
+      "ha-sidecar-bootstrap.sh",
+    );
+    if (state.secretOnboarding.enabled && (await fileExists(sidecarBootstrapScript))) {
+      await runCommand(
+        "Bootstrap Sidecar Provider",
+        "bash",
+        [sidecarBootstrapScript],
+        { ...env, NEXUS_HTTP_API_KEY: state.secrets.httpApiKey },
+        dryRun,
+      );
+      completedPhases.push("Bootstrap Sidecar Provider");
+    }
+
     await runCommand("HA Status", "bash", [rolloutScript, "status"], env, dryRun);
     completedPhases.push("HA Status");
 
