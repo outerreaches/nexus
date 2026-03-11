@@ -1146,6 +1146,25 @@ function buildScriptEnv(state: SetupState): NodeJS.ProcessEnv {
   };
 }
 
+async function seedDefaultSidecarProviderProfile(state: SetupState): Promise<void> {
+  const { openDatabase } = await import("../storage/database.js");
+  const { upsertSecretProviderProfile } = await import("../storage/secrets.js");
+
+  const db = await openDatabase(path.join(state.paths.stateDir, "nexus.db"));
+  try {
+    upsertSecretProviderProfile(db, {
+      id: "sidecar-main",
+      kind: "sidecar_http",
+      endpointRef: "unix:///run/nexus/secret-sidecar.sock",
+      authMode: "unix_peer",
+      strictMode: true,
+      enabled: true,
+    });
+  } finally {
+    db.close();
+  }
+}
+
 function getBootstrapTestReference(state: SetupState): string | null {
   const providerCredentialId = state.secretOnboarding.providers.find((provider) => Boolean(provider.apiKey))?.credentialId;
   if (providerCredentialId) {
@@ -1395,6 +1414,15 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       dryRun,
     );
     completedPhases.push("Secrets Preflight");
+
+    section("Seed Sidecar Provider");
+    if (dryRun) {
+      ok("dry-run: would seed sidecar-main provider profile in local database");
+    } else {
+      await seedDefaultSidecarProviderProfile(state);
+      ok("sidecar-main provider profile seeded in local database");
+    }
+    completedPhases.push("Seed Sidecar Provider");
 
     await runCommand("Deploy Stack", "bash", [deployScript], env, dryRun);
     completedPhases.push("Deploy Stack");
