@@ -14,7 +14,7 @@ const resolvedSecrets = new Map<string, string>();
  * Follows the same pattern as resolveMcpServerEnvSecrets() in src/mcp/manager.ts:
  * - Values containing {{secret:*}} are resolved through the sidecar/broker/provider stack
  * - Plain values are stored as-is
- * - Resolution failures fail closed (throw)
+ * - Resolution failures are logged and skipped
  * - Leases are revoked immediately after resolution (startup one-shot)
  *
  * Must be called after DB + sidecar are ready.
@@ -35,6 +35,7 @@ export async function resolveEnvSecrets(params: {
   const nowMs = params.nowMs ?? Date.now();
   let fromProvider = 0;
   let plain = 0;
+  let skipped = 0;
   const keys: string[] = [];
   const nextResolved = new Map<string, string>();
 
@@ -64,7 +65,7 @@ export async function resolveEnvSecrets(params: {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         params.log(`secrets/env: ERROR ${envKey} not resolved (${message})`);
-        throw new Error(`env_secret_resolution_failed:${envKey}:${message}`);
+        skipped += 1;
       }
     } else {
       nextResolved.set(envKey, value);
@@ -77,8 +78,10 @@ export async function resolveEnvSecrets(params: {
     resolvedSecrets.set(key, value);
   }
 
-  params.log(`secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain)`);
-  return { resolved: keys.length, fromProvider, plain, skipped: 0, keys };
+  params.log(
+    `secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain, ${skipped} skipped)`,
+  );
+  return { resolved: keys.length, fromProvider, plain, skipped, keys };
 }
 
 /** Get a resolved secret value. Returns undefined if not in registry. */

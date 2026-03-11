@@ -139,7 +139,7 @@ test("resolveEnvSecrets resolves secret references via provider", async () => {
     });
 });
 
-test("resolveEnvSecrets fails closed when a secret reference cannot be resolved", async () => {
+test("resolveEnvSecrets skips secret references that cannot be resolved", async () => {
     await withTempDir(async (dir) => {
         clearResolvedSecretsForTests();
         const db = await openDatabase(path.join(dir, "test.db"));
@@ -163,20 +163,21 @@ test("resolveEnvSecrets fails closed when a secret reference cannot be resolved"
             });
 
             const warnings: string[] = [];
-            await assert.rejects(
-                () => resolveEnvSecrets({
-                    db,
-                    stateDir: dir,
-                    env: {
-                        BAD_KEY: "{{secret:sidecar-main/fail-path#password}}",
-                        GOOD_KEY: "plain-value",
-                    },
-                    log: (msg) => warnings.push(msg),
-                }),
-                /env_secret_resolution_failed:BAD_KEY:/,
-            );
+            const result = await resolveEnvSecrets({
+                db,
+                stateDir: dir,
+                env: {
+                    BAD_KEY: "{{secret:sidecar-main/fail-path#password}}",
+                    GOOD_KEY: "plain-value",
+                },
+                log: (msg) => warnings.push(msg),
+            });
+            assert.equal(result.resolved, 1);
+            assert.equal(result.plain, 1);
+            assert.equal(result.fromProvider, 0);
+            assert.equal(result.skipped, 1);
             assert.equal(getSecret("BAD_KEY"), undefined);
-            assert.equal(getSecret("GOOD_KEY"), undefined);
+            assert.equal(getSecret("GOOD_KEY"), "plain-value");
             assert.ok(warnings.some((w) => w.includes("ERROR BAD_KEY not resolved")));
         } finally {
             setSecretBrokerRequestInvokerForTests(null);
