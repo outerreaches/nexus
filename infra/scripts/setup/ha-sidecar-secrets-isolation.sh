@@ -4,6 +4,7 @@
 # Defaults:
 #   source: <state-dir>/secrets/credentials.json
 #   target: <store-dir>/credentials.json
+#   backup: <store-dir>/archive/credentials.legacy.<timestamp>.json
 #
 # Usage:
 #   infra/scripts/setup/ha-sidecar-secrets-isolation.sh --status
@@ -33,6 +34,7 @@ fi
 OLD_STORE_PATH="${OLD_STORE_PATH:-${DEFAULT_STATE_DIR}/secrets/credentials.json}"
 NEW_STORE_DIR="${NEW_STORE_DIR:-${DEFAULT_STORE_DIR}}"
 NEW_STORE_PATH="${NEW_STORE_PATH:-${NEW_STORE_DIR}/credentials.json}"
+BACKUP_DIR="${BACKUP_DIR:-${NEW_STORE_DIR}/archive}"
 
 ACTION="status"
 FORCE=0
@@ -48,7 +50,7 @@ for arg in "$@"; do
 Usage: $(basename "$0") [--status|--prepare|--migrate] [--force]
   --status   Show source/target presence, size, and sha256
   --prepare  Create target dir with restrictive permissions (0700)
-  --migrate  Copy source store to target (non-destructive)
+  --migrate  Back up, copy to target, then remove the legacy source store
   --force    Overwrite target when --migrate and target already exists
 EOF
       exit 0
@@ -91,19 +93,36 @@ prepare_target_dir() {
 
 migrate_store() {
   if [[ ! -f "$OLD_STORE_PATH" ]]; then
+    if [[ -f "$NEW_STORE_PATH" ]]; then
+      echo "legacy source store already absent; target store already present: $NEW_STORE_PATH"
+      return 0
+    fi
     echo "source store not found: $OLD_STORE_PATH" >&2
     exit 1
   fi
   prepare_target_dir
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR" || true
 
   if [[ -f "$NEW_STORE_PATH" && "$FORCE" -ne 1 ]]; then
     echo "target store already exists: $NEW_STORE_PATH (use --force to overwrite)" >&2
     exit 1
   fi
 
+  local timestamp backup_path
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  backup_path="${BACKUP_DIR}/credentials.legacy.${timestamp}.json"
+  cp "$OLD_STORE_PATH" "$backup_path"
+  chmod 600 "$backup_path" || true
   cp "$OLD_STORE_PATH" "$NEW_STORE_PATH"
   chmod 600 "$NEW_STORE_PATH" || true
-  echo "copied store: $OLD_STORE_PATH -> $NEW_STORE_PATH (chmod 600 attempted)"
+  if ! cmp -s "$OLD_STORE_PATH" "$NEW_STORE_PATH"; then
+    echo "target store verification failed after copy: $NEW_STORE_PATH" >&2
+    exit 1
+  fi
+  rm -f "$OLD_STORE_PATH"
+  rmdir "$(dirname "$OLD_STORE_PATH")" 2>/dev/null || true
+  echo "migrated store: $OLD_STORE_PATH -> $NEW_STORE_PATH (backup: $backup_path)"
 }
 
 print_status() {

@@ -633,6 +633,7 @@ Bootstrap helper (upsert + test + recent audit events):
 ```bash
 cd /data/code
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+TEST_REFERENCE='{{secret:sidecar-main/test.brave.api#password}}' \
 infra/scripts/setup/ha-sidecar-bootstrap.sh
 ```
 
@@ -641,6 +642,7 @@ Test-only run (no provider mutation):
 ```bash
 cd /data/code
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+TEST_REFERENCE='{{secret:sidecar-main/test.brave.api#password}}' \
 infra/scripts/setup/ha-sidecar-bootstrap.sh --test-only
 ```
 
@@ -649,6 +651,7 @@ Optional overrides for non-default profile wiring:
 - `PROVIDER_ENDPOINT` (default `unix:///run/nexus/secret-sidecar.sock`)
 - `PROVIDER_AUTH_MODE` (default `unix_peer`)
 - `PROVIDER_STRICT_MODE` / `PROVIDER_ENABLED` (`true|false`, `1|0`)
+- `TEST_REFERENCE` optional but recommended for a real resolution check; without it the script validates transport/policy only
 
 Sidecar-only enforcement is always active.
 
@@ -681,12 +684,12 @@ docker compose -p infra \
 Validation checks:
 
 ```bash
-# sidecar health over unix socket
+# sidecar readiness over unix socket
 docker compose -p infra \
   -f /data/code/infra/docker-compose.ha.yml \
   -f /data/code/infra/docker-compose.ha.sidecar.yml \
   exec -T nexus-primary sh -lc \
-  'curl -fsS --unix-socket /run/nexus/secret-sidecar.sock http://localhost/health'
+  'curl -fsS --unix-socket /run/nexus/secret-sidecar.sock http://localhost/ready'
 
 # sidecar provider still resolves
 curl -s -X POST http://localhost:18789/api/secrets/providers/sidecar-main/test \
@@ -768,6 +771,7 @@ docker compose -p infra \
 
 # 4) Bootstrap/verify sidecar provider profile
 NEXUS_HTTP_API_KEY="$NEXUS_HTTP_API_KEY" \
+TEST_REFERENCE='{{secret:sidecar-main/test.brave.api#password}}' \
 infra/scripts/setup/ha-sidecar-bootstrap.sh
 
 # 5) Sanity checks

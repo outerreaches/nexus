@@ -8,6 +8,10 @@ import test from "node:test";
 import { upsertCredential } from "./credentials.js";
 import { startSecretSidecar } from "./sidecar.js";
 
+function getTestStoreDir(stateDir: string): string {
+  return path.join(stateDir, "isolated-secrets");
+}
+
 function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(overrides)) {
@@ -36,7 +40,16 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => Promis
 async function withTempStateDir(fn: (stateDir: string) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-secret-sidecar-test-"));
   try {
-    await fn(dir);
+    await Promise.resolve(
+      withEnv(
+        {
+          NEXUS_CREDENTIALS_STORE_DIR: getTestStoreDir(dir),
+        },
+        async () => {
+          await fn(dir);
+        },
+      ),
+    );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -76,16 +89,23 @@ async function requestViaUnixSocket(params: {
 
 test("sidecar strict mode requires bearer token for TCP endpoint", async () => {
   await withTempStateDir(async (stateDir) => {
-    await assert.rejects(
-      () =>
-        startSecretSidecar({
-          stateDir,
-          bindHost: "127.0.0.1",
-          port: 0,
-          bearerToken: null,
-          strictMode: true,
-        }),
-      /secret_sidecar_strict_mode_requires_bearer_token_for_tcp/,
+    await withEnv(
+      {
+        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      },
+      async () => {
+        await assert.rejects(
+          () =>
+            startSecretSidecar({
+              stateDir,
+              bindHost: "127.0.0.1",
+              port: 0,
+              bearerToken: null,
+              strictMode: true,
+            }),
+          /secret_sidecar_strict_mode_requires_bearer_token_for_tcp/,
+        );
+      },
     );
   });
 });
@@ -127,6 +147,12 @@ test("sidecar resolves local credential over unix socket without bearer auth", a
             path: "/health",
           });
           assert.equal(health.statusCode, 200);
+          const ready = await requestViaUnixSocket({
+            socketPath,
+            method: "GET",
+            path: "/ready",
+          });
+          assert.equal(ready.statusCode, 200);
 
           const resolveBody = JSON.stringify({
             providerKind: "sidecar_http",
@@ -153,4 +179,41 @@ test("sidecar resolves local credential over unix socket without bearer auth", a
       });
     },
   );
+});
+
+test("sidecar startup fails when encrypted store cannot be decrypted", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withEnv(
+      {
+        NEXUS_CREDENTIALS_KEY: "secret-sidecar-test-key",
+        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      },
+      async () => {
+        await upsertCredential({
+          stateDir,
+          id: "cred-sidecar-bad-key",
+          password: "pw-sidecar-bad-key",
+        });
+      },
+    );
+
+    const socketPath = path.join(stateDir, "secret-sidecar-ready.sock");
+    await withEnv(
+      {
+        NEXUS_CREDENTIALS_KEY: undefined,
+        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      },
+      async () => {
+        await assert.rejects(
+          () =>
+            startSecretSidecar({
+              stateDir,
+              socketPath,
+              strictMode: true,
+            }),
+          /Credential is encrypted but NEXUS_CREDENTIALS_KEY is not set/,
+        );
+      },
+    );
+  });
 });

@@ -3,7 +3,7 @@ import http from "node:http";
 import { URL } from "node:url";
 import fs from "node:fs/promises";
 
-import { getCredentialField } from "./credentials.js";
+import { getCredentialField, validateCredentialStoreReadiness } from "./credentials.js";
 
 export type SecretSidecarOptions = {
   stateDir: string;
@@ -27,12 +27,14 @@ export type SecretSidecarHandle = {
     port: number | null;
     resolvePath: string;
     healthPath: string;
+    readyPath: string;
   };
 };
 
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024;
 const RESOLVE_PATHS = new Set(["/v1/secrets/resolve", "/resolve"]);
 const HEALTH_PATH = "/health";
+const READY_PATH = "/ready";
 const DEFAULT_SOCKET_MODE = 0o666;
 
 function parseSocketMode(raw: string | undefined): number | null {
@@ -155,6 +157,13 @@ export async function startSecretSidecar(options: SecretSidecarOptions): Promise
     }
   }
 
+  const startupReadiness = await validateCredentialStoreReadiness({
+    stateDir: options.stateDir,
+  });
+  log(
+    `secret-sidecar: credential store ready path=${startupReadiness.storePath} credentials=${startupReadiness.credentialCount} encrypted=${startupReadiness.encryptedCredentialCount}`,
+  );
+
   const server = http.createServer(async (req, res) => {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -168,6 +177,32 @@ export async function startSecretSidecar(options: SecretSidecarOptions): Promise
         port: socketPath ? null : port,
         timestamp: Date.now(),
       });
+      return;
+    }
+    if (method === "GET" && url.pathname === READY_PATH) {
+      try {
+        const readiness = await validateCredentialStoreReadiness({
+          stateDir: options.stateDir,
+        });
+        writeJson(res, 200, {
+          ok: true,
+          service: "secret-sidecar",
+          strictMode,
+          storePath: readiness.storePath,
+          credentialCount: readiness.credentialCount,
+          encryptedCredentialCount: readiness.encryptedCredentialCount,
+          timestamp: Date.now(),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        writeJson(res, 503, {
+          ok: false,
+          service: "secret-sidecar",
+          strictMode,
+          error: message.slice(0, 240),
+          timestamp: Date.now(),
+        });
+      }
       return;
     }
 
@@ -283,6 +318,7 @@ export async function startSecretSidecar(options: SecretSidecarOptions): Promise
       port: socketPath ? null : effectivePort,
       resolvePath: "/v1/secrets/resolve",
       healthPath: HEALTH_PATH,
+      readyPath: READY_PATH,
     },
   };
 }

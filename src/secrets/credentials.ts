@@ -25,6 +25,9 @@ type CredentialStoreFileV1 = {
 const CREDENTIAL_STORE_VERSION = 1 as const;
 const CREDENTIAL_STORE_FILE = "credentials.json";
 const credentialStoreLocks = new Map<string, Promise<void>>();
+const CREDENTIAL_STORE_LOCK_WAIT_MS = 50;
+const CREDENTIAL_STORE_LOCK_TIMEOUT_MS = 15_000;
+const CREDENTIAL_STORE_LOCK_STALE_MS = 60_000;
 
 function getSecretsProcessRole(): string {
   return (process.env.NEXUS_SECRETS_PROCESS_ROLE ?? "gateway").trim().toLowerCase();
@@ -41,16 +44,22 @@ function getVaultKey(): Buffer | null {
   return crypto.createHash("sha256").update(raw, "utf8").digest();
 }
 
-function resolveCredentialStorePath(stateDir: string): string {
+function resolveCredentialStoreDir(): string {
   const explicitDir = (process.env.NEXUS_CREDENTIALS_STORE_DIR ?? "").trim();
-  if (explicitDir) {
-    if (!path.isAbsolute(explicitDir)) {
-      throw new Error("NEXUS_CREDENTIALS_STORE_DIR must be an absolute path.");
-    }
-    return path.join(explicitDir, CREDENTIAL_STORE_FILE);
+  if (!explicitDir) {
+    throw new Error(
+      "NEXUS_CREDENTIALS_STORE_DIR is required; legacy state-dir credential storage is no longer supported.",
+    );
   }
+  if (!path.isAbsolute(explicitDir)) {
+    throw new Error("NEXUS_CREDENTIALS_STORE_DIR must be an absolute path.");
+  }
+  return explicitDir;
+}
 
-  return path.join(stateDir, "secrets", CREDENTIAL_STORE_FILE);
+function resolveCredentialStorePath(stateDir: string): string {
+  void stateDir;
+  return path.join(resolveCredentialStoreDir(), CREDENTIAL_STORE_FILE);
 }
 
 function encryptSecret(value: string, key: Buffer): StoredSecret {
@@ -81,6 +90,10 @@ function decryptSecret(secret: StoredSecret, key: Buffer | null): string {
 
 export function getCredentialStorePath(stateDir: string): string {
   return resolveCredentialStorePath(stateDir);
+}
+
+export function getLegacyCredentialStorePath(stateDir: string): string {
+  return path.join(stateDir, "secrets", CREDENTIAL_STORE_FILE);
 }
 
 function emptyStore(nowMs: number): CredentialStoreFileV1 {
@@ -207,6 +220,57 @@ async function saveStore(stateDir: string, store: CredentialStoreFileV1): Promis
   }
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireStoreFileLock(storePath: string): Promise<Awaited<ReturnType<typeof fs.open>>> {
+  const lockPath = `${storePath}.lock`;
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + CREDENTIAL_STORE_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const handle = await fs.open(lockPath, "wx", 0o600);
+      await handle.writeFile(
+        JSON.stringify({
+          pid: process.pid,
+          createdAt: Date.now(),
+        }) + "\n",
+        "utf8",
+      ).catch(() => {});
+      return handle;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? "";
+      if (code !== "EEXIST") {
+        if (err instanceof Error) throw err;
+        throw new Error(`credential_store_lock_failed:${String(err)}`);
+      }
+
+      try {
+        const stat = await fs.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > CREDENTIAL_STORE_LOCK_STALE_MS) {
+          await fs.rm(lockPath, { force: true }).catch(() => {});
+          continue;
+        }
+      } catch (statErr) {
+        const statCode = (statErr as NodeJS.ErrnoException)?.code ?? "";
+        if (statCode === "ENOENT") continue;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(`credential_store_lock_timeout:${lockPath}`);
+      }
+      await sleep(CREDENTIAL_STORE_LOCK_WAIT_MS);
+    }
+  }
+}
+
+async function releaseStoreFileLock(storePath: string, handle: Awaited<ReturnType<typeof fs.open>>): Promise<void> {
+  const lockPath = `${storePath}.lock`;
+  await handle.close().catch(() => {});
+  await fs.rm(lockPath, { force: true }).catch(() => {});
+}
+
 async function withStoreLock<T>(stateDir: string, fn: () => Promise<T>): Promise<T> {
   const storePath = getCredentialStorePath(stateDir);
   const prev = credentialStoreLocks.get(storePath) ?? Promise.resolve();
@@ -217,9 +281,14 @@ async function withStoreLock<T>(stateDir: string, fn: () => Promise<T>): Promise
   const tail = prev.then(() => gate);
   credentialStoreLocks.set(storePath, tail);
   await prev;
+  let fileLock: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
+    fileLock = await acquireStoreFileLock(storePath);
     return await fn();
   } finally {
+    if (fileLock) {
+      await releaseStoreFileLock(storePath, fileLock);
+    }
     release();
     if (credentialStoreLocks.get(storePath) === tail) {
       credentialStoreLocks.delete(storePath);
@@ -333,4 +402,23 @@ export async function getCredentialField(params: {
     if (!c.password) throw new Error(`Credential ${params.id} has no password.`);
     return decryptSecret(c.password, getVaultKey());
   });
+}
+
+export async function validateCredentialStoreReadiness(params: {
+  stateDir: string;
+}): Promise<{ storePath: string; credentialCount: number; encryptedCredentialCount: number }> {
+  assertDirectCredentialAccessAllowed("readiness");
+  const store = await loadStore(params.stateDir);
+  const key = getVaultKey();
+  let encryptedCredentialCount = 0;
+  for (const credential of store.credentials) {
+    if (!credential.password) continue;
+    encryptedCredentialCount += 1;
+    decryptSecret(credential.password, key);
+  }
+  return {
+    storePath: getCredentialStorePath(params.stateDir),
+    credentialCount: store.credentials.length,
+    encryptedCredentialCount,
+  };
 }

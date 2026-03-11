@@ -31,9 +31,8 @@ services:
       context: ..
       dockerfile: Dockerfile
       target: sidecar
-    command: secret-sidecar --socket-path /run/nexus/secret-sidecar.sock
+    command: secret-sidecar --state-dir /data/nexus --socket-path /run/nexus/secret-sidecar.sock
     volumes:
-      - ${NEXUS_HOST_STATE_DIR:-/data/nexus}:/data/nexus
       - ${NEXUS_HOST_SECRETS_DIR:-/data/nexus-secrets}:/data/nexus-secrets
       - secret-sidecar-run:/run/nexus
     environment:
@@ -47,14 +46,21 @@ services:
     env_file:
       - ${NEXUS_SIDECAR_ENV_FILE:-/data/nexus-config/sidecar/nexus.env}
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent --unix-socket /run/nexus/secret-sidecar.sock http://localhost/health >/dev/null"]
+      test: ["CMD-SHELL", "curl --fail --silent --unix-socket /run/nexus/secret-sidecar.sock http://localhost/ready >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
-    networks:
-      - nexus-net
+    network_mode: "none"
 
 volumes:
   secret-sidecar-run:

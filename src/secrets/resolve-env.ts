@@ -20,65 +20,65 @@ const resolvedSecrets = new Map<string, string>();
  * Must be called after DB + sidecar are ready.
  */
 export async function resolveEnvSecrets(params: {
-    db: NexusDatabase;
-    stateDir: string;
-    env: Record<string, string>;
-    log: (msg: string) => void;
-    nowMs?: number;
+  db: NexusDatabase;
+  stateDir: string;
+  env: Record<string, string>;
+  log: (msg: string) => void;
+  nowMs?: number;
 }): Promise<{ resolved: number; fromProvider: number; plain: number; skipped: number; keys: string[] }> {
-    const entries = Object.entries(params.env ?? {});
-    if (entries.length === 0) {
-        params.log("secrets/env: no env secrets configured in config.secrets.env");
-        return { resolved: 0, fromProvider: 0, plain: 0, skipped: 0, keys: [] };
-    }
+  const entries = Object.entries(params.env ?? {});
+  if (entries.length === 0) {
+    params.log("secrets/env: no env secrets configured in config.secrets.env");
+    return { resolved: 0, fromProvider: 0, plain: 0, skipped: 0, keys: [] };
+  }
 
-    const nowMs = params.nowMs ?? Date.now();
-    let fromProvider = 0;
-    let plain = 0;
-    let skipped = 0;
-    const keys: string[] = [];
+  const nowMs = params.nowMs ?? Date.now();
+  let fromProvider = 0;
+  let plain = 0;
+  const keys: string[] = [];
+  const nextResolved = new Map<string, string>();
 
-    for (const [envKey, value] of entries) {
-        const parsed = parseSecretReference(value);
-        if (parsed !== null) {
-            // Secret reference — resolve through sidecar/broker/provider stack
-            try {
-                const traceId = `env-secret:${envKey}:${nowMs}`;
-                const resolved = await resolveSecretReference({
-                    db: params.db,
-                    stateDir: params.stateDir,
-                    reference: value,
-                    traceId,
-                    actor: `gateway:env:${envKey}`,
-                    nowMs,
-                });
-                resolvedSecrets.set(envKey, resolved.value);
-                if (resolved.leaseId) {
-                    revokeSecretLease({
-                        db: params.db,
-                        leaseId: resolved.leaseId,
-                        nowMs: nowMs + 1,
-                    });
-                }
-                fromProvider += 1;
-                keys.push(envKey);
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                params.log(`secrets/env: WARN ${envKey} not resolved (${message}) — key will be unavailable`);
-                skipped += 1;
-            }
-        } else {
-            // Plain value — store as-is
-            resolvedSecrets.set(envKey, value);
-            plain += 1;
-            keys.push(envKey);
+  for (const [envKey, value] of entries) {
+    const parsed = parseSecretReference(value);
+    if (parsed !== null) {
+      const traceId = `env-secret:${envKey}:${nowMs}`;
+      try {
+        const resolved = await resolveSecretReference({
+          db: params.db,
+          stateDir: params.stateDir,
+          reference: value,
+          traceId,
+          actor: `gateway:env:${envKey}`,
+          nowMs,
+        });
+        nextResolved.set(envKey, resolved.value);
+        if (resolved.leaseId) {
+          revokeSecretLease({
+            db: params.db,
+            leaseId: resolved.leaseId,
+            nowMs: nowMs + 1,
+          });
         }
+        fromProvider += 1;
+        keys.push(envKey);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        params.log(`secrets/env: ERROR ${envKey} not resolved (${message})`);
+        throw new Error(`env_secret_resolution_failed:${envKey}:${message}`);
+      }
+    } else {
+      nextResolved.set(envKey, value);
+      plain += 1;
+      keys.push(envKey);
     }
+  }
 
-    params.log(
-        `secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain${skipped > 0 ? `, ${skipped} skipped` : ""})`,
-    );
-    return { resolved: keys.length, fromProvider, plain, skipped, keys };
+  for (const [key, value] of nextResolved) {
+    resolvedSecrets.set(key, value);
+  }
+
+  params.log(`secrets/env: resolved ${keys.length} env secrets (${fromProvider} via provider, ${plain} plain)`);
+  return { resolved: keys.length, fromProvider, plain, skipped: 0, keys };
 }
 
 /** Get a resolved secret value. Returns undefined if not in registry. */

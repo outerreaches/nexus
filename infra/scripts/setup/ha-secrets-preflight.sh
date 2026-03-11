@@ -45,6 +45,7 @@ WATCHDOG_ENV_FILE="${WATCHDOG_ENV_FILE:-${CONFIG_ROOT}/watchdog/nexus.env}"
 STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
 STORE_DIR="${STORE_DIR:-${DEFAULT_STORE_DIR}}"
 STORE_PATH="${STORE_PATH:-${STORE_DIR}/credentials.json}"
+LEGACY_STORE_PATH="${STATE_DIR%/}/secrets/credentials.json"
 
 AUTO_FIX=0
 AUTO_GENERATE_CREDENTIALS_KEY=0
@@ -232,14 +233,30 @@ STORE_PATH="${STORE_DIR%/}/credentials.json"
 
 # Honor env overrides when present.
 env_store_dir="$(read_env_file_value "NEXUS_CREDENTIALS_STORE_DIR" "$SIDECAR_ENV_FILE")"
-if [[ -n "$env_store_dir" ]]; then
-  STORE_DIR="$env_store_dir"
-  STORE_PATH="${STORE_DIR%/}/credentials.json"
+if [[ -z "$env_store_dir" ]]; then
+  if (( AUTO_FIX )); then
+    upsert_env_value "NEXUS_CREDENTIALS_STORE_DIR" "$STORE_DIR" "$SIDECAR_ENV_FILE"
+    env_store_dir="$STORE_DIR"
+    log "set NEXUS_CREDENTIALS_STORE_DIR=${STORE_DIR}"
+  else
+    fail "NEXUS_CREDENTIALS_STORE_DIR is required in ${SIDECAR_ENV_FILE}"
+  fi
+fi
+STORE_DIR="$env_store_dir"
+[[ "${STORE_DIR:0:1}" == "/" ]] || fail "NEXUS_CREDENTIALS_STORE_DIR must be an absolute path: ${STORE_DIR}"
+STORE_PATH="${STORE_DIR%/}/credentials.json"
+LEGACY_STORE_PATH="${STATE_DIR%/}/secrets/credentials.json"
+if [[ "$STORE_PATH" == "$LEGACY_STORE_PATH" ]]; then
+  fail "NEXUS_CREDENTIALS_STORE_DIR must not point to legacy state-dir secrets path: ${STORE_DIR}"
 fi
 
 if (( AUTO_FIX )); then
   mkdir -p "$STORE_DIR" || fail "unable to create store dir: ${STORE_DIR}"
   chmod 700 "$STORE_DIR" 2>/dev/null || true
+fi
+
+if [[ -e "$LEGACY_STORE_PATH" ]]; then
+  fail "legacy credential store still present at ${LEGACY_STORE_PATH}; migrate it to ${STORE_PATH} and remove the legacy file"
 fi
 
 http_api_key="$(read_env_file_value "NEXUS_HTTP_API_KEY" "$GATEWAY_ENV_FILE")"
@@ -310,4 +327,4 @@ if [[ ${#credentials_key} -lt 32 ]]; then
   fail "NEXUS_CREDENTIALS_KEY appears too short (len=${#credentials_key}); expected >= 32 chars"
 fi
 
-log "ok http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") dashboard_password=$(mask_len "$dashboard_password") secretctl_password=$(mask_len "$secretctl_password") credentials_key_len=${#credentials_key} gateway_env=${GATEWAY_ENV_FILE} sidecar_env=${SIDECAR_ENV_FILE} watchdog_env=${WATCHDOG_ENV_FILE} store_path=${STORE_PATH}"
+log "ok http_api_key=$(mask_len "$http_api_key") ha_api_key=$(mask_len "$ha_api_key") dashboard_password=$(mask_len "$dashboard_password") secretctl_password=$(mask_len "$secretctl_password") credentials_key_len=${#credentials_key} gateway_env=${GATEWAY_ENV_FILE} sidecar_env=${SIDECAR_ENV_FILE} watchdog_env=${WATCHDOG_ENV_FILE} store_path=${STORE_PATH} legacy_store_path=${LEGACY_STORE_PATH}"

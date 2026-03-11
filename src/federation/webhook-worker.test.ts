@@ -401,101 +401,108 @@ test("webhook worker supports hmac endpoint signing with secret references", asy
       NEXUS_RUNTIME_PROFILE: "monetization",
     },
     async () => await withDb(async ({ db, stateDir }) => {
-      const nowMs = Date.now();
-      const signing = generateKeyPairSync("ed25519");
-
-      upsertSecretProviderProfile(db, {
-        id: "sidecar-main",
-        kind: "sidecar_http",
-        endpointRef: "https://127.0.0.1:7777/resolve",
-        authMode: "workload_identity",
-        strictMode: true,
-        enabled: true,
-        config: {
-          leaseTtlMs: 30_000,
-          resolvePath: "/resolve",
+      await withEnv(
+        {
+          NEXUS_CREDENTIALS_STORE_DIR: path.join(stateDir, "isolated-secrets"),
         },
-        nowMs,
-      });
-      await upsertCredential({
-        stateDir,
-        id: "webhook.shared",
-        password: "hmac-secret",
-      });
-      upsertWebhookEndpoint(db, {
-        id: "wep-hmac-1",
-        ownerScope: "local",
-        peerId: null,
-        url: "https://hooks.internal/ingest",
-        eventFilter: ["federation.task.*"],
-        signingMode: "hmac",
-        secretRef: "{{secret:sidecar-main/webhook.shared#password}}",
-        enabled: true,
-        status: "active",
-        nowMs,
-      });
-      appendFederationEvent(db, {
-        id: "evt-hmac-1",
-        peerId: null,
-        eventType: "federation.task.updated",
-        direction: "outbound",
-        envelopeId: "env-hmac-1",
-        payload: { taskId: "task-1", status: "running" },
-        traceId: "trace-hmac-1",
-        nowMs,
-      });
-      enqueueWebhookDelivery(db, {
-        id: "wdel-hmac-1",
-        endpointId: "wep-hmac-1",
-        eventId: "evt-hmac-1",
-        traceId: "trace-hmac-1",
-        nowMs,
-      });
+        async () => {
+          const nowMs = Date.now();
+          const signing = generateKeyPairSync("ed25519");
 
-      const seenHeaders: Record<string, string> = {};
-      setSecretBrokerRequestInvokerForTests(async () => ({
-        statusCode: 200,
-        bodyText: JSON.stringify({
-          value: "hmac-secret",
-          secretClass: "credential",
-        }),
-      }));
-      const worker = startWebhookDeliveryWorker({
-        db,
-        stateDir,
-        localInstanceId: "local-1",
-        getSigningMaterial: () => ({
-          privateKey: signing.privateKey,
-          keyId: "kid-local-1",
-        }),
-        webhooksFederatedOnly: false,
-        webhooksExternalEnabled: true,
-        lookupHost: async () => [{ address: "203.0.113.20", family: 4 }],
-        fetchImpl: async (_url, init) => {
-          const headers = init?.headers as Record<string, string> | undefined;
-          if (headers) {
-            for (const [key, value] of Object.entries(headers)) {
-              seenHeaders[key.toLowerCase()] = String(value);
-            }
+          upsertSecretProviderProfile(db, {
+            id: "sidecar-main",
+            kind: "sidecar_http",
+            endpointRef: "https://127.0.0.1:7777/resolve",
+            authMode: "workload_identity",
+            strictMode: true,
+            enabled: true,
+            config: {
+              leaseTtlMs: 30_000,
+              resolvePath: "/resolve",
+            },
+            nowMs,
+          });
+          await upsertCredential({
+            stateDir,
+            id: "webhook.shared",
+            password: "hmac-secret",
+          });
+          upsertWebhookEndpoint(db, {
+            id: "wep-hmac-1",
+            ownerScope: "local",
+            peerId: null,
+            url: "https://hooks.internal/ingest",
+            eventFilter: ["federation.task.*"],
+            signingMode: "hmac",
+            secretRef: "{{secret:sidecar-main/webhook.shared#password}}",
+            enabled: true,
+            status: "active",
+            nowMs,
+          });
+          appendFederationEvent(db, {
+            id: "evt-hmac-1",
+            peerId: null,
+            eventType: "federation.task.updated",
+            direction: "outbound",
+            envelopeId: "env-hmac-1",
+            payload: { taskId: "task-1", status: "running" },
+            traceId: "trace-hmac-1",
+            nowMs,
+          });
+          enqueueWebhookDelivery(db, {
+            id: "wdel-hmac-1",
+            endpointId: "wep-hmac-1",
+            eventId: "evt-hmac-1",
+            traceId: "trace-hmac-1",
+            nowMs,
+          });
+
+          const seenHeaders: Record<string, string> = {};
+          setSecretBrokerRequestInvokerForTests(async () => ({
+            statusCode: 200,
+            bodyText: JSON.stringify({
+              value: "hmac-secret",
+              secretClass: "credential",
+            }),
+          }));
+          const worker = startWebhookDeliveryWorker({
+            db,
+            stateDir,
+            localInstanceId: "local-1",
+            getSigningMaterial: () => ({
+              privateKey: signing.privateKey,
+              keyId: "kid-local-1",
+            }),
+            webhooksFederatedOnly: false,
+            webhooksExternalEnabled: true,
+            lookupHost: async () => [{ address: "203.0.113.20", family: 4 }],
+            fetchImpl: async (_url, init) => {
+              const headers = init?.headers as Record<string, string> | undefined;
+              if (headers) {
+                for (const [key, value] of Object.entries(headers)) {
+                  seenHeaders[key.toLowerCase()] = String(value);
+                }
+              }
+              return new Response("", { status: 202 });
+            },
+            intervalMs: 100_000,
+            maxBatch: 10,
+            requestTimeoutMs: 2_000,
+          });
+          try {
+            const processed = await worker.tick();
+            assert.equal(processed, 1);
+          } finally {
+            setSecretBrokerRequestInvokerForTests(null);
+            worker.stop();
           }
-          return new Response("", { status: 202 });
-        },
-        intervalMs: 100_000,
-        maxBatch: 10,
-        requestTimeoutMs: 2_000,
-      });
-      try {
-        const processed = await worker.tick();
-        assert.equal(processed, 1);
-      } finally {
-        setSecretBrokerRequestInvokerForTests(null);
-        worker.stop();
-      }
 
-      assert.match(seenHeaders["x-nexus-signature"] ?? "", /^hmac-sha256:/);
-      assert.equal(seenHeaders["x-nexus-key-id"], "hmac:sidecar-main");
-      const row = getWebhookDeliveryById(db, "wdel-hmac-1");
-      assert.equal(row?.status, "acked");
+          assert.match(seenHeaders["x-nexus-signature"] ?? "", /^hmac-sha256:/);
+          assert.equal(seenHeaders["x-nexus-key-id"], "hmac:sidecar-main");
+          const row = getWebhookDeliveryById(db, "wdel-hmac-1");
+          assert.equal(row?.status, "acked");
+        },
+      );
     }),
   );
 });

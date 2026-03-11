@@ -47,7 +47,6 @@ services:
     environment:
       NEXUS_SECRET_SIDECAR_SOCKET_GID: "${NEXUS_GATEWAY_GID:-20}"
     volumes:
-      - ${NEXUS_HOST_STATE_DIR}:/data/nexus
       - ${NEXUS_HOST_SECRETS_DIR}:/data/nexus-secrets
       - secret-sidecar-run:/run/nexus
 

@@ -21,6 +21,7 @@ PROVIDER_ENDPOINT="${PROVIDER_ENDPOINT:-unix:///run/nexus/secret-sidecar.sock}"
 PROVIDER_AUTH_MODE="${PROVIDER_AUTH_MODE:-unix_peer}"
 PROVIDER_STRICT_MODE="${PROVIDER_STRICT_MODE:-true}"
 PROVIDER_ENABLED="${PROVIDER_ENABLED:-true}"
+TEST_REFERENCE="${TEST_REFERENCE:-${NEXUS_SECRET_BOOTSTRAP_TEST_REFERENCE:-}}"
 HTTP_API_KEY="${NEXUS_HTTP_API_KEY:-${NEXUS_HA_API_KEY:-}}"
 AUTH_HEADER_FILE=""
 
@@ -41,6 +42,7 @@ Environment:
   PROVIDER_AUTH_MODE=${PROVIDER_AUTH_MODE}
   PROVIDER_STRICT_MODE=${PROVIDER_STRICT_MODE}
   PROVIDER_ENABLED=${PROVIDER_ENABLED}
+  TEST_REFERENCE=${TEST_REFERENCE:-<unset>}
   NEXUS_HTTP_API_KEY (or NEXUS_HA_API_KEY)
 EOF
       exit 0
@@ -116,6 +118,9 @@ PROVIDER_ENABLED="$(normalize_bool "$PROVIDER_ENABLED")"
 require_safe_json_field "PROVIDER_ID" "$PROVIDER_ID"
 require_safe_json_field "PROVIDER_ENDPOINT" "$PROVIDER_ENDPOINT"
 require_safe_json_field "PROVIDER_AUTH_MODE" "$PROVIDER_AUTH_MODE"
+if [[ -n "$TEST_REFERENCE" ]]; then
+  require_safe_json_field "TEST_REFERENCE" "$TEST_REFERENCE"
+fi
 if [[ -n "$HTTP_API_KEY" ]]; then
   AUTH_HEADER_FILE="$(mktemp)"
   chmod 600 "$AUTH_HEADER_FILE"
@@ -137,10 +142,19 @@ EOF
 fi
 
 echo "[sidecar-bootstrap] testing provider profile: ${PROVIDER_ID}"
-test_payload="$(cat <<EOF
+if [[ -n "$TEST_REFERENCE" ]]; then
+  echo "[sidecar-bootstrap] using test reference: ${TEST_REFERENCE}"
+  test_payload="$(cat <<EOF
+{"strictMode":${PROVIDER_STRICT_MODE},"reference":"${TEST_REFERENCE}"}
+EOF
+)"
+else
+  echo "[sidecar-bootstrap] WARNING: TEST_REFERENCE not set; provider test will validate transport/policy only"
+  test_payload="$(cat <<EOF
 {"strictMode":${PROVIDER_STRICT_MODE}}
 EOF
 )"
+fi
 api_call POST "/api/secrets/providers/${PROVIDER_ID}/test" "$test_payload"
 echo
 

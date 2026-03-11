@@ -1,15 +1,29 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getCredentialField, getCredentialStorePath, upsertCredential } from "./credentials.js";
+import { getCredentialField, getCredentialStorePath, listCredentials, upsertCredential } from "./credentials.js";
+
+function getTestStoreDir(stateDir: string): string {
+  return path.join(stateDir, "isolated-secrets");
+}
 
 async function withTempStateDir(fn: (stateDir: string) => Promise<void> | void): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-credentials-test-"));
   try {
-    await fn(dir);
+    await Promise.resolve(
+      withEnv(
+        {
+          NEXUS_CREDENTIALS_STORE_DIR: getTestStoreDir(dir),
+        },
+        async () => {
+          await fn(dir);
+        },
+      ),
+    );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -254,4 +268,110 @@ test("credentials store path honors NEXUS_CREDENTIALS_STORE_DIR override", async
       assert.equal(p, "/tmp/nexus-secrets/credentials.json");
     },
   );
+});
+
+test("credential store path requires explicit store dir", async () => {
+  await withEnv(
+    {
+      NEXUS_CREDENTIALS_STORE_DIR: undefined,
+    },
+    async () => {
+      assert.throws(
+        () => getCredentialStorePath("/data/nexus"),
+        /NEXUS_CREDENTIALS_STORE_DIR is required/,
+      );
+    },
+  );
+});
+
+test("concurrent credential writers preserve all updates across processes", async () => {
+  await withTempStateDir(async (stateDir) => {
+    const runnerPath = path.join(stateDir, "credential-writer.ts");
+    const credentialsModulePath = path.join(process.cwd(), "src", "secrets", "credentials.ts");
+    const tsxBin = path.join(
+      process.cwd(),
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? "tsx.cmd" : "tsx",
+    );
+    await fs.writeFile(
+      runnerPath,
+      [
+        `import { upsertCredential } from ${JSON.stringify(credentialsModulePath)};`,
+        "",
+        "async function main() {",
+        "  const id = process.argv[2] ?? \"\";",
+        "  const password = process.argv[3] ?? \"\";",
+        "  const startAt = Number(process.argv[4] ?? \"0\");",
+        "  if (!id || !password || !Number.isFinite(startAt)) {",
+        "    throw new Error(\"missing child writer args\");",
+        "  }",
+        "  const delayMs = Math.max(0, startAt - Date.now());",
+        "  if (delayMs > 0) {",
+        "    await new Promise((resolve) => setTimeout(resolve, delayMs));",
+        "  }",
+        "  await upsertCredential({",
+        "    stateDir: process.env.NEXUS_STATE_DIR || \".\",",
+        "    id,",
+        "    password,",
+        "    overwrite: true,",
+        "  });",
+        "}",
+        "",
+        "void main();",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const startAt = Date.now() + 500;
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      NEXUS_STATE_DIR: stateDir,
+      NEXUS_CREDENTIALS_STORE_DIR: getTestStoreDir(stateDir),
+      NEXUS_CREDENTIALS_KEY: "multi-process-key",
+      NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+    };
+    const writeCredential = (id: string, password: string) =>
+      new Promise<void>((resolve, reject) => {
+        const child = spawn(tsxBin, [runnerPath, id, password, String(startAt)], {
+          cwd: process.cwd(),
+          env: childEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        child.on("exit", (code) => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
+          reject(new Error(`child writer failed code=${code}: ${stderr.trim()}`));
+        });
+        child.on("error", reject);
+      });
+
+    await withEnv(
+      {
+        NEXUS_CREDENTIALS_KEY: "multi-process-key",
+        NEXUS_SECRETS_PROCESS_ROLE: "sidecar",
+      },
+      async () => {
+        await Promise.all(
+          Array.from({ length: 8 }, (_value, index) =>
+            writeCredential(`cred-race-${index}`, `pw-race-${index}`),
+          ),
+        );
+        const items = await listCredentials(stateDir);
+        assert.equal(items.length, 8);
+        const ids = items.map((item) => item.id).sort();
+        assert.deepEqual(
+          ids,
+          Array.from({ length: 8 }, (_value, index) => `cred-race-${index}`),
+        );
+      },
+    );
+  });
 });

@@ -1123,6 +1123,7 @@ async function applySecretOnboarding(
 }
 
 function buildScriptEnv(state: SetupState): NodeJS.ProcessEnv {
+  const bootstrapTestReference = getBootstrapTestReference(state);
   return {
     ...process.env,
     NEXUS_HOME: state.paths.rootDir,
@@ -1141,7 +1142,20 @@ function buildScriptEnv(state: SetupState): NodeJS.ProcessEnv {
     NEXUS_SIDECAR_ENV_FILE: state.paths.sidecarEnvFile,
     NEXUS_WATCHDOG_ENV_FILE: state.paths.watchdogEnvFile,
     NEXUS_HAPROXY_TLS_CERT_PEM: state.paths.tlsPemPath,
+    ...(bootstrapTestReference ? { NEXUS_SECRET_BOOTSTRAP_TEST_REFERENCE: bootstrapTestReference } : {}),
   };
+}
+
+function getBootstrapTestReference(state: SetupState): string | null {
+  const providerCredentialId = state.secretOnboarding.providers.find((provider) => Boolean(provider.apiKey))?.credentialId;
+  if (providerCredentialId) {
+    return `{{secret:sidecar-main/${providerCredentialId}#password}}`;
+  }
+  const extraCredentialId = state.secretOnboarding.extraSecrets.find((entry) => Boolean(entry.value))?.credentialId;
+  if (extraCredentialId) {
+    return `{{secret:sidecar-main/${extraCredentialId}#password}}`;
+  }
+  return null;
 }
 
 async function installHaDeployerSystemd(state: SetupState, env: NodeJS.ProcessEnv, dryRun: boolean): Promise<void> {
