@@ -385,23 +385,28 @@ async function runCommand(
 
 async function waitForGatewayHealth(baseUrl: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  const intervalMs = 2_000;
+  const intervalMs = 3_000;
   let lastError = "";
+  // Poll /health/traffic — this is what HAProxy uses to decide whether a
+  // backend can serve requests.  /health/live only proves the HTTP server is
+  // up; HAProxy still needs /health/traffic to pass (with `rise 2`) before it
+  // will route API requests to the backend.
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${baseUrl}/health/live`);
+      const res = await fetch(`${baseUrl}/health/traffic`);
       if (res.ok) {
-        ok("gateway is healthy");
+        ok("gateway is traffic-healthy");
         return;
       }
-      lastError = `HTTP ${res.status}`;
+      const body = await res.text().catch(() => "");
+      lastError = `HTTP ${res.status}${body ? ` — ${body.slice(0, 120)}` : ""}`;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
     process.stdout.write(tui.paint("dim", `  waiting for gateway (${lastError})...\n`));
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  throw new Error(`gateway did not become healthy within ${Math.round(timeoutMs / 1000)}s (last: ${lastError})`);
+  throw new Error(`gateway did not become traffic-healthy within ${Math.round(timeoutMs / 1000)}s (last: ${lastError})`);
 }
 
 function xmlEscape(value: string): string {
