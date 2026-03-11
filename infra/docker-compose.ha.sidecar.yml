@@ -57,6 +57,9 @@ services:
       - /tmp
     cap_drop:
       - ALL
+    # Needed so the sidecar can hand the shared unix socket to the gateway GID.
+    cap_add:
+      - CHOWN
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
