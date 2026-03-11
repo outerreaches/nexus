@@ -527,7 +527,6 @@ async function askSecretValue(
       const cleanup = () => {
         stdin.off("data", onData);
         stdin.setRawMode(false);
-        stdin.pause();
       };
       stdin.setRawMode(true);
       stdin.resume();
@@ -875,7 +874,7 @@ async function writeRuntimeConfig(state: SetupState): Promise<void> {
   await writeText(state.paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`);
 }
 
-async function initializeAgentState(state: SetupState, nonInteractive: boolean): Promise<void> {
+async function initializeAgentState(state: SetupState, nonInteractive: boolean, rl: readline.Interface): Promise<void> {
   const { applyInitTelegramConfig, getInitializationStatus, InitTelegramSchema, runOnboarding, writeOnboardingFiles } =
     await import("../state/onboarding.js");
   const { IdentitySchema, UserProfileSchema } = await import("../state/personalization.js");
@@ -902,7 +901,7 @@ async function initializeAgentState(state: SetupState, nonInteractive: boolean):
   }
 
   info("running first-time onboarding prompts");
-  const result = await runOnboarding(state.paths.stateDir, { includeTelegram: true });
+  const result = await runOnboarding(state.paths.stateDir, { includeTelegram: true, rl });
   if (result.skipped) {
     fail("initialization canceled; setup cannot continue");
   }
@@ -1316,7 +1315,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     if (dryRun) {
       ok("dry-run: skipped initialization");
     } else {
-      await initializeAgentState(state, nonInteractive);
+      await initializeAgentState(state, nonInteractive, rl);
     }
     completedPhases.push("Initialize Agent State");
 

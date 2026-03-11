@@ -153,10 +153,11 @@ function getDefaultInitTelegramSettings(): InitTelegramSettings {
 
 export async function runOnboarding(
   stateDir: string,
-  options: { includeTelegram?: boolean } = {},
+  options: { includeTelegram?: boolean; rl?: readline.Interface } = {},
 ): Promise<OnboardingResult> {
   const includeTelegram = options.includeTelegram ?? false;
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const ownsRl = !options.rl;
+  const rl = options.rl ?? readline.createInterface({ input: stdin, output: stdout });
 
   try {
     console.log();
@@ -266,7 +267,7 @@ export async function runOnboarding(
 
     return { identity, userProfile, skipped: false, telegram: includeTelegram ? telegram : undefined };
   } finally {
-    rl.close();
+    if (ownsRl) rl.close();
   }
 }
 
