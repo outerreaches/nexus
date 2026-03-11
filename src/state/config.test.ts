@@ -64,5 +64,10 @@ test("bootstrap config template matches nexus.json.example and parses cleanly", 
   const template = buildBootstrapConfigTemplate();
 
   assert.deepEqual(template, example);
+  assert.deepEqual((template as { secrets?: { env?: Record<string, unknown> } }).secrets?.env ?? {}, {});
+  assert.equal(
+    (template as { llm?: { openaiCompat?: { baseUrl?: string } } }).llm?.openaiCompat?.baseUrl,
+    "https://openrouter.ai/api/v1",
+  );
   assert.doesNotThrow(() => ConfigSchema.parse(template));
 });

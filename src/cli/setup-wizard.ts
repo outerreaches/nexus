@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import JSON5 from "json5";
 import { runCommand as runCommandShared } from "./run-command.js";
 import { createSharedTui } from "./tui.js";
+import type { SecretProviderProfileRecord } from "../storage/secrets.js";
 
 type SetupWizardOptions = {
   root?: string;
@@ -35,7 +36,9 @@ type SetupPaths = {
 
 type SetupSecrets = {
   httpApiKey: string;
+  dashboardUsername: string;
   dashboardPassword: string;
+  secretctlUsername: string;
   secretctlPassword: string;
   credentialsKey: string;
   haApiKey: string;
@@ -195,6 +198,10 @@ const EXTRA_SECRET_PRESETS: Array<{ credentialId: string; label: string; envKeys
     envKeys: ["CT0", "TWITTER_CT0"],
   },
 ];
+
+const MANAGED_PROVIDER_ENV_KEYS = new Set(PROVIDER_PRESETS.map((preset) => preset.envKey));
+const MANAGED_REMOTE_PROVIDER_IDS = new Set(PROVIDER_PRESETS.filter((preset) => !preset.local).map((preset) => preset.id));
+const MANAGED_EXTRA_SECRET_ENV_KEYS = new Set(EXTRA_SECRET_PRESETS.flatMap((preset) => preset.envKeys));
 
 const tui = createSharedTui({ themeId: "terminal-green", colorEnabled: Boolean(stdout.isTTY) });
 
@@ -566,6 +573,21 @@ async function askSecretValue(
   }
 }
 
+async function promptManagedPassword(
+  rl: readline.Interface,
+  label: string,
+  currentValue: string,
+  existingValue: string | undefined,
+  nonInteractive: boolean,
+): Promise<string> {
+  if (nonInteractive) return currentValue;
+  const keepCurrentLabel =
+    existingValue && existingValue === currentValue ? `Keep existing ${label}` : `Use generated ${label}`;
+  const keepCurrent = await askConfirm(rl, keepCurrentLabel, true, false);
+  if (keepCurrent) return currentValue;
+  return askSecretValue(rl, `Enter ${label}`, true, false);
+}
+
 async function promptProviderSetup(
   rl: readline.Interface,
   preset: ProviderPreset,
@@ -712,8 +734,12 @@ async function readExistingSetupSecrets(paths: SetupPaths): Promise<Partial<Setu
   const existing: Partial<SetupSecrets> = {};
   const httpApiKey = await readEnvFileValue(paths.gatewayEnvFile, "NEXUS_HTTP_API_KEY");
   if (httpApiKey) existing.httpApiKey = httpApiKey;
+  const dashboardUsername = await readEnvFileValue(paths.gatewayEnvFile, "NEXUS_DASHBOARD_USERNAME");
+  if (dashboardUsername) existing.dashboardUsername = dashboardUsername;
   const dashboardPassword = await readEnvFileValue(paths.gatewayEnvFile, "NEXUS_DASHBOARD_PASSWORD");
   if (dashboardPassword) existing.dashboardPassword = dashboardPassword;
+  const secretctlUsername = await readEnvFileValue(paths.sidecarEnvFile, "NEXUS_SECRETCTL_USERNAME");
+  if (secretctlUsername) existing.secretctlUsername = secretctlUsername;
   const secretctlPassword = await readEnvFileValue(paths.sidecarEnvFile, "NEXUS_SECRETCTL_PASSWORD");
   if (secretctlPassword) existing.secretctlPassword = secretctlPassword;
   const credentialsKey = await readEnvFileValue(paths.sidecarEnvFile, "NEXUS_CREDENTIALS_KEY");
@@ -728,7 +754,9 @@ function buildSetupSecrets(existing: Partial<SetupSecrets>, overwrite: boolean):
     const httpApiKey = randomSecret(24);
     return {
       httpApiKey,
+      dashboardUsername: "admin",
       dashboardPassword: randomSecret(18),
+      secretctlUsername: "admin",
       secretctlPassword: randomSecret(18),
       credentialsKey: randomSecret(32),
       haApiKey: httpApiKey,
@@ -737,10 +765,44 @@ function buildSetupSecrets(existing: Partial<SetupSecrets>, overwrite: boolean):
   const httpApiKey = existing.httpApiKey || randomSecret(24);
   return {
     httpApiKey,
+    dashboardUsername: existing.dashboardUsername || "admin",
     dashboardPassword: existing.dashboardPassword || randomSecret(18),
+    secretctlUsername: existing.secretctlUsername || "admin",
     secretctlPassword: existing.secretctlPassword || randomSecret(18),
     credentialsKey: existing.credentialsKey || randomSecret(32),
     haApiKey: existing.haApiKey || existing.httpApiKey || httpApiKey,
+  };
+}
+
+async function promptCoreAccessSecrets(
+  rl: readline.Interface,
+  secrets: SetupSecrets,
+  existing: Partial<SetupSecrets>,
+  nonInteractive: boolean,
+): Promise<SetupSecrets> {
+  if (nonInteractive) return secrets;
+  const dashboardUsername = await askQuestion(rl, "Dashboard username", secrets.dashboardUsername, false);
+  const dashboardPassword = await promptManagedPassword(
+    rl,
+    "dashboard password",
+    secrets.dashboardPassword,
+    existing.dashboardPassword,
+    false,
+  );
+  const secretctlUsername = await askQuestion(rl, "Secret manager username", secrets.secretctlUsername, false);
+  const secretctlPassword = await promptManagedPassword(
+    rl,
+    "secret manager password",
+    secrets.secretctlPassword,
+    existing.secretctlPassword,
+    false,
+  );
+  return {
+    ...secrets,
+    dashboardUsername,
+    dashboardPassword,
+    secretctlUsername,
+    secretctlPassword,
   };
 }
 
@@ -812,7 +874,12 @@ async function prepareState(rl: readline.Interface, opts: SetupWizardOptions): P
     }
   }
   const secretOnboarding = await promptSecretOnboardingPlan(rl, nonInteractive);
-  const secrets = buildSetupSecrets(existingSecrets, overwriteCoreSecrets);
+  const secrets = await promptCoreAccessSecrets(
+    rl,
+    buildSetupSecrets(existingSecrets, overwriteCoreSecrets),
+    existingSecrets,
+    nonInteractive,
+  );
 
   return {
     repoUrl,
@@ -861,11 +928,11 @@ async function writeSplitEnvFiles(state: SetupState): Promise<void> {
     NEXUS_HOME: state.paths.rootDir,
     NEXUS_CODE_DIR: state.paths.codeDir,
     NEXUS_HTTP_API_KEY: state.secrets.httpApiKey,
-    NEXUS_DASHBOARD_USERNAME: "admin",
+    NEXUS_DASHBOARD_USERNAME: state.secrets.dashboardUsername,
     NEXUS_DASHBOARD_PASSWORD: state.secrets.dashboardPassword,
   });
   await upsertEnvFile(state.paths.sidecarEnvFile, {
-    NEXUS_SECRETCTL_USERNAME: "admin",
+    NEXUS_SECRETCTL_USERNAME: state.secrets.secretctlUsername,
     NEXUS_SECRETCTL_PASSWORD: state.secrets.secretctlPassword,
     NEXUS_CREDENTIALS_KEY: state.secrets.credentialsKey,
     NEXUS_CREDENTIALS_STORE_DIR: state.paths.storeDir,
@@ -1069,6 +1136,16 @@ async function applySecretOnboarding(
   const secrets = ensureObject(parsed, "secrets");
   const envRefs = ensureObject(secrets, "env");
 
+  for (const envKey of MANAGED_PROVIDER_ENV_KEYS) {
+    delete envRefs[envKey];
+  }
+  for (const envKey of MANAGED_EXTRA_SECRET_ENV_KEYS) {
+    delete envRefs[envKey];
+  }
+  for (const providerId of MANAGED_REMOTE_PROVIDER_IDS) {
+    delete providers[providerId];
+  }
+
   const gatewayEnvUpdates: Record<string, string> = {};
   for (const provider of state.secretOnboarding.providers) {
     if (provider.local) {
@@ -1098,21 +1175,27 @@ async function applySecretOnboarding(
   }
 
   const selectedProviderIds = new Set(state.secretOnboarding.providers.map((provider) => provider.id));
-  const defaultProviderId = normalizeProviderId(state.secretOnboarding.defaultProviderId ?? "");
-  if (defaultProviderId && selectedProviderIds.has(defaultProviderId)) {
-    primary.provider = defaultProviderId;
-    const provider = state.secretOnboarding.providers.find((entry) => entry.id === defaultProviderId);
+  const requestedDefaultProviderId = normalizeProviderId(state.secretOnboarding.defaultProviderId ?? "");
+  const resolvedDefaultProviderId =
+    (requestedDefaultProviderId && selectedProviderIds.has(requestedDefaultProviderId) ? requestedDefaultProviderId : "") ||
+    state.secretOnboarding.providers.find((provider) => !provider.local)?.id ||
+    state.secretOnboarding.providers[0]?.id ||
+    "";
+  if (requestedDefaultProviderId && requestedDefaultProviderId !== resolvedDefaultProviderId) {
+    warn(`default provider '${requestedDefaultProviderId}' was not selected; using '${resolvedDefaultProviderId}'`);
+  }
+  if (resolvedDefaultProviderId) {
+    primary.provider = resolvedDefaultProviderId;
+    const provider = state.secretOnboarding.providers.find((entry) => entry.id === resolvedDefaultProviderId);
     if (provider?.model) {
       primary.model = provider.model;
     }
-    if (defaultProviderId !== "local") {
+    if (resolvedDefaultProviderId !== "local") {
       const fallback = ensureObject(defaultRoute, "fallback");
       fallback.provider = "local";
     } else {
       delete defaultRoute.fallback;
     }
-  } else if (defaultProviderId) {
-    warn(`default provider '${defaultProviderId}' was not selected; keeping existing routing.default`);
   }
 
   await writeText(state.paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`);
@@ -1148,7 +1231,7 @@ function buildScriptEnv(state: SetupState): NodeJS.ProcessEnv {
 
 async function seedDefaultSidecarProviderProfile(state: SetupState): Promise<void> {
   const { openDatabase } = await import("../storage/database.js");
-  const { upsertSecretProviderProfile } = await import("../storage/secrets.js");
+  const { getSecretProviderProfileById, upsertSecretProviderProfile } = await import("../storage/secrets.js");
 
   const db = await openDatabase(path.join(state.paths.stateDir, "nexus.db"));
   try {
@@ -1160,9 +1243,27 @@ async function seedDefaultSidecarProviderProfile(state: SetupState): Promise<voi
       strictMode: true,
       enabled: true,
     });
+    const seeded = getSecretProviderProfileById(db, "sidecar-main");
+    const validationError = validateDefaultSidecarProviderProfile(seeded);
+    if (validationError) {
+      fail(`sidecar-main seed verification failed: ${validationError}`);
+    }
   } finally {
     db.close();
   }
+}
+
+export function validateDefaultSidecarProviderProfile(profile: SecretProviderProfileRecord | null): string | null {
+  if (!profile) return "profile missing";
+  if (profile.id !== "sidecar-main") return `unexpected id ${profile.id}`;
+  if (profile.kind !== "sidecar_http") return `unexpected kind ${profile.kind}`;
+  if (profile.endpointRef !== "unix:///run/nexus/secret-sidecar.sock") {
+    return `unexpected endpoint ${profile.endpointRef ?? "null"}`;
+  }
+  if (profile.authMode !== "unix_peer") return `unexpected auth mode ${profile.authMode}`;
+  if (!profile.strictMode) return "strict mode disabled";
+  if (!profile.enabled) return "profile disabled";
+  return null;
 }
 
 function getBootstrapTestReference(state: SetupState): string | null {
@@ -1323,6 +1424,8 @@ function printSummary(state: SetupState): void {
   lines.push(`configRoot   : ${state.paths.configRoot}`);
   lines.push(`storeDir     : ${state.paths.storeDir}`);
   lines.push(`tlsPemPath   : ${state.paths.tlsPemPath}`);
+  lines.push(`dashboardUser: ${state.secrets.dashboardUsername}`);
+  lines.push(`secretctlUser: ${state.secrets.secretctlUsername}`);
 
   if (state.secretOnboarding.enabled) {
     lines.push("");
@@ -1336,6 +1439,24 @@ function printSummary(state: SetupState): void {
     }
   }
   process.stdout.write(`${tui.panel("Setup Summary", lines, { borderRole: "prompt", titleRole: "system" })}\n`);
+  process.stdout.write("\n");
+}
+
+function printAccessCredentials(state: SetupState, title: string): void {
+  const lines = [
+    "Save these values now. They are required for dashboard and secret-manager access.",
+    "",
+    `dashboard username : ${state.secrets.dashboardUsername}`,
+    `dashboard password : ${state.secrets.dashboardPassword}`,
+    `secretctl username : ${state.secrets.secretctlUsername}`,
+    `secretctl password : ${state.secrets.secretctlPassword}`,
+    `http api key       : ${state.secrets.httpApiKey}`,
+    "",
+    `gateway env file   : ${state.paths.gatewayEnvFile}`,
+    `sidecar env file   : ${state.paths.sidecarEnvFile}`,
+    `watchdog env file  : ${state.paths.watchdogEnvFile}`,
+  ];
+  process.stdout.write(`${tui.panel(title, lines, { borderRole: "system", titleRole: "system" })}\n`);
   process.stdout.write("\n");
 }
 
@@ -1466,6 +1587,9 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
         process.stdout.write(`  - ${phase}\n`);
       }
     }
+    if (!dryRun && completedPhases.includes("Write Config + Env")) {
+      printAccessCredentials(state, "Saved Access Credentials");
+    }
     warn("Partial state may have been written. Re-running setup is safe (files are upserted, not overwritten destructively).");
     info("Fix the issue above and re-run: nexus setup");
     throw err;
@@ -1501,6 +1625,9 @@ export async function runSetupWizard(opts: SetupWizardOptions): Promise<void> {
 
     process.stdout.write("\n");
     ok("setup wizard complete");
+    if (!opts.dryRun) {
+      printAccessCredentials(state, "Access Credentials");
+    }
     info(`Dashboard/API key stored in: ${state.paths.gatewayEnvFile}`);
     info(`Sidecar secrets config stored in: ${state.paths.sidecarEnvFile}`);
     info(`Watchdog HA config stored in: ${state.paths.watchdogEnvFile}`);
