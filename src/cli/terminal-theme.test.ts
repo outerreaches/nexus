@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   DEFAULT_TERMINAL_THEME,
+  getTerminalTheme,
   loadTerminalThemePreference,
   resolveTerminalThemeId,
   saveTerminalThemePreference,
@@ -50,4 +51,11 @@ test("loadTerminalThemePreference falls back on invalid stored theme", async () 
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("classic terminal themes use ANSI-safe colors", () => {
+  const green = getTerminalTheme("terminal-green");
+  const amber = getTerminalTheme("terminal-amber");
+  assert.doesNotMatch(green.prompt, /38;2;/);
+  assert.doesNotMatch(amber.prompt, /38;2;/);
 });
