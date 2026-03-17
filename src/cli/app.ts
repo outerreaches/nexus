@@ -1,4 +1,7 @@
 import { Command } from "commander";
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startGateway } from "../gateway/start.js";
 import { ProcessManager } from "../process/manager.js";
 import { getDefaultConfigPath } from "../state/paths.js";
@@ -19,6 +22,10 @@ const RUNTIME_PROFILES = [
   "execution_node_host",
 ] as const;
 type RuntimeProfile = (typeof RUNTIME_PROFILES)[number];
+
+const CLI_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT_DIR = path.resolve(CLI_MODULE_DIR, "../..");
+const SECRETCTL_SCRIPT_PATH = path.join(REPO_ROOT_DIR, "infra", "scripts", "ha-secretctl.sh");
 
 function envInt(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
@@ -124,7 +131,56 @@ async function resolveCliLlmConfigSecrets(params: {
   };
 }
 
+function findFirstCliSubcommand(argv: string[]): { name: string; index: number } | null {
+  let expectConfigValue = false;
+  for (let i = 2; i < argv.length; i += 1) {
+    const arg = argv[i] ?? "";
+    if (expectConfigValue) {
+      expectConfigValue = false;
+      continue;
+    }
+    if (arg === "--config") {
+      expectConfigValue = true;
+      continue;
+    }
+    if (arg.startsWith("--config=") || arg === "--verbose" || arg === "-v" || arg === "--help" || arg === "-h") {
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      continue;
+    }
+    return { name: arg, index: i };
+  }
+  return null;
+}
+
+async function runHostScript(scriptPath: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("bash", [scriptPath, ...args], {
+      stdio: "inherit",
+      env: process.env,
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        reject(new Error(`cli_host_script_terminated:${path.basename(scriptPath)}:${signal}`));
+        return;
+      }
+      if ((code ?? 0) !== 0) {
+        process.exitCode = code ?? 1;
+      }
+      resolve();
+    });
+  });
+}
+
 export async function runCli(argv: string[]): Promise<void> {
+  const firstSubcommand = findFirstCliSubcommand(argv);
+  if (firstSubcommand?.name === "secrets") {
+    await runHostScript(SECRETCTL_SCRIPT_PATH, argv.slice(firstSubcommand.index + 1));
+    return;
+  }
+
   const program = new Command()
     .name("nexus")
     .description("Nexus — lightweight multi-agent assistant")
@@ -1128,6 +1184,16 @@ export async function runCli(argv: string[]): Promise<void> {
       await applyInitTelegramConfig(options.config, onboardingValues.telegram);
 
       process.stdout.write(`OK: initialized using config ${options.config}\n`);
+    });
+
+  program
+    .command("secrets")
+    .description("Manage sidecar credentials via ha-secretctl (host-side wrapper)")
+    .argument("[args...]", "Arguments forwarded to ha-secretctl")
+    .allowUnknownOption(true)
+    .action(async (args) => {
+      const forwarded = Array.isArray(args) ? args.map((value) => String(value)) : [];
+      await runHostScript(SECRETCTL_SCRIPT_PATH, forwarded);
     });
 
   program

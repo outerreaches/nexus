@@ -149,7 +149,7 @@ resolve_active_target() {
 }
 
 subcommand="\$(first_subcommand "\$@" || true)"
-if [[ "\$CLI_TARGET" == "host" ]] || [[ "\$subcommand" == "setup" ]] || [[ "\$subcommand" == "uninstall" ]]; then
+if [[ "\$CLI_TARGET" == "host" ]] || [[ "\$subcommand" == "setup" ]] || [[ "\$subcommand" == "uninstall" ]] || [[ "\$subcommand" == "secrets" ]]; then
   exec node "\$LOCAL_ENTRYPOINT" "\$@"
 fi
 

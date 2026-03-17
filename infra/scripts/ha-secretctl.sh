@@ -17,16 +17,62 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CODE_DIR="${CODE_DIR:-$REPO_ROOT}"
-CONFIG_ROOT="${CONFIG_ROOT:-/data/nexus-config}"
+HOST_OS="${NEXUS_HOST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+IS_DARWIN=0
+if [ "$HOST_OS" = "Darwin" ]; then
+  IS_DARWIN=1
+fi
+
+if [ -n "${NEXUS_HOME:-}" ]; then
+  DEFAULT_NEXUS_HOME="$NEXUS_HOME"
+elif [ -d "/data/code" ] || [ -d "/data/nexus-config" ] || [ -d "/data/nexus" ]; then
+  DEFAULT_NEXUS_HOME=""
+else
+  DEFAULT_NEXUS_HOME="${HOME}/.nexus"
+fi
+
+if [ -n "$DEFAULT_NEXUS_HOME" ]; then
+  DEFAULT_CODE_DIR="${DEFAULT_NEXUS_HOME}/code"
+  DEFAULT_CONFIG_ROOT="${DEFAULT_NEXUS_HOME}/config"
+  DEFAULT_STATE_DIR="${DEFAULT_NEXUS_HOME}/state"
+  DEFAULT_STORE_DIR="${DEFAULT_NEXUS_HOME}/secrets"
+else
+  DEFAULT_CODE_DIR="${REPO_ROOT}"
+  DEFAULT_CONFIG_ROOT="/data/nexus-config"
+  DEFAULT_STATE_DIR="/data/nexus"
+  DEFAULT_STORE_DIR="/data/nexus-secrets"
+fi
+
+CODE_DIR="${CODE_DIR:-${NEXUS_CODE_DIR:-${DEFAULT_CODE_DIR}}}"
+CONFIG_ROOT="${CONFIG_ROOT:-${DEFAULT_CONFIG_ROOT}}"
+STATE_DIR="${STATE_DIR:-${NEXUS_STATE_DIR:-${DEFAULT_STATE_DIR}}}"
+STORE_DIR="${STORE_DIR:-${NEXUS_STORE_DIR:-${DEFAULT_STORE_DIR}}}"
+HOST_CODE_DIR="${NEXUS_HOST_CODE_DIR:-${CODE_DIR}}"
+HOST_STATE_DIR="${NEXUS_HOST_STATE_DIR:-${STATE_DIR}}"
+HOST_SECRETS_DIR="${NEXUS_HOST_SECRETS_DIR:-${STORE_DIR}}"
 
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-infra}"
-COMPOSE_FILES="${COMPOSE_FILES:-${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml}"
+DEFAULT_MACOS_COMPOSE="${CODE_DIR}/infra/docker-compose.ha.macos.yml"
+DEFAULT_COMPOSE_FILES="${CODE_DIR}/infra/docker-compose.ha.yml:${CODE_DIR}/infra/docker-compose.ha.sidecar.yml"
+if [ "$IS_DARWIN" -eq 1 ] && [ -f "$DEFAULT_MACOS_COMPOSE" ]; then
+  DEFAULT_COMPOSE_FILES="${DEFAULT_COMPOSE_FILES}:${DEFAULT_MACOS_COMPOSE}"
+fi
+COMPOSE_FILES="${COMPOSE_FILES:-${DEFAULT_COMPOSE_FILES}}"
 SECRET_PROVIDER_ID="${SECRET_PROVIDER_ID:-sidecar-main}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-${CONFIG_ROOT}/gateway/nexus.env}"
 SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE:-${CONFIG_ROOT}/sidecar/nexus.env}"
 
 AUTH_REQUIRED="${AUTH_REQUIRED:-1}"
+
+export NEXUS_GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE}"
+export NEXUS_SIDECAR_ENV_FILE="${SIDECAR_ENV_FILE}"
+export NEXUS_HOST_CODE_DIR="${HOST_CODE_DIR}"
+export NEXUS_HOST_STATE_DIR="${HOST_STATE_DIR}"
+export NEXUS_HOST_SECRETS_DIR="${HOST_SECRETS_DIR}"
+if [ "$IS_DARWIN" -eq 1 ]; then
+  export NEXUS_GATEWAY_UID="${NEXUS_GATEWAY_UID:-$(id -u)}"
+  export NEXUS_GATEWAY_GID="${NEXUS_GATEWAY_GID:-$(id -g)}"
+fi
 
 declare -a COMPOSE_CMD
 COMPOSE_CMD=(docker compose -p "${COMPOSE_PROJECT}")
@@ -159,6 +205,8 @@ Commands:
 
 Environment:
   CODE_DIR=${CODE_DIR}
+  STATE_DIR=${STATE_DIR}
+  STORE_DIR=${STORE_DIR}
   COMPOSE_PROJECT=${COMPOSE_PROJECT}
   COMPOSE_FILES=${COMPOSE_FILES}
   SECRET_PROVIDER_ID=${SECRET_PROVIDER_ID}

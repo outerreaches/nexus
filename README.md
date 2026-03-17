@@ -151,7 +151,7 @@ resolve_active_target() {
 }
 
 subcommand="$(first_subcommand "$@" || true)"
-if [[ "$CLI_TARGET" == "host" ]] || [[ "$subcommand" == "setup" ]] || [[ "$subcommand" == "uninstall" ]]; then
+if [[ "$CLI_TARGET" == "host" ]] || [[ "$subcommand" == "setup" ]] || [[ "$subcommand" == "uninstall" ]] || [[ "$subcommand" == "secrets" ]]; then
   exec node "$LOCAL_ENTRYPOINT" "$@"
 fi
 
@@ -179,7 +179,7 @@ If needed, add to PATH:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Default launcher mode is `active-container`. It auto-detects HA (`nexus-primary`/`nexus-standby`) and single-instance (`nexus`) services. Use `NEXUS_CLI_TARGET=host` to force direct host execution when needed.
+Default launcher mode is `active-container`. It auto-detects HA (`nexus-primary`/`nexus-standby`) and single-instance (`nexus`) services. `setup`, `uninstall`, and `secrets` always run host-side. Use `NEXUS_CLI_TARGET=host` to force direct host execution for other commands when needed.
 
 ## Start Here: New Instance Deployment
 
