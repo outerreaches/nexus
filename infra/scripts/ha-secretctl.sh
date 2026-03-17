@@ -179,7 +179,16 @@ run_sidecar_tsx() {
     env_args+=(-e "$var_name")
   done < <(compgen -v | grep '^SECRETCTL_' || true)
 
-  "${COMPOSE_CMD[@]}" exec -T "${extra_env[@]}" "${env_args[@]}" secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx'
+  local -a cmd
+  cmd=("${COMPOSE_CMD[@]}" exec -T)
+  if [[ ${#extra_env[@]} -gt 0 ]]; then
+    cmd+=("${extra_env[@]}")
+  fi
+  if [[ ${#env_args[@]} -gt 0 ]]; then
+    cmd+=("${env_args[@]}")
+  fi
+  cmd+=(secret-sidecar sh -lc 'cd /app && ./node_modules/.bin/tsx')
+  "${cmd[@]}"
 }
 
 print_usage() {
