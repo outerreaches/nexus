@@ -53,9 +53,9 @@ test("loadTerminalThemePreference falls back on invalid stored theme", async () 
   }
 });
 
-test("classic terminal themes use ANSI-safe colors", () => {
+test("classic terminal themes use explicit RGB with indexed-color fallback", () => {
   const green = getTerminalTheme("terminal-green");
   const amber = getTerminalTheme("terminal-amber");
-  assert.doesNotMatch(green.prompt, /38;2;/);
-  assert.doesNotMatch(amber.prompt, /38;2;/);
+  assert.match(green.prompt, /\x1b\[38;5;\d+m\x1b\[38;2;/);
+  assert.match(amber.prompt, /\x1b\[38;5;\d+m\x1b\[38;2;/);
 });

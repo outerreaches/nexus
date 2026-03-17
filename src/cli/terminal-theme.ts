@@ -39,24 +39,25 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     id: "terminal-green",
     label: "Terminal Green",
     description: "Classic phosphor-green CRT vibe.",
-    // Keep the classic CRT themes on ANSI-safe colors so they render consistently
-    // through Docker Desktop/macOS PTYs as well as native Linux terminals.
-    prompt: "\x1b[92m",
-    assistant: "\x1b[32m",
-    system: "\x1b[92;1m",
-    error: "\x1b[91m",
-    dim: "\x1b[32;2m",
+    // Use the same 256-color + truecolor layering as the richer themes so terminals
+    // that support RGB get an exact phosphor shade while older terminals still get
+    // a reasonable indexed-color fallback.
+    prompt: "\x1b[38;5;119m\x1b[38;2;120;255;100m",
+    assistant: "\x1b[38;5;46m\x1b[38;2;57;255;20m",
+    system: "\x1b[38;5;83m\x1b[38;2;51;255;51;1m",
+    error: "\x1b[38;5;203m\x1b[38;2;255;51;51m",
+    dim: "\x1b[38;5;28m\x1b[38;2;17;170;17;2m",
     reset: RESET,
   },
   "terminal-amber": {
     id: "terminal-amber",
     label: "Terminal Amber",
     description: "Warm amber monitor style.",
-    prompt: "\x1b[93m",
-    assistant: "\x1b[33m",
-    system: "\x1b[93;1m",
-    error: "\x1b[91m",
-    dim: "\x1b[33;2m",
+    prompt: "\x1b[38;5;220m\x1b[38;2;255;204;0m",
+    assistant: "\x1b[38;5;214m\x1b[38;2;255;176;0m",
+    system: "\x1b[38;5;220m\x1b[38;2;255;204;0;1m",
+    error: "\x1b[38;5;203m\x1b[38;2;255;51;51m",
+    dim: "\x1b[38;5;130m\x1b[38;2;170;102;0;2m",
     reset: RESET,
   },
   "dos-bw": {
