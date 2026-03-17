@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../gateway/start.js";
@@ -24,7 +25,12 @@ const RUNTIME_PROFILES = [
 type RuntimeProfile = (typeof RUNTIME_PROFILES)[number];
 
 const CLI_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT_DIR = path.resolve(CLI_MODULE_DIR, "../..");
+const REPO_ROOT_DIR = [
+  process.env.NEXUS_CODE_DIR ? path.resolve(process.env.NEXUS_CODE_DIR) : "",
+  path.resolve(CLI_MODULE_DIR, "../.."),
+  path.resolve(CLI_MODULE_DIR, ".."),
+].find((candidate) => candidate.length > 0 && existsSync(path.join(candidate, "infra", "scripts", "ha-secretctl.sh")))
+  ?? path.resolve(CLI_MODULE_DIR, "../..");
 const SECRETCTL_SCRIPT_PATH = path.join(REPO_ROOT_DIR, "infra", "scripts", "ha-secretctl.sh");
 
 function envInt(name: string): number | null {
