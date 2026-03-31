@@ -8,7 +8,7 @@ import { getSecret } from "../../secrets/resolve-env.js";
 import { resolveWithinRoots } from "../path-utils.js";
 import { truncateText, withTimeout } from "../web-shared.js";
 
-const OPENROUTER_AUDIO_GENERATIONS_ENDPOINT = "https://openrouter.ai/api/v1/audio/generations";
+const OPENROUTER_CHAT_COMPLETIONS_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const LYRIA_3_PRO_MODEL = "google/lyria-3-pro-preview";
 const DEFAULT_DURATION_SECONDS = 60;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -16,18 +16,28 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_REFERER = "https://github.com/outerreaches/nexus";
 const DEFAULT_TITLE = "Nexus generate_song";
 
+type InputAudioFormat = "wav" | "mp3" | "flac";
+
+type ChatContentPart =
+  | {
+    type: "text";
+    text: string;
+  }
+  | {
+    type: "input_audio";
+    input_audio: {
+      data: string;
+      format: InputAudioFormat;
+    };
+  };
+
 type GenerateSongRequest = {
   model: typeof LYRIA_3_PRO_MODEL;
-  prompt: string;
-  duration_seconds: number;
-  lyrics?: string;
-  style?: string;
-  // OpenRouter bills this model per completed song ($0.08/song), not per token.
-  reference_audio?: {
-    filename?: string;
-    mimeType?: string;
-    data: string;
-  };
+  messages: Array<{
+    role: "user";
+    content: string | ChatContentPart[];
+  }>;
+  modalities?: Array<"text" | "audio">;
 };
 
 type OpenRouterAudioItem = {
@@ -35,8 +45,24 @@ type OpenRouterAudioItem = {
   audio_url?: string;
   b64_json?: string;
   audio_data?: string;
+  data?: string;
   format?: string;
   duration_seconds?: number;
+};
+
+type OpenRouterMessage = {
+  audio?: OpenRouterAudioItem;
+  content?: string | Array<{
+    type?: string;
+    text?: string;
+    audio?: OpenRouterAudioItem;
+    audio_url?: string;
+    url?: string;
+    b64_json?: string;
+    audio_data?: string;
+    data?: string;
+    format?: string;
+  }>;
 };
 
 type OpenRouterSongResponse = {
@@ -48,6 +74,9 @@ type OpenRouterSongResponse = {
   audio_url?: string;
   b64_json?: string;
   audio_data?: string;
+  choices?: Array<{
+    message?: OpenRouterMessage;
+  }>;
   error?: {
     message?: string;
     type?: string;
@@ -64,22 +93,79 @@ function inferMimeType(filePath: string): string {
   return "application/octet-stream";
 }
 
-function buildPrompt(params: { prompt: string; style?: string; lyrics?: string }): string {
-  const parts: string[] = [params.prompt.trim()];
+function inferInputAudioFormat(filePath: string): InputAudioFormat {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".mp3") return "mp3";
+  if (ext === ".flac") return "flac";
+  return "wav";
+}
+
+function buildPrompt(params: { prompt: string; durationSeconds: number; style?: string; lyrics?: string }): string {
+  const parts: string[] = [
+    `Song concept: ${params.prompt.trim()}`,
+    `Target duration: approximately ${params.durationSeconds} seconds.`,
+    "Generate a complete song and return audio output.",
+  ];
+
   if (params.style?.trim()) {
     parts.push(`Style: ${params.style.trim()}`);
   }
   if (params.lyrics?.trim()) {
-    parts.push(`Lyrics:\n${params.lyrics.trim()}`);
+    parts.push(`Lyrics (use or adapt):\n${params.lyrics.trim()}`);
   }
+
   return parts.join("\n\n");
 }
 
 function extractAudioResult(response: OpenRouterSongResponse): { audioUrl?: string; audioData?: string; item?: OpenRouterAudioItem } {
-  const item = Array.isArray(response.data) ? response.data[0] : undefined;
-  const audioUrl = item?.url ?? item?.audio_url ?? response.url ?? response.audio_url;
-  const audioData = item?.b64_json ?? item?.audio_data ?? response.b64_json ?? response.audio_data;
-  return { audioUrl, audioData, item };
+  const firstDataItem = Array.isArray(response.data) ? response.data[0] : undefined;
+  const message = response.choices?.[0]?.message;
+  const messageAudio = message?.audio;
+
+  let contentAudio: OpenRouterAudioItem | undefined;
+  if (Array.isArray(message?.content)) {
+    for (const part of message.content) {
+      const byNestedAudio = part.audio;
+      const byDirectFields: OpenRouterAudioItem = {
+        url: part.url ?? part.audio_url,
+        b64_json: part.b64_json ?? part.audio_data ?? part.data,
+        format: part.format,
+      };
+      if (byNestedAudio?.url || byNestedAudio?.audio_url || byNestedAudio?.b64_json || byNestedAudio?.audio_data || byNestedAudio?.data) {
+        contentAudio = byNestedAudio;
+        break;
+      }
+      if (byDirectFields.url || byDirectFields.b64_json) {
+        contentAudio = byDirectFields;
+        break;
+      }
+    }
+  }
+
+  const audioUrl =
+    firstDataItem?.url
+    ?? firstDataItem?.audio_url
+    ?? messageAudio?.url
+    ?? messageAudio?.audio_url
+    ?? contentAudio?.url
+    ?? contentAudio?.audio_url
+    ?? response.url
+    ?? response.audio_url;
+
+  const audioData =
+    firstDataItem?.b64_json
+    ?? firstDataItem?.audio_data
+    ?? firstDataItem?.data
+    ?? messageAudio?.b64_json
+    ?? messageAudio?.audio_data
+    ?? messageAudio?.data
+    ?? contentAudio?.b64_json
+    ?? contentAudio?.audio_data
+    ?? contentAudio?.data
+    ?? response.b64_json
+    ?? response.audio_data;
+
+  return { audioUrl, audioData, item: firstDataItem ?? messageAudio ?? contentAudio };
 }
 
 export const generateSong = defineTool({
@@ -100,14 +186,14 @@ export const generateSong = defineTool({
       throw new Error("Missing OPENROUTER_API_KEY (required for generate_song).");
     }
 
-    const payload: GenerateSongRequest = {
-      model: LYRIA_3_PRO_MODEL,
-      prompt: buildPrompt({ prompt: args.prompt, style: args.style, lyrics: args.lyrics }),
-      duration_seconds: args.duration_seconds,
-    };
+    const prompt = buildPrompt({
+      prompt: args.prompt,
+      durationSeconds: args.duration_seconds,
+      style: args.style,
+      lyrics: args.lyrics,
+    });
 
-    if (args.lyrics?.trim()) payload.lyrics = args.lyrics.trim();
-    if (args.style?.trim()) payload.style = args.style.trim();
+    let content: string | ChatContentPart[] = prompt;
 
     if (args.reference_audio?.trim()) {
       const resolvedPath = resolveWithinRoots({
@@ -116,14 +202,31 @@ export const generateSong = defineTool({
         defaultRoot: ctx.workspaceDir,
       });
       const bytes = await fs.readFile(resolvedPath);
-      payload.reference_audio = {
-        filename: path.basename(resolvedPath),
-        mimeType: inferMimeType(resolvedPath),
-        data: bytes.toString("base64"),
-      };
+      const encoded = bytes.toString("base64");
+
+      content = [
+        { type: "text", text: prompt },
+        {
+          type: "input_audio",
+          input_audio: {
+            data: encoded,
+            format: inferInputAudioFormat(resolvedPath),
+          },
+        },
+        {
+          type: "text",
+          text: `Reference audio attached (${path.basename(resolvedPath)}, ${inferMimeType(resolvedPath)}). Use it as a stylistic guide.`,
+        },
+      ];
     }
 
-    const response = await fetch(OPENROUTER_AUDIO_GENERATIONS_ENDPOINT, {
+    const payload: GenerateSongRequest = {
+      model: LYRIA_3_PRO_MODEL,
+      messages: [{ role: "user", content }],
+      modalities: ["text", "audio"],
+    };
+
+    const response = await fetch(OPENROUTER_CHAT_COMPLETIONS_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
