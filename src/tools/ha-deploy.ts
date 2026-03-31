@@ -14,6 +14,7 @@ import {
   syncCandidateForDeployApproval,
   type DeployApprovalMetadata,
 } from "../core/deploy-approval.js";
+import { syncDeployRequestForHumanAction } from "../core/deploy-requests.js";
 import { defineTool } from "../core/tools.js";
 import { inspectDeployWorktree, type DeployChangeInspection } from "../core/deploy-policy.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -748,7 +749,7 @@ export async function continueApprovedDeployAfterApproval(params: {
   candidateRootDir?: string;
   nowMs: number;
   log: (msg: string) => void;
-}): Promise<{ ok: boolean; message: string }> {
+}): Promise<{ ok: boolean; message: string; status: "queued" | "busy" | "stale" | "failed"; triggerId?: string | null }> {
   const metadata = parseMetadataJson(params.metadataJson);
   const continuation = parseDeployApprovalContinuation(metadata);
   if (!metadataMatchesApproval(metadata, buildDeployApprovalMetadata({
@@ -763,6 +764,7 @@ export async function continueApprovedDeployAfterApproval(params: {
   }))) {
     return {
       ok: false,
+      status: "stale",
       message: `Deploy approval '${params.approvalId}' metadata is invalid. Rerun ha_deploy manually if needed.`,
     };
   }
@@ -772,6 +774,7 @@ export async function continueApprovedDeployAfterApproval(params: {
   if (busyMessage) {
     return {
       ok: false,
+      status: "busy",
       message:
         `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation could not start.\n` +
         `${busyMessage}\n` +
@@ -783,107 +786,135 @@ export async function continueApprovedDeployAfterApproval(params: {
   let codeDir = continuation?.liveCodeDir ?? "";
   let liveCodeDir = continuation?.liveCodeDir ?? "";
 
-  const candidateId =
-    typeof metadata?.candidateId === "string" && metadata.candidateId.trim().length > 0
-      ? metadata.candidateId.trim()
-      : "";
-  if (candidateId) {
-    if (!params.candidateRootDir) {
+  try {
+    const candidateId =
+      typeof metadata?.candidateId === "string" && metadata.candidateId.trim().length > 0
+        ? metadata.candidateId.trim()
+        : "";
+    if (candidateId) {
+      if (!params.candidateRootDir) {
+        return {
+          ok: false,
+          status: "failed",
+          message:
+            `Deploy approval '${params.approvalId}' has been fulfilled, but candidate storage is unavailable. ` +
+            `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
+        };
+      }
+      const record = await loadCandidate(params.candidateRootDir, candidateId);
+      candidate = {
+        candidateId: record.candidateId,
+        baseSha: record.baseSha,
+        repoDir: record.repoDir,
+      };
+      codeDir = record.repoDir;
+      liveCodeDir = record.liveCodeDir;
+    }
+
+    if (!codeDir) {
       return {
         ok: false,
+        status: "failed",
         message:
-          `Deploy approval '${params.approvalId}' has been fulfilled, but candidate storage is unavailable. ` +
+          `Deploy approval '${params.approvalId}' has been fulfilled, but the source code directory is unknown. ` +
           `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
       };
     }
-    const record = await loadCandidate(params.candidateRootDir, candidateId);
-    candidate = {
-      candidateId: record.candidateId,
-      baseSha: record.baseSha,
-      repoDir: record.repoDir,
-    };
-    codeDir = record.repoDir;
-    liveCodeDir = record.liveCodeDir;
-  }
 
-  if (!codeDir) {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but the source code directory is unknown. ` +
-        `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
-    };
-  }
-
-  const changes = inspectDeployWorktree(codeDir);
-  if (changes.gitStatusError) {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed ` +
-        `while inspecting changes: ${changes.gitStatusError}`,
-    };
-  }
-  if (changes.deployable.length === 0) {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but there are no longer deployable changes in the candidate.`,
-    };
-  }
-  if (changes.policy !== "approval_required") {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate no longer matches an approval-gated deploy state.`,
-    };
-  }
-
-  const expected = buildDeployApprovalMetadata({
-    policy: changes.policy,
-    changeFingerprint: changes.fingerprint,
-    candidate: candidate ? { candidateId: candidate.candidateId, baseSha: candidate.baseSha } : undefined,
-    continuation: continuation ?? undefined,
-  });
-  if (!metadataMatchesApproval(metadata, expected)) {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate changed after approval. ` +
-        `Request a fresh approval for the new snapshot.`,
-    };
-  }
-
-  const verificationResult = await verifyDeployCandidate({
-    changes,
-    ctx: {
-      codeDir,
+    const candidateStateCtx = {
       candidateRootDir: params.candidateRootDir,
       candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
       nowMs: () => params.nowMs,
       log: params.log,
-    },
-  });
-  if (verificationResult) {
-    return {
-      ok: false,
-      message:
-        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed verification.\n\n` +
-        verificationResult,
     };
-  }
 
-  const target = resolveDeployGitTarget(liveCodeDir || codeDir, continuation?.remote ?? "host", continuation?.branch ?? "main");
-  for (const note of target.notes) params.log(note);
+    const changes = inspectDeployWorktree(codeDir);
+    if (changes.gitStatusError) {
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "failed",
+        lastError: `automatic deploy continuation failed while inspecting changes: ${changes.gitStatusError}`,
+      });
+      return {
+        ok: false,
+        status: "failed",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed ` +
+          `while inspecting changes: ${changes.gitStatusError}`,
+      };
+    }
+    if (changes.deployable.length === 0) {
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "failed",
+        lastError: "there are no longer deployable changes in the candidate",
+      });
+      return {
+        ok: false,
+        status: "stale",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but there are no longer deployable changes in the candidate.`,
+      };
+    }
+    if (changes.policy !== "approval_required") {
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "failed",
+        lastError: "candidate no longer matches an approval-gated deploy state",
+      });
+      return {
+        ok: false,
+        status: "stale",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate no longer matches an approval-gated deploy state.`,
+      };
+    }
 
-  await updateBoundCandidateState(
-    {
-      candidateRootDir: params.candidateRootDir,
-      candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
-      nowMs: () => params.nowMs,
-      log: params.log,
-    },
-    {
+    const expected = buildDeployApprovalMetadata({
+      policy: changes.policy,
+      changeFingerprint: changes.fingerprint,
+      candidate: candidate ? { candidateId: candidate.candidateId, baseSha: candidate.baseSha } : undefined,
+      continuation: continuation ?? undefined,
+    });
+    if (!metadataMatchesApproval(metadata, expected)) {
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "failed",
+        lastError: "candidate changed after approval",
+      });
+      return {
+        ok: false,
+        status: "stale",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate changed after approval. ` +
+          `Request a fresh approval for the new snapshot.`,
+      };
+    }
+
+    const verificationResult = await verifyDeployCandidate({
+      changes,
+      ctx: {
+        codeDir,
+        candidateRootDir: params.candidateRootDir,
+        candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
+        nowMs: () => params.nowMs,
+        log: params.log,
+      },
+    });
+    if (verificationResult) {
+      return {
+        ok: false,
+        status: "failed",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation failed verification.\n\n` +
+          verificationResult,
+      };
+    }
+
+    const target = resolveDeployGitTarget(
+      liveCodeDir || codeDir,
+      continuation?.remote ?? "host",
+      continuation?.branch ?? "main",
+    );
+    for (const note of target.notes) params.log(note);
+
+    await updateBoundCandidateState(candidateStateCtx, {
       status: "approved",
       classification: "approval_required",
       approvalStatus: "approved",
@@ -891,33 +922,25 @@ export async function continueApprovedDeployAfterApproval(params: {
       verificationFingerprint: changes.fingerprint ?? null,
       verifiedAt: params.nowMs,
       lastError: null,
-    },
-  );
+    });
 
-  writeApplyDeployTrigger({
-    stateDir: params.stateDir,
-    codeDir,
-    liveCodeDir: liveCodeDir || codeDir,
-    candidate,
-    approvalId: params.approvalId,
-    commitMessage:
-      continuation?.commitMessage?.trim() ||
-      `ha-rollout: apply approved changes ${new Date(params.nowMs).toISOString()}`,
-    remote: target.remote,
-    branch: target.branch,
-    request: continuation?.request ?? null,
-    nowMs: params.nowMs,
-    log: params.log,
-  });
-
-  await updateBoundCandidateState(
-    {
-      candidateRootDir: params.candidateRootDir,
-      candidate: candidate ? { candidateId: candidate.candidateId } : undefined,
-      nowMs: () => params.nowMs,
+    const triggerId = writeApplyDeployTrigger({
+      stateDir: params.stateDir,
+      codeDir,
+      liveCodeDir: liveCodeDir || codeDir,
+      candidate,
+      approvalId: params.approvalId,
+      commitMessage:
+        continuation?.commitMessage?.trim() ||
+        `ha-rollout: apply approved changes ${new Date(params.nowMs).toISOString()}`,
+      remote: target.remote,
+      branch: target.branch,
+      request: continuation?.request ?? null,
+      nowMs: params.nowMs,
       log: params.log,
-    },
-    {
+    });
+
+    await updateBoundCandidateState(candidateStateCtx, {
       status: "auto_deploying",
       classification: "approval_required",
       approvalStatus: "approved",
@@ -925,16 +948,27 @@ export async function continueApprovedDeployAfterApproval(params: {
       verificationFingerprint: changes.fingerprint ?? null,
       verifiedAt: params.nowMs,
       lastError: null,
-    },
-  );
+    });
 
-  return {
-    ok: true,
-    message:
-      `Deploy approval '${params.approvalId}' has been fulfilled.\n` +
-      "Automatic deploy continuation has been queued.\n" +
-      "Use ha_deploy action='status' if you need rollout status.",
-  };
+    return {
+      ok: true,
+      status: "queued",
+      triggerId,
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled.\n` +
+        "Automatic deploy continuation has been queued.\n" +
+        "Use ha_deploy action='status' if you need rollout status.",
+    };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: "failed",
+      message:
+        `Deploy approval '${params.approvalId}' has been fulfilled, but automatic deploy continuation crashed.\n` +
+        `${detail}`,
+    };
+  }
 }
 
 function findReusablePendingApproval(
@@ -1057,6 +1091,14 @@ async function ensureDeployApproval(params: {
         nowMs,
         log: params.ctx.log,
       });
+      syncDeployRequestForHumanAction({
+        db,
+        approvalId: row.id,
+        metadataJson: row.metadataJson,
+        status: row.status,
+        responseText: row.responseText,
+        nowMs,
+      });
       if (row.status === "pending") {
         return formatApprovalRequiredMessage({
           approvalId: row.id,
@@ -1096,6 +1138,13 @@ async function ensureDeployApproval(params: {
 
   const reusable = findReusablePendingApproval(db, params.ctx.request?.sessionId, nowMs, expected);
   if (reusable) {
+    syncDeployRequestForHumanAction({
+      db,
+      approvalId: reusable.id,
+      metadataJson: getHumanAction(db, { id: reusable.id, nowMs })?.metadataJson ?? null,
+      status: "pending",
+      nowMs,
+    });
     await updateBoundCandidateState(params.ctx, {
       status: "pending_approval",
       classification: "approval_required",
@@ -1152,6 +1201,15 @@ async function ensureDeployApproval(params: {
           : null,
       },
     },
+  });
+
+  syncDeployRequestForHumanAction({
+    db,
+    approvalId: row.id,
+    metadataJson: row.metadataJson,
+    status: row.status,
+    responseText: row.responseText,
+    nowMs,
   });
 
   await updateBoundCandidateState(params.ctx, {

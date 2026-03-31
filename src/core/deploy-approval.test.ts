@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   buildDeployApprovalMetadata,
   formatDeployApprovalFulfillmentMessage,
+  metadataMatchesApproval,
   syncCandidateForDeployApproval,
 } from "./deploy-approval.js";
 import { createCandidate, loadCandidate } from "../state/candidates.js";
@@ -75,11 +76,63 @@ test("syncCandidateForDeployApproval updates candidate state immediately on reje
   }
 });
 
-test("formatDeployApprovalFulfillmentMessage clarifies that approval does not auto-deploy", () => {
+test("formatDeployApprovalFulfillmentMessage clarifies that backend auto-continuation is the default", () => {
   const text = formatDeployApprovalFulfillmentMessage({
     approvalId: "HA123",
     responseText: "approve",
   });
-  assert.match(text, /does not deploy by itself/i);
+  assert.match(text, /continue the approved deploy in the backend automatically/i);
   assert.match(text, /approvalId='HA123'/i);
+});
+
+test("metadataMatchesApproval rejects approvals whose continuation target changed", () => {
+  const metadata = buildDeployApprovalMetadata({
+    policy: "approval_required",
+    changeFingerprint: "fingerprint-123",
+    candidate: {
+      candidateId: "cand-1",
+      baseSha: "abc123",
+    },
+    continuation: {
+      commitMessage: "deploy tool change",
+      remote: "host",
+      branch: "main",
+      liveCodeDir: "/data/code",
+      request: {
+        channel: "telegram",
+        channelKey: "12345",
+        agentId: "main:coder",
+        homeAgentId: "main",
+        sessionId: "session-1",
+        runId: "run-1",
+        parentRunId: null,
+      },
+    },
+  });
+
+  const mismatched = buildDeployApprovalMetadata({
+    policy: "approval_required",
+    changeFingerprint: "fingerprint-123",
+    candidate: {
+      candidateId: "cand-1",
+      baseSha: "abc123",
+    },
+    continuation: {
+      commitMessage: "deploy tool change",
+      remote: "origin",
+      branch: "main",
+      liveCodeDir: "/data/code",
+      request: {
+        channel: "telegram",
+        channelKey: "12345",
+        agentId: "main:coder",
+        homeAgentId: "main",
+        sessionId: "session-1",
+        runId: "run-1",
+        parentRunId: null,
+      },
+    },
+  });
+
+  assert.equal(metadataMatchesApproval(metadata, mismatched), false);
 });

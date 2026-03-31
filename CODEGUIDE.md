@@ -219,7 +219,7 @@ Architecture and implementation guide for the **coder** preset.
 6. Deploy in the same coder run:
    - `ha_deploy` with `action="apply"`
    - For approval-gated changes, call `ha_deploy action="apply"` without `approvalId` first.
-   - If it returns `APPROVAL REQUIRED`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and wait for operator approval via Telegram `/act <id> approve` or CLI `nexus actions respond <id> approve`, then rerun `ha_deploy` with that exact `approvalId`.
+   - If it returns `APPROVAL REQUIRED`, do not invent IDs, do not mention a dashboard, and do not poll with fake status probes. Use the returned approval ID and wait for operator approval via Telegram `/act <id> approve` or CLI `nexus actions respond <id> approve`. Nexus will queue the approved deploy in the backend; only rerun `ha_deploy` with that exact `approvalId` if recovery is needed.
 7. If deploy returns `ERROR`, stop and report recovery steps from `infra/DEPLOYMENT.md`.
 8. If deploy succeeds, stop runtime/schema checks in that same run and request a fresh follow-up validation run.
 

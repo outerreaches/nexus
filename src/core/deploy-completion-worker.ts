@@ -4,6 +4,10 @@ import path from "node:path";
 
 import type { NexusDatabase } from "../storage/database.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
+import {
+  syncCandidateForDeployCompletion,
+  syncDeployRequestForCompletion,
+} from "./deploy-requests.js";
 
 type DeployCompletionRequest = {
   channel?: string | null;
@@ -198,6 +202,7 @@ async function enqueueCompletionReport(db: NexusDatabase, artifact: DeployComple
 export function startDeployCompletionWorker(params: {
   db: NexusDatabase;
   stateDir: string;
+  candidateRootDir?: string;
   log: (msg: string) => void;
 }): DeployCompletionWorker | null {
   const enabled = envBool("NEXUS_DEPLOY_COMPLETION_WORKER") ?? true;
@@ -238,6 +243,30 @@ export function startDeployCompletionWorker(params: {
         try {
           const raw = await fs.readFile(claimedPath, "utf8");
           const artifact = parseArtifact(raw);
+          const nowMs = Date.now();
+          if (artifact.approvalId) {
+            syncDeployRequestForCompletion({
+              db: params.db,
+              approvalId: artifact.approvalId,
+              action: artifact.action,
+              status: artifact.status,
+              candidateId: artifact.candidateId ?? null,
+              triggerId: artifact.triggerId ?? null,
+              effectiveSha: artifact.effectiveSha ?? null,
+              lastGoodSha: artifact.lastGoodSha ?? null,
+              failureReason: artifact.failureReason ?? null,
+              nowMs,
+            });
+          }
+          await syncCandidateForDeployCompletion({
+            candidateRootDir: params.candidateRootDir,
+            candidateId: artifact.candidateId ?? null,
+            action: artifact.action,
+            status: artifact.status,
+            failureReason: artifact.failureReason ?? null,
+            nowMs,
+            log: params.log,
+          });
           try {
             await enqueueCompletionReport(params.db, artifact);
           } catch (err) {

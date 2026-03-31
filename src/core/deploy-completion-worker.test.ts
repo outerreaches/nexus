@@ -1,14 +1,41 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
+import { upsertDeployRequest } from "../storage/deploy-requests.js";
 import { getRunReportById } from "../storage/run-reports.js";
 import { setHomeSession } from "../storage/sessions.js";
+import { createCandidate, loadCandidate } from "../state/candidates.js";
 import { startDeployCompletionWorker } from "./deploy-completion-worker.js";
 import { startRunReportBroker } from "./run-report-broker.js";
+
+const execFileAsync = promisify(execFile);
+
+async function git(args: string[], cwd: string): Promise<string> {
+  const result = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  return result.stdout.trim();
+}
+
+async function createLiveRepo(root: string): Promise<string> {
+  const liveCodeDir = path.join(root, "live");
+  await fs.mkdir(liveCodeDir, { recursive: true });
+  await git(["init", "-b", "main"], liveCodeDir);
+  await git(["config", "user.name", "Nexus Test"], liveCodeDir);
+  await git(["config", "user.email", "nexus@example.com"], liveCodeDir);
+  await fs.writeFile(path.join(liveCodeDir, "README.md"), "seed\n", "utf8");
+  await git(["add", "README.md"], liveCodeDir);
+  await git(["commit", "-m", "seed"], liveCodeDir);
+  return liveCodeDir;
+}
 
 async function withDbAndState(
   fn: (params: { db: NexusDatabase; stateDir: string }) => Promise<void> | void,
@@ -121,6 +148,82 @@ test("deploy completion worker enqueues and broker delivers home-channel complet
 
     await assert.rejects(fs.access(path.join(completionsDir, "completion.json")));
     await fs.access(path.join(completionsDir, "completion.json.processing.notified"));
+  });
+});
+
+test("deploy completion worker reconciles deploy-request and candidate terminal state", async () => {
+  await withDbAndState(async ({ db, stateDir }) => {
+    const root = path.dirname(stateDir);
+    const liveCodeDir = await createLiveRepo(root);
+    const candidateRootDir = path.join(stateDir, "candidates");
+    const candidate = await createCandidate({
+      liveCodeDir,
+      candidateRootDir,
+      candidateId: "cand-completion-sync",
+      nowMs: Date.now(),
+    });
+
+    upsertDeployRequest(db, {
+      approvalId: "HADEPLOYSYNC",
+      status: "queued",
+      metadataJson: JSON.stringify({ kind: "ha_deploy_approval" }),
+      candidateId: candidate.candidateId,
+      createdAt: Date.now(),
+      nowMs: Date.now(),
+    });
+
+    const completionsDir = path.join(stateDir, "deploy-completions");
+    await fs.mkdir(completionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(completionsDir, "completion-sync.json"),
+      JSON.stringify(
+        {
+          id: "DC_TEST_004",
+          action: "apply",
+          status: "finalized",
+          triggerId: "trigger-4",
+          approvalId: "HADEPLOYSYNC",
+          candidateId: candidate.candidateId,
+          effectiveSha: "abc123",
+          lastGoodSha: "abc123",
+          request: {
+            channel: "telegram",
+            channelKey: "12345",
+            agentId: "main:coder",
+            homeAgentId: "main",
+            sessionId: "session-1",
+            runId: "run-4",
+            parentRunId: null,
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const worker = startDeployCompletionWorker({
+      db,
+      stateDir,
+      candidateRootDir,
+      log: () => {},
+    });
+    assert.ok(worker, "worker should start");
+
+    const processed = await worker.tick();
+    worker.stop();
+
+    assert.equal(processed, 1);
+    const request = db.db
+      .prepare("SELECT status, completion_status, effective_sha FROM deploy_requests WHERE approval_id = ?")
+      .get("HADEPLOYSYNC") as { status: string; completion_status: string; effective_sha: string } | undefined;
+    assert.equal(request?.status, "deployed");
+    assert.equal(request?.completion_status, "finalized");
+    assert.equal(request?.effective_sha, "abc123");
+
+    const record = await loadCandidate(candidateRootDir, candidate.candidateId);
+    assert.equal(record.status, "deployed");
+    assert.equal(record.lastError, null);
   });
 });
 

@@ -122,6 +122,31 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_human_actions_status_created ON human_actions(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_human_actions_session ON human_actions(session_id, status, created_at);
 
+    CREATE TABLE IF NOT EXISTS deploy_requests (
+      approval_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      metadata_json TEXT,
+      policy TEXT,
+      change_fingerprint TEXT,
+      continuation_hash TEXT,
+      candidate_id TEXT,
+      source_base_sha TEXT,
+      trigger_id TEXT,
+      completion_status TEXT,
+      effective_sha TEXT,
+      last_good_sha TEXT,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      approved_at INTEGER,
+      queued_at INTEGER,
+      started_at INTEGER,
+      completed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deploy_requests_status_updated ON deploy_requests(status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_deploy_requests_candidate_updated ON deploy_requests(candidate_id, updated_at);
+
     -- ───────────────────────────────────────────────────────────────────────
     -- Internal scheduler / jobs
     -- ───────────────────────────────────────────────────────────────────────

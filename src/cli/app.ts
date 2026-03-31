@@ -1328,11 +1328,10 @@ export async function runCli(argv: string[]): Promise<void> {
       const {
         formatDeployApprovalFulfillmentMessage,
         isDeployApprovalMetadata,
-        isAffirmativeApprovalResponse,
         parseMetadataJson,
         syncCandidateForDeployApproval,
       } = await import("../core/deploy-approval.js");
-      const { continueApprovedDeployAfterApproval } = await import("../tools/ha-deploy.js");
+      const { syncDeployRequestForHumanAction } = await import("../core/deploy-requests.js");
       const { fulfillHumanAction, getHumanAction } = await import("../storage/human-actions.js");
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
@@ -1356,25 +1355,18 @@ export async function runCli(argv: string[]): Promise<void> {
             responseText: row.responseText,
             nowMs: Date.now(),
           });
+          syncDeployRequestForHumanAction({
+            db,
+            approvalId: row.id,
+            metadataJson: row.metadataJson,
+            status: row.status,
+            responseText: row.responseText,
+            nowMs: Date.now(),
+          });
         }
         const metadata = parseMetadataJson(row?.metadataJson ?? null);
         if (isDeployApprovalMetadata(metadata)) {
           const responseText = row?.responseText ?? response;
-          if (row?.status === "fulfilled" && isAffirmativeApprovalResponse(responseText)) {
-            const continuation = await continueApprovedDeployAfterApproval({
-              approvalId: String(id),
-              metadataJson: row?.metadataJson ?? null,
-              stateDir: paths.stateDir,
-              candidateRootDir: paths.candidateRootDir,
-              nowMs: Date.now(),
-              log: (msg: string) => process.stderr.write(`${msg}\n`),
-            });
-            process.stdout.write(`${continuation.message}\n`);
-            if (!continuation.ok) {
-              process.exitCode = 1;
-            }
-            return;
-          }
           process.stdout.write(`${formatDeployApprovalFulfillmentMessage({
             approvalId: String(id),
             responseText,

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { HumanActionStatus } from "../storage/human-actions.js";
 import { updateCandidate } from "../state/candidates.js";
 import type { DeployPolicy } from "./deploy-policy.js";
@@ -10,6 +12,7 @@ export type DeployApprovalMetadata = {
   changeFingerprint: string | null;
   candidateId: string | null;
   sourceBaseSha: string | null;
+  continuationHash?: string | null;
   continuation?: {
     commitMessage: string | null;
     remote: string | null;
@@ -39,8 +42,8 @@ export function formatDeployApprovalFulfillmentMessage(params: {
   if (isAffirmativeApprovalResponse(responseText)) {
     return [
       `Deploy approval '${params.approvalId}' has been fulfilled.`,
-      "Approval only records operator consent; it does not deploy by itself.",
-      `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}' to continue the deploy.`,
+      "Nexus will continue the approved deploy in the backend automatically.",
+      `If automatic continuation fails, rerun ha_deploy with action='apply' and approvalId='${params.approvalId}'.`,
     ].join("\n");
   }
   if (isNegativeApprovalResponse(responseText)) {
@@ -73,8 +76,49 @@ export function buildDeployApprovalMetadata(params: {
     changeFingerprint: params.changeFingerprint,
     candidateId: params.candidate?.candidateId ?? null,
     sourceBaseSha: params.candidate?.baseSha ?? null,
+    continuationHash: hashDeployApprovalContinuation(params.continuation ?? null),
     continuation: params.continuation ?? null,
   };
+}
+
+function normalizeDeployApprovalContinuation(
+  raw: unknown,
+): DeployApprovalMetadata["continuation"] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const continuation = raw as Record<string, unknown>;
+  const request =
+    continuation.request && typeof continuation.request === "object" && !Array.isArray(continuation.request)
+      ? continuation.request as Record<string, unknown>
+      : null;
+  return {
+    commitMessage: typeof continuation.commitMessage === "string" ? continuation.commitMessage : null,
+    remote: typeof continuation.remote === "string" ? continuation.remote : null,
+    branch: typeof continuation.branch === "string" ? continuation.branch : null,
+    liveCodeDir: typeof continuation.liveCodeDir === "string" ? continuation.liveCodeDir : null,
+    request: request
+      ? {
+          channel: typeof request.channel === "string" ? request.channel : null,
+          channelKey: typeof request.channelKey === "string" ? request.channelKey : null,
+          agentId: typeof request.agentId === "string" ? request.agentId : null,
+          homeAgentId: typeof request.homeAgentId === "string" ? request.homeAgentId : null,
+          sessionId: typeof request.sessionId === "string" ? request.sessionId : null,
+          runId: typeof request.runId === "string" ? request.runId : null,
+          parentRunId: typeof request.parentRunId === "string" ? request.parentRunId : null,
+        }
+      : null,
+  };
+}
+
+export function hashDeployApprovalContinuation(
+  continuation: DeployApprovalMetadata["continuation"] | unknown,
+): string | null {
+  const normalized = normalizeDeployApprovalContinuation(continuation);
+  if (!normalized) return null;
+  return createHash("sha256").update(JSON.stringify({
+    remote: normalized.remote,
+    branch: normalized.branch,
+    liveCodeDir: normalized.liveCodeDir,
+  })).digest("hex");
 }
 
 export function metadataMatchesApproval(
@@ -82,12 +126,17 @@ export function metadataMatchesApproval(
   expected: DeployApprovalMetadata,
 ): boolean {
   if (!metadata) return false;
+  const metadataContinuationHash =
+    typeof metadata.continuationHash === "string"
+      ? metadata.continuationHash
+      : hashDeployApprovalContinuation(metadata.continuation);
   return (
     metadata.kind === expected.kind &&
     metadata.policy === expected.policy &&
     metadata.changeFingerprint === expected.changeFingerprint &&
     metadata.candidateId === expected.candidateId &&
-    metadata.sourceBaseSha === expected.sourceBaseSha
+    metadata.sourceBaseSha === expected.sourceBaseSha &&
+    metadataContinuationHash === (expected.continuationHash ?? hashDeployApprovalContinuation(expected.continuation))
   );
 }
 

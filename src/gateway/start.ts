@@ -9,6 +9,7 @@ import crypto from "node:crypto";
 import { AgentService } from "../core/agent-service.js";
 import { AgentTracker } from "../core/agent-tracker.js";
 import { startDeployCompletionWorker, type DeployCompletionWorker } from "../core/deploy-completion-worker.js";
+import { startDeployApprovalWorker, type DeployApprovalWorker } from "../core/deploy-approval-worker.js";
 import { startRunReportBroker, type RunReportBroker } from "../core/run-report-broker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
@@ -1364,6 +1365,7 @@ export async function startGateway(
   let scheduler: ReturnType<typeof startJobScheduler> = null;
   let processNotifier: ReturnType<typeof startProcessNotifier> = null;
   let deployCompletionWorker: DeployCompletionWorker | null = null;
+  let deployApprovalWorker: DeployApprovalWorker | null = null;
 
   const startServices = async () => {
     tg = await startTelegramBot({
@@ -1411,11 +1413,24 @@ export async function startGateway(
     deployCompletionWorker = startDeployCompletionWorker({
       db,
       stateDir: paths.stateDir,
+      candidateRootDir: paths.candidateRootDir,
       log,
     });
     void deployCompletionWorker?.tick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log(`deploy_completion_worker: initial tick failed: ${message}`);
+    });
+
+    deployApprovalWorker?.stop();
+    deployApprovalWorker = startDeployApprovalWorker({
+      db,
+      stateDir: paths.stateDir,
+      candidateRootDir: paths.candidateRootDir,
+      log,
+    });
+    void deployApprovalWorker?.tick().catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`deploy_approval_worker: initial tick failed: ${message}`);
     });
 
     // Process lifecycle callbacks (best-effort). Requires db + agent + telegram.
@@ -1539,6 +1554,8 @@ export async function startGateway(
     federationOutboxWorker = null;
     webhookDeliveryWorker?.stop();
     webhookDeliveryWorker = null;
+    deployApprovalWorker?.stop();
+    deployApprovalWorker = null;
     deployCompletionWorker?.stop();
     deployCompletionWorker = null;
     runReportBroker?.stop();
