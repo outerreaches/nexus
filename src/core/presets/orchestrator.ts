@@ -66,6 +66,7 @@ export const preset: AgentPreset = {
     "process_manage",
     "image_analyze",
     "video_analyze",
+    "generate_song",
     "web_fetch",
     "web_search",
     // Swarm coordination
