@@ -3,6 +3,7 @@ import type { AgentPreset } from "../core/presets.js";
 import {
   OpenAICompatClient,
   type LLMClient,
+  type LLMCompleteChatParams,
   type OpenAICompatConfig,
 } from "./openai-compat.js";
 
@@ -34,14 +35,19 @@ export type ResolvedModelRoute = {
   primary: OpenAICompatConfig;
 };
 
+/** Dynamically resolves credentials for a provider (e.g. OAuth token refresh). */
+export type ProviderCredentialResolver = () => Promise<{ baseUrl: string; apiKey: string }>;
+
 export type ModelRouterConfig = {
   defaultProvider: SerializableOpenAICompatConfig;
   providers?: Record<string, SerializableOpenAICompatConfig>;
   routing: NexusConfig["llm"]["routing"];
+  credentialResolvers?: Record<string, ProviderCredentialResolver>;
 };
 
 export class ModelRouter {
   private readonly providers: Record<string, OpenAICompatConfig>;
+  private readonly credentialResolvers: Record<string, ProviderCredentialResolver>;
   private routing: NexusConfig["llm"]["routing"];
 
   constructor(private readonly opts: ModelRouterConfig) {
@@ -49,6 +55,7 @@ export class ModelRouter {
       default: opts.defaultProvider,
       ...(opts.providers ?? {}),
     };
+    this.credentialResolvers = { ...(opts.credentialResolvers ?? {}) };
     this.routing = cloneRouting(opts.routing);
   }
 
@@ -109,6 +116,10 @@ export class ModelRouter {
       onLog?: (line: string) => void;
     },
   ): LLMClient {
+    const resolver = this.credentialResolvers[route.primaryProvider];
+    if (resolver) {
+      return new DynamicCredentialClient(route.primary, resolver, opts?.onLog);
+    }
     return new OpenAICompatClient({ ...route.primary, onLog: opts?.onLog });
   }
 
@@ -143,6 +154,29 @@ export class ModelRouter {
         model: target.model ?? base.model,
       },
     };
+  }
+}
+
+/**
+ * LLMClient wrapper that resolves dynamic credentials (e.g. OAuth token refresh)
+ * before each request, then delegates to a fresh OpenAICompatClient.
+ */
+class DynamicCredentialClient implements LLMClient {
+  constructor(
+    private readonly baseConfig: OpenAICompatConfig,
+    private readonly resolver: ProviderCredentialResolver,
+    private readonly onLog?: (line: string) => void,
+  ) {}
+
+  async completeChat(params: LLMCompleteChatParams) {
+    const creds = await this.resolver();
+    const client = new OpenAICompatClient({
+      ...this.baseConfig,
+      baseUrl: creds.baseUrl,
+      apiKey: creds.apiKey,
+      onLog: this.onLog,
+    });
+    return client.completeChat(params);
   }
 }
 

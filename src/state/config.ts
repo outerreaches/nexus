@@ -325,6 +325,10 @@ export function buildBootstrapConfigTemplate(): Record<string, unknown> {
           apiKey: "${OPENROUTER_API_KEY}",
           model: "moonshotai/kimi-k2.5",
         },
+        codex: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          model: "gpt-5.3-codex",
+        },
       },
       routing: {
         default: {

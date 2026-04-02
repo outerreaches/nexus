@@ -15,7 +15,8 @@ import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
 import { getPreset } from "../core/presets.js";
 import { McpManager } from "../mcp/manager.js";
-import { ModelRouter } from "../llm/model-router.js";
+import { ModelRouter, type ProviderCredentialResolver } from "../llm/model-router.js";
+import { resolveCodexCredentials } from "../llm/codex-auth.js";
 import { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { openDatabase } from "../storage/database.js";
 import { ensureConfigExists, loadConfig } from "../state/config.js";
@@ -63,6 +64,7 @@ import { parseControlCommandText } from "../control/control-command.js";
 import { executeInfoCommand } from "../control/info-command-handler.js";
 import { renderHelpText } from "../control/help-command-handler.js";
 import { executeModelSettingsCommand } from "../control/model-settings-command-handler.js";
+import { executeCodexCommand } from "../control/codex-command-handler.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
@@ -311,10 +313,13 @@ export async function startGateway(
       },
     ]),
   );
+  const codexResolver: ProviderCredentialResolver = () =>
+    resolveCodexCredentials({ stateDir: paths.stateDir, log });
   const modelRouter = new ModelRouter({
     defaultProvider: defaultLlmConfig,
     providers: llmProviderConfigs,
     routing: config.llm.routing,
+    credentialResolvers: { codex: codexResolver },
   });
   const startupRoute = modelRouter.resolve({
     agentId: "gateway:start",
@@ -1120,6 +1125,16 @@ export async function startGateway(
         agentId: params.agentId,
       });
       return "OK: home session cleared. Background events will use the latest eligible session.";
+    }
+    if (parsed.kind === "codex") {
+      const codexText = await executeCodexCommand({
+        command: parsed.codex,
+        deps: {
+          stateDir: paths.stateDir,
+          log,
+        },
+      });
+      return codexText;
     }
 
     const stopParsed = parsed.stop;

@@ -302,6 +302,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { openDatabase } = await import("../storage/database.js");
       const { getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
+      const { resolveCodexCredentials } = await import("../llm/codex-auth.js");
       const { getPreset } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
       const { AgentTracker } = await import("../core/agent-tracker.js");
@@ -359,10 +360,12 @@ export async function runCli(argv: string[]): Promise<void> {
           },
         ]),
       );
+      const codexResolver = () => resolveCodexCredentials({ stateDir: paths.stateDir, log });
       const modelRouter = new ModelRouter({
         defaultProvider: defaultLlmConfig,
         providers: llmProviderConfigs,
         routing: config.llm.routing,
+        credentialResolvers: { codex: codexResolver },
       });
       const startupRoute = modelRouter.resolve({
         agentId: String(opts.agent ?? "main"),
@@ -844,6 +847,13 @@ export async function runCli(argv: string[]): Promise<void> {
           clearHomeSession({ db, agentId });
           return `OK: home session cleared for agent ${agentId}.`;
         }
+        if (controlParsed.kind === "codex") {
+          const { executeCodexCommand } = await import("../control/codex-command-handler.js");
+          return executeCodexCommand({
+            command: controlParsed.codex,
+            deps: { stateDir: paths.stateDir, log },
+          });
+        }
 
         const stopParsed = controlParsed.stop;
         if (stopParsed.kind === "stop") {
@@ -993,6 +1003,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { getInitializationStatus, getInitializationErrorMessage } = await import("../state/onboarding.js");
       const { openDatabase } = await import("../storage/database.js");
       const { ModelRouter } = await import("../llm/model-router.js");
+      const { resolveCodexCredentials: resolveCodexCreds } = await import("../llm/codex-auth.js");
       const { getPreset } = await import("../core/presets.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
@@ -1033,10 +1044,12 @@ export async function runCli(argv: string[]): Promise<void> {
             },
           ]),
         );
+        const codexResolver2 = () => resolveCodexCreds({ stateDir: paths.stateDir, log });
         const modelRouter = new ModelRouter({
           defaultProvider: defaultLlmConfig,
           providers: llmProviderConfigs,
           routing: config.llm.routing,
+          credentialResolvers: { codex: codexResolver2 },
         });
         const startupRoute = modelRouter.resolve({
           agentId: "cli:tool",
