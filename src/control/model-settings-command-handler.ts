@@ -53,7 +53,9 @@ async function executeProviderModelCommand(
       return `${formatModelSettingsUsage(command.kind)}\n\nERROR: missing ${command.kind} value.`;
     }
     if (field === "provider") {
-      const providers = new Set(["default", ...Object.keys(deps.config.llm.providers)]);
+      const providers = deps.modelRouter
+        ? new Set(deps.modelRouter.listProviderNames())
+        : new Set(["default", ...Object.keys(deps.config.llm.providers)]);
       if (!providers.has(value)) {
         return `ERROR: unknown provider "${value}". Known providers: ${[...providers].sort().join(", ")}.`;
       }

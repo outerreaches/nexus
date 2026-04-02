@@ -56,6 +56,13 @@ export class ModelRouter {
       ...(opts.providers ?? {}),
     };
     this.credentialResolvers = { ...(opts.credentialResolvers ?? {}) };
+    // Auto-register stub providers for credential resolvers without explicit config.
+    // The resolver will override baseUrl/apiKey at request time.
+    for (const name of Object.keys(this.credentialResolvers)) {
+      if (!this.providers[name]) {
+        this.providers[name] = { baseUrl: "dynamic", model: "gpt-5.3-codex" };
+      }
+    }
     this.routing = cloneRouting(opts.routing);
   }
 
@@ -138,6 +145,10 @@ export class ModelRouter {
 
   updateRouting(routing: NexusConfig["llm"]["routing"]): void {
     this.routing = cloneRouting(routing);
+  }
+
+  listProviderNames(): string[] {
+    return Object.keys(this.providers).sort();
   }
 
   private resolveTarget(target: LlmRouteTarget): { provider: string; config: OpenAICompatConfig } {
