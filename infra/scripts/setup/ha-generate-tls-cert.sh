@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CODE_DIR="${CODE_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+CODE_DIR="${CODE_DIR:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 CERT_PEM="${NEXUS_HAPROXY_TLS_CERT_PEM:-${CODE_DIR}/infra/haproxy/certs/nexus.pem}"
 DAYS="${NEXUS_HAPROXY_TLS_DAYS:-825}"
