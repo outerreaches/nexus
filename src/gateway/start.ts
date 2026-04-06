@@ -330,6 +330,31 @@ export async function startGateway(
   log(
     `startup: llm route primary=${startupRoute.primaryProvider}/${startupRoute.primary.model} source=${startupRoute.source}`,
   );
+
+  // Watch nexus.json for external routing changes (e.g. CLI updating provider/model)
+  let configWatcherActive = true;
+  fs.watchFile(startConfigPath, { interval: 2000 }, async () => {
+    if (!configWatcherActive) return;
+    try {
+      const reloaded = await loadConfig(startConfigPath);
+      const routingJson = JSON.stringify(reloaded.llm.routing);
+      const currentJson = JSON.stringify(config.llm.routing);
+      if (routingJson === currentJson) return;
+      config.llm.routing = reloaded.llm.routing;
+      config.llm.toolRouting = reloaded.llm.toolRouting;
+      modelRouter.updateRouting(reloaded.llm.routing);
+      const route = modelRouter.resolve({
+        agentId: "gateway:config-reload",
+        preset: "orchestrator",
+        mode: "default",
+        presetLlm: getPreset("orchestrator")?.llm,
+      });
+      log(`config_watch: routing reloaded — ${route.primaryProvider}/${route.primary.model} source=${route.source}`);
+    } catch (err) {
+      log(`config_watch: reload failed — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
   const circuitBreaker = new LlmCircuitBreaker({
     primaryConfig: defaultLlmConfig,
     onStateChange: (from, to, reason) => log(`circuit_breaker ${from} → ${to}: ${reason}`),
@@ -1984,6 +2009,8 @@ export async function startGateway(
     isolatedWorkers.clear();
     isolatedWorkerOwners.clear();
 
+    configWatcherActive = false;
+    fs.unwatchFile(startConfigPath);
     await deactivateServices("shutdown");
     circuitBreaker.dispose();
     nodeWsGateway.close();
