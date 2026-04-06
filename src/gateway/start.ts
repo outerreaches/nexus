@@ -1104,6 +1104,7 @@ export async function startGateway(
           applyRuntimeConfig: (nextConfig) => {
             toolContext.llmToolRouting = nextConfig.llm.toolRouting;
           },
+          stateDir: paths.stateDir,
           log,
         },
       });

@@ -1,5 +1,6 @@
 import { getPreset, getPresetNames } from "../core/presets.js";
 import type { ModelRouter } from "../llm/model-router.js";
+import { getCodexAuthStatus } from "../llm/codex-auth.js";
 import {
   editNexusConfigRoutingField,
   type ConfigRoutingField,
@@ -18,6 +19,7 @@ export type ModelSettingsCommandHandlerDeps = {
   modelRouter?: ModelRouter;
   listTools: () => ToolLike[];
   applyRuntimeConfig?: (next: NexusConfig) => void;
+  stateDir?: string;
   log?: (line: string) => void;
 };
 
@@ -58,6 +60,13 @@ async function executeProviderModelCommand(
         : new Set(["default", ...Object.keys(deps.config.llm.providers)]);
       if (!providers.has(value)) {
         return `ERROR: unknown provider "${value}". Known providers: ${[...providers].sort().join(", ")}.`;
+      }
+      // Check codex auth before allowing provider switch
+      if (value === "codex" && deps.stateDir) {
+        const status = await getCodexAuthStatus(deps.stateDir);
+        if (!status.loggedIn) {
+          return "ERROR: Codex provider requires authentication. Run /codex login first to authenticate with your ChatGPT account.";
+        }
       }
     }
 
