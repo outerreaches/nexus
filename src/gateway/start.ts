@@ -1128,11 +1128,21 @@ export async function startGateway(
       return "OK: home session cleared. Background events will use the latest eligible session.";
     }
     if (parsed.kind === "codex") {
+      const chatId = params.channel === "telegram" ? Number(params.channelKey) : NaN;
       const codexText = await executeCodexCommand({
         command: parsed.codex,
         deps: {
           stateDir: paths.stateDir,
           log,
+          sendFollowUp: (text) => {
+            if (tg && !isNaN(chatId)) {
+              tg.sendOutput(chatId, text).catch((err: unknown) =>
+                log(`codex: follow-up send failed: ${err instanceof Error ? err.message : String(err)}`),
+              );
+            } else {
+              log(`codex: ${text}`);
+            }
+          },
         },
       });
       return codexText;

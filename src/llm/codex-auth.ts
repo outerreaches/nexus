@@ -174,46 +174,29 @@ export async function codexDeviceCodeLogin(
   callbacks: DeviceCodeLoginCallbacks,
   opts?: { timeoutMs?: number },
 ): Promise<CodexTokens> {
-  const timeoutMs = opts?.timeoutMs ?? 15 * 60_000;
+  const { userCode, verificationUrl, poll } = await codexDeviceCodeLogin_start(opts);
+  callbacks.onUserCode({ verificationUrl, userCode });
+  return poll({ onPollTick: callbacks.onPollTick });
+}
 
-  // Step 1: Request device code
-  const codeResp = await fetch(`${CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID }),
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  if (!codeResp.ok) {
-    throw new Error(`Failed to request device code: status ${codeResp.status}`);
-  }
-
-  const deviceData = (await codeResp.json()) as Record<string, unknown>;
-  const userCode = String(deviceData.user_code ?? "");
-  const deviceAuthId = String(deviceData.device_auth_id ?? "");
-  let pollInterval = Math.max(3, Number(deviceData.interval ?? 5)) * 1000;
-
-  if (!userCode || !deviceAuthId) {
-    throw new Error("Device code response missing required fields");
-  }
-
-  // Step 2: Notify caller with the user code
-  callbacks.onUserCode({
-    verificationUrl: `${CODEX_OAUTH_ISSUER}/codex/device`,
-    userCode,
-  });
-
-  // Step 3: Poll for authorization
-  const deadline = Date.now() + timeoutMs;
+/** Shared polling logic for device-code auth. */
+async function pollDeviceAuth(params: {
+  deviceAuthId: string;
+  userCode: string;
+  pollInterval: number;
+  timeoutMs: number;
+  onPollTick?: () => void;
+}): Promise<CodexTokens> {
+  const deadline = Date.now() + params.timeoutMs;
 
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollInterval));
-    callbacks.onPollTick?.();
+    await new Promise((r) => setTimeout(r, params.pollInterval));
+    params.onPollTick?.();
 
     const pollResp = await fetch(`${CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
+      body: JSON.stringify({ device_auth_id: params.deviceAuthId, user_code: params.userCode }),
       signal: AbortSignal.timeout(15_000),
     });
 
@@ -226,7 +209,6 @@ export async function codexDeviceCodeLogin(
         throw new Error("Device auth response missing authorization_code or code_verifier");
       }
 
-      // Step 4: Exchange authorization code for tokens
       const tokenResp = await fetch(CODEX_OAUTH_TOKEN_URL, {
         method: "POST",
         headers: {
@@ -259,7 +241,6 @@ export async function codexDeviceCodeLogin(
     }
 
     if (pollResp.status === 403 || pollResp.status === 404) {
-      // User hasn't completed login yet
       continue;
     }
 
@@ -323,7 +304,59 @@ export async function resolveCodexCredentials(opts: {
   };
 }
 
-// ── Login + persist ────────────────────────────────────────────────────────
+// ── Two-phase login (start → poll in background → finish) ─────────────────
+
+/**
+ * Phase 1: request device code from OpenAI. Returns the user code for display
+ * and a `poll` function that can be called in the background to await authorization.
+ */
+export async function codexDeviceCodeLogin_start(
+  opts?: { timeoutMs?: number },
+): Promise<{
+  userCode: string;
+  verificationUrl: string;
+  poll: (cbs: { onPollTick?: () => void }) => Promise<CodexTokens>;
+}> {
+  const timeoutMs = opts?.timeoutMs ?? 15 * 60_000;
+
+  const codeResp = await fetch(`${CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID }),
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!codeResp.ok) {
+    throw new Error(`Failed to request device code: status ${codeResp.status}`);
+  }
+
+  const deviceData = (await codeResp.json()) as Record<string, unknown>;
+  const userCode = String(deviceData.user_code ?? "");
+  const deviceAuthId = String(deviceData.device_auth_id ?? "");
+  const pollInterval = Math.max(3, Number(deviceData.interval ?? 5)) * 1000;
+
+  if (!userCode || !deviceAuthId) {
+    throw new Error("Device code response missing required fields");
+  }
+
+  const verificationUrl = `${CODEX_OAUTH_ISSUER}/codex/device`;
+
+  return {
+    userCode,
+    verificationUrl,
+    poll: (cbs) => pollDeviceAuth({ deviceAuthId, userCode, pollInterval, timeoutMs, onPollTick: cbs.onPollTick }),
+  };
+}
+
+/** Phase 2: persist tokens after successful login. */
+export async function codexLoginFinish(opts: {
+  stateDir: string;
+  tokens: CodexTokens;
+}): Promise<void> {
+  await writeTokens(opts.stateDir, opts.tokens);
+}
+
+// ── Legacy combined login (kept for CLI) ──────────────────────────────────
 
 export async function codexLogin(opts: {
   stateDir: string;

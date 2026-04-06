@@ -1,16 +1,16 @@
 import type { ParsedCodexCommand } from "./codex-command.js";
 import {
-  codexLogin,
+  codexDeviceCodeLogin_start,
+  codexLoginFinish,
   codexLogout,
   getCodexAuthStatus,
-  type DeviceCodeLoginCallbacks,
 } from "../llm/codex-auth.js";
 
 export type CodexCommandHandlerDeps = {
   stateDir: string;
   log?: (line: string) => void;
-  /** Send a message to the user (e.g. Telegram). Used for device code display. */
-  sendMessage?: (text: string) => Promise<void>;
+  /** Send a follow-up message to the user after the initial response has been delivered. */
+  sendFollowUp?: (text: string) => void;
 };
 
 export async function executeCodexCommand(params: {
@@ -39,29 +39,34 @@ export async function executeCodexCommand(params: {
       : "Codex: no credentials found to remove.";
   }
 
-  // login flow
-  const callbacks: DeviceCodeLoginCallbacks = {
-    onUserCode: ({ verificationUrl, userCode }) => {
-      const msg = [
-        "🔑 Codex Login — authenticate with your ChatGPT account:",
-        "",
-        `1. Open: ${verificationUrl}`,
-        `2. Enter code: **${userCode}**`,
-        "",
-        "Waiting for authorization...",
-      ].join("\n");
-
-      deps.log?.(msg);
-      deps.sendMessage?.(msg);
-    },
-    onPollTick: () => {
-      deps.log?.("codex: waiting for authorization...");
-    },
-  };
-
+  // login flow — request device code, return it immediately, poll in background
   try {
-    await codexLogin({ stateDir: deps.stateDir, callbacks });
-    return "Codex: login successful! You can now use the \"codex\" provider in your LLM routing config.";
+    const { userCode, verificationUrl, poll } = await codexDeviceCodeLogin_start();
+
+    // Start background polling
+    poll({
+      onPollTick: () => deps.log?.("codex: waiting for authorization..."),
+    })
+      .then(async (tokens) => {
+        await codexLoginFinish({ stateDir: deps.stateDir, tokens });
+        const msg = "Codex: login successful! You can now use /provider codex to switch.";
+        deps.log?.(msg);
+        deps.sendFollowUp?.(msg);
+      })
+      .catch((err) => {
+        const msg = `Codex login failed: ${err instanceof Error ? err.message : String(err)}`;
+        deps.log?.(msg);
+        deps.sendFollowUp?.(msg);
+      });
+
+    return [
+      "Codex Login — authenticate with your ChatGPT account:",
+      "",
+      `1. Open: ${verificationUrl}`,
+      `2. Enter code: ${userCode}`,
+      "",
+      "Waiting for authorization (up to 15 min)... You'll get a message when it's done.",
+    ].join("\n");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `Codex login failed: ${msg}`;
