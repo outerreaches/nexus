@@ -39,36 +39,38 @@ export async function executeCodexCommand(params: {
       : "Codex: no credentials found to remove.";
   }
 
-  // login flow — request device code, return it immediately, poll in background
-  try {
-    const { userCode, verificationUrl, poll } = await codexDeviceCodeLogin_start();
+  // login flow — run entirely in background, return immediately
+  runCodexLoginInBackground(deps);
+  return "Codex: requesting device code from OpenAI... You'll get a message with the login URL shortly.";
+}
 
-    // Start background polling
-    poll({
-      onPollTick: () => deps.log?.("codex: waiting for authorization..."),
-    })
-      .then(async (tokens) => {
-        await codexLoginFinish({ stateDir: deps.stateDir, tokens });
-        const msg = "Codex: login successful! You can now use /provider codex to switch.";
-        deps.log?.(msg);
-        deps.sendFollowUp?.(msg);
-      })
-      .catch((err) => {
-        const msg = `Codex login failed: ${err instanceof Error ? err.message : String(err)}`;
-        deps.log?.(msg);
-        deps.sendFollowUp?.(msg);
+function runCodexLoginInBackground(deps: CodexCommandHandlerDeps): void {
+  codexDeviceCodeLogin_start()
+    .then(({ userCode, verificationUrl, poll }) => {
+      const msg = [
+        "Codex Login — authenticate with your ChatGPT account:",
+        "",
+        `1. Open: ${verificationUrl}`,
+        `2. Enter code: ${userCode}`,
+        "",
+        "Waiting for authorization (up to 15 min)...",
+      ].join("\n");
+      deps.log?.(msg);
+      deps.sendFollowUp?.(msg);
+
+      return poll({
+        onPollTick: () => deps.log?.("codex: waiting for authorization..."),
       });
-
-    return [
-      "Codex Login — authenticate with your ChatGPT account:",
-      "",
-      `1. Open: ${verificationUrl}`,
-      `2. Enter code: ${userCode}`,
-      "",
-      "Waiting for authorization (up to 15 min)... You'll get a message when it's done.",
-    ].join("\n");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return `Codex login failed: ${msg}`;
-  }
+    })
+    .then(async (tokens) => {
+      await codexLoginFinish({ stateDir: deps.stateDir, tokens });
+      const msg = "Codex: login successful! You can now use /provider codex to switch.";
+      deps.log?.(msg);
+      deps.sendFollowUp?.(msg);
+    })
+    .catch((err) => {
+      const msg = `Codex login failed: ${err instanceof Error ? err.message : String(err)}`;
+      deps.log?.(msg);
+      deps.sendFollowUp?.(msg);
+    });
 }

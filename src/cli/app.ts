@@ -851,7 +851,13 @@ export async function runCli(argv: string[]): Promise<void> {
           const { executeCodexCommand } = await import("../control/codex-command-handler.js");
           return executeCodexCommand({
             command: controlParsed.codex,
-            deps: { stateDir: paths.stateDir, log },
+            deps: {
+              stateDir: paths.stateDir,
+              log,
+              sendFollowUp: (text) => {
+                process.stdout.write(tui.paint("system", text.trimEnd()) + "\n");
+              },
+            },
           });
         }
 
