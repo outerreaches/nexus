@@ -6,6 +6,7 @@ import {
   type LLMCompleteChatParams,
   type OpenAICompatConfig,
 } from "./openai-compat.js";
+import { CodexResponsesClient } from "./codex-responses.js";
 
 export type ModelRoutingMode = "default" | "local_only";
 
@@ -43,11 +44,14 @@ export type ModelRouterConfig = {
   providers?: Record<string, SerializableOpenAICompatConfig>;
   routing: NexusConfig["llm"]["routing"];
   credentialResolvers?: Record<string, ProviderCredentialResolver>;
+  /** Providers that use the Responses API instead of chat/completions. */
+  responsesApiProviders?: string[];
 };
 
 export class ModelRouter {
   private readonly providers: Record<string, OpenAICompatConfig>;
   private readonly credentialResolvers: Record<string, ProviderCredentialResolver>;
+  private readonly responsesApiProviders: Set<string>;
   private routing: NexusConfig["llm"]["routing"];
 
   constructor(private readonly opts: ModelRouterConfig) {
@@ -56,6 +60,7 @@ export class ModelRouter {
       ...(opts.providers ?? {}),
     };
     this.credentialResolvers = { ...(opts.credentialResolvers ?? {}) };
+    this.responsesApiProviders = new Set(opts.responsesApiProviders ?? []);
     // Auto-register stub providers for credential resolvers without explicit config.
     // The resolver will override baseUrl/apiKey at request time.
     for (const name of Object.keys(this.credentialResolvers)) {
@@ -125,7 +130,8 @@ export class ModelRouter {
   ): LLMClient {
     const resolver = this.credentialResolvers[route.primaryProvider];
     if (resolver) {
-      return new DynamicCredentialClient(route.primary, resolver, opts?.onLog);
+      const useResponses = this.responsesApiProviders.has(route.primaryProvider);
+      return new DynamicCredentialClient(route.primary, resolver, opts?.onLog, useResponses);
     }
     return new OpenAICompatClient({ ...route.primary, onLog: opts?.onLog });
   }
@@ -177,10 +183,20 @@ class DynamicCredentialClient implements LLMClient {
     private readonly baseConfig: OpenAICompatConfig,
     private readonly resolver: ProviderCredentialResolver,
     private readonly onLog?: (line: string) => void,
+    private readonly useResponsesApi?: boolean,
   ) {}
 
   async completeChat(params: LLMCompleteChatParams) {
     const creds = await this.resolver();
+    if (this.useResponsesApi) {
+      const client = new CodexResponsesClient({
+        baseUrl: creds.baseUrl,
+        apiKey: creds.apiKey,
+        model: this.baseConfig.model,
+        onLog: this.onLog,
+      });
+      return client.completeChat(params);
+    }
     const client = new OpenAICompatClient({
       ...this.baseConfig,
       baseUrl: creds.baseUrl,

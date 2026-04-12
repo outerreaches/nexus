@@ -366,6 +366,7 @@ export async function runCli(argv: string[]): Promise<void> {
         providers: llmProviderConfigs,
         routing: config.llm.routing,
         credentialResolvers: { codex: codexResolver },
+        responsesApiProviders: ["codex"],
       });
       const startupRoute = modelRouter.resolve({
         agentId: String(opts.agent ?? "main"),
@@ -448,6 +449,7 @@ export async function runCli(argv: string[]): Promise<void> {
         stateDir: paths.stateDir,
         agentTracker,
         onRunnerLog: traceEnabled || options.verbose ? log : undefined,
+        defaultPreset: "orchestrator",
         nudges: config.nudges,
         skillsConfig: config.skills,
         limits: {
@@ -1056,6 +1058,7 @@ export async function runCli(argv: string[]): Promise<void> {
           providers: llmProviderConfigs,
           routing: config.llm.routing,
           credentialResolvers: { codex: codexResolver2 },
+          responsesApiProviders: ["codex"],
         });
         const startupRoute = modelRouter.resolve({
           agentId: "cli:tool",

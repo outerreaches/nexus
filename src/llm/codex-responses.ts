@@ -1,0 +1,340 @@
+/**
+ * Codex Responses API client.
+ *
+ * The ChatGPT Codex backend (chatgpt.com/backend-api/codex) uses the
+ * Responses API — a different wire format from chat/completions.
+ * This client translates our internal ChatMessage format to the
+ * Responses API input format, streams the response via SSE, and
+ * converts back to our standard LLMClient result shape.
+ *
+ * Reference: Hermes Agent's _CodexCompletionsAdapter
+ * (NousResearch/hermes-agent, agent/auxiliary_client.py)
+ */
+
+import type { ChatMessage, ToolCall, ChatUserContent } from "../core/types.js";
+import type { Tool } from "../core/tools.js";
+import type { LLMClient, LLMCompleteChatParams, LLMUsage } from "./openai-compat.js";
+
+export type CodexResponsesConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  onLog?: (line: string) => void;
+};
+
+export class CodexResponsesClient implements LLMClient {
+  constructor(private readonly config: CodexResponsesConfig) {}
+
+  async completeChat(params: LLMCompleteChatParams): Promise<{
+    content: string | null;
+    toolCalls: ToolCall[];
+    usage?: LLMUsage;
+  }> {
+    const log = this.config.onLog;
+    const url = joinUrl(this.config.baseUrl, "responses");
+
+    // Convert messages to Responses API format
+    const { instructions, input } = convertMessages(params.messages);
+
+    // Convert tools
+    const tools = params.tools.map((t) => ({
+      type: "function" as const,
+      name: t.name,
+      description: t.description,
+      parameters: t.jsonSchema,
+    }));
+
+    const body: Record<string, unknown> = {
+      model: this.config.model,
+      instructions,
+      input,
+      store: false,
+      stream: true,
+    };
+
+    if (tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = "auto";
+    }
+
+    // The Codex endpoint does NOT support max_output_tokens or temperature.
+
+    const startMs = Date.now();
+    log?.(`codex_fetch_start model=${this.config.model} input_items=${input.length} tools=${tools.length}`);
+
+    const controller = new AbortController();
+    const timeoutMs = 300_000;
+    const timeout = setTimeout(() => {
+      log?.(`codex_fetch_abort_timeout elapsed=${Date.now() - startMs}ms`);
+      controller.abort();
+    }, timeoutMs);
+
+    if (params.abortSignal) {
+      const onAbort = () => {
+        log?.(`codex_fetch_abort_external elapsed=${Date.now() - startMs}ms`);
+        controller.abort(params.abortSignal?.reason);
+      };
+      if (params.abortSignal.aborted) {
+        onAbort();
+      } else {
+        params.abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      log?.(`codex_fetch_headers status=${res.status} elapsed=${Date.now() - startMs}ms`);
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        // Truncate HTML error bodies (Cloudflare pages etc.)
+        const truncated = errBody.length > 500 ? errBody.slice(0, 500) + "..." : errBody;
+        throw new Error(`Codex API request failed: ${res.status} ${res.statusText} — ${truncated}`);
+      }
+
+      // Parse SSE stream
+      const result = await readResponsesStream(res, {
+        onTextDelta: params.onTextDelta,
+        onActivity: params.onActivity,
+        onLog: log,
+        startMs,
+      });
+
+      log?.(`codex_fetch_complete elapsed=${Date.now() - startMs}ms text_len=${result.content?.length ?? 0} tool_calls=${result.toolCalls.length}`);
+      return result;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+// ── Message conversion ──────────────────────────────────────────────────────
+
+function convertMessages(messages: ChatMessage[]): {
+  instructions: string;
+  input: ResponsesInputItem[];
+} {
+  let instructions = "You are a helpful assistant.";
+  const input: ResponsesInputItem[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      instructions = msg.content;
+      continue;
+    }
+
+    if (msg.role === "user") {
+      input.push({
+        type: "message",
+        role: "user",
+        content: convertUserContent(msg.content),
+      });
+      continue;
+    }
+
+    if (msg.role === "assistant") {
+      // Text content
+      if (msg.content) {
+        input.push({
+          type: "message",
+          role: "assistant",
+          content: msg.content,
+        });
+      }
+
+      // Tool calls become function_call items
+      if (msg.toolCalls) {
+        for (const tc of msg.toolCalls) {
+          input.push({
+            type: "function_call",
+            call_id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (msg.role === "tool") {
+      input.push({
+        type: "function_call_output",
+        call_id: msg.toolCallId,
+        output: msg.content,
+      });
+    }
+  }
+
+  return { instructions, input };
+}
+
+type ResponsesInputItem =
+  | { type: "message"; role: "user" | "assistant"; content: string | ResponsesContentPart[] }
+  | { type: "function_call"; call_id: string; name: string; arguments: string }
+  | { type: "function_call_output"; call_id: string; output: string };
+
+type ResponsesContentPart =
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url: string };
+
+function convertUserContent(content: ChatUserContent): string | ResponsesContentPart[] {
+  if (typeof content === "string") return content;
+
+  const parts: ResponsesContentPart[] = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      parts.push({ type: "input_text", text: part.text });
+    } else if (part.type === "image_url") {
+      parts.push({ type: "input_image", image_url: part.image_url.url });
+    }
+  }
+  return parts;
+}
+
+// ── SSE stream parsing ──────────────────────────────────────────────────────
+
+async function readResponsesStream(
+  res: Response,
+  opts: {
+    onTextDelta?: (delta: string) => void;
+    onActivity?: () => void;
+    onLog?: (line: string) => void;
+    startMs: number;
+  },
+): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }> {
+  const textParts: string[] = [];
+  const toolCalls: ToolCall[] = [];
+  // Track function call arguments as they stream in
+  const pendingFunctionArgs = new Map<string, { id: string; name: string; args: string[] }>();
+  let usage: LLMUsage | undefined;
+
+  const body = res.body;
+  if (!body) throw new Error("Codex API response has no body");
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      opts.onActivity?.();
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.slice(6).trim();
+        if (data === "[DONE]") continue;
+
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue;
+        }
+
+        const eventType = String(event.type ?? "");
+
+        // Text content delta
+        if (eventType === "response.output_text.delta") {
+          const delta = String(event.delta ?? "");
+          if (delta) {
+            textParts.push(delta);
+            opts.onTextDelta?.(delta);
+          }
+        }
+
+        // Function call arguments streaming
+        if (eventType === "response.function_call_arguments.delta") {
+          const callId = String(event.call_id ?? event.item_id ?? "");
+          const delta = String(event.delta ?? "");
+          if (callId && delta) {
+            const pending = pendingFunctionArgs.get(callId);
+            if (pending) {
+              pending.args.push(delta);
+            }
+          }
+        }
+
+        // Output item added — start tracking function calls
+        if (eventType === "response.output_item.added") {
+          const item = event.item as Record<string, unknown> | undefined;
+          if (item?.type === "function_call") {
+            const callId = String(item.call_id ?? "");
+            const name = String(item.name ?? "");
+            if (callId) {
+              pendingFunctionArgs.set(callId, { id: callId, name, args: [] });
+            }
+          }
+        }
+
+        // Output item done — finalize
+        if (eventType === "response.output_item.done") {
+          const item = event.item as Record<string, unknown> | undefined;
+          if (item?.type === "function_call") {
+            const callId = String(item.call_id ?? "");
+            const name = String(item.name ?? "");
+            const args = String(item.arguments ?? "{}");
+            // Prefer the accumulated streamed args if we have them
+            const pending = pendingFunctionArgs.get(callId);
+            const finalArgs = pending && pending.args.length > 0 ? pending.args.join("") : args;
+            toolCalls.push({ id: callId, name, arguments: finalArgs });
+            pendingFunctionArgs.delete(callId);
+          } else if (item?.type === "message") {
+            // Extract text from completed message if we missed deltas
+            const content = item.content as unknown[];
+            if (Array.isArray(content)) {
+              for (const part of content) {
+                const p = part as Record<string, unknown>;
+                if ((p.type === "output_text" || p.type === "text") && typeof p.text === "string") {
+                  // Only add if we didn't already capture via deltas
+                  if (textParts.length === 0) {
+                    textParts.push(p.text);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Response completed — extract usage
+        if (eventType === "response.completed") {
+          const response = event.response as Record<string, unknown> | undefined;
+          const u = response?.usage as Record<string, number> | undefined;
+          if (u) {
+            usage = {
+              promptTokens: u.input_tokens,
+              completionTokens: u.output_tokens,
+              totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
+            };
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const content = textParts.join("").trim() || null;
+  return { content, toolCalls, usage };
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function joinUrl(baseUrl: string, path: string): string {
+  const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  return new URL(path, normalizedBase).toString();
+}
