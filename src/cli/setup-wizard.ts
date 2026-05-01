@@ -104,7 +104,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "fireworks",
     label: "Fireworks",
     baseUrl: "https://api.fireworks.ai/inference/v1",
-    model: "accounts/fireworks/models/llama-v3p1-70b-instruct",
+    model: "accounts/fireworks/models/kimi-k2p6",
     envKey: "FIREWORKS_API_KEY",
     credentialId: "llm.fireworks.api",
   },

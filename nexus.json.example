@@ -52,18 +52,26 @@
 
   // ── LLM ──────────────────────────────────────────────────────────────────
   "llm": {
-    // Default provider — OpenRouter
+    // Default provider — Fireworks AI (Kimi K2.6)
     "openaiCompat": {
-      "baseUrl": "https://openrouter.ai/api/v1",
-      "apiKey": "${OPENROUTER_API_KEY}",
-      "model": "moonshotai/kimi-k2.5",
-      "stream": true
+      "baseUrl": "https://api.fireworks.ai/inference/v1",
+      "apiKey": "${FIREWORKS_API_KEY}",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "stream": true,
+      "stripCacheControl": true
     },
     "providers": {
       "local": {
         "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
         "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}",
         "model": "${NEXUS_LOCAL_LLM_MODEL}"
+      },
+      "fireworks": {
+        "baseUrl": "https://api.fireworks.ai/inference/v1",
+        "apiKey": "${FIREWORKS_API_KEY}",
+        "model": "accounts/fireworks/models/kimi-k2p6",
+        "stream": true,
+        "stripCacheControl": true
       },
       "baseten": {
         "baseUrl": "https://inference.baseten.co/v1",

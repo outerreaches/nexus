@@ -64,10 +64,17 @@ test("bootstrap config template matches nexus.json.example and parses cleanly", 
   const template = buildBootstrapConfigTemplate();
 
   assert.deepEqual(template, example);
-  assert.deepEqual((template as { secrets?: { env?: Record<string, unknown> } }).secrets?.env ?? {}, {});
+  assert.equal(
+    (template as { secrets?: { env?: Record<string, unknown> } }).secrets?.env?.FIREWORKS_API_KEY,
+    "{{secret:sidecar-main/llm.fireworks.api#password}}",
+  );
   assert.equal(
     (template as { llm?: { openaiCompat?: { baseUrl?: string } } }).llm?.openaiCompat?.baseUrl,
-    "https://openrouter.ai/api/v1",
+    "https://api.fireworks.ai/inference/v1",
+  );
+  assert.equal(
+    (template as { llm?: { providers?: Record<string, { model?: string }> } }).llm?.providers?.fireworks?.model,
+    "accounts/fireworks/models/kimi-k2p6",
   );
   assert.doesNotThrow(() => ConfigSchema.parse(template));
 });

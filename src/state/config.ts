@@ -297,23 +297,50 @@ export function buildBootstrapConfigTemplate(): Record<string, unknown> {
   return {
     port: 18789,
     secrets: {
-      env: {},
+      env: {
+        OPENROUTER_API_KEY: "{{secret:sidecar-main/llm.openrouter.api#password}}",
+        FIREWORKS_API_KEY: "{{secret:sidecar-main/llm.fireworks.api#password}}",
+        BASETEN_API_KEY: "{{secret:sidecar-main/llm.baseten.k2.5.api#password}}",
+        BRAVE_API_KEY: "{{secret:sidecar-main/search.brave.api#password}}",
+        FIRECRAWL_API_KEY: "{{secret:sidecar-main/search.firecrawl.api#password}}",
+        PERPLEXITY_API_KEY: "{{secret:sidecar-main/search.perplexity.api#password}}",
+        QUIVER_SVG_API_KEY: "{{secret:sidecar-main/quiver.svg.api#password}}",
+        TELEGRAM_BOT_TOKEN: "{{secret:sidecar-main/telegram.bot.token#password}}",
+        GOOGLE_CLIENT_ID: "{{secret:sidecar-main/google.oauth#username}}",
+        GOOGLE_CLIENT_SECRET: "{{secret:sidecar-main/google.oauth#password}}",
+        ALPHAVANTAGE_API_KEY: "{{secret:sidecar-main/data.alphavantage.api#password}}",
+        MARKETSTACK_API_KEY: "{{secret:sidecar-main/data.marketstack.api#password}}",
+        TWELVEDATA_API_KEY: "{{secret:sidecar-main/data.twelvedata.api#password}}",
+        COINLAYER_API_KEY: "{{secret:sidecar-main/data.coinlayer.api#password}}",
+        CRYPTOCOMPARE_API_KEY: "{{secret:sidecar-main/data.cryptocompare.api#password}}",
+        OPEN_METALS_API_KEY: "{{secret:sidecar-main/data.openmetals.api#password}}",
+        AUTH_TOKEN: "{{secret:sidecar-main/twitter.auth.auth_token#password}}",
+        CT0: "{{secret:sidecar-main/twitter.auth.ct0#password}}",
+      },
     },
     runtime: {
       profile: "primary",
     },
     llm: {
       openaiCompat: {
-        baseUrl: "https://openrouter.ai/api/v1",
-        apiKey: "${OPENROUTER_API_KEY}",
-        model: "moonshotai/kimi-k2.5",
+        baseUrl: "https://api.fireworks.ai/inference/v1",
+        apiKey: "${FIREWORKS_API_KEY}",
+        model: "accounts/fireworks/models/kimi-k2p6",
         stream: true,
+        stripCacheControl: true,
       },
       providers: {
         local: {
           baseUrl: "${NEXUS_LOCAL_LLM_BASE_URL}",
           apiKey: "${NEXUS_LOCAL_LLM_API_KEY}",
           model: "${NEXUS_LOCAL_LLM_MODEL}",
+        },
+        fireworks: {
+          baseUrl: "https://api.fireworks.ai/inference/v1",
+          apiKey: "${FIREWORKS_API_KEY}",
+          model: "accounts/fireworks/models/kimi-k2p6",
+          stream: true,
+          stripCacheControl: true,
         },
         baseten: {
           baseUrl: "https://inference.baseten.co/v1",
@@ -324,10 +351,6 @@ export function buildBootstrapConfigTemplate(): Record<string, unknown> {
           baseUrl: "https://openrouter.ai/api/v1",
           apiKey: "${OPENROUTER_API_KEY}",
           model: "moonshotai/kimi-k2.5",
-        },
-        codex: {
-          baseUrl: "https://chatgpt.com/backend-api/codex",
-          model: "gpt-5.3-codex",
         },
       },
       routing: {
