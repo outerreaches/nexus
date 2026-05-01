@@ -6,6 +6,7 @@ import { z } from "zod";
 import { defineTool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
+import { resolveTelegramDestination } from "../gateway/telegram-destination.js";
 
 type TelegramCtx = {
   sendOutput: (chatId: number, output: string) => Promise<void>;
@@ -74,49 +75,14 @@ async function resolveTelegramFilePath(requestedPath: string, ctx: ToolCtx): Pro
   throw new Error(`file not found: ${requestedPath}`);
 }
 
-async function resolveDefaultTelegramChatId(db: NexusDatabase, agentId: string): Promise<number | null> {
-  try {
-    const row = db.db
-      .prepare(
-        `
-        SELECT s.channel_key as chat_id
-        FROM sessions s
-        JOIN messages m ON m.session_id = s.id
-        WHERE s.channel = 'telegram' AND s.agent_id = ?
-        ORDER BY m.created_at DESC
-        LIMIT 1
-      `,
-      )
-      .get(agentId) as { chat_id: string } | undefined;
-    if (!row?.chat_id) return null;
-    const id = Number(row.chat_id);
-    return Number.isFinite(id) ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveTelegramChatId(argsChatId: number | undefined, ctx: ToolCtx, db: NexusDatabase): Promise<number | null> {
-  let chatId: number | null = argsChatId ?? null;
-  if (!chatId && ctx.request?.channel === "telegram") {
-    const id = Number(ctx.request.channelKey);
-    if (Number.isFinite(id) && id > 0) chatId = Math.trunc(id);
-  }
-  if (!chatId && ctx.request?.agentId) {
-    chatId = await resolveDefaultTelegramChatId(db, ctx.request.agentId);
-  }
-  return chatId;
-}
-
 export const telegramSend = defineTool({
   name: "telegram_send",
   description:
-    "Send Telegram output (text or file). If chatId is omitted, uses the current telegram chat (if applicable) or the most recent telegram chat for this agent. Only sends to allowlisted user ids.",
+    "Send Telegram output (text or file) to the user. Routes to the active Telegram chat when invoked from one, otherwise to the home session pinned via /sethome. The destination is determined by the system and cannot be overridden.",
   parameters: z.object({
     text: z.string().min(1).max(20_000).optional().describe("Text message to send, or caption when path is set"),
     path: z.string().min(1).optional().describe("Optional file path to send (absolute or repo-relative)"),
     caption: z.string().max(1024).optional().describe("Optional file caption (used only when path is set)"),
-    chatId: z.number().int().positive().optional().describe("Telegram chat id (private chats are positive integers)"),
   }).superRefine((value, issueCtx) => {
     if (value.text || value.path) return;
     issueCtx.addIssue({
@@ -133,13 +99,26 @@ export const telegramSend = defineTool({
     const tg = toolCtx.telegram as TelegramCtx | undefined;
     if (!tg) return "ERROR: telegram is not configured";
 
-    const chatId = await resolveTelegramChatId(args.chatId, toolCtx, db);
+    if (!toolCtx.request?.agentId) return "ERROR: missing agent context";
 
-    if (!chatId) return "ERROR: missing chatId (no active/recent telegram chat found)";
-    if (chatId <= 0) return "ERROR: only private-chat chatIds are supported for telegram_send";
+    const destination = resolveTelegramDestination({
+      db,
+      agentId: toolCtx.request.agentId,
+      request: toolCtx.request,
+    });
+    if (!destination) {
+      return "ERROR: no Telegram destination available (not in a Telegram session and no home pinned via /sethome)";
+    }
+    const chatId = destination.chatId;
 
-    const allowed = isTelegramUserAllowed(db, { userId: chatId, staticAllowFrom: tg.allowFrom ?? [], allowAll: Boolean(tg.allowAll) });
-    if (!allowed) return "ERROR: chatId is not allowlisted";
+    const allowed = isTelegramUserAllowed(db, {
+      userId: chatId,
+      staticAllowFrom: tg.allowFrom ?? [],
+      allowAll: Boolean(tg.allowAll),
+    });
+    if (!allowed) {
+      return `ERROR: resolved chat ${chatId} (source=${destination.source}) is not allowlisted; ask the user to /sethome from an allowlisted chat`;
+    }
 
     const normalizedText = typeof args.text === "string" ? args.text.trim() : "";
     if (!args.path && normalizedText.length === 0) {

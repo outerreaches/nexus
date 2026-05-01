@@ -8,6 +8,7 @@ import { defineTool, type ToolContext } from "../core/tools.js";
 import { requestOpenAICompatChatCompletion, type OpenAICompatConfig } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
+import { resolveTelegramDestination } from "../gateway/telegram-destination.js";
 import { resolveWithinRoots } from "./path-utils.js";
 import { resolveLegacyImageDefaults, resolveOpenAiToolProviderConfig, resolveToolRoute } from "./tool-routing.js";
 
@@ -495,44 +496,6 @@ async function resolveInputImageFromBlackboard(params: {
   };
 }
 
-async function resolveDefaultTelegramChatId(db: NexusDatabase, agentId: string): Promise<number | null> {
-  try {
-    const row = db.db
-      .prepare(
-        `
-        SELECT s.channel_key as chat_id
-        FROM sessions s
-        JOIN messages m ON m.session_id = s.id
-        WHERE s.channel = 'telegram' AND s.agent_id = ?
-        ORDER BY m.created_at DESC
-        LIMIT 1
-      `,
-      )
-      .get(agentId) as { chat_id: string } | undefined;
-    if (!row?.chat_id) return null;
-    const id = Number(row.chat_id);
-    return Number.isFinite(id) ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveTelegramChatId(argsChatId: number | undefined, ctx: {
-  db?: unknown;
-  request?: { channel: string; channelKey: string; agentId: string };
-}): Promise<number | null> {
-  const db = requireDb(ctx);
-  if (!db) return null;
-  let chatId: number | null = argsChatId ?? null;
-  if (!chatId && ctx.request?.channel === "telegram") {
-    const id = Number(ctx.request.channelKey);
-    if (Number.isFinite(id)) chatId = id;
-  }
-  if (!chatId && ctx.request?.agentId) {
-    chatId = await resolveDefaultTelegramChatId(db, ctx.request.agentId);
-  }
-  return chatId;
-}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -606,8 +569,7 @@ export const imageEdit = defineTool({
       .max(30 * 24 * 60 * 60_000)
       .optional()
       .describe("Optional blackboard TTL in ms."),
-    sendToTelegram: z.boolean().default(false).describe("If true, send edited image files to Telegram."),
-    chatId: z.number().int().positive().optional().describe("Optional Telegram chat id. Defaults to current/recent chat."),
+    sendToTelegram: z.boolean().default(false).describe("If true, send edited image files to Telegram. Routes to the active Telegram chat or the home session pinned via /sethome."),
     caption: z.string().max(1024).optional().describe("Optional Telegram caption."),
   }).refine((args) => Boolean(args.inputPath) || Boolean(args.inputBlackboardId), {
     message: "Provide either `inputPath` or `inputBlackboardId`.",
@@ -849,17 +811,26 @@ export const imageEdit = defineTool({
       if (!tg) return "ERROR: telegram is not configured";
       const db = requireDb(ctx);
       if (!db) return "ERROR: database is not available for telegram auth checks";
+      if (!ctx.request?.agentId) return "ERROR: missing agent context";
 
-      const chatId = await resolveTelegramChatId(args.chatId, ctx);
-      if (!chatId) return "ERROR: missing chatId (no active/recent telegram chat found)";
-      if (chatId <= 0) return "ERROR: only private-chat chatIds are supported for image_edit telegram send";
+      const destination = resolveTelegramDestination({
+        db,
+        agentId: ctx.request.agentId,
+        request: ctx.request,
+      });
+      if (!destination) {
+        return "ERROR: no Telegram destination available (not in a Telegram session and no home pinned via /sethome)";
+      }
+      const chatId = destination.chatId;
 
       const allowed = isTelegramUserAllowed(db, {
         userId: chatId,
         staticAllowFrom: tg.allowFrom ?? [],
         allowAll: Boolean(tg.allowAll),
       });
-      if (!allowed) return "ERROR: chatId is not allowlisted";
+      if (!allowed) {
+        return `ERROR: resolved chat ${chatId} (source=${destination.source}) is not allowlisted`;
+      }
 
       for (let i = 0; i < savedFiles.length; i += 1) {
         const file = savedFiles[i]!;
