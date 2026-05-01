@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolCall } from "../core/types.js";
+import type { ChatMessage, ReasoningItem, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
 import { CHARS_PER_TOKEN } from "../core/context-compactor.js";
@@ -35,7 +35,13 @@ export type LLMUsage = {
 };
 
 export interface LLMClient {
-  completeChat(params: LLMCompleteChatParams): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }>;
+  completeChat(params: LLMCompleteChatParams): Promise<{
+    content: string | null;
+    toolCalls: ToolCall[];
+    usage?: LLMUsage;
+    /** Reasoning items returned by the model — present only for Responses API providers. */
+    reasoning?: ReasoningItem[];
+  }>;
 }
 
 const DEFAULT_HTTP_TIMEOUT_MS = 120_000;

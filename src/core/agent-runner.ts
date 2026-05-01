@@ -11,7 +11,7 @@ import {
   storeCompactionSummary,
 } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
-import type { ToolCall } from "./types.js";
+import type { ReasoningItem, ToolCall } from "./types.js";
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -21,6 +21,24 @@ function truncate(text: string, maxChars: number): string {
 function previewString(value: string, limit: number): string {
   if (value.length <= limit) return value;
   return `${value.slice(0, limit)}…(+${value.length - limit} chars)`;
+}
+
+/**
+ * Builds the agent's visible output, prepending reasoning summary when the
+ * model exposed one (codex/gpt-5.x). For chat-completions providers reasoning
+ * is undefined and the output is just `text`.
+ */
+function composeOutputWithReasoning(text: string, reasoning?: ReasoningItem[]): string {
+  if (!reasoning || reasoning.length === 0) return text;
+  const summary = reasoning
+    .flatMap((r) => r.summary)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .join("\n\n")
+    .trim();
+  if (!summary) return text;
+  if (!text) return `[reasoning]\n${summary}\n[/reasoning]`;
+  return `[reasoning]\n${summary}\n[/reasoning]\n\n${text}`;
 }
 
 function toolCallPreview(name: string, args: Record<string, unknown>): string {
@@ -754,6 +772,7 @@ export class AgentRunner {
 
       let content: string | null = null;
       let toolCalls: import("./types.js").ToolCall[] = [];
+      let reasoning: import("./types.js").ReasoningItem[] | undefined;
       const promptEstimateRaw = estimateTotalTokens(messages, this.deps.tools);
       const promptEstimateCalibrated = Math.ceil(promptEstimateRaw * promptEstimateMultiplier);
       this.deps.onLog?.(
@@ -771,6 +790,7 @@ export class AgentRunner {
         this.throwIfCancelled();
         content = res.content;
         toolCalls = res.toolCalls;
+        reasoning = res.reasoning;
         logUsageAndCalibrate("default", res.usage, promptEstimateRaw, promptEstimateCalibrated);
       } catch (err) {
         if (this.deps.abortSignal?.aborted || isAbortLikeError(err)) {
@@ -825,6 +845,7 @@ export class AgentRunner {
               this.throwIfCancelled();
               content = retry.content;
               toolCalls = retry.toolCalls;
+              reasoning = retry.reasoning;
               logUsageAndCalibrate("transient_retry", retry.usage, retryEstimateRaw, retryEstimateCalibrated);
               this.deps.onLog?.(`llm_transient_recovery: succeeded on attempt ${attempt}`);
               retrySucceeded = true;
@@ -932,6 +953,7 @@ export class AgentRunner {
             this.throwIfCancelled();
             content = retry.content;
             toolCalls = retry.toolCalls;
+            reasoning = retry.reasoning;
             logUsageAndCalibrate("extended", retry.usage, extendedEstimateRaw, extendedEstimateCalibrated);
             this.deps.onLog?.("llm_timeout_recovery: retry succeeded");
           } catch (retryErr) {
@@ -982,19 +1004,31 @@ export class AgentRunner {
             iterationsUsed: iteration + 1,
           };
         }
-        const msg: ChatMessage = { role: "assistant", content: finalTextRaw };
+        const msg: ChatMessage = {
+          role: "assistant",
+          content: finalTextRaw,
+          ...(reasoning && reasoning.length > 0 ? { reasoning } : {}),
+        };
         messages.push(msg);
         newMessages.push(msg);
+        // Surface reasoning summary in the visible output so callers (scheduled
+        // jobs, telegram) see the model's explanation, not just a terse line.
+        const visibleOutput = composeOutputWithReasoning(finalTextRaw, reasoning);
         return {
           status: "complete",
-          output: finalTextRaw,
+          output: visibleOutput,
           newMessages,
           toolCallsUsed,
           iterationsUsed: iteration + 1,
         };
       }
 
-      const toolCallingMsg: ChatMessage = { role: "assistant", content: content ?? null, toolCalls };
+      const toolCallingMsg: ChatMessage = {
+        role: "assistant",
+        content: content ?? null,
+        toolCalls,
+        ...(reasoning && reasoning.length > 0 ? { reasoning } : {}),
+      };
       messages.push(toolCallingMsg);
       newMessages.push(toolCallingMsg);
 

@@ -11,7 +11,7 @@
  * (NousResearch/hermes-agent, agent/auxiliary_client.py)
  */
 
-import type { ChatMessage, ToolCall, ChatUserContent } from "../core/types.js";
+import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
 import type { LLMClient, LLMCompleteChatParams, LLMUsage } from "./openai-compat.js";
 
@@ -29,6 +29,7 @@ export class CodexResponsesClient implements LLMClient {
     content: string | null;
     toolCalls: ToolCall[];
     usage?: LLMUsage;
+    reasoning?: ReasoningItem[];
   }> {
     const log = this.config.onLog;
     const url = joinUrl(this.config.baseUrl, "responses");
@@ -50,6 +51,10 @@ export class CodexResponsesClient implements LLMClient {
       input,
       store: false,
       stream: true,
+      // Encrypted reasoning enables round-tripping reasoning items across turns
+      // when stateless (store: false) — required for codex to maintain its
+      // chain of thought through an agent loop.
+      include: ["reasoning.encrypted_content"],
     };
 
     if (tools.length > 0) {
@@ -142,6 +147,21 @@ function convertMessages(messages: ChatMessage[]): {
     }
 
     if (msg.role === "assistant") {
+      // Reasoning items must come BEFORE the message/tool calls they reasoned
+      // about. Replaying them with encrypted_content lets codex resume its
+      // chain of thought without re-deriving it.
+      if (msg.reasoning) {
+        for (const r of msg.reasoning) {
+          const item: ResponsesInputItem = {
+            type: "reasoning",
+            id: r.id,
+            summary: r.summary.map((text) => ({ type: "summary_text", text })),
+          };
+          if (r.encryptedContent) item.encrypted_content = r.encryptedContent;
+          input.push(item);
+        }
+      }
+
       // Text content
       if (msg.content) {
         input.push({
@@ -180,7 +200,13 @@ function convertMessages(messages: ChatMessage[]): {
 type ResponsesInputItem =
   | { type: "message"; role: "user" | "assistant"; content: string | ResponsesContentPart[] }
   | { type: "function_call"; call_id: string; name: string; arguments: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+  | { type: "function_call_output"; call_id: string; output: string }
+  | {
+      type: "reasoning";
+      id: string;
+      summary: Array<{ type: "summary_text"; text: string }>;
+      encrypted_content?: string;
+    };
 
 type ResponsesContentPart =
   | { type: "input_text"; text: string }
@@ -210,9 +236,15 @@ async function readResponsesStream(
     onLog?: (line: string) => void;
     startMs: number;
   },
-): Promise<{ content: string | null; toolCalls: ToolCall[]; usage?: LLMUsage }> {
+): Promise<{
+  content: string | null;
+  toolCalls: ToolCall[];
+  usage?: LLMUsage;
+  reasoning?: ReasoningItem[];
+}> {
   const textParts: string[] = [];
   const toolCalls: ToolCall[] = [];
+  const reasoningItems: ReasoningItem[] = [];
   // Track function call arguments as they stream in
   const pendingFunctionArgs = new Map<string, { id: string; name: string; args: string[] }>();
   let usage: LLMUsage | undefined;
@@ -307,6 +339,19 @@ async function readResponsesStream(
                 }
               }
             }
+          } else if (item?.type === "reasoning") {
+            const id = String(item.id ?? "");
+            if (!id) continue;
+            const summaryParts = Array.isArray(item.summary) ? item.summary : [];
+            const summary: string[] = [];
+            for (const part of summaryParts) {
+              const p = part as Record<string, unknown>;
+              if (p?.type === "summary_text" && typeof p.text === "string" && p.text.trim()) {
+                summary.push(p.text);
+              }
+            }
+            const encryptedContent = typeof item.encrypted_content === "string" ? item.encrypted_content : undefined;
+            reasoningItems.push({ id, summary, ...(encryptedContent ? { encryptedContent } : {}) });
           }
         }
 
@@ -319,6 +364,9 @@ async function readResponsesStream(
               promptTokens: u.input_tokens,
               completionTokens: u.output_tokens,
               totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
+              reasoningTokens: typeof u.output_tokens_details === "object" && u.output_tokens_details !== null
+                ? Number((u.output_tokens_details as Record<string, unknown>).reasoning_tokens ?? 0) || undefined
+                : undefined,
             };
           }
         }
@@ -328,8 +376,18 @@ async function readResponsesStream(
     reader.releaseLock();
   }
 
-  const content = textParts.join("").trim() || null;
-  return { content, toolCalls, usage };
+  // Keep content clean (model's message text only). Reasoning items are
+  // returned separately so the agent runner can round-trip them across turns
+  // without duplication, and surface the summary in the final output.
+  const messageText = textParts.join("").trim();
+  const content = messageText.length > 0 ? messageText : null;
+
+  return {
+    content,
+    toolCalls,
+    usage,
+    ...(reasoningItems.length > 0 ? { reasoning: reasoningItems } : {}),
+  };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
