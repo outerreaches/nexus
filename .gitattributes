@@ -1,0 +1,9 @@
+# Generated TypeScript files always emit with LF (the generator writes \n).
+# Without this, Windows checkouts with autocrlf=true end up showing phantom
+# CRLF/LF diffs every time `npm run pretypecheck` regenerates them.
+src/data-intake/generated-sources.ts text eol=lf
+src/tools/generated-runtime-tools.ts text eol=lf
+
+# Shell scripts and POSIX-only assets must stay LF on every platform.
+*.sh text eol=lf
+infra/scripts/** text eol=lf
