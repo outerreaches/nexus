@@ -658,5 +658,12 @@ test("continueApprovedDeployAfterApproval queues the deploy trigger automaticall
     assert.equal(trigger.action, "apply");
     assert.equal(trigger.candidateId, candidate.candidateId);
     assert.equal(trigger.sourceCodeDir, candidate.repoDir);
+    const triggerRequest = trigger.request as Record<string, unknown> | undefined;
+    assert.ok(triggerRequest, "trigger should carry a request envelope for completion routing");
+    assert.equal(triggerRequest.sessionId, "session-1");
+    assert.equal(triggerRequest.channel, "telegram");
+    assert.equal(triggerRequest.homeAgentId, "main");
+    assert.equal(triggerRequest.runId, null, "stale approval runId must not pin expectedAckRunId");
+    assert.equal(triggerRequest.parentRunId, null, "stale approval parentRunId must not pin expectedAckRunId");
   });
 });

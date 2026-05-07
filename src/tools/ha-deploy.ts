@@ -935,7 +935,14 @@ export async function continueApprovedDeployAfterApproval(params: {
         `ha-rollout: apply approved changes ${new Date(params.nowMs).toISOString()}`,
       remote: target.remote,
       branch: target.branch,
-      request: continuation?.request ?? null,
+      // The approval continuation's runId/parentRunId belong to the agent run that originally
+      // requested approval; that run is long gone by the time the worker drives the deploy.
+      // Leaving them in the trigger pins ha-deployer's expectedAckRunId to a stale id, so no
+      // future agent run can ever ack and finalize always waits the full ACK_TIMEOUT. Drop the
+      // run ids and let shouldAckPending fall back to session/channel/agent correlation.
+      request: continuation?.request
+        ? { ...continuation.request, runId: null, parentRunId: null }
+        : null,
       nowMs: params.nowMs,
       log: params.log,
     });
