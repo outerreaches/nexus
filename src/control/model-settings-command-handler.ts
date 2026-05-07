@@ -61,8 +61,15 @@ async function executeProviderModelCommand(
       if (!providers.has(value)) {
         return `ERROR: unknown provider "${value}". Known providers: ${[...providers].sort().join(", ")}.`;
       }
-      // Check codex auth before allowing provider switch
-      if (value === "codex" && deps.stateDir) {
+      // Check codex auth before allowing provider switch. The stateDir guard
+      // here used to be `value === "codex" && deps.stateDir` — that silently
+      // skipped the gate when stateDir was undefined and let the switch succeed
+      // only to fail at the next request. Refuse the switch instead so the
+      // operator gets immediate, actionable feedback.
+      if (value === "codex") {
+        if (!deps.stateDir) {
+          return "ERROR: cannot switch to codex provider — stateDir is not configured for this command surface.";
+        }
         const status = await getCodexAuthStatus(deps.stateDir);
         if (!status.loggedIn) {
           return "ERROR: Codex provider requires authentication. Run /codex login first to authenticate with your ChatGPT account.";

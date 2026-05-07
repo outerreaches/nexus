@@ -252,7 +252,14 @@ async function pollDeviceAuth(params: {
 
 // ── Resolve credentials (main entry point) ─────────────────────────────────
 
-export async function resolveCodexCredentials(opts: {
+// Single-flight per stateDir. Concurrent agents waking up after an idle period
+// can all hit isTokenExpiring()=true and trigger parallel refreshes; with rotating
+// refresh tokens (most OAuth providers) the second one would invalidate the first.
+// Coalesce them onto one promise — the first caller drives the network round-trip
+// and file write, the rest get the result.
+const inFlightResolves = new Map<string, Promise<CodexCredentials>>();
+
+async function doResolveCodexCredentials(opts: {
   stateDir: string;
   forceRefresh?: boolean;
   log?: (line: string) => void;
@@ -302,6 +309,23 @@ export async function resolveCodexCredentials(opts: {
     apiKey: tokens.access_token,
     source: "codex-oauth",
   };
+}
+
+export async function resolveCodexCredentials(opts: {
+  stateDir: string;
+  forceRefresh?: boolean;
+  log?: (line: string) => void;
+}): Promise<CodexCredentials> {
+  const key = opts.stateDir;
+  const existing = inFlightResolves.get(key);
+  if (existing) return existing;
+  const promise = doResolveCodexCredentials(opts);
+  inFlightResolves.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightResolves.delete(key);
+  }
 }
 
 // ── Two-phase login (start → poll in background → finish) ─────────────────
