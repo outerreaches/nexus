@@ -121,19 +121,18 @@ function clampNonNegativeInt(value: number): number {
 }
 
 function buildRuntimeClockSystemMessage(nowMs: number): string {
-  const now = new Date(nowMs);
-  const iso = now.toISOString();
+  // Round to the top of the hour so the trailing hint block is byte-stable
+  // within a one-hour window. Coarser than seconds, but fine for current-events
+  // routing — and lets prompt caches survive across multi-turn sessions.
+  const hourStartMs = Math.floor(nowMs / 3_600_000) * 3_600_000;
+  const hour = new Date(hourStartMs);
+  const iso = hour.toISOString();
   return [
-    "Runtime clock (ephemeral, UTC):",
-    `- now: ${iso}`,
+    "Runtime clock (UTC, rounded to hour):",
+    `- hour: ${iso.slice(0, 13)}:00Z`,
     `- date: ${iso.slice(0, 10)}`,
-    `- year: ${now.getUTCFullYear()}`,
+    `- year: ${hour.getUTCFullYear()}`,
   ].join("\n");
-}
-
-function buildRuntimeChannelSystemMessage(params: { channel: string }): string {
-  const channel = params.channel.trim() || "unknown";
-  return `Runtime note (ephemeral): current inbound channel is ${channel}; provide your final user-facing response for this channel unless a tool explicitly sends output elsewhere.`;
 }
 
 function buildMemoryRetentionNudgeSystemMessage(params: { turnCount: number; interval: number }): string {
@@ -321,10 +320,6 @@ export class AgentService {
   }
 
   private shouldRunMemoryHintsForChannel(channel: string): boolean {
-    return channel === "telegram" || channel === "cli";
-  }
-
-  private shouldInjectRuntimeChannelHint(channel: string): boolean {
     return channel === "telegram" || channel === "cli";
   }
 
@@ -522,6 +517,7 @@ export class AgentService {
           presetSystemPrompt: preset?.systemPrompt,
           skillScopes,
           skillsOptions: this.deps.skillsConfig?.prompt,
+          channel: params.channel,
         })
         : await buildPresetSystemPrompt({
           stateDir: this.deps.stateDir,
@@ -532,6 +528,7 @@ export class AgentService {
           includePresets: false,
           skillScopes,
           skillsOptions: this.deps.skillsConfig?.prompt,
+          channel: params.channel,
         });
 
       const onRunnerLog = this.deps.onRunnerLog
@@ -671,16 +668,7 @@ export class AgentService {
         });
         onRunnerLog?.(`skill_nudge_injected length=${skillNudge.length}`);
       }
-      if (this.shouldInjectRuntimeChannelHint(params.channel)) {
-        const runtimeChannelHint = buildRuntimeChannelSystemMessage({
-          channel: params.channel,
-        });
-        runHistory.push({
-          role: "system",
-          content: runtimeChannelHint,
-        });
-        onRunnerLog?.(`runtime_channel_injected channel=${params.channel} length=${runtimeChannelHint.length}`);
-      }
+      // Runtime channel hint moved into the cached system prompt (formatChannelRoutingHint).
       const runtimeClockHint = buildRuntimeClockSystemMessage(nowMs);
       runHistory.push({
         role: "system",

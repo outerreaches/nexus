@@ -13,6 +13,8 @@ export async function buildSystemPrompt(params: {
   presetSystemPrompt?: string;
   skillScopes?: SkillScopes;
   skillsOptions?: SkillsPromptOptions;
+  /** Inbound channel name (telegram, cli, ...) for the routing hint. Stable per session. */
+  channel?: string;
 }): Promise<string> {
   const scopes = params.skillScopes ?? { global: true, preset: false };
   const shouldLoad = scopes.global || scopes.preset;
@@ -24,6 +26,7 @@ export async function buildSystemPrompt(params: {
     ctx,
     shouldLoad ? formatSkillsPromptSection(skills, params.skillsOptions) : null,
     params.presetSystemPrompt,
+    params.channel,
   );
 }
 
@@ -38,6 +41,8 @@ export async function buildPresetSystemPrompt(params: {
   presetFilter?: string[];
   skillScopes?: SkillScopes;
   skillsOptions?: SkillsPromptOptions;
+  /** Inbound channel name (telegram, cli, ...) for the routing hint. Stable per session. */
+  channel?: string;
 }): Promise<string> {
   const promptFiles = params.promptFiles ?? [];
   const sections: string[] = [];
@@ -72,10 +77,22 @@ export async function buildPresetSystemPrompt(params: {
   if (params.includePresets) {
     sections.push(formatPresetsForPrompt(params.presetFilter));
   }
+  const channelHint = formatChannelRoutingHint(params.channel);
+  if (channelHint) sections.push(channelHint);
   return sections.filter(Boolean).join("\n\n---\n\n");
 }
 
-function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null, presetSystemPrompt?: string): string {
+function formatChannelRoutingHint(channel?: string): string | null {
+  // Stable per session — kept inside the cached system prompt rather than reshipped
+  // as a per-turn ephemeral hint, so it lives behind the cache breakpoint.
+  if (!channel) return null;
+  const normalized = channel.trim();
+  if (!normalized) return null;
+  if (normalized !== "telegram" && normalized !== "cli") return null;
+  return `## Channel\n\nCurrent inbound channel is ${normalized}; deliver your final user-facing response on this channel unless a tool explicitly sends output elsewhere.`;
+}
+
+function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string | null, presetSystemPrompt?: string, channel?: string): string {
   const sections: string[] = [];
 
   // Core identity and personality (SOUL.md)
@@ -110,6 +127,10 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
   if (presetSystemPrompt?.trim()) {
     sections.push(["## Preset Instructions", presetSystemPrompt.trim()].join("\n"));
   }
+
+  // Stable per-session channel routing hint, kept inside the cached system prompt.
+  const channelHint = formatChannelRoutingHint(channel);
+  if (channelHint) sections.push(channelHint);
 
   // Runtime notes (always appended — routing/delegation rules live in the orchestrator preset)
   sections.push(
