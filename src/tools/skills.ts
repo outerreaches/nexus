@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { getPreset } from "../core/presets.js";
 import { defineTool, type ToolContext } from "../core/tools.js";
-import { loadSkills, normalizeSkillReference, resolveSkillReferencePath } from "../state/skills.js";
+import { invalidateSkillsCache, loadSkills, normalizeSkillReference, resolveSkillReferencePath } from "../state/skills.js";
 
 const MAX_SKILL_REFERENCES = 20;
 const DEFAULT_REFERENCE_CHAR_LIMIT = 1600;
@@ -185,6 +185,7 @@ export const skillCreate = defineTool({
         }),
         "utf8",
       );
+      invalidateSkillsCache();
       return `OK: created skill "${dirName}" (scope=${target.scopeLabel}, category=${category ?? "root"})`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;
@@ -344,6 +345,7 @@ export const skillUpdate = defineTool({
 
     try {
       await fs.writeFile(current.skillFile, updated, "utf8");
+      invalidateSkillsCache();
       return `OK: updated skill "${dirName}"`;
     } catch (e) {
       return `ERROR: ${e instanceof Error ? e.message : String(e)}`;

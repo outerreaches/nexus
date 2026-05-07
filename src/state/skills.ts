@@ -136,17 +136,23 @@ async function discoverSkillDirs(rootDir: string, maxDepth: number = 6): Promise
   return discovered;
 }
 
-/**
- * Load all skills from `{stateDir}/skills/` (or agent/preset-specific override).
- * Skills are discovered recursively so categorized trees like
- * `skills/operations/node-ops/SKILL.md` are supported.
- *
- * Lookup order (first match wins via dedup):
- * 1. `{stateDir}/agents/{agentId}/skills/` (agent override)
- * 2. `{stateDir}/presets/{presetName}/skills/` (preset-scoped)
- * 3. `{stateDir}/skills/` (global)
- */
-export async function loadSkills(stateDir: string, agentId?: string, presetName?: string, opts?: { excludeGlobal?: boolean }): Promise<SkillEntry[]> {
+// In-memory TTL cache. loadSkills runs on every user turn and walks the skill tree
+// (one readdir per dir, one readFile per SKILL.md). Skills change rarely; a 30s
+// staleness window is acceptable. Tools that mutate skills should call
+// invalidateSkillsCache() explicitly so prompt injection picks up the change.
+const SKILLS_CACHE_TTL_MS = 30_000;
+type SkillsCacheEntry = { expiresAt: number; promise: Promise<SkillEntry[]> };
+const skillsCache = new Map<string, SkillsCacheEntry>();
+
+function skillsCacheKey(stateDir: string, agentId: string | undefined, presetName: string | undefined, excludeGlobal: boolean): string {
+  return `${stateDir}\x00${agentId ?? ""}\x00${presetName ?? ""}\x00${excludeGlobal ? "1" : "0"}`;
+}
+
+export function invalidateSkillsCache(): void {
+  skillsCache.clear();
+}
+
+async function loadSkillsUncached(stateDir: string, agentId?: string, presetName?: string, opts?: { excludeGlobal?: boolean }): Promise<SkillEntry[]> {
   const roots = [
     ...(agentId ? [path.join(stateDir, "agents", agentId, "skills")] : []),
     ...(presetName ? [path.join(stateDir, "presets", presetName, "skills")] : []),
@@ -175,6 +181,31 @@ export async function loadSkills(stateDir: string, agentId?: string, presetName?
   }
 
   return skills;
+}
+
+/**
+ * Load all skills from `{stateDir}/skills/` (or agent/preset-specific override).
+ * Skills are discovered recursively so categorized trees like
+ * `skills/operations/node-ops/SKILL.md` are supported.
+ *
+ * Lookup order (first match wins via dedup):
+ * 1. `{stateDir}/agents/{agentId}/skills/` (agent override)
+ * 2. `{stateDir}/presets/{presetName}/skills/` (preset-scoped)
+ * 3. `{stateDir}/skills/` (global)
+ *
+ * Results are cached for ~30s; mutations should call invalidateSkillsCache().
+ */
+export async function loadSkills(stateDir: string, agentId?: string, presetName?: string, opts?: { excludeGlobal?: boolean }): Promise<SkillEntry[]> {
+  const excludeGlobal = Boolean(opts?.excludeGlobal);
+  const key = skillsCacheKey(stateDir, agentId, presetName, excludeGlobal);
+  const now = Date.now();
+  const existing = skillsCache.get(key);
+  if (existing && existing.expiresAt > now) return existing.promise;
+  const promise = loadSkillsUncached(stateDir, agentId, presetName, opts);
+  skillsCache.set(key, { expiresAt: now + SKILLS_CACHE_TTL_MS, promise });
+  // Drop the entry on rejection so the next caller retries.
+  promise.catch(() => { skillsCache.delete(key); });
+  return promise;
 }
 
 /**

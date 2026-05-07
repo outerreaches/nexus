@@ -571,6 +571,7 @@ export async function writePersonalizationFile(
   const targetDir = agentId ? path.join(stateDir, "agents", agentId) : stateDir;
   await fs.mkdir(targetDir, { recursive: true });
   await fs.writeFile(path.join(targetDir, filename), content, "utf8");
+  invalidatePersonalizationCache();
 }
 
 export async function personalizationFileExists(
@@ -597,7 +598,23 @@ export type PersonalizationContext = {
   heartbeat: string | null;
 };
 
-export async function loadPersonalizationContext(
+// Per-turn cache so multi-turn sessions don't re-read 5 files (×2 with agent override
+// fallback) on every user message. 30s TTL is short enough that operator edits to
+// SOUL.md / AGENTS.md / etc. propagate quickly; mutations through writePersonalizationFile
+// invalidate the cache immediately.
+const PERSONALIZATION_CACHE_TTL_MS = 30_000;
+type PersonalizationCacheEntry = { expiresAt: number; promise: Promise<PersonalizationContext> };
+const personalizationCache = new Map<string, PersonalizationCacheEntry>();
+
+function personalizationCacheKey(stateDir: string, agentId: string | undefined): string {
+  return `${stateDir}\x00${agentId ?? ""}`;
+}
+
+export function invalidatePersonalizationCache(): void {
+  personalizationCache.clear();
+}
+
+async function loadPersonalizationContextUncached(
   stateDir: string,
   agentId?: string,
 ): Promise<PersonalizationContext> {
@@ -610,4 +627,18 @@ export async function loadPersonalizationContext(
   ]);
 
   return { soul, agents, user, codeguide, heartbeat };
+}
+
+export async function loadPersonalizationContext(
+  stateDir: string,
+  agentId?: string,
+): Promise<PersonalizationContext> {
+  const key = personalizationCacheKey(stateDir, agentId);
+  const now = Date.now();
+  const existing = personalizationCache.get(key);
+  if (existing && existing.expiresAt > now) return existing.promise;
+  const promise = loadPersonalizationContextUncached(stateDir, agentId);
+  personalizationCache.set(key, { expiresAt: now + PERSONALIZATION_CACHE_TTL_MS, promise });
+  promise.catch(() => { personalizationCache.delete(key); });
+  return promise;
 }
