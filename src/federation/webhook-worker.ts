@@ -38,7 +38,8 @@ export type WebhookDeliverySigningMaterial = {
 };
 
 export type WebhookDeliveryWorker = {
-  stop: () => void;
+  /** Stops the timer and resolves once any in-flight tick has settled. */
+  stop: () => Promise<void>;
   tick: () => Promise<number>;
 };
 
@@ -368,6 +369,7 @@ export function startWebhookDeliveryWorker(params: {
   const maxResponseBytes = Math.max(1_024, params.maxResponseBytes ?? 32_768);
   let closed = false;
   let inFlight = false;
+  let lastTickPromise: Promise<unknown> | null = null;
 
   const markDeadLetter = (args: {
     deliveryId: string;
@@ -990,8 +992,14 @@ export function startWebhookDeliveryWorker(params: {
     }
   };
 
+  const trackedTick = (): Promise<number> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
+  };
+
   const timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log(`webhook/worker: tick_failed err=${message}`);
     });
@@ -999,10 +1007,11 @@ export function startWebhookDeliveryWorker(params: {
   if (typeof timer.unref === "function") timer.unref();
 
   return {
-    stop: () => {
+    stop: async () => {
       closed = true;
       clearInterval(timer);
+      if (lastTickPromise) await lastTickPromise;
     },
-    tick,
+    tick: trackedTick,
   };
 }

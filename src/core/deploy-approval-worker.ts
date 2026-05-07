@@ -10,7 +10,8 @@ import { syncDeployRequestForHumanAction } from "./deploy-requests.js";
 import { continueApprovedDeployAfterApproval } from "../tools/ha-deploy.js";
 
 export type DeployApprovalWorker = {
-  stop: () => void;
+  /** Stops the timer and resolves once any in-flight tick has settled. */
+  stop: () => Promise<void>;
   tick: () => Promise<number>;
 };
 
@@ -102,6 +103,10 @@ export function startDeployApprovalWorker(params: {
   const maxPerTick = clamp(envInt("NEXUS_DEPLOY_APPROVAL_MAX_PER_TICK") ?? 500, 1, 2_000);
   let stopped = false;
   let running = false;
+  // Tracks the most recent tick promise so stop() can await mid-flight work
+  // before returning. Errors are swallowed for tracking purposes only — the
+  // original promise still surfaces them to the timer callback.
+  let lastTickPromise: Promise<unknown> | null = null;
 
   const tick = async (): Promise<number> => {
     if (stopped || running) return 0;
@@ -201,8 +206,14 @@ export function startDeployApprovalWorker(params: {
     }
   };
 
+  const trackedTick = (): Promise<number> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
+  };
+
   const timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       params.log(`deploy_approval_worker: tick_failed err=${message}`);
     });
@@ -211,10 +222,11 @@ export function startDeployApprovalWorker(params: {
 
   params.log(`deploy_approval_worker: started tickIntervalMs=${tickIntervalMs} maxPerTick=${maxPerTick}`);
   return {
-    stop: () => {
+    stop: async () => {
       stopped = true;
       clearInterval(timer);
+      if (lastTickPromise) await lastTickPromise;
     },
-    tick,
+    tick: trackedTick,
   };
 }

@@ -34,7 +34,8 @@ type DeployCompletionArtifact = {
 };
 
 export type DeployCompletionWorker = {
-  stop: () => void;
+  /** Stops the timer and resolves once any in-flight tick has settled. */
+  stop: () => Promise<void>;
   tick: () => Promise<number>;
 };
 
@@ -213,6 +214,7 @@ export function startDeployCompletionWorker(params: {
   const dir = completionsDir(params.stateDir);
   let stopped = false;
   let running = false;
+  let lastTickPromise: Promise<unknown> | null = null;
 
   const tick = async (): Promise<number> => {
     if (stopped || running) return 0;
@@ -297,8 +299,14 @@ export function startDeployCompletionWorker(params: {
     }
   };
 
+  const trackedTick = (): Promise<number> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
+  };
+
   const timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       params.log(`deploy_completion_worker: tick_failed err=${message}`);
     });
@@ -307,10 +315,11 @@ export function startDeployCompletionWorker(params: {
 
   params.log(`deploy_completion_worker: started tickIntervalMs=${tickIntervalMs} maxPerTick=${maxPerTick}`);
   return {
-    stop: () => {
+    stop: async () => {
       stopped = true;
       clearInterval(timer);
+      if (lastTickPromise) await lastTickPromise;
     },
-    tick,
+    tick: trackedTick,
   };
 }

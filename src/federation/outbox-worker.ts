@@ -15,7 +15,8 @@ export type FederationOutboxDispatchResult = {
 export type FederationOutboxDispatcher = (item: FederationOutboxRecord) => Promise<FederationOutboxDispatchResult>;
 
 export type FederationOutboxWorker = {
-  stop: () => void;
+  /** Stops the timer and resolves once any in-flight tick has settled. */
+  stop: () => Promise<void>;
   tick: () => Promise<number>;
 };
 
@@ -31,6 +32,7 @@ export function startFederationOutboxWorker(params: {
   const maxBatch = Math.max(1, params.maxBatch ?? 20);
   let closed = false;
   let inFlight = false;
+  let lastTickPromise: Promise<unknown> | null = null;
 
   const tick = async (): Promise<number> => {
     if (closed || inFlight) return 0;
@@ -118,8 +120,14 @@ export function startFederationOutboxWorker(params: {
     }
   };
 
+  const trackedTick = (): Promise<number> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
+  };
+
   const timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log(`federation/outbox: tick_failed err=${message}`);
     });
@@ -127,10 +135,11 @@ export function startFederationOutboxWorker(params: {
   if (typeof timer.unref === "function") timer.unref();
 
   return {
-    stop: () => {
+    stop: async () => {
       closed = true;
       clearInterval(timer);
+      if (lastTickPromise) await lastTickPromise;
     },
-    tick,
+    tick: trackedTick,
   };
 }

@@ -161,7 +161,7 @@ export function startProcessNotifier(deps: {
   processManager: ProcessManager;
   telegram?: TelegramCtx;
   log: (msg: string) => void;
-}): { stop: () => void } | null {
+}): { stop: () => Promise<void> } | null {
   const enabled = envBool("NEXUS_PROCESS_NOTIFIER") ?? true;
   if (!enabled) return null;
 
@@ -172,11 +172,13 @@ export function startProcessNotifier(deps: {
   let stopped = false;
   let running = false;
   let timer: NodeJS.Timeout | null = null;
+  let lastTickPromise: Promise<unknown> | null = null;
 
-  const stop = () => {
+  const stop = async (): Promise<void> => {
     stopped = true;
     if (timer) clearInterval(timer);
     timer = null;
+    if (lastTickPromise) await lastTickPromise;
   };
 
   const tick = async () => {
@@ -189,6 +191,12 @@ export function startProcessNotifier(deps: {
     } finally {
       running = false;
     }
+  };
+
+  const trackedTick = (): Promise<void> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
   };
 
   const notifyEnded = async () => {
@@ -319,13 +327,13 @@ export function startProcessNotifier(deps: {
   };
 
   timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       deps.log(`process_notifier: tick_failed err=${msg}`);
     });
   }, tickIntervalMs);
   // Kick once on start.
-  void tick().catch((err) => {
+  void trackedTick().catch((err) => {
     const msg = err instanceof Error ? err.message : String(err);
     deps.log(`process_notifier: initial_tick_failed err=${msg}`);
   });

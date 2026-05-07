@@ -1610,22 +1610,33 @@ export async function startGateway(
     isStandby = true;
     activatedAt = null;
     nodeWsGateway.closeNodeConnections("gateway entering standby");
-    federationOutboxWorker?.stop();
+    // Capture stop promises so we can run them concurrently and still await.
+    // Each worker's stop() is now async and resolves once its in-flight tick
+    // settles — without this we'd return from deactivateServices while ticks
+    // were still mid-flight, holding DB transactions or queueing into what is
+    // now the foreign active.
+    const workerStops: Array<Promise<unknown>> = [];
+    if (federationOutboxWorker) workerStops.push(federationOutboxWorker.stop());
     federationOutboxWorker = null;
-    webhookDeliveryWorker?.stop();
+    if (webhookDeliveryWorker) workerStops.push(webhookDeliveryWorker.stop());
     webhookDeliveryWorker = null;
-    deployApprovalWorker?.stop();
+    if (deployApprovalWorker) workerStops.push(deployApprovalWorker.stop());
     deployApprovalWorker = null;
-    deployCompletionWorker?.stop();
+    if (deployCompletionWorker) workerStops.push(deployCompletionWorker.stop());
     deployCompletionWorker = null;
-    runReportBroker?.stop();
+    if (runReportBroker) workerStops.push(runReportBroker.stop());
     runReportBroker = null;
-    processNotifier?.stop();
+    if (processNotifier) workerStops.push(processNotifier.stop());
     processNotifier = null;
+    // scheduler.stop() and proactive.stop() remain synchronous (their tick model
+    // is setTimeout-chained / ad-hoc); calling them is still fire-and-clear.
     scheduler?.stop();
     scheduler = null;
     proactive?.stop();
     proactive = null;
+    if (workerStops.length > 0) {
+      await Promise.allSettled(workerStops);
+    }
     try {
       await browser.stop();
     } catch (err) {

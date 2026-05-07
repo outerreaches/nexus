@@ -231,7 +231,8 @@ async function deliverHomeChannelGroup(
 }
 
 export type RunReportBroker = {
-  stop: () => void;
+  /** Stops the timer and resolves once any in-flight tick has settled. */
+  stop: () => Promise<void>;
   tick: () => Promise<number>;
 };
 
@@ -251,6 +252,7 @@ export function startRunReportBroker(deps: {
 
   let stopped = false;
   let running = false;
+  let lastTickPromise: Promise<unknown> | null = null;
 
   const tick = async (): Promise<number> => {
     if (stopped || running) return 0;
@@ -331,8 +333,14 @@ export function startRunReportBroker(deps: {
     }
   };
 
+  const trackedTick = (): Promise<number> => {
+    const p = tick();
+    lastTickPromise = p.catch(() => undefined);
+    return p;
+  };
+
   const timer = setInterval(() => {
-    void tick().catch((err) => {
+    void trackedTick().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       deps.log(`run_report_broker: tick_failed err=${msg}`);
     });
@@ -341,10 +349,11 @@ export function startRunReportBroker(deps: {
 
   deps.log(`run_report_broker: started tickIntervalMs=${tickIntervalMs} maxPerTick=${maxPerTick}`);
   return {
-    stop: () => {
+    stop: async () => {
       stopped = true;
       clearInterval(timer);
+      if (lastTickPromise) await lastTickPromise;
     },
-    tick,
+    tick: trackedTick,
   };
 }
