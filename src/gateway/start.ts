@@ -723,21 +723,30 @@ export async function startGateway(
 
   const startLeaseRenewal = (deactivate: (reason?: string) => Promise<void>) => {
     if (leaseTimer) clearInterval(leaseTimer);
+    // Clear the timer immediately on lease loss so we don't keep firing renewal
+    // attempts while deactivateServices is still resolving. The leaseHeld guard
+    // would catch them, but the timer otherwise survives until deactivate gets
+    // around to its own clearInterval — a long window if any of the awaited
+    // worker stops are slow.
+    const handleLeaseLoss = (reason: string) => {
+      if (leaseTimer) {
+        clearInterval(leaseTimer);
+        leaseTimer = null;
+      }
+      leaseHeld = false;
+      leaseExpiresAt = null;
+      void deactivate(reason);
+    };
+
     leaseTimer = setInterval(() => {
       if (!leaseHeld) return;
       try {
         const ok = renewActiveLease(Date.now());
-        if (!ok) {
-          leaseHeld = false;
-          leaseExpiresAt = null;
-          void deactivate("lost active lease");
-        }
+        if (!ok) handleLeaseLoss("lost active lease");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`standby: lease renewal failed (${msg})`);
-        leaseHeld = false;
-        leaseExpiresAt = null;
-        void deactivate("lost active lease");
+        handleLeaseLoss("lost active lease");
       }
     }, leaseRenewMs);
   };
