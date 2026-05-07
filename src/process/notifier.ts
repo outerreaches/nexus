@@ -1,10 +1,58 @@
 import type { AgentService } from "../core/agent-service.js";
-import type { NexusDatabase } from "../storage/database.js";
+import { cachedPrepare, type NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
 import type { ProcessManager } from "./manager.js";
 
 type NotifyMode = "never" | "on_failure" | "on_exit";
+
+const NOTIFY_SELECT_PENDING_SQL = `
+  SELECT
+    id, status, command, cwd, pid, started_at, ended_at, exit_code, signal, log_path,
+    notify_mode, notify_chat_id, notify_preset, notify_attempts, notify_last_error, notify_next_attempt_at, notified_at,
+    request_channel, request_channel_key, request_agent_id, request_preset, request_session_id, request_run_id, request_parent_run_id
+  FROM process_runs
+  WHERE status != 'running'
+    AND notify_mode != 'never'
+    AND notified_at IS NULL
+    AND (notify_next_attempt_at IS NULL OR notify_next_attempt_at <= ?)
+  ORDER BY COALESCE(ended_at, started_at) ASC
+  LIMIT ?
+`;
+
+const NOTIFY_MARK_SUCCESS_NOTIFIED_SQL = `
+  UPDATE process_runs
+  SET notified_at = ?, notify_last_error = NULL, notify_next_attempt_at = NULL, updated_at = ?
+  WHERE id = ? AND notified_at IS NULL
+`;
+
+const NOTIFY_MARK_SKIPPED_SQL = `
+  UPDATE process_runs
+  SET notified_at = ?, notify_last_error = ?, notify_next_attempt_at = NULL, updated_at = ?
+  WHERE id = ? AND notified_at IS NULL
+`;
+
+const NOTIFY_CLAIM_SQL = `
+  UPDATE process_runs
+  SET notify_attempts = notify_attempts + 1,
+      notify_next_attempt_at = ?,
+      updated_at = ?
+  WHERE id = ?
+    AND notified_at IS NULL
+    AND (notify_next_attempt_at IS NULL OR notify_next_attempt_at <= ?)
+`;
+
+const NOTIFY_MARK_DELIVERED_SQL = `
+  UPDATE process_runs
+  SET notified_at = ?, notify_last_error = NULL, notify_next_attempt_at = NULL, updated_at = ?
+  WHERE id = ?
+`;
+
+const NOTIFY_RECORD_FAILURE_SQL = `
+  UPDATE process_runs
+  SET notify_last_error = ?, notify_next_attempt_at = ?, updated_at = ?
+  WHERE id = ?
+`;
 
 type TelegramCtx = {
   allowFrom: number[];
@@ -151,23 +199,7 @@ export function startProcessNotifier(deps: {
     const nowMs = Date.now();
     let rows: any[] = [];
     try {
-      rows = deps.db.db
-        .prepare(
-          `
-          SELECT
-            id, status, command, cwd, pid, started_at, ended_at, exit_code, signal, log_path,
-            notify_mode, notify_chat_id, notify_preset, notify_attempts, notify_last_error, notify_next_attempt_at, notified_at,
-            request_channel, request_channel_key, request_agent_id, request_preset, request_session_id, request_run_id, request_parent_run_id
-          FROM process_runs
-          WHERE status != 'running'
-            AND notify_mode != 'never'
-            AND notified_at IS NULL
-            AND (notify_next_attempt_at IS NULL OR notify_next_attempt_at <= ?)
-          ORDER BY COALESCE(ended_at, started_at) ASC
-          LIMIT ?
-        `,
-        )
-        .all(nowMs, maxPerTick) as any[];
+      rows = cachedPrepare(deps.db, NOTIFY_SELECT_PENDING_SQL).all(nowMs, maxPerTick) as any[];
     } catch {
       return;
     }
@@ -178,15 +210,7 @@ export function startProcessNotifier(deps: {
 
       if (mode === "on_failure" && isSuccess(row)) {
         try {
-          deps.db.db
-            .prepare(
-              `
-              UPDATE process_runs
-              SET notified_at = ?, notify_last_error = NULL, notify_next_attempt_at = NULL, updated_at = ?
-              WHERE id = ? AND notified_at IS NULL
-            `,
-            )
-            .run(nowMs, nowMs, row.id);
+          cachedPrepare(deps.db, NOTIFY_MARK_SUCCESS_NOTIFIED_SQL).run(nowMs, nowMs, row.id);
         } catch {
           // ignore
         }
@@ -197,15 +221,9 @@ export function startProcessNotifier(deps: {
       const chatId = typeof chatIdRaw === "number" ? chatIdRaw : chatIdRaw === null ? null : Number(chatIdRaw) || null;
       if (!chatId || chatId <= 0) {
         try {
-          deps.db.db
-            .prepare(
-              `
-              UPDATE process_runs
-              SET notified_at = ?, notify_last_error = ?, notify_next_attempt_at = NULL, updated_at = ?
-              WHERE id = ? AND notified_at IS NULL
-            `,
-            )
-            .run(nowMs, "skipped: missing or invalid notify_chat_id", nowMs, row.id);
+          cachedPrepare(deps.db, NOTIFY_MARK_SKIPPED_SQL).run(
+            nowMs, "skipped: missing or invalid notify_chat_id", nowMs, row.id,
+          );
         } catch {
           // ignore
         }
@@ -219,15 +237,9 @@ export function startProcessNotifier(deps: {
       });
       if (!allowed) {
         try {
-          deps.db.db
-            .prepare(
-              `
-              UPDATE process_runs
-              SET notified_at = ?, notify_last_error = ?, notify_next_attempt_at = NULL, updated_at = ?
-              WHERE id = ? AND notified_at IS NULL
-            `,
-            )
-            .run(nowMs, `skipped: chatId ${chatId} not allowlisted`, nowMs, row.id);
+          cachedPrepare(deps.db, NOTIFY_MARK_SKIPPED_SQL).run(
+            nowMs, `skipped: chatId ${chatId} not allowlisted`, nowMs, row.id,
+          );
         } catch {
           // ignore
         }
@@ -238,19 +250,7 @@ export function startProcessNotifier(deps: {
       const claimUntil = nowMs + lockMs;
       let claimed = false;
       try {
-        const res = deps.db.db
-          .prepare(
-            `
-            UPDATE process_runs
-            SET notify_attempts = notify_attempts + 1,
-                notify_next_attempt_at = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND notified_at IS NULL
-              AND (notify_next_attempt_at IS NULL OR notify_next_attempt_at <= ?)
-          `,
-          )
-          .run(claimUntil, nowMs, row.id, nowMs);
+        const res = cachedPrepare(deps.db, NOTIFY_CLAIM_SQL).run(claimUntil, nowMs, row.id, nowMs);
         claimed = (res.changes ?? 0) > 0;
       } catch {
         claimed = false;
@@ -301,15 +301,7 @@ export function startProcessNotifier(deps: {
           nowMs,
         });
 
-        deps.db.db
-          .prepare(
-            `
-            UPDATE process_runs
-            SET notified_at = ?, notify_last_error = NULL, notify_next_attempt_at = NULL, updated_at = ?
-            WHERE id = ?
-          `,
-          )
-          .run(nowMs, nowMs, row.id);
+        cachedPrepare(deps.db, NOTIFY_MARK_DELIVERED_SQL).run(nowMs, nowMs, row.id);
         deps.log(`process_notifier: report_queued id=${row.id} report_id=${reportId} target_agent=${agentId} chat_id=${chatId}`);
       } catch (err) {
         const attempt = typeof row.notify_attempts === "number" ? row.notify_attempts + 1 : 1;
@@ -318,15 +310,7 @@ export function startProcessNotifier(deps: {
         const msg = err instanceof Error ? err.message : String(err);
         deps.log(`process_notifier: notify failed id=${row.id} attempt=${attempt} backoffMs=${backoffMs} err=${msg}`);
         try {
-          deps.db.db
-            .prepare(
-              `
-              UPDATE process_runs
-              SET notify_last_error = ?, notify_next_attempt_at = ?, updated_at = ?
-              WHERE id = ?
-            `,
-            )
-            .run(msg.slice(0, 800), nextAttemptAt, nowMs, row.id);
+          cachedPrepare(deps.db, NOTIFY_RECORD_FAILURE_SQL).run(msg.slice(0, 800), nextAttemptAt, nowMs, row.id);
         } catch {
           // ignore
         }

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { NexusDatabase } from "../storage/database.js";
+import { cachedPrepare, type NexusDatabase } from "../storage/database.js";
 import {
   listDeployRequests,
   upsertDeployRequest,
@@ -54,18 +54,18 @@ function mapHumanActionRow(row: any): DeployApprovalHumanActionRow {
   };
 }
 
+const LIST_DEPLOY_APPROVAL_HUMAN_ACTIONS_SQL =
+  "SELECT id, status, created_at, responded_at, response_text, metadata_json " +
+  "FROM human_actions " +
+  "WHERE kind = 'confirm' AND metadata_json LIKE ? " +
+  "ORDER BY COALESCE(responded_at, created_at) ASC, created_at ASC " +
+  "LIMIT ?";
+
 function listDeployApprovalHumanActions(
   db: NexusDatabase,
   maxPerTick: number,
 ): DeployApprovalHumanActionRow[] {
-  const rows = db.db
-    .prepare(
-      "SELECT id, status, created_at, responded_at, response_text, metadata_json " +
-      "FROM human_actions " +
-      "WHERE kind = 'confirm' AND metadata_json LIKE ? " +
-      "ORDER BY COALESCE(responded_at, created_at) ASC, created_at ASC " +
-      "LIMIT ?",
-    )
+  const rows = cachedPrepare(db, LIST_DEPLOY_APPROVAL_HUMAN_ACTIONS_SQL)
     .all('%"kind":"ha_deploy_approval"%', maxPerTick);
   return (rows as any[]).map(mapHumanActionRow);
 }

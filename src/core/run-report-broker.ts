@@ -1,4 +1,4 @@
-import type { NexusDatabase } from "../storage/database.js";
+import { cachedPrepare, type NexusDatabase } from "../storage/database.js";
 import { isTelegramUserAllowed } from "../gateway/telegram-store.js";
 import {
   claimRunReport,
@@ -70,16 +70,13 @@ function parseMetadata(row: RunReportRecord): Record<string, unknown> {
   return {};
 }
 
+const LATEST_PRESET_FOR_AGENT_SQL =
+  "SELECT preset FROM agent_runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT 1";
+
 function latestPresetForAgent(db: NexusDatabase, agentId: string): string | null {
-  const row = db.db
-    .prepare(
-      `SELECT preset
-       FROM agent_runs
-       WHERE agent_id = ?
-       ORDER BY started_at DESC
-       LIMIT 1`,
-    )
-    .get(agentId) as { preset: string } | undefined;
+  const row = cachedPrepare(db, LATEST_PRESET_FOR_AGENT_SQL).get(agentId) as
+    | { preset: string }
+    | undefined;
   const preset = row?.preset?.trim();
   return preset ? preset : null;
 }
@@ -192,17 +189,16 @@ function resolveHomeChannelTelegramDestination(params: {
     if (homeChatId) return { chatId: homeChatId, source: "home" };
   }
 
-  const latestTelegram = params.db.db
-    .prepare(
-      `SELECT s.channel_key AS channel_key
-         FROM sessions s
-         LEFT JOIN messages m ON m.session_id = s.id
-        WHERE s.channel = 'telegram' AND s.agent_id = ?
-        GROUP BY s.id
-        ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
-        LIMIT 1`,
-    )
-    .get(params.agentId) as { channel_key: string } | undefined;
+  const latestTelegram = cachedPrepare(
+    params.db,
+    `SELECT s.channel_key AS channel_key
+       FROM sessions s
+       LEFT JOIN messages m ON m.session_id = s.id
+      WHERE s.channel = 'telegram' AND s.agent_id = ?
+      GROUP BY s.id
+      ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC, s.created_at DESC
+      LIMIT 1`,
+  ).get(params.agentId) as { channel_key: string } | undefined;
   const latestChatId = parsePositiveTelegramChatId(latestTelegram?.channel_key);
   if (!latestChatId) return null;
   return { chatId: latestChatId, source: "latest_telegram_for_agent" };

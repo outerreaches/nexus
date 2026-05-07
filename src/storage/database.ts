@@ -8,6 +8,29 @@ export type NexusDatabase = {
   close: () => void;
 };
 
+// Per-DB prepared statement cache. better-sqlite3 does not memoize Statement
+// objects across db.prepare(SAME_SQL) calls, so worker tick paths that reissue
+// the same statement on every iteration end up recompiling each time. Cache
+// keyed by db so closing one DB doesn't leak into another.
+const cachedStatements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+
+export function cachedPrepare<T extends Database.Statement = Database.Statement>(
+  database: NexusDatabase,
+  sql: string,
+): T {
+  let perDb = cachedStatements.get(database.db);
+  if (!perDb) {
+    perDb = new Map();
+    cachedStatements.set(database.db, perDb);
+  }
+  let stmt = perDb.get(sql);
+  if (!stmt) {
+    stmt = database.db.prepare(sql);
+    perDb.set(sql, stmt);
+  }
+  return stmt as T;
+}
+
 export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
