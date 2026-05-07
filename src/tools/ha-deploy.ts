@@ -368,6 +368,12 @@ async function attemptDependencySeedRecovery(params: {
   }
 }
 
+/** Sentinel returned by verifyDeployCandidate when requireCached=true and no
+ *  matching cache entry exists. Callers (worker tick) check for this to bail
+ *  out of the slow `npm run typecheck`+`build` path instead of blocking the
+ *  shared tick loop for 30-90s. */
+export const VERIFY_DEPLOY_NEEDS_RUN = "__verify_deploy_needs_run__";
+
 async function verifyDeployCandidate(params: {
   changes: DeployChangeInspection;
   ctx: {
@@ -377,6 +383,10 @@ async function verifyDeployCandidate(params: {
     nowMs: () => number;
     log: (msg: string) => void;
   };
+  /** When true, return VERIFY_DEPLOY_NEEDS_RUN on cache miss instead of running
+   *  the slow verification commands. Used by the deploy_approval_worker so its
+   *  tick loop doesn't block other approvals on a 30-90s typecheck+build. */
+  requireCached?: boolean;
 }): Promise<string | null> {
   const candidateStateCtx = {
     candidateRootDir: params.ctx.candidateRootDir,
@@ -402,6 +412,10 @@ async function verifyDeployCandidate(params: {
         `${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  if (params.requireCached) {
+    return VERIFY_DEPLOY_NEEDS_RUN;
   }
 
   const dependencyBootstrap = detectDependencyBootstrapCommand(params.ctx.codeDir, params.changes);
@@ -896,7 +910,29 @@ export async function continueApprovedDeployAfterApproval(params: {
         nowMs: () => params.nowMs,
         log: params.log,
       },
+      // Worker tick is single-flighted and shared across all approvals; running
+      // npm typecheck+build inline (30-90s) blocks every other approval. Refuse
+      // to run the slow verification path here and surface a stale status that
+      // the worker can hold for operator follow-up.
+      requireCached: true,
     });
+    if (verificationResult === VERIFY_DEPLOY_NEEDS_RUN) {
+      await updateBoundCandidateState(candidateStateCtx, {
+        status: "approved",
+        classification: "approval_required",
+        approvalStatus: "approved",
+        lastError:
+          "Auto-deploy paused: candidate has no cached verification matching the current change fingerprint. " +
+          "Rerun ha_deploy with action='apply' to verify and continue.",
+      });
+      return {
+        ok: false,
+        status: "stale",
+        message:
+          `Deploy approval '${params.approvalId}' has been fulfilled, but the candidate is not pre-verified for this change set. ` +
+          `Rerun ha_deploy with action='apply' and approvalId='${params.approvalId}' so verification (typecheck+build) runs in the agent context instead of blocking the shared worker tick.`,
+      };
+    }
     if (verificationResult) {
       return {
         ok: false,
