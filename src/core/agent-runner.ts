@@ -197,6 +197,9 @@ function isTransientLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   if (/LLM request timed out/i.test(message)) return true;
   if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up/i.test(message)) return true;
+  // Codex SSE stream cut off before response.output_item.done — partial tool
+  // call discarded by codex-responses.ts. Retry like a network blip.
+  if (/Codex stream ended with \d+ unfinalized function call/i.test(message)) return true;
   const statusMatch = message.match(/LLM request failed:\s*(\d{3})\b/);
   if (!statusMatch) return false;
   const status = Number(statusMatch[1]);

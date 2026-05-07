@@ -376,6 +376,20 @@ async function readResponsesStream(
     reader.releaseLock();
   }
 
+  // Stream EOF without a matching response.output_item.done for an in-flight
+  // function call means the model's response was truncated mid-call. We can't
+  // know whether all argument deltas arrived, and silently emitting a partial
+  // tool call risks executing a malformed action. Throw so the runner retries.
+  if (pendingFunctionArgs.size > 0) {
+    const names = Array.from(pendingFunctionArgs.values())
+      .map((p) => p.name || "<unnamed>")
+      .join(", ");
+    throw new Error(
+      `Codex stream ended with ${pendingFunctionArgs.size} unfinalized function call(s): ${names}. ` +
+      "Stream truncated before response.output_item.done; partial tool call discarded.",
+    );
+  }
+
   // Keep content clean (model's message text only). Reasoning items are
   // returned separately so the agent runner can round-trip them across turns
   // without duplication, and surface the summary in the final output.
