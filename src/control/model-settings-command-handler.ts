@@ -46,7 +46,15 @@ async function executeProviderModelCommand(
   if (targetValidation !== null) return targetValidation;
 
   if (command.action === "show") {
-    return renderProviderModelState({ target: command.target, deps });
+    const stateLine = renderProviderModelState({ target: command.target, deps });
+    // For orchestrator-level show (bare `/provider` or `/provider show`), append
+    // the providers listing so the operator sees auth/health up front instead of
+    // discovering it only when a switch fails.
+    if (command.target.kind === "orchestrator") {
+      const listing = await renderProvidersListing(deps);
+      return [stateLine, "", listing].join("\n");
+    }
+    return stateLine;
   }
 
   if (command.action === "set") {
@@ -131,6 +139,62 @@ function formatBeforeAfter(beforeState: string, afterState: string): string[] {
     return [`(no effective change) ${afterState}`];
   }
   return [`before: ${beforeState}`, `after:  ${afterState}`];
+}
+
+async function renderProvidersListing(deps: ModelSettingsCommandHandlerDeps): Promise<string> {
+  const lines: string[] = ["Configured providers:"];
+  const providers = deps.config.llm.providers ?? {};
+  const names = Object.keys(providers).sort();
+  if (names.length === 0) {
+    lines.push("  (no providers configured)");
+    return lines.join("\n");
+  }
+  for (const name of names) {
+    const cfg = providers[name];
+    if (!cfg) continue;
+    const state = await providerHealthLabel({
+      name,
+      apiKey: cfg.apiKey,
+      stateDir: deps.stateDir,
+    });
+    const baseUrl = cfg.baseUrl ? compactProviderUrl(cfg.baseUrl) : "(no base url)";
+    lines.push(`  ${padRight(name, 14)} ${padRight(state, 18)} ${baseUrl}`);
+  }
+  return lines.join("\n");
+}
+
+async function providerHealthLabel(params: {
+  name: string;
+  apiKey: string | undefined;
+  stateDir: string | undefined;
+}): Promise<string> {
+  if (params.name === "codex") {
+    if (!params.stateDir) return "stateDir missing";
+    try {
+      const status = await getCodexAuthStatus(params.stateDir);
+      return status.loggedIn ? "ok" : "login required";
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `error: ${msg.slice(0, 28)}`;
+    }
+  }
+  if (!params.apiKey) return "missing key";
+  return "ok";
+}
+
+function compactProviderUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const tail = parsed.pathname.length > 1 ? parsed.pathname : "";
+    return `${parsed.host}${tail}`;
+  } catch {
+    return url;
+  }
+}
+
+function padRight(text: string, width: number): string {
+  if (text.length >= width) return text;
+  return text + " ".repeat(width - text.length);
 }
 
 function renderPresetsCommand(
