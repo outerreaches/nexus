@@ -23,14 +23,24 @@ const PINNED_CONTEXT_PREFIX = "## Pinned Context (always keep)";
 
 export const CHARS_PER_TOKEN = 3.5; // mixed English/code content estimate
 
+// Tool definitions are immutable at runtime — caching the per-tool char count
+// avoids repeating JSON.stringify(jsonSchema) on every iteration (orchestrator
+// runs this 56 times per LLM call, and the runner calls it twice per iteration
+// for prompt-size estimation + compaction trigger).
+const toolCharsCache = new WeakMap<Tool, number>();
+
+function toolChars(t: Tool): number {
+  const cached = toolCharsCache.get(t);
+  if (typeof cached === "number") return cached;
+  const chars = t.name.length + t.description.length + JSON.stringify(t.jsonSchema).length + 40;
+  toolCharsCache.set(t, chars);
+  return chars;
+}
+
 /** Estimate tokens for the tool definitions (JSON schemas + descriptions). */
 export function estimateToolTokens(tools: Tool[]): number {
   let chars = 0;
-  for (const t of tools) {
-    chars += t.name.length + t.description.length;
-    chars += JSON.stringify(t.jsonSchema).length;
-    chars += 40; // overhead per tool definition
-  }
+  for (const t of tools) chars += toolChars(t);
   return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
