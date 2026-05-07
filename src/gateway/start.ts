@@ -66,6 +66,7 @@ import { renderHelpText } from "../control/help-command-handler.js";
 import { executeModelSettingsCommand } from "../control/model-settings-command-handler.js";
 import { executeCodexCommand } from "../control/codex-command-handler.js";
 import { executeStatusCommand } from "../control/status-command-handler.js";
+import { enqueueRunReport } from "../storage/run-reports.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
@@ -1200,6 +1201,28 @@ export async function startGateway(
               );
             } else {
               log(`codex: ${text}`);
+            }
+          },
+          // Belt-and-suspenders: also enqueue completion as a run_report so the
+          // home-channel broker can deliver it even if the originating session is
+          // stale (closed terminal, switched device). The broker dedupes by id —
+          // started events fire only when the device-code arrives, succeeded/
+          // failed once at end of flow.
+          enqueueLoginEvent: (event) => {
+            try {
+              enqueueRunReport(db, {
+                kind: `codex_login_${event.kind}`,
+                title: event.title,
+                body: event.body,
+                sourceAgentId: params.agentId,
+                sourceChannel: params.channel,
+                sourceChannelKey: params.channelKey,
+                targetAgentId: params.agentId,
+                targetChannel: "home_channel",
+                metadata: { kind: event.kind },
+              });
+            } catch (err) {
+              log(`codex: enqueueLoginEvent failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           },
         },

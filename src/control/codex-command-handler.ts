@@ -6,11 +6,25 @@ import {
   getCodexAuthStatus,
 } from "../llm/codex-auth.js";
 
+export type CodexLoginEvent = {
+  kind: "started" | "succeeded" | "failed";
+  title: string;
+  body: string;
+};
+
 export type CodexCommandHandlerDeps = {
   stateDir: string;
   log?: (line: string) => void;
   /** Send a follow-up message to the user after the initial response has been delivered. */
   sendFollowUp?: (text: string) => void;
+  /**
+   * Optional secondary delivery for completion notifications. Wired by the
+   * gateway to the run-report broker so home-channel users see "login
+   * succeeded" even if they invoked /codex login from a closed terminal.
+   * Errors are swallowed by the caller — sendFollowUp remains the primary
+   * delivery channel.
+   */
+  enqueueLoginEvent?: (event: CodexLoginEvent) => void;
 };
 
 export async function executeCodexCommand(params: {
@@ -57,6 +71,11 @@ function runCodexLoginInBackground(deps: CodexCommandHandlerDeps): void {
       ].join("\n");
       deps.log?.(msg);
       deps.sendFollowUp?.(msg);
+      deps.enqueueLoginEvent?.({
+        kind: "started",
+        title: "Codex login started",
+        body: `Open ${verificationUrl} and enter code ${userCode}.`,
+      });
 
       return poll({
         onPollTick: () => deps.log?.("codex: waiting for authorization..."),
@@ -67,10 +86,21 @@ function runCodexLoginInBackground(deps: CodexCommandHandlerDeps): void {
       const msg = "Codex: login successful! You can now use /provider codex to switch.";
       deps.log?.(msg);
       deps.sendFollowUp?.(msg);
+      deps.enqueueLoginEvent?.({
+        kind: "succeeded",
+        title: "Codex login succeeded",
+        body: "Codex provider is ready. Use /provider codex to switch.",
+      });
     })
     .catch((err) => {
-      const msg = `Codex login failed: ${err instanceof Error ? err.message : String(err)}`;
+      const detail = err instanceof Error ? err.message : String(err);
+      const msg = `Codex login failed: ${detail}`;
       deps.log?.(msg);
       deps.sendFollowUp?.(msg);
+      deps.enqueueLoginEvent?.({
+        kind: "failed",
+        title: "Codex login failed",
+        body: detail,
+      });
     });
 }
