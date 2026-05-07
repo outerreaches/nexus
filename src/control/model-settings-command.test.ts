@@ -61,3 +61,56 @@ test("parseModelSettingsCommandText reports invalid arguments", () => {
   assert.match(invalidTarget.error ?? "", /invalid target/);
 });
 
+test("parseModelSettingsCommandText parses --preset flag form", () => {
+  const parsed = parseModelSettingsCommandText("/provider --preset coder openrouter");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "provider");
+  assert.equal(parsed.action, "set");
+  assert.equal(parsed.target.kind, "preset");
+  assert.equal(parsed.target.preset, "coder");
+  assert.equal(parsed.value, "openrouter");
+  assert.equal(parsed.error, undefined);
+});
+
+test("parseModelSettingsCommandText parses --tool with preset:tool", () => {
+  const parsed = parseModelSettingsCommandText("/model --tool coder:code_search openrouter");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "model");
+  assert.equal(parsed.action, "set");
+  assert.equal(parsed.target.kind, "toolPreset");
+  assert.equal(parsed.target.preset, "coder");
+  assert.equal(parsed.target.tool, "code_search");
+  assert.equal(parsed.value, "openrouter");
+});
+
+test("parseModelSettingsCommandText parses --reset --preset", () => {
+  const parsed = parseModelSettingsCommandText("/provider --reset --preset coder");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "provider");
+  assert.equal(parsed.action, "reset");
+  assert.equal(parsed.target.kind, "preset");
+  assert.equal(parsed.target.preset, "coder");
+});
+
+test("parseModelSettingsCommandText rejects unknown flag", () => {
+  const parsed = parseModelSettingsCommandText("/provider --bogus foo");
+  assert.ok(parsed);
+  assert.match(parsed.error ?? "", /unknown flag/);
+});
+
+test("parseModelSettingsCommandText rejects --preset and --tool together", () => {
+  const parsed = parseModelSettingsCommandText("/provider --preset coder --tool image_generate openrouter");
+  assert.ok(parsed);
+  assert.match(parsed.error ?? "", /either --preset or --tool/);
+});
+
+test("parseModelSettingsCommandText flag form with no value reads as show", () => {
+  const parsed = parseModelSettingsCommandText("/provider --preset coder");
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "provider");
+  assert.equal(parsed.action, "show");
+  assert.equal(parsed.target.kind, "preset");
+  assert.equal(parsed.target.preset, "coder");
+  assert.equal(parsed.value, undefined);
+});
+

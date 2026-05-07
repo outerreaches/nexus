@@ -77,6 +77,9 @@ async function executeProviderModelCommand(
       }
     }
 
+    // Snapshot the current state so we can show before→after after the change.
+    const beforeState = renderProviderModelState({ target: command.target, deps });
+
     const saved = await persistModelSettingsUpdate({
       deps,
       target: command.target,
@@ -86,20 +89,21 @@ async function executeProviderModelCommand(
     });
     if (!saved.ok) return saved.error;
     const pathLabel = describeTargetPath(command.target, field);
-    const liveState = renderProviderModelState({ target: command.target, deps });
+    const afterState = renderProviderModelState({ target: command.target, deps });
     if (!saved.liveApplied) {
       return [
         `OK: saved ${pathLabel}=${value} in nexus.json.`,
         `WARN: live apply failed (${saved.liveApplyError ?? "unknown"}). Restart required for runtime changes.`,
-        liveState,
+        ...formatBeforeAfter(beforeState, afterState),
       ].join("\n");
     }
     return [
       `OK: updated ${pathLabel}=${value}.`,
-      liveState,
+      ...formatBeforeAfter(beforeState, afterState),
     ].join("\n");
   }
 
+  const beforeState = renderProviderModelState({ target: command.target, deps });
   const saved = await persistModelSettingsUpdate({
     deps,
     target: command.target,
@@ -108,18 +112,25 @@ async function executeProviderModelCommand(
   });
   if (!saved.ok) return saved.error;
   const pathLabel = describeTargetPath(command.target, field);
-  const liveState = renderProviderModelState({ target: command.target, deps });
+  const afterState = renderProviderModelState({ target: command.target, deps });
   if (!saved.liveApplied) {
     return [
       `OK: reset ${pathLabel} in nexus.json.`,
       `WARN: live apply failed (${saved.liveApplyError ?? "unknown"}). Restart required for runtime changes.`,
-      liveState,
+      ...formatBeforeAfter(beforeState, afterState),
     ].join("\n");
   }
   return [
     `OK: reset ${pathLabel}.`,
-    liveState,
+    ...formatBeforeAfter(beforeState, afterState),
   ].join("\n");
+}
+
+function formatBeforeAfter(beforeState: string, afterState: string): string[] {
+  if (beforeState === afterState) {
+    return [`(no effective change) ${afterState}`];
+  }
+  return [`before: ${beforeState}`, `after:  ${afterState}`];
 }
 
 function renderPresetsCommand(
@@ -310,12 +321,16 @@ function formatRoutingTarget(target: RoutingTarget): string {
 
 function formatModelSettingsUsage(kind: "provider" | "model"): string {
   return [
-    `Usage: /${kind}`,
-    `       /${kind} <${kind}>`,
-    `       /${kind} <target> <${kind}>`,
-    `       /${kind} show [target]`,
-    `       /${kind} reset [target]`,
-    "Targets: orchestrator | preset:<name> | tool:<toolName> | tool:<presetName>:<toolName>",
+    `Usage: /${kind}                                          show orchestrator`,
+    `       /${kind} <${kind}>                            set orchestrator`,
+    `       /${kind} --preset <name> <${kind}>            set preset (recommended)`,
+    `       /${kind} --tool <tool> <${kind}>              set per-tool default`,
+    `       /${kind} --tool <preset>:<tool> <${kind}>     set per-preset per-tool`,
+    `       /${kind} --reset --preset <name>                  reset preset override`,
+    `       /${kind} --reset --tool <tool>                    reset tool override`,
+    `       /${kind} show [target]                            (legacy positional show)`,
+    `       /${kind} reset [target]                           (legacy positional reset)`,
+    "Targets (legacy positional): orchestrator | preset:<name> | tool:<toolName> | tool:<presetName>:<toolName>",
   ].join("\n");
 }
 

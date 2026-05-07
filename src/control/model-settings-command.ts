@@ -44,6 +44,12 @@ export function parseModelSettingsCommandText(text: string): ParsedModelSettings
     };
   }
 
+  // Flag-style form: --preset/--tool + optional --reset, with the value as the
+  // remaining positional. Explicit flags eliminate the ambiguity in the legacy
+  // positional form where a typo'd target would silently get parsed as a value.
+  const flagParsed = tryParseFlagForm(kind, args);
+  if (flagParsed) return flagParsed;
+
   const first = (args[0] ?? "").trim();
   const firstLower = first.toLowerCase();
 
@@ -213,4 +219,132 @@ function normalizeCommandToken(token: string): string {
   const at = token.indexOf("@");
   if (at <= 0) return token;
   return token.slice(0, at);
+}
+
+/**
+ * Parses the explicit-flag form: `--preset NAME` / `--tool NAME[:TOOL]` plus
+ * optional `--reset`. Returns null when no flag is present so the legacy
+ * positional parser (above) handles unchanged input.
+ *
+ * Examples:
+ *   /provider --preset coder openrouter
+ *   /provider --tool image_generate openai
+ *   /provider --tool coder:code_search openrouter
+ *   /provider --reset --preset coder
+ *   /model --preset coder gpt-4o
+ */
+function tryParseFlagForm(
+  kind: "provider" | "model",
+  args: string[],
+): ParsedProviderModelCommand | null {
+  if (!args.some((arg) => arg.startsWith("--"))) return null;
+
+  let presetFlagValue: string | undefined;
+  let toolFlagValue: string | undefined;
+  let resetFlag = false;
+  const positional: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const raw = args[i] ?? "";
+    if (raw === "--reset") {
+      resetFlag = true;
+      continue;
+    }
+    if (raw === "--preset") {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        return {
+          kind,
+          action: "set",
+          target: { kind: "orchestrator" },
+          error: "--preset requires a name (e.g. --preset coder)",
+        };
+      }
+      presetFlagValue = next;
+      i += 1;
+      continue;
+    }
+    if (raw === "--tool") {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        return {
+          kind,
+          action: "set",
+          target: { kind: "orchestrator" },
+          error: "--tool requires a name (e.g. --tool image_generate or --tool coder:code_search)",
+        };
+      }
+      toolFlagValue = next;
+      i += 1;
+      continue;
+    }
+    if (raw.startsWith("--")) {
+      return {
+        kind,
+        action: "set",
+        target: { kind: "orchestrator" },
+        error: `unknown flag "${raw}". Use --preset, --tool, or --reset.`,
+      };
+    }
+    positional.push(raw);
+  }
+
+  if (presetFlagValue && toolFlagValue) {
+    return {
+      kind,
+      action: "set",
+      target: { kind: "orchestrator" },
+      error: "use either --preset or --tool, not both",
+    };
+  }
+
+  let target: RoutingTarget = { kind: "orchestrator" };
+  if (presetFlagValue) {
+    target = { kind: "preset", preset: presetFlagValue };
+  } else if (toolFlagValue) {
+    const colon = toolFlagValue.indexOf(":");
+    if (colon === -1) {
+      target = { kind: "tool", tool: toolFlagValue };
+    } else {
+      const preset = toolFlagValue.slice(0, colon).trim();
+      const tool = toolFlagValue.slice(colon + 1).trim();
+      if (!preset || !tool) {
+        return {
+          kind,
+          action: "set",
+          target: { kind: "orchestrator" },
+          error: `invalid --tool value "${toolFlagValue}". Use TOOL_NAME or PRESET:TOOL_NAME.`,
+        };
+      }
+      target = { kind: "toolPreset", preset, tool };
+    }
+  }
+
+  if (resetFlag) {
+    if (positional.length > 0) {
+      return {
+        kind,
+        action: "reset",
+        target,
+        error: `--reset takes no value (got "${positional.join(" ")}")`,
+      };
+    }
+    return { kind, action: "reset", target };
+  }
+
+  if (positional.length === 0) {
+    // No value and no --reset → treat as show, so `/provider --preset coder`
+    // works as a quick "what's the current state for this preset" probe.
+    return { kind, action: "show", target };
+  }
+  if (positional.length > 1) {
+    return {
+      kind,
+      action: "set",
+      target,
+      value: positional[positional.length - 1],
+      error: `too many values (got ${positional.length}: ${positional.join(" ")})`,
+    };
+  }
+  return { kind, action: "set", target, value: positional[0]! };
 }
