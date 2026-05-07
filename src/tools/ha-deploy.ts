@@ -160,9 +160,13 @@ function resolveDeployGitTarget(
   if (!remoteExists(codeDir, remote)) {
     const upstream = detectUpstreamTarget(codeDir);
     if (upstream && remoteExists(codeDir, upstream.remote)) {
-      notes.push(
-        `push remote '${remote}' not found; falling back to branch upstream '${upstream.remote}/${upstream.branch}'`,
-      );
+      if (remote) {
+        notes.push(
+          `push remote '${remote}' not found; falling back to branch upstream '${upstream.remote}/${upstream.branch}'`,
+        );
+      } else {
+        notes.push(`push remote not specified; using branch upstream '${upstream.remote}/${upstream.branch}'`);
+      }
       remote = upstream.remote;
     }
   }
@@ -945,7 +949,7 @@ export async function continueApprovedDeployAfterApproval(params: {
 
     const target = resolveDeployGitTarget(
       liveCodeDir || codeDir,
-      continuation?.remote ?? "host",
+      continuation?.remote ?? "",
       continuation?.branch ?? "main",
     );
     for (const note of target.notes) params.log(note);
@@ -1319,7 +1323,10 @@ export const haDeploy = defineTool({
       .min(1)
       .optional()
       .describe("Human approval ID required for approval-gated changes (tools/core/shared paths)."),
-    remote: z.string().default("host").describe("Git push remote"),
+    remote: z
+      .string()
+      .default("")
+      .describe("Git push remote. When empty, falls back to the branch's upstream remote."),
     branch: z.string().default("main").describe("Git push branch"),
     timeoutMs: z
       .number()
