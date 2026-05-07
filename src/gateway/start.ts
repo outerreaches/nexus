@@ -97,7 +97,9 @@ export async function startGateway(
   const stderrWrite = process.stderr.write.bind(process.stderr);
   let teeInstalled = false;
   const hostId = os.hostname().slice(0, 12);
-  let logMode: () => string = () => params.standby ? "standby" : "active";
+  // Until isStandby is wired up below, log as "standby" — the gateway always
+  // boots in standby and only flips to active after startServices() succeeds.
+  let logMode: () => string = () => "standby";
   const log = (msg: string) => {
     const line = `[nexus] ${new Date().toISOString()} [${hostId}/${logMode()}] ${msg}\n`;
     if (params.verbose) {
@@ -193,8 +195,14 @@ export async function startGateway(
   });
   // Standby mode tracking is declared early so node transport, status, and HA
   // transitions all share the same source of truth.
-  let isStandby = params.standby ?? false;
-  let activatedAt: number | null = isStandby ? null : Date.now();
+  // Always start in standby — flip to active only after startServices() resolves
+  // below. This avoids a window where /api/* allows mutating requests and
+  // /health/traffic reports active while Telegram/scheduler/workers are still
+  // wiring up. The primary's boot path still runs startServices via the same
+  // path the failover handler uses.
+  let isStandby = true;
+  let activatedAt: number | null = null;
+  const initialPrimaryRole = !(params.standby ?? false);
   const nodeWsGateway = new NodeWebSocketGateway({
     identity: nodeGatewayIdentity,
     registry: nodeRegistry,
@@ -1632,10 +1640,13 @@ export async function startGateway(
     if (!isStandby) return { ok: true, already: true };
     const lease = ensureActiveLease(deactivateServices);
     if (!lease.ok) return { ok: false, holderId: lease.holderId, expiresAt: lease.expiresAt };
-    isStandby = false;
     log("standby: activating services");
     try {
       await startServices();
+      // Flip to active only after services are wired up. Until this line
+      // /api/mode + /health/traffic still report standby, so HAProxy keeps
+      // routing elsewhere and the standby gate keeps mutating requests out.
+      isStandby = false;
       activatedAt = Date.now();
       log("standby: services activated");
       return { ok: true };
@@ -1800,15 +1811,19 @@ export async function startGateway(
     })();
   };
 
-  // Start services immediately if not in standby mode
-  if (!isStandby) {
+  // Start services immediately if launched as primary. isStandby starts true and
+  // only flips false after startServices() succeeds, so during boot the gateway
+  // reports standby on /health/traffic and keeps the /api/* mutation gate in
+  // place — HAProxy won't route here until services are actually wired up.
+  if (initialPrimaryRole) {
     const lease = ensureActiveLease(deactivateServices);
     if (!lease.ok) {
-      isStandby = true;
       log(`standby: active lease held by ${lease.holderId ?? "unknown"}; staying standby`);
     } else {
       try {
         await startServices();
+        isStandby = false;
+        activatedAt = Date.now();
         log("standby: services activated");
       } catch (err) {
         await deactivateServices("activation failed");
