@@ -314,6 +314,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { executeInfoCommand } = await import("../control/info-command-handler.js");
       const { renderHelpText } = await import("../control/help-command-handler.js");
       const { executeModelSettingsCommand } = await import("../control/model-settings-command-handler.js");
+      const { executeStatusCommand } = await import("../control/status-command-handler.js");
       const { formatDurationMs } = await import("../control/stop-command.js");
       const {
         formatThemeList,
@@ -848,6 +849,21 @@ export async function runCli(argv: string[]): Promise<void> {
           }
           clearHomeSession({ db, agentId });
           return `OK: home session cleared for agent ${agentId}.`;
+        }
+        if (controlParsed.kind === "status") {
+          return executeStatusCommand({
+            command: controlParsed.status,
+            deps: {
+              db,
+              config,
+              modelRouter,
+              stateDir: paths.stateDir,
+              getMode: () => "active",
+              getActivatedAt: () => null,
+              nowMs: () => Date.now(),
+              defaultAgentId: String(opts.agent ?? "main"),
+            },
+          });
         }
         if (controlParsed.kind === "codex") {
           const { executeCodexCommand } = await import("../control/codex-command-handler.js");

@@ -6,6 +6,7 @@ export function renderHelpText(channel: HelpChannel): string {
   lines.push("- /help");
   lines.push("- /stop");
   lines.push("- /stopall [cooldown] (e.g. 30s, 5m, 1h, 1d)");
+  lines.push("- /status");
   lines.push("- /sethome");
   lines.push("- /unsethome");
   lines.push("- /provider [target] [provider]");

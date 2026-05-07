@@ -65,6 +65,7 @@ import { executeInfoCommand } from "../control/info-command-handler.js";
 import { renderHelpText } from "../control/help-command-handler.js";
 import { executeModelSettingsCommand } from "../control/model-settings-command-handler.js";
 import { executeCodexCommand } from "../control/codex-command-handler.js";
+import { executeStatusCommand } from "../control/status-command-handler.js";
 import { stopLocalInteractiveSessions } from "../tools/shell-interactive.js";
 
 type RuntimeProfile = "standard" | "primary" | "standby" | "monetization" | "service_custom" | "portable" | "execution_node_host";
@@ -1169,6 +1170,21 @@ export async function startGateway(
         agentId: params.agentId,
       });
       return "OK: home session cleared. Background events will use the latest eligible session.";
+    }
+    if (parsed.kind === "status") {
+      return executeStatusCommand({
+        command: parsed.status,
+        deps: {
+          db,
+          config,
+          modelRouter,
+          stateDir: paths.stateDir,
+          getMode: () => (isStandby ? "standby" : "active"),
+          getActivatedAt: () => activatedAt,
+          nowMs: () => Date.now(),
+          defaultAgentId: params.agentId,
+        },
+      });
     }
     if (parsed.kind === "codex") {
       const chatId = params.channel === "telegram" ? Number(params.channelKey) : NaN;
