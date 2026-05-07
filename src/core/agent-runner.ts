@@ -645,13 +645,15 @@ export class AgentRunner {
 
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     this.throwIfCancelled();
-    const baseMessages: ChatMessage[] = [{ role: "system", content: params.systemPrompt }, ...params.history];
-    if (baseMessages.length > 0) {
-      baseMessages[baseMessages.length - 1] = {
-        ...baseMessages[baseMessages.length - 1],
-        cacheControl: { type: "ephemeral" },
-      };
-    }
+    // Mark the system prompt as a cache breakpoint (stable across all turns/sessions).
+    // agent-service marks the last persisted-history message and the trailing hint block;
+    // those second/third breakpoints stay stable within their respective scopes. Marking
+    // here intentionally does NOT touch the last entry — that anchor is owned by the caller
+    // so volatile per-turn hints can sit outside the cached prefix.
+    const baseMessages: ChatMessage[] = [
+      { role: "system", content: params.systemPrompt, cacheControl: { type: "ephemeral" } },
+      ...params.history,
+    ];
     const newMessages: ChatMessage[] = [{ role: "user", content: params.userMessage }];
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];
 

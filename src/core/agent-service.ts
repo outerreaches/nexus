@@ -495,6 +495,17 @@ export class AgentService {
       for (const message of history) {
         if (message.role !== "system") runHistory.push(message);
       }
+      // Cache breakpoint #2 of 3: end of stable persisted history. Caches the prefix up
+      // through the previous turn so subsequent turns in the same session re-use it.
+      // (#1 is the system prompt, marked by AgentRunner; #3 is the trailing hint block,
+      // marked below after all hints are appended.)
+      if (runHistory.length > 0) {
+        const lastIdx = runHistory.length - 1;
+        runHistory[lastIdx] = {
+          ...runHistory[lastIdx]!,
+          cacheControl: { type: "ephemeral" },
+        };
+      }
 
       // Resolve preset and filter tools
       const presetName = params.preset ?? this.deps.defaultPreset;
@@ -578,6 +589,9 @@ export class AgentService {
         }
       };
 
+      // Hints below all merge into a single trailing system block (collapseConsecutiveSystemMessages
+      // in openai-compat). Only the last one carries the cacheControl marker that becomes
+      // breakpoint #3 — the rest are unmarked to stay within Anthropic's 4-breakpoint budget.
       const shouldInjectCompactionSummary = !preset || preset.name === "orchestrator" || preset.name === "coder";
       if (shouldInjectCompactionSummary) {
         const compaction = this.loadLatestCompactionSummary(params.agentId, readSessionId);
@@ -586,7 +600,6 @@ export class AgentService {
           runHistory.push({
             role: "system",
             content: compactionHint,
-            cacheControl: { type: "ephemeral" },
           });
           onRunnerLog?.(`compaction_summary_injected length=${compactionHint.length}`);
         }
@@ -626,14 +639,15 @@ export class AgentService {
         onRunnerLog?.(`memory_hint_skipped channel=${params.channel}`);
       }
 
-      // Instead of changing the system prompt (which breaks the prefix cache),
-      // append ephemeral runtime hints right before the latest user message.
+      // Append ephemeral runtime hints right before the latest user message. They merge
+      // into one trailing system block via collapseConsecutiveSystemMessages; the cacheControl
+      // marker on the final clock hint becomes breakpoint #3 covering the whole block, so
+      // within-turn iteration retries hit cache for everything up to here.
       if (memoryHint) {
         onRunnerLog?.(`memory_hint_injected length=${memoryHint.length}`);
         runHistory.push({
           role: "system",
           content: memoryHint,
-          cacheControl: { type: "ephemeral" },
         });
       }
       if (memoryNudgeDue && this.deps.nudges && nudgeTurnCount !== null) {
@@ -644,7 +658,6 @@ export class AgentService {
         runHistory.push({
           role: "system",
           content: memoryNudge,
-          cacheControl: { type: "ephemeral" },
         });
         onRunnerLog?.(`memory_nudge_injected turn=${nudgeTurnCount} length=${memoryNudge.length}`);
       }
@@ -655,7 +668,6 @@ export class AgentService {
         runHistory.push({
           role: "system",
           content: skillNudge,
-          cacheControl: { type: "ephemeral" },
         });
         onRunnerLog?.(`skill_nudge_injected length=${skillNudge.length}`);
       }
@@ -666,7 +678,6 @@ export class AgentService {
         runHistory.push({
           role: "system",
           content: runtimeChannelHint,
-          cacheControl: { type: "ephemeral" },
         });
         onRunnerLog?.(`runtime_channel_injected channel=${params.channel} length=${runtimeChannelHint.length}`);
       }
