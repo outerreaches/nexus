@@ -6,10 +6,18 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 
-/** Hard cap on tool-result size to prevent context blow-up (chars, not bytes). */
-const MAX_OUTPUT_CHARS = 60_000;
+/**
+ * Default cap on tool-result size to prevent context blow-up (chars, not bytes).
+ * ~20K chars ≈ ~6K tokens — generous for typical command output but tight enough
+ * that a coder doing 5-10 shells/turn can't single-handedly fill the context
+ * window. Callers can request more via the per-call maxOutputChars parameter
+ * when they really need it.
+ */
+const DEFAULT_MAX_OUTPUT_CHARS = 20_000;
+/** Absolute ceiling for opt-in maxOutputChars. */
+export const SHELL_OUTPUT_HARD_CAP_CHARS = 200_000;
 
-export function truncateShellOutput(text: string, max: number = MAX_OUTPUT_CHARS): string {
+export function truncateShellOutput(text: string, max: number = DEFAULT_MAX_OUTPUT_CHARS): string {
   if (text.length <= max) return text;
   const half = Math.floor(max / 2);
   const omitted = text.length - max;
@@ -97,11 +105,19 @@ export function isOrchestratorShellDelegationCommand(command: string): boolean {
 export const shellExec = defineTool({
   name: "shell_exec",
   description:
-    "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_manage(action='start').",
+    "Run a short-lived shell command (guarded; may be disabled). For long-running jobs/daemons use process_manage(action='start'). " +
+    `Output is truncated to ~${DEFAULT_MAX_OUTPUT_CHARS.toLocaleString()} chars by default (head+tail with omission notice); pipe through head/tail/grep first or pass maxOutputChars to opt into more (hard cap ${SHELL_OUTPUT_HARD_CAP_CHARS.toLocaleString()}).`,
   nodeRoutable: true,
   parameters: z.object({
     command: z.string(),
     timeoutMs: z.number().int().positive().default(60_000),
+    maxOutputChars: z
+      .number()
+      .int()
+      .positive()
+      .max(SHELL_OUTPUT_HARD_CAP_CHARS)
+      .optional()
+      .describe(`Override the default ${DEFAULT_MAX_OUTPUT_CHARS}-char output cap (head+tail truncation). Use sparingly — large outputs blow up the context.`),
     security: z
       .object({
         requireNexusBackend: z
@@ -115,7 +131,8 @@ export const shellExec = defineTool({
       })
       .optional(),
   }),
-  execute: async ({ command, timeoutMs }, ctx) => {
+  execute: async ({ command, timeoutMs, maxOutputChars }, ctx) => {
+    const outputCap = maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
     if (!ctx.allowShellExec) return "ERROR: shell_exec is disabled by policy";
     if (ctx.abortSignal?.aborted) return "ERROR: run cancelled";
     if (ctx.request?.preset === "orchestrator" && isOrchestratorShellDelegationCommand(command)) {
@@ -157,9 +174,9 @@ export const shellExec = defineTool({
             ? `\n\nHINT: This command exceeded ${timeoutMs}ms. If it should keep running (server/scheduler), start it with process_manage(action='start') and inspect with process_manage(action='logs').`
             : "\n\nHINT: If this keeps failing with the same command, stop retrying and inspect STDERR (or switch approach)." +
               "\nFor exploratory probes, avoid shell control operators by default; run a single command and treat expected no-match/not-found outcomes as signal.";
-          resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`));
+          resolve(truncateShellOutput(`ERROR: ${err.message}${hint}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`, outputCap));
         }
-        else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n")));
+        else resolve(truncateShellOutput([stdout, stderr].filter(Boolean).join("\n"), outputCap));
         },
       );
     });
