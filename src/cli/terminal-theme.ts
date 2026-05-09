@@ -41,23 +41,28 @@ const THEMES: Record<TerminalThemeId, TerminalTheme> = {
     description: "Classic phosphor-green CRT vibe.",
     // Use the same 256-color + truecolor layering as the richer themes so terminals
     // that support RGB get an exact phosphor shade while older terminals still get
-    // a reasonable indexed-color fallback.
+    // a reasonable indexed-color fallback. Dim role used to be RGB(17,170,17) plus
+    // SGR `2` (dim attribute) — invisible on light terminal backgrounds. Brighten
+    // to mid phosphor and drop the dim attribute so the typing indicator and
+    // gutter text stay readable on both light and dark terminals.
     prompt: "\x1b[38;5;119m\x1b[38;2;120;255;100m",
     assistant: "\x1b[38;5;46m\x1b[38;2;57;255;20m",
     system: "\x1b[38;5;83m\x1b[38;2;51;255;51;1m",
     error: "\x1b[38;5;203m\x1b[38;2;255;51;51m",
-    dim: "\x1b[38;5;28m\x1b[38;2;17;170;17;2m",
+    dim: "\x1b[38;5;65m\x1b[38;2;102;187;102m",
     reset: RESET,
   },
   "terminal-amber": {
     id: "terminal-amber",
     label: "Terminal Amber",
     description: "Warm amber monitor style.",
+    // Same fix as terminal-green: brighten dim from RGB(170,102,0)+SGR2 to a mid
+    // amber that holds up on light backgrounds.
     prompt: "\x1b[38;5;220m\x1b[38;2;255;204;0m",
     assistant: "\x1b[38;5;214m\x1b[38;2;255;176;0m",
     system: "\x1b[38;5;220m\x1b[38;2;255;204;0;1m",
     error: "\x1b[38;5;203m\x1b[38;2;255;51;51m",
-    dim: "\x1b[38;5;130m\x1b[38;2;170;102;0;2m",
+    dim: "\x1b[38;5;172m\x1b[38;2;204;142;30m",
     reset: RESET,
   },
   "dos-bw": {
