@@ -1460,10 +1460,72 @@ function printAccessCredentials(state: SetupState, title: string): void {
   process.stdout.write("\n");
 }
 
+type SetupProgress = {
+  startedAt: string;
+  updatedAt: string;
+  completedPhases: string[];
+  rootDir: string;
+  dryRun: boolean;
+};
+
+function setupProgressPath(stateDir: string): string {
+  return path.join(stateDir, "setup-progress.json");
+}
+
+async function loadSetupProgress(stateDir: string): Promise<SetupProgress | null> {
+  try {
+    const raw = await fs.readFile(setupProgressPath(stateDir), "utf8");
+    const parsed = JSON.parse(raw) as Partial<SetupProgress>;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!Array.isArray(parsed.completedPhases)) return null;
+    return {
+      startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : "",
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
+      completedPhases: parsed.completedPhases.filter((entry): entry is string => typeof entry === "string"),
+      rootDir: typeof parsed.rootDir === "string" ? parsed.rootDir : "",
+      dryRun: Boolean(parsed.dryRun),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    return null;
+  }
+}
+
+async function saveSetupProgress(stateDir: string, progress: SetupProgress): Promise<void> {
+  try {
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(setupProgressPath(stateDir), JSON.stringify(progress, null, 2) + "\n", "utf8");
+  } catch {
+    // Progress tracking is best-effort; setup itself shouldn't fail because we
+    // couldn't write the progress file (e.g. early phase before dirs exist).
+  }
+}
+
+async function clearSetupProgress(stateDir: string): Promise<void> {
+  try {
+    await fs.unlink(setupProgressPath(stateDir));
+  } catch {
+    // Already absent or unreadable — nothing to do.
+  }
+}
+
 async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readline.Interface): Promise<void> {
   const dryRun = Boolean(opts.dryRun);
   const nonInteractive = Boolean(opts.nonInteractive || opts.yes);
   const completedPhases: string[] = [];
+  const progressStartedAt = new Date().toISOString();
+
+  const recordPhase = async (name: string): Promise<void> => {
+    completedPhases.push(name);
+    if (dryRun) return;
+    await saveSetupProgress(state.paths.stateDir, {
+      startedAt: progressStartedAt,
+      updatedAt: new Date().toISOString(),
+      completedPhases: [...completedPhases],
+      rootDir: state.paths.rootDir,
+      dryRun,
+    });
+  };
 
   try {
     section("Prepare Directories");
@@ -1476,12 +1538,12 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     await ensureDir(path.join(state.paths.configRoot, "watchdog"));
     await ensureDir(state.paths.storeDir);
     ok("directory layout prepared");
-    completedPhases.push("Prepare Directories");
+    await recordPhase("Prepare Directories");
 
     section("Seed Skills");
     const seededCount = await seedSkills(state.paths.codeDir, state.paths.stateDir);
     ok(seededCount > 0 ? `seeded ${seededCount} skill(s) from repo` : "no skills to seed (or all already present)");
-    completedPhases.push("Seed Skills");
+    await recordPhase("Seed Skills");
 
     section("Write Config + Env");
     if (!dryRun) {
@@ -1489,7 +1551,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       await writeRuntimeConfig(state);
     }
     ok(dryRun ? "dry-run: skipped file writes" : "config and split env files written");
-    completedPhases.push("Write Config + Env");
+    await recordPhase("Write Config + Env");
 
     section("Initialize Agent State");
     if (dryRun) {
@@ -1497,7 +1559,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     } else {
       await initializeAgentState(state, nonInteractive, rl);
     }
-    completedPhases.push("Initialize Agent State");
+    await recordPhase("Initialize Agent State");
 
     section("Secrets Onboarding");
     if (dryRun) {
@@ -1510,7 +1572,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
     } else {
       await applySecretOnboarding(state, rl, nonInteractive);
     }
-    completedPhases.push("Secrets Onboarding");
+    await recordPhase("Secrets Onboarding");
 
     const env = buildScriptEnv(state);
     const tlsScript = path.join(state.paths.codeDir, "infra", "scripts", "setup", "ha-generate-tls-cert.sh");
@@ -1525,7 +1587,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       env,
       dryRun,
     );
-    completedPhases.push("Generate TLS Certificate");
+    await recordPhase("Generate TLS Certificate");
 
     await runCommand(
       "Secrets Preflight",
@@ -1534,7 +1596,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       env,
       dryRun,
     );
-    completedPhases.push("Secrets Preflight");
+    await recordPhase("Secrets Preflight");
 
     section("Seed Sidecar Provider");
     if (dryRun) {
@@ -1543,10 +1605,10 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       await seedDefaultSidecarProviderProfile(state);
       ok("sidecar-main provider profile seeded in local database");
     }
-    completedPhases.push("Seed Sidecar Provider");
+    await recordPhase("Seed Sidecar Provider");
 
     await runCommand("Deploy Stack", "bash", [deployScript], env, dryRun);
-    completedPhases.push("Deploy Stack");
+    await recordPhase("Deploy Stack");
 
     const sidecarBootstrapScript = path.join(
       state.paths.codeDir,
@@ -1559,7 +1621,7 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
       if (!dryRun) {
         section("Wait for Gateway Health");
         await waitForGatewayHealth(env.API_BASE_URL ?? "http://localhost:18789", 90_000);
-        completedPhases.push("Wait for Gateway Health");
+        await recordPhase("Wait for Gateway Health");
       }
       await runCommand(
         "Bootstrap Sidecar Provider",
@@ -1568,16 +1630,20 @@ async function applySetup(state: SetupState, opts: SetupWizardOptions, rl: readl
         { ...env, NEXUS_HTTP_API_KEY: state.secrets.httpApiKey },
         dryRun,
       );
-      completedPhases.push("Bootstrap Sidecar Provider");
+      await recordPhase("Bootstrap Sidecar Provider");
     }
 
     await runCommand("HA Status", "bash", [rolloutScript, "status"], env, dryRun);
-    completedPhases.push("HA Status");
+    await recordPhase("HA Status");
 
     if (state.enableHaDeployer) {
       await installHaDeployerService(state, env, dryRun);
-      completedPhases.push("Install ha-deployer Service");
+      await recordPhase("Install ha-deployer Service");
     }
+
+    // All phases succeeded — drop the progress breadcrumb so the next run
+    // doesn't show a stale "previous attempt" notice.
+    if (!dryRun) await clearSetupProgress(state.paths.stateDir);
   } catch (err) {
     process.stdout.write("\n");
     warn(`Setup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1606,6 +1672,29 @@ export async function runSetupWizard(opts: SetupWizardOptions): Promise<void> {
   try {
     banner("Nexus Setup Wizard", "Classic Green Edition");
     process.stdout.write(`${tui.paint("dim", "This wizard sets up a new Nexus instance under ~/.nexus by default.")}\n\n`);
+
+    // Surface a previous incomplete attempt before re-prompting. We check the
+    // default root's stateDir; if the operator picked a custom --root last time,
+    // they'll just see no notice. Re-running setup is safe (idempotent phases),
+    // so this is informational rather than blocking.
+    const defaultPaths = buildDefaultPaths(opts);
+    const priorProgress = await loadSetupProgress(defaultPaths.stateDir);
+    if (priorProgress && priorProgress.completedPhases.length > 0) {
+      warn("A previous setup attempt did not complete:");
+      info(`  started:  ${priorProgress.startedAt || "(unknown)"}`);
+      info(`  updated:  ${priorProgress.updatedAt || "(unknown)"}`);
+      info(`  root:     ${priorProgress.rootDir || defaultPaths.rootDir}`);
+      info(`  finished phases (${priorProgress.completedPhases.length}):`);
+      for (const phase of priorProgress.completedPhases) {
+        process.stdout.write(`    - ${phase}\n`);
+      }
+      info("Re-running setup will redo earlier phases (most are idempotent — directories, configs, env files).");
+      const cont = await askConfirm(rl, "Continue with a fresh setup pass", true, nonInteractive);
+      if (!cont) {
+        warn("setup aborted; previous progress preserved");
+        return;
+      }
+    }
 
     const state = await prepareState(rl, opts);
     printSummary(state);
