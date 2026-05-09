@@ -581,12 +581,28 @@ export async function runCli(argv: string[]): Promise<void> {
         return { pause, resume, stop };
       };
 
+      // Build a "[agent · preset · provider/model] " prefix for the prompt so the
+      // operator always sees what they're talking to. Recomputed each prompt
+      // because /provider and /model can change the route mid-session.
+      const buildPromptPrefix = (): string => {
+        const agentId = String(opts.agent ?? "main");
+        const presetName = "orchestrator";
+        try {
+          const route = modelRouter?.resolve({ agentId, preset: presetName, mode: "default" });
+          if (!route) return `[${agentId} · ${presetName}]`;
+          return `[${agentId} · ${presetName} · ${route.primaryProvider}/${route.primary.model}]`;
+        } catch {
+          return `[${agentId} · ${presetName}]`;
+        }
+      };
+
       const readInteractiveInput = async (): Promise<string | null> => {
+        const promptPrefix = buildPromptPrefix();
         if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
           const { createInterface } = await import("node:readline/promises");
           const rl = createInterface({ input: process.stdin, output: process.stdout });
           try {
-            return await rl.question(tui.promptString());
+            return await rl.question(tui.promptString(promptPrefix));
           } finally {
             rl.close();
           }
@@ -594,7 +610,8 @@ export async function runCli(argv: string[]): Promise<void> {
 
         const { clearScreenDown, cursorTo, moveCursor } = await import("node:readline");
         const previousRawMode = process.stdin.isRaw;
-        const promptLen = 2; // visible width of "> "
+        // Visible prompt width = "[…] " (prefix + space) + "> " (2). Empty prefix → just 2.
+        const promptLen = promptPrefix ? promptPrefix.length + 1 + 2 : 2;
 
         return await new Promise<string | null>((resolve, reject) => {
           let value = "";
@@ -644,7 +661,7 @@ export async function runCli(argv: string[]): Promise<void> {
             }
             // Clear to end-of-line after each rendered input row so prompt background
             // fills the full terminal width on themed prompts.
-            process.stdout.write(lines.map((line) => `${tui.promptString()}${line}\x1b[K`).join("\n"));
+            process.stdout.write(lines.map((line) => `${tui.promptString(promptPrefix)}${line}\x1b[K`).join("\n"));
             renderedRows = nextRows;
 
             // Position cursor at cursorPos within the rendered lines.

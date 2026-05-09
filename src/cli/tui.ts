@@ -133,10 +133,16 @@ export class SharedTui {
     return `${this.theme[role]}${text}`;
   }
 
-  promptString(): string {
-    if (!this.colorEnabled) return "> ";
-    // Keep prompt style active so user input inherits theme colors/background.
-    return `${this.theme.prompt}> `;
+  promptString(prefix?: string): string {
+    const tail = prefix && prefix.length > 0 ? `${prefix} > ` : "> ";
+    if (!this.colorEnabled) return tail;
+    // Render prefix with the dim role so context info (agent/preset/model) is
+    // visually distinct from typed input but still readable. Keep the prompt
+    // style active on "> " so user input inherits theme colors/background.
+    if (!prefix || prefix.length === 0) {
+      return `${this.theme.prompt}> `;
+    }
+    return `${this.theme.dim}${prefix}${this.theme.reset} ${this.theme.prompt}> `;
   }
 
   section(title: string): string {
