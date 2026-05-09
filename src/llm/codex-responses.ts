@@ -14,6 +14,7 @@
 import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
 import type { LLMClient, LLMCompleteChatParams, LLMUsage } from "./openai-compat.js";
+import { readSseDataEvents } from "./sse-reader.js";
 
 export type CodexResponsesConfig = {
   baseUrl: string;
@@ -252,128 +253,108 @@ async function readResponsesStream(
   const body = res.body;
   if (!body) throw new Error("Codex API response has no body");
 
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // SSE byte→data-payload pipeline shared with openai-compat. Event-type
+  // dispatch below is Responses-API-specific and stays local.
+  for await (const data of readSseDataEvents(body, { onChunk: () => opts.onActivity?.() })) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      continue;
+    }
 
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      opts.onActivity?.();
+    const eventType = String(event.type ?? "");
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+    // Text content delta
+    if (eventType === "response.output_text.delta") {
+      const delta = String(event.delta ?? "");
+      if (delta) {
+        textParts.push(delta);
+        opts.onTextDelta?.(delta);
+      }
+    }
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const data = line.slice(6).trim();
-        if (data === "[DONE]") continue;
-
-        let event: Record<string, unknown>;
-        try {
-          event = JSON.parse(data);
-        } catch {
-          continue;
-        }
-
-        const eventType = String(event.type ?? "");
-
-        // Text content delta
-        if (eventType === "response.output_text.delta") {
-          const delta = String(event.delta ?? "");
-          if (delta) {
-            textParts.push(delta);
-            opts.onTextDelta?.(delta);
-          }
-        }
-
-        // Function call arguments streaming
-        if (eventType === "response.function_call_arguments.delta") {
-          const callId = String(event.call_id ?? event.item_id ?? "");
-          const delta = String(event.delta ?? "");
-          if (callId && delta) {
-            const pending = pendingFunctionArgs.get(callId);
-            if (pending) {
-              pending.args.push(delta);
-            }
-          }
-        }
-
-        // Output item added — start tracking function calls
-        if (eventType === "response.output_item.added") {
-          const item = event.item as Record<string, unknown> | undefined;
-          if (item?.type === "function_call") {
-            const callId = String(item.call_id ?? "");
-            const name = String(item.name ?? "");
-            if (callId) {
-              pendingFunctionArgs.set(callId, { id: callId, name, args: [] });
-            }
-          }
-        }
-
-        // Output item done — finalize
-        if (eventType === "response.output_item.done") {
-          const item = event.item as Record<string, unknown> | undefined;
-          if (item?.type === "function_call") {
-            const callId = String(item.call_id ?? "");
-            const name = String(item.name ?? "");
-            const args = String(item.arguments ?? "{}");
-            // Prefer the accumulated streamed args if we have them
-            const pending = pendingFunctionArgs.get(callId);
-            const finalArgs = pending && pending.args.length > 0 ? pending.args.join("") : args;
-            toolCalls.push({ id: callId, name, arguments: finalArgs });
-            pendingFunctionArgs.delete(callId);
-          } else if (item?.type === "message") {
-            // Extract text from completed message if we missed deltas
-            const content = item.content as unknown[];
-            if (Array.isArray(content)) {
-              for (const part of content) {
-                const p = part as Record<string, unknown>;
-                if ((p.type === "output_text" || p.type === "text") && typeof p.text === "string") {
-                  // Only add if we didn't already capture via deltas
-                  if (textParts.length === 0) {
-                    textParts.push(p.text);
-                  }
-                }
-              }
-            }
-          } else if (item?.type === "reasoning") {
-            const id = String(item.id ?? "");
-            if (!id) continue;
-            const summaryParts = Array.isArray(item.summary) ? item.summary : [];
-            const summary: string[] = [];
-            for (const part of summaryParts) {
-              const p = part as Record<string, unknown>;
-              if (p?.type === "summary_text" && typeof p.text === "string" && p.text.trim()) {
-                summary.push(p.text);
-              }
-            }
-            const encryptedContent = typeof item.encrypted_content === "string" ? item.encrypted_content : undefined;
-            reasoningItems.push({ id, summary, ...(encryptedContent ? { encryptedContent } : {}) });
-          }
-        }
-
-        // Response completed — extract usage
-        if (eventType === "response.completed") {
-          const response = event.response as Record<string, unknown> | undefined;
-          const u = response?.usage as Record<string, number> | undefined;
-          if (u) {
-            usage = {
-              promptTokens: u.input_tokens,
-              completionTokens: u.output_tokens,
-              totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
-              reasoningTokens: typeof u.output_tokens_details === "object" && u.output_tokens_details !== null
-                ? Number((u.output_tokens_details as Record<string, unknown>).reasoning_tokens ?? 0) || undefined
-                : undefined,
-            };
-          }
+    // Function call arguments streaming
+    if (eventType === "response.function_call_arguments.delta") {
+      const callId = String(event.call_id ?? event.item_id ?? "");
+      const delta = String(event.delta ?? "");
+      if (callId && delta) {
+        const pending = pendingFunctionArgs.get(callId);
+        if (pending) {
+          pending.args.push(delta);
         }
       }
     }
-  } finally {
-    reader.releaseLock();
+
+    // Output item added — start tracking function calls
+    if (eventType === "response.output_item.added") {
+      const item = event.item as Record<string, unknown> | undefined;
+      if (item?.type === "function_call") {
+        const callId = String(item.call_id ?? "");
+        const name = String(item.name ?? "");
+        if (callId) {
+          pendingFunctionArgs.set(callId, { id: callId, name, args: [] });
+        }
+      }
+    }
+
+    // Output item done — finalize
+    if (eventType === "response.output_item.done") {
+      const item = event.item as Record<string, unknown> | undefined;
+      if (item?.type === "function_call") {
+        const callId = String(item.call_id ?? "");
+        const name = String(item.name ?? "");
+        const args = String(item.arguments ?? "{}");
+        // Prefer the accumulated streamed args if we have them
+        const pending = pendingFunctionArgs.get(callId);
+        const finalArgs = pending && pending.args.length > 0 ? pending.args.join("") : args;
+        toolCalls.push({ id: callId, name, arguments: finalArgs });
+        pendingFunctionArgs.delete(callId);
+      } else if (item?.type === "message") {
+        // Extract text from completed message if we missed deltas
+        const content = item.content as unknown[];
+        if (Array.isArray(content)) {
+          for (const part of content) {
+            const p = part as Record<string, unknown>;
+            if ((p.type === "output_text" || p.type === "text") && typeof p.text === "string") {
+              // Only add if we didn't already capture via deltas
+              if (textParts.length === 0) {
+                textParts.push(p.text);
+              }
+            }
+          }
+        }
+      } else if (item?.type === "reasoning") {
+        const id = String(item.id ?? "");
+        if (!id) continue;
+        const summaryParts = Array.isArray(item.summary) ? item.summary : [];
+        const summary: string[] = [];
+        for (const part of summaryParts) {
+          const p = part as Record<string, unknown>;
+          if (p?.type === "summary_text" && typeof p.text === "string" && p.text.trim()) {
+            summary.push(p.text);
+          }
+        }
+        const encryptedContent = typeof item.encrypted_content === "string" ? item.encrypted_content : undefined;
+        reasoningItems.push({ id, summary, ...(encryptedContent ? { encryptedContent } : {}) });
+      }
+    }
+
+    // Response completed — extract usage
+    if (eventType === "response.completed") {
+      const response = event.response as Record<string, unknown> | undefined;
+      const u = response?.usage as Record<string, number> | undefined;
+      if (u) {
+        usage = {
+          promptTokens: u.input_tokens,
+          completionTokens: u.output_tokens,
+          totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
+          reasoningTokens: typeof u.output_tokens_details === "object" && u.output_tokens_details !== null
+            ? Number((u.output_tokens_details as Record<string, unknown>).reasoning_tokens ?? 0) || undefined
+            : undefined,
+        };
+      }
+    }
   }
 
   // Stream EOF without a matching response.output_item.done for an in-flight

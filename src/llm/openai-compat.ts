@@ -2,6 +2,7 @@ import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../c
 import type { Tool } from "../core/tools.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
 import { CHARS_PER_TOKEN } from "../core/context-compactor.js";
+import { parseSseDataEvents } from "./sse-reader.js";
 
 export type OpenAICompatConfig = {
   baseUrl: string;
@@ -370,25 +371,10 @@ function createIncrementalSseTextExtractor(onDelta: (delta: string) => void): (r
   };
 }
 
-function parseSseDataEvents(rawBody: string): string[] {
-  const events: string[] = [];
-  let current = "";
-  for (const line of rawBody.split(/\r?\n/)) {
-    if (line.length === 0) {
-      const trimmed = current.trim();
-      if (trimmed.length > 0) events.push(trimmed);
-      current = "";
-      continue;
-    }
-    if (line.startsWith(":")) continue;
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice("data:".length).trimStart();
-    current = current.length > 0 ? `${current}\n${payload}` : payload;
-  }
-  const tail = current.trim();
-  if (tail.length > 0) events.push(tail);
-  return events;
-}
+// Data-event extraction lives in ./sse-reader.ts so codex-responses (Responses
+// API stream) can reuse the same line buffering. Re-imported here for the
+// post-stream reconciliation pass over a buffered body.
+// (parseSseDataEvents is imported at the top of this file.)
 
 type StreamToolCallAccumulator = {
   id?: string;
