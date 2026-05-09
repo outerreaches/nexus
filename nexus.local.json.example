@@ -1,0 +1,206 @@
+{
+  // Nexus configuration (JSON5 - comments are ok)
+  // Local-first sample for LM Studio or another OpenAI-compatible local server.
+  //
+  // Copy to your config path, usually:
+  //   ~/.nexus/nexus.json
+  //
+  // Also set these in the gateway env file, usually:
+  //   ~/.nexus/config/gateway/nexus.env
+  //
+  //   NEXUS_LOCAL_LLM_BASE_URL=http://host.docker.internal:1234/v1
+  //   NEXUS_LOCAL_LLM_MODEL=qwen/qwen3.6-35b-a3b@q4_k_m
+  //   # Optional: force Qwen chat-template compatibility when the model id
+  //   # does not contain "qwen". Auto-detected for qwen/* model names.
+  //   # NEXUS_LLM_CHAT_TEMPLATE_COMPAT=qwen
+  //
+  // If LM Studio runs on a different host or VM, replace host.docker.internal
+  // with the IP or DNS name reachable from the Nexus gateway container.
+
+  "port": 18789,
+
+  // Map env-var names to {{secret:provider/path#field}} references.
+  // Local LM Studio does not normally need an API key, so no local LLM
+  // secret is configured here. Add one only if your local endpoint requires
+  // bearer auth.
+  "secrets": {
+    "env": {
+      // Search / scraping
+      "BRAVE_API_KEY": "{{secret:sidecar-main/search.brave.api#password}}",
+      "FIRECRAWL_API_KEY": "{{secret:sidecar-main/search.firecrawl.api#password}}",
+      "PERPLEXITY_API_KEY": "{{secret:sidecar-main/search.perplexity.api#password}}",
+
+      // SVG / vector tools
+      "QUIVER_SVG_API_KEY": "{{secret:sidecar-main/quiver.svg.api#password}}",
+
+      // Telegram
+      "TELEGRAM_BOT_TOKEN": "{{secret:sidecar-main/telegram.bot.token#password}}",
+
+      // Google OAuth
+      "GOOGLE_CLIENT_ID": "{{secret:sidecar-main/google.oauth#username}}",
+      "GOOGLE_CLIENT_SECRET": "{{secret:sidecar-main/google.oauth#password}}",
+
+      // Market / data sources
+      "ALPHAVANTAGE_API_KEY": "{{secret:sidecar-main/data.alphavantage.api#password}}",
+      "MARKETSTACK_API_KEY": "{{secret:sidecar-main/data.marketstack.api#password}}",
+      "TWELVEDATA_API_KEY": "{{secret:sidecar-main/data.twelvedata.api#password}}",
+      "COINLAYER_API_KEY": "{{secret:sidecar-main/data.coinlayer.api#password}}",
+      "CRYPTOCOMPARE_API_KEY": "{{secret:sidecar-main/data.cryptocompare.api#password}}",
+      "OPEN_METALS_API_KEY": "{{secret:sidecar-main/data.openmetals.api#password}}",
+
+      // Social / X auth cookies
+      "AUTH_TOKEN": "{{secret:sidecar-main/twitter.auth.auth_token#password}}",
+      "CT0": "{{secret:sidecar-main/twitter.auth.ct0#password}}"
+    }
+  },
+
+  "runtime": {
+    "profile": "primary"
+  },
+
+  "llm": {
+    // Default provider - local OpenAI-compatible endpoint.
+    "openaiCompat": {
+      "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
+      "model": "${NEXUS_LOCAL_LLM_MODEL}",
+      "maxTokens": 8192,
+      "stream": true,
+      "stripCacheControl": true,
+
+      // If your local endpoint requires bearer auth, add:
+      // "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}"
+    },
+
+    "providers": {
+      "local": {
+        "baseUrl": "${NEXUS_LOCAL_LLM_BASE_URL}",
+        "model": "${NEXUS_LOCAL_LLM_MODEL}",
+        "maxTokens": 8192,
+        "stream": true,
+        "stripCacheControl": true,
+
+        // If your local endpoint requires bearer auth, add:
+        // "apiKey": "${NEXUS_LOCAL_LLM_API_KEY}"
+      }
+    },
+
+    "routing": {
+      "default": {
+        "primary": { "provider": "local" }
+      },
+      "byPreset": {
+        "orchestrator": { "primary": { "provider": "local" } },
+        "security-researcher": { "primary": { "provider": "local" } },
+        "intake-manager": { "primary": { "provider": "local" } },
+        "coder": { "primary": { "provider": "local" } },
+        "trader": { "primary": { "provider": "local" } },
+        "analyst": { "primary": { "provider": "local" } },
+        "graphic-designer": { "primary": { "provider": "local" } }
+      },
+      "byAgent": {},
+      "localProvider": "local"
+    },
+
+    // Local text models do not replace image/video/SVG-specific providers.
+    // Add tool routes here only when you intentionally configure remote or
+    // specialized local providers for those tools.
+    "toolRouting": {
+      "default": {},
+      "byPreset": {},
+      "byAgent": {}
+    },
+
+    "transientRetries": 3
+  },
+
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "${TELEGRAM_BOT_TOKEN}",
+      "mode": "polling",
+      "allowFrom": [],
+      "requireMentionInGroups": true,
+      "agentId": "main",
+      "streaming": {
+        "enabled": true,
+        "serializePerChat": true,
+        "maxConcurrentPerChat": 1,
+        "previewTransport": "message",
+        "previewThrottleMs": 650,
+        "fallbackToSendOutput": true,
+        "emitFallbackNotice": true
+      },
+      "pairing": {
+        "enabled": true,
+        "codeTtlMs": 3600000,
+        "maxPending": 3
+      }
+    }
+  },
+
+  "proactive": {
+    "enabled": true,
+    "agentId": "main",
+    "intervalMs": 900000,
+    "maxIntervalMs": 3600000,
+    "jitterMs": 5000,
+    "notifyTelegram": true,
+    "pauseOnActiveTelegram": true,
+    "activeTelegramQuietMs": 120000
+  },
+
+  "scheduler": {
+    "enabled": true,
+    "tickIntervalMs": 15000,
+    "maxRunsPerTick": 5,
+    "concurrency": 5,
+    "leaseTtlMs": 600000,
+    "maxConsecutiveFailures": 5,
+    "notifyAgentOnFailure": true,
+    "notifyCooldownMs": 300000,
+    "contextMode": "delta"
+  },
+
+  "nudges": {
+    "enabled": true,
+    "channels": ["cli", "telegram"],
+    "memoryTurnInterval": 10,
+    "skillIterationInterval": 20
+  },
+
+  "skills": {
+    "enabled": true,
+    "prompt": {
+      "enabled": true,
+      "maxInlineSkills": 5,
+      "includeReferences": true,
+      "maxReferencesPerSkill": 2,
+      "maxReferenceChars": 1600
+    }
+  },
+
+  "maintenance": {
+    "enabled": true,
+    "archiveRetentionDays": 180,
+    "jobRunRetentionDays": 60,
+    "ttlCleanupEnabled": true
+  },
+
+  "permissions": {
+    "allowShellExec": true,
+    "allowCodeEdit": true,
+    "allowCodeWrite": true
+  },
+
+  "limits": {
+    "maxConcurrentAgents": 5,
+    "maxToolCallsPerRun": 200,
+    "maxIterationsPerRun": 100,
+    "maxContextTokens": 32768
+  },
+
+  "federation": {
+    "enabled": true,
+    "localInstanceId": "local"
+  }
+}

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collapseConsecutiveSystemMessages, normalizeAssistantContent, parseChatCompletionResponseBody } from "./openai-compat.js";
+import {
+  collapseConsecutiveSystemMessages,
+  normalizeAssistantContent,
+  normalizeMessagesForQwenChatTemplate,
+  parseChatCompletionResponseBody,
+} from "./openai-compat.js";
 
 test("collapseConsecutiveSystemMessages merges adjacent system prompts", () => {
   const collapsed = collapseConsecutiveSystemMessages([
@@ -18,6 +23,31 @@ test("collapseConsecutiveSystemMessages merges adjacent system prompts", () => {
     { role: "system", content: "System C" },
     { role: "assistant", content: "done" },
   ]);
+});
+
+test("normalizeMessagesForQwenChatTemplate converts non-initial system messages to user context", () => {
+  const normalized = normalizeMessagesForQwenChatTemplate([
+    { role: "system", content: "Base system" },
+    { role: "user", content: "Build the thing" },
+    { role: "system", content: "Runtime hint" },
+  ]);
+
+  assert.deepEqual(normalized, [
+    { role: "system", content: "Base system" },
+    { role: "user", content: "Build the thing" },
+    { role: "user", content: "[Nexus runtime context]\nRuntime hint" },
+  ]);
+});
+
+test("normalizeMessagesForQwenChatTemplate adds a real user anchor for compacted tool-only windows", () => {
+  const normalized = normalizeMessagesForQwenChatTemplate([
+    { role: "system", content: "Base system" },
+    { role: "assistant", content: null, toolCalls: [{ id: "call_1", name: "file_read", arguments: "{}" }] },
+    { role: "tool", name: "file_read", toolCallId: "call_1", content: "result" },
+  ]);
+
+  assert.equal(normalized.at(-1)?.role, "user");
+  assert.match(String(normalized.at(-1)?.content), /Continue the current Nexus task/);
 });
 
 test("normalizeAssistantContent handles plain string content", () => {

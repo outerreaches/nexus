@@ -1,4 +1,4 @@
-import type { ChatMessage, ReasoningItem, ToolCall } from "../core/types.js";
+import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
 import { CHARS_PER_TOKEN } from "../core/context-compactor.js";
@@ -137,14 +137,79 @@ function normalizeToolCallArgumentsForRequest(raw: unknown): string {
   return toObjectString(raw) ?? "{}";
 }
 
-function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatMessage[] {
-  return collapseConsecutiveSystemMessages(messages).map((m) => {
+const QWEN_CONTEXT_USER_PREFIX = "[Nexus runtime context]\n";
+const QWEN_CONTINUATION_USER_ANCHOR =
+  "[Nexus continuation]\nContinue the current Nexus task using the context and tool results above. " +
+  "If the task is complete, provide the final answer.";
+
+function userContentAsText(content: ChatUserContent): string {
+  return typeof content === "string"
+    ? content
+    : renderUserContentForText(content, { includeImageUrls: false });
+}
+
+function isToolResponseUserContent(content: ChatUserContent): boolean {
+  const text = userContentAsText(content).trim();
+  return text.startsWith("<tool_response>") && text.endsWith("</tool_response>");
+}
+
+function shouldUseQwenChatTemplateCompat(config: OpenAICompatConfig): boolean {
+  const override = (process.env.NEXUS_LLM_CHAT_TEMPLATE_COMPAT ?? "").trim().toLowerCase();
+  if (override === "none" || override === "off" || override === "false" || override === "0") return false;
+  if (override === "qwen" || override === "qwen3" || override === "qwen3.5" || override === "qwen3.6") return true;
+  return config.model.toLowerCase().includes("qwen");
+}
+
+export function normalizeMessagesForQwenChatTemplate(messages: ChatMessage[]): ChatMessage[] {
+  const collapsed = collapseConsecutiveSystemMessages(messages);
+  const normalized: ChatMessage[] = [];
+
+  for (const message of collapsed) {
+    if (message.role !== "system") {
+      normalized.push(message);
+      continue;
+    }
+
+    if (normalized.length === 0) {
+      normalized.push(message);
+      continue;
+    }
+
+    normalized.push({
+      role: "user",
+      content: `${QWEN_CONTEXT_USER_PREFIX}${message.content}`,
+      ...(message.cacheControl ? { cacheControl: message.cacheControl } : {}),
+    });
+  }
+
+  const hasRealUserQuery = normalized.some((message) =>
+    message.role === "user" && !isToolResponseUserContent(message.content)
+  );
+  if (!hasRealUserQuery) {
+    normalized.push({
+      role: "user",
+      content: QWEN_CONTINUATION_USER_ANCHOR,
+    });
+  }
+
+  return normalized;
+}
+
+function prepareMessagesForChatTemplate(messages: ChatMessage[], config: OpenAICompatConfig): ChatMessage[] {
+  if (shouldUseQwenChatTemplateCompat(config)) {
+    return normalizeMessagesForQwenChatTemplate(messages);
+  }
+  return collapseConsecutiveSystemMessages(messages);
+}
+
+function toOpenAIMessages(messages: ChatMessage[], config: OpenAICompatConfig): OpenAIChatMessage[] {
+  return prepareMessagesForChatTemplate(messages, config).map((m) => {
     if (m.role === "user") {
       return {
         role: "user",
         content: m.content,
         ...(m.name ? { name: m.name } : {}),
-        ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
+        ...(!config.stripCacheControl && m.cacheControl ? { cache_control: m.cacheControl } : {}),
       };
     }
     if (m.role === "assistant") {
@@ -157,17 +222,17 @@ function toOpenAIMessages(messages: ChatMessage[], strip?: boolean): OpenAIChatM
             type: "function",
             function: { name: tc.name, arguments: normalizeToolCallArgumentsForRequest(tc.arguments) },
           })),
-          ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}),
+          ...(!config.stripCacheControl && m.cacheControl ? { cache_control: m.cacheControl } : {}),
         };
       }
-      return { role: "assistant", content: m.content, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "assistant", content: m.content, ...(!config.stripCacheControl && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     if (m.role === "tool") {
-      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "tool", content: m.content, tool_call_id: m.toolCallId, name: m.name, ...(!config.stripCacheControl && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     // Handle system messages explicitly to appease TS
     if (m.role === "system") {
-      return { role: "system", content: m.content, ...(!strip && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
+      return { role: "system", content: m.content, ...(!config.stripCacheControl && m.cacheControl ? { cache_control: m.cacheControl } : {}) };
     }
     return m as unknown as OpenAIChatMessage;
   });
@@ -786,7 +851,7 @@ export class OpenAICompatClient implements LLMClient {
         tool_choice: "auto",
         temperature: params.temperature ?? 0.2,
         max_tokens: this.config.maxTokens ?? 16384,
-        messages: toOpenAIMessages(activeMessages, this.config.stripCacheControl),
+        messages: toOpenAIMessages(activeMessages, this.config),
       };
       const stream = resolveChatCompletionStreaming(this.config, requestPayload);
       if (stream) requestPayload.stream = true;
