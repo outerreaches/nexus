@@ -449,16 +449,19 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
           const telegram = deps.toolContext.telegram as { sendOutput?: (chatId: number, output: string) => Promise<void> } | undefined;
           if (!origin.telegramChatId) throw new Error(`session_resume telegram origin missing chat id for job ${job.id}`);
           if (!telegram?.sendOutput) throw new Error("telegram transport unavailable for session_resume job");
-          if (!isIdleOutput(res.output)) {
-            await telegram.sendOutput(origin.telegramChatId, res.output);
-          }
-          deps.agent.ackDeployIfPending({
-            runId: res.runId ?? null,
-            sessionId: res.sessionId,
-            channel: origin.channel,
-            channelKey: origin.channelKey,
-            agentId: origin.agentId,
-          });
+          await deps.agent.withTelegramDeliveryAck(
+            {
+              chatId: origin.telegramChatId,
+              runId: res.runId ?? null,
+              sessionId: res.sessionId,
+              agentId: origin.agentId,
+            },
+            async () => {
+              if (!isIdleOutput(res.output)) {
+                await telegram.sendOutput!(origin.telegramChatId!, res.output);
+              }
+            },
+          );
         }
 
         const ok = res.status === "complete";

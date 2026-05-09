@@ -103,6 +103,22 @@ test("scheduler resumes one-shot telegram follow-up jobs in the original session
         ackDeployIfPending: (params: any) => {
           acks.push(params);
         },
+        withTelegramDeliveryAck: async (
+          ackContext: { chatId: number; runId: string | null; sessionId: string; agentId: string },
+          deliver: () => Promise<unknown>,
+        ) => {
+          try {
+            return await deliver();
+          } finally {
+            acks.push({
+              runId: ackContext.runId,
+              sessionId: ackContext.sessionId,
+              channel: "telegram",
+              channelKey: String(ackContext.chatId),
+              agentId: ackContext.agentId,
+            });
+          }
+        },
       } as any,
     });
     assert.ok(scheduler);
@@ -182,6 +198,7 @@ test("scheduler keeps legacy one-shot report_only agent tasks on the report pipe
           iterationsUsed: 1,
         }),
         ackDeployIfPending: () => {},
+        withTelegramDeliveryAck: async (_ctx: unknown, deliver: () => Promise<unknown>) => deliver(),
       } as any,
     });
     assert.ok(scheduler);

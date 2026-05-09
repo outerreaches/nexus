@@ -1435,14 +1435,10 @@ export async function startTelegramBot(deps: {
           agentId: tg.agentId,
           text: `Human action ${id} is fulfilled.`,
         });
-        await sendOutput(chatId, res.output);
-        deps.agent.ackDeployIfPending({
-          runId: res.runId,
-          sessionId: res.sessionId,
-          channel: "telegram",
-          channelKey: String(chatId),
-          agentId: tg.agentId,
-        });
+        await deps.agent.withTelegramDeliveryAck(
+          { chatId, runId: res.runId, sessionId: res.sessionId, agentId: tg.agentId },
+          () => sendOutput(chatId, res.output),
+        );
         return;
       }
 
@@ -1623,67 +1619,64 @@ export async function startTelegramBot(deps: {
             await streamPreview.finish();
           }
 
-          const previewState = streamPreview.state();
-          if (previewState.failed) {
-            deps.log(
-              `telegram: stream_error chat_id=${chatId} preview_transport=${previewState.mode}`,
-            );
-          }
-
-          const extracted = await extractTelegramImageAttachments(res.output);
-          const shouldFallbackSend =
-            (previewState.failed && streamingFallbackToSendOutput)
-            || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
-          const finalText = mergeTelegramFinalTextWithToolSummary(extracted.text, previewState.toolSummaryText);
-          if (shouldFallbackSend) {
-            await streamPreview.clear();
-            if (previewState.failed && streamingEmitFallbackNotice && !previewState.hadPreview) {
-              await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
-                ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
-              });
-            }
-            deps.log(
-              `telegram: stream_fallback_send_output chat_id=${chatId} reason=${
-                previewState.failed ? "stream_error" : "no_preview_updates"
-              }`,
-            );
-            await sendOutput(chatId, mergeTelegramFinalTextWithToolSummary(res.output, previewState.toolSummaryText), { messageThreadId });
-          } else {
-            const textDelivered = await finalizeTelegramStreamPreviewText({
-              api: bot.api,
-              chatId,
-              messageThreadId,
-              text: finalText,
-              preview: previewState,
-              log: deps.log,
-            });
-            if (!textDelivered && finalText.trim().length > 0) {
-              deps.log(`telegram: stream_finalize_fallback_send_output chat_id=${chatId}`);
-              await sendOutput(chatId, finalText, { messageThreadId });
-            }
-            // Send images as follow-up messages (they can't be part of a text stream)
-            for (const img of extracted.imagePaths) {
-              try {
-                await sendFile(chatId, img, {
-                  caption: path.basename(img),
-                  messageThreadId,
-                });
-              } catch (err) {
-                deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-                await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
-                  ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
-                });
+          await deps.agent.withTelegramDeliveryAck(
+            { chatId, runId: res.runId, sessionId: res.sessionId, agentId: tg.agentId },
+            async () => {
+              const previewState = streamPreview.state();
+              if (previewState.failed) {
+                deps.log(
+                  `telegram: stream_error chat_id=${chatId} preview_transport=${previewState.mode}`,
+                );
               }
-            }
-          }
 
-          deps.agent.ackDeployIfPending({
-            runId: res.runId,
-            sessionId: res.sessionId,
-            channel: "telegram",
-            channelKey: String(chatId),
-            agentId: tg.agentId,
-          });
+              const extracted = await extractTelegramImageAttachments(res.output);
+              const shouldFallbackSend =
+                (previewState.failed && streamingFallbackToSendOutput)
+                || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
+              const finalText = mergeTelegramFinalTextWithToolSummary(extracted.text, previewState.toolSummaryText);
+              if (shouldFallbackSend) {
+                await streamPreview.clear();
+                if (previewState.failed && streamingEmitFallbackNotice && !previewState.hadPreview) {
+                  await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
+                    ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                  });
+                }
+                deps.log(
+                  `telegram: stream_fallback_send_output chat_id=${chatId} reason=${
+                    previewState.failed ? "stream_error" : "no_preview_updates"
+                  }`,
+                );
+                await sendOutput(chatId, mergeTelegramFinalTextWithToolSummary(res.output, previewState.toolSummaryText), { messageThreadId });
+              } else {
+                const textDelivered = await finalizeTelegramStreamPreviewText({
+                  api: bot.api,
+                  chatId,
+                  messageThreadId,
+                  text: finalText,
+                  preview: previewState,
+                  log: deps.log,
+                });
+                if (!textDelivered && finalText.trim().length > 0) {
+                  deps.log(`telegram: stream_finalize_fallback_send_output chat_id=${chatId}`);
+                  await sendOutput(chatId, finalText, { messageThreadId });
+                }
+                // Send images as follow-up messages (they can't be part of a text stream)
+                for (const img of extracted.imagePaths) {
+                  try {
+                    await sendFile(chatId, img, {
+                      caption: path.basename(img),
+                      messageThreadId,
+                    });
+                  } catch (err) {
+                    deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
+                    await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+                      ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                    });
+                  }
+                }
+              }
+            },
+          );
         });
       } else {
         // --- Non-streaming path for groups/channels: existing behavior ---
@@ -1704,14 +1697,10 @@ export async function startTelegramBot(deps: {
           clearInterval(typingInterval);
         }
 
-        await sendOutput(chatId, res.output, { messageThreadId });
-        deps.agent.ackDeployIfPending({
-          runId: res.runId,
-          sessionId: res.sessionId,
-          channel: "telegram",
-          channelKey: String(chatId),
-          agentId: tg.agentId,
-        });
+        await deps.agent.withTelegramDeliveryAck(
+          { chatId, runId: res.runId, sessionId: res.sessionId, agentId: tg.agentId },
+          () => sendOutput(chatId, res.output, { messageThreadId }),
+        );
       }
     } catch (err) {
       deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);

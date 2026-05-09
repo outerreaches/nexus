@@ -966,6 +966,31 @@ export class AgentService {
     });
   }
 
+  /**
+   * Run a Telegram delivery callback and ack the pending deploy after it
+   * settles. Centralizes the "deliver, then ack" contract that telegram.ts and
+   * scheduler/job-scheduler.ts both need: ack must happen after sendOutput
+   * because finalize on the host rebuilds this container, and we don't want
+   * to be killed mid-reply. Ack fires in `finally` so transient delivery
+   * failures don't strand a finalize-pending forever.
+   */
+  async withTelegramDeliveryAck<T>(
+    ackContext: { chatId: number | string; runId: string | null; sessionId: string; agentId: string },
+    deliver: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await deliver();
+    } finally {
+      this.ackDeployIfPending({
+        runId: ackContext.runId,
+        sessionId: ackContext.sessionId,
+        channel: "telegram",
+        channelKey: String(ackContext.chatId),
+        agentId: ackContext.agentId,
+      });
+    }
+  }
+
   /** Write deploy-ack if finalize-pending exists and this run matches the pending deploy context. */
   ackDeployIfPending(current: {
     runId: string | null;
