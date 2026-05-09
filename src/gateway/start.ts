@@ -1475,6 +1475,21 @@ export async function startGateway(
   let deployCompletionWorker: DeployCompletionWorker | null = null;
   let deployApprovalWorker: DeployApprovalWorker | null = null;
 
+  // Spread initial-tick load across ~0-2s so background workers don't all
+  // hit the DB at the exact same instant on activation. better-sqlite3 is
+  // synchronous and serializes on the event loop; staggering reduces tail
+  // latency for whatever else is starting up alongside.
+  const scheduleInitialTick = (label: string, tick: () => Promise<unknown>): void => {
+    const delayMs = Math.floor(Math.random() * 2_000);
+    const timer = setTimeout(() => {
+      void tick().catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`${label}: initial tick failed: ${message}`);
+      });
+    }, delayMs);
+    if (typeof timer.unref === "function") timer.unref();
+  };
+
   const startServices = async () => {
     tg = await startTelegramBot({
       config,
@@ -1512,10 +1527,7 @@ export async function startGateway(
       telegram: toolContext.telegram as any,
       log,
     });
-    void runReportBroker?.tick().catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log(`run_report_broker: initial tick failed: ${message}`);
-    });
+    if (runReportBroker) scheduleInitialTick("run_report_broker", () => runReportBroker!.tick());
 
     deployCompletionWorker?.stop();
     deployCompletionWorker = startDeployCompletionWorker({
@@ -1524,10 +1536,7 @@ export async function startGateway(
       candidateRootDir: paths.candidateRootDir,
       log,
     });
-    void deployCompletionWorker?.tick().catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log(`deploy_completion_worker: initial tick failed: ${message}`);
-    });
+    if (deployCompletionWorker) scheduleInitialTick("deploy_completion_worker", () => deployCompletionWorker!.tick());
 
     deployApprovalWorker?.stop();
     deployApprovalWorker = startDeployApprovalWorker({
@@ -1536,10 +1545,7 @@ export async function startGateway(
       candidateRootDir: paths.candidateRootDir,
       log,
     });
-    void deployApprovalWorker?.tick().catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log(`deploy_approval_worker: initial tick failed: ${message}`);
-    });
+    if (deployApprovalWorker) scheduleInitialTick("deploy_approval_worker", () => deployApprovalWorker!.tick());
 
     // Process lifecycle callbacks (best-effort). Requires db + agent + telegram.
     processNotifier = startProcessNotifier({
@@ -1600,10 +1606,7 @@ export async function startGateway(
           intervalMs: config.federation.outbox.intervalMs,
           maxBatch: config.federation.outbox.maxBatch,
         });
-        void federationOutboxWorker.tick().catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          log(`federation/outbox: initial tick failed: ${message}`);
-        });
+        scheduleInitialTick("federation/outbox", () => federationOutboxWorker!.tick());
         log(
           "federation/outbox: started " +
           `intervalMs=${config.federation.outbox.intervalMs} ` +
@@ -1641,10 +1644,7 @@ export async function startGateway(
         maxResponseBytes: 32_768,
         log,
       });
-      void webhookDeliveryWorker.tick().catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`webhook/worker: initial tick failed: ${message}`);
-      });
+      scheduleInitialTick("webhook/worker", () => webhookDeliveryWorker!.tick());
     }
   };
 
