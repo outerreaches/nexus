@@ -1574,12 +1574,24 @@ export async function startTelegramBot(deps: {
           // --- Streaming path: native preview updates (draft-first with runtime fallback) ---
           // Show typing while waiting for first tokens and during tool gaps.
           let typingTimer: ReturnType<typeof setInterval> | null = null;
+          let lastTypingSentMs = 0;
+          const TYPING_COALESCE_MS = 2_000;
+          const sendTypingNow = () => {
+            lastTypingSentMs = Date.now();
+            bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+          };
           const startTyping = () => {
             if (typingTimer) return;
-            bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-            typingTimer = setInterval(() => {
-              bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
-            }, 4_000);
+            // Telegram's typing indicator persists ~5s after the last send.
+            // If we just stopped less than TYPING_COALESCE_MS ago (e.g. tool
+            // ended → text streamed → stopTyping → next tool call → startTyping),
+            // skip the immediate send and let the 4s interval take over —
+            // the user still sees an unbroken indicator. Without this, a
+            // 50-tool-call run produces 50+ extra sendChatAction round-trips.
+            if (Date.now() - lastTypingSentMs >= TYPING_COALESCE_MS) {
+              sendTypingNow();
+            }
+            typingTimer = setInterval(sendTypingNow, 4_000);
           };
           const stopTyping = () => {
             if (!typingTimer) return;
