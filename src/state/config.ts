@@ -16,7 +16,7 @@ const TelegramStreamingSchema = z
     serializePerChat: z.boolean().default(true),
     maxConcurrentPerChat: z.number().int().positive().max(8).default(1),
     previewTransport: z.enum(["auto", "message", "draft"]).default("message"),
-    previewThrottleMs: z.number().int().min(200).max(5000).default(650),
+    previewThrottleMs: z.number().int().min(200).max(5000).default(2500),
     fallbackToSendOutput: z.boolean().default(true),
     emitFallbackNotice: z.boolean().default(true),
   })
@@ -402,7 +402,7 @@ export function buildBootstrapConfigTemplate(): Record<string, unknown> {
           serializePerChat: true,
           maxConcurrentPerChat: 1,
           previewTransport: "message",
-          previewThrottleMs: 650,
+          previewThrottleMs: 2500,
           fallbackToSendOutput: true,
           emitFallbackNotice: true,
         },

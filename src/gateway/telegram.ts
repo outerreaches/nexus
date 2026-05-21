@@ -166,11 +166,15 @@ function resolveMessageThreadId(ctx: Context): number | undefined {
 }
 
 const TELEGRAM_STREAM_PREVIEW_MAX_CHARS = 4096;
-const TELEGRAM_STREAM_PREVIEW_THROTTLE_MS = 650;
+const TELEGRAM_STREAM_PREVIEW_THROTTLE_MS = 2_500;
+const TELEGRAM_STREAM_PREVIEW_MESSAGE_MIN_THROTTLE_MS = 2_500;
 const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
+const TELEGRAM_RATE_LIMIT_GRACE_MS = 1_000;
+const TELEGRAM_RATE_LIMIT_MAX_ATTEMPTS = 3;
 const DRAFT_METHOD_UNAVAILABLE_RE = /(unknown method|method .*not (found|available|supported)|unsupported)/i;
 const DRAFT_CHAT_UNSUPPORTED_RE = /(can't be used|can be used only)/i;
 const MESSAGE_NOT_MODIFIED_RE = /message is not modified/i;
+const TELEGRAM_RETRY_AFTER_RE = /\bretry after\s+(\d+)\b/i;
 
 type TelegramSendMessageDraft = (
   chatId: number,
@@ -196,6 +200,123 @@ function toErrorText(err: unknown): string {
     if (typeof description === "string") return description;
   }
   return String(err);
+}
+
+function sanitizeTelegramErrorDetail(raw: string): string {
+  return raw
+    .replace(/\bbot\d+:[A-Za-z0-9_-]+\b/g, "bot[redacted]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, "[redacted-api-key]")
+    .replace(/\b(api[-_ ]?key|token|password|secret|authorization)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+}
+
+function compactTelegramErrorDetail(err: unknown, maxChars: number = 260): string {
+  const compact = sanitizeTelegramErrorDetail(toErrorText(err)).replace(/\s+/g, " ").trim();
+  if (!compact) return "unknown error";
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, maxChars - 3)}...`;
+}
+
+function formatTelegramRetryAfter(ms: number): string {
+  const seconds = Math.max(1, Math.ceil(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function isTelegramApiError(err: unknown): boolean {
+  const text = toErrorText(err);
+  return /^Call to '[^']+' failed!/i.test(text)
+    || /\b(telegram|bot api|message_thread_id)\b/i.test(text);
+}
+
+export function formatTelegramHandlerErrorMessage(err: unknown): string {
+  const detail = compactTelegramErrorDetail(err);
+  const retryAfterMs = getTelegramRetryAfterMs(err);
+  if (retryAfterMs !== null) {
+    return `ERROR: Telegram rate limit hit. Retry after about ${formatTelegramRetryAfter(retryAfterMs)}. Details: ${detail}`;
+  }
+
+  if (isTelegramApiError(err)) {
+    return `ERROR: Telegram delivery failed: ${detail}`;
+  }
+
+  const text = toErrorText(err);
+  if (/\b(401|403)\b|unauthorized|forbidden|invalid api key|authentication/i.test(text)) {
+    return `ERROR: model/backend authentication failed: ${detail}`;
+  }
+  if (/\b429\b|too many requests|rate limit/i.test(text)) {
+    return `ERROR: model/backend rate limited: ${detail}`;
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|socket hang up|network/i.test(text)) {
+    return `ERROR: model/backend connection failed: ${detail}`;
+  }
+  if (/aborted|cancelled|canceled|interrupted/i.test(text)) {
+    return `ERROR: request interrupted: ${detail}`;
+  }
+  return `ERROR: request failed: ${detail}`;
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
+function readRetryAfterSeconds(value: unknown): number | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  const direct = readFiniteNumber(obj.retry_after) ?? readFiniteNumber(obj.retryAfter);
+  if (direct !== null) return direct;
+  const parameters = obj.parameters;
+  if (parameters && typeof parameters === "object") {
+    const params = parameters as Record<string, unknown>;
+    const fromParams = readFiniteNumber(params.retry_after) ?? readFiniteNumber(params.retryAfter);
+    if (fromParams !== null) return fromParams;
+  }
+  return null;
+}
+
+export function getTelegramRetryAfterMs(err: unknown): number | null {
+  const structuredSeconds = readRetryAfterSeconds(err);
+  if (structuredSeconds !== null) {
+    return Math.max(0, Math.ceil(structuredSeconds * 1000)) + TELEGRAM_RATE_LIMIT_GRACE_MS;
+  }
+
+  const match = TELEGRAM_RETRY_AFTER_RE.exec(toErrorText(err));
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  if (!Number.isFinite(seconds)) return null;
+  return Math.max(0, Math.ceil(seconds * 1000)) + TELEGRAM_RATE_LIMIT_GRACE_MS;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callTelegramApiWithRateLimit<T>(
+  operation: () => Promise<T>,
+  params: {
+    chatId: number;
+    action: string;
+    log: (msg: string) => void;
+    maxAttempts?: number;
+  },
+): Promise<T> {
+  const maxAttempts = Math.max(1, Math.floor(params.maxAttempts ?? TELEGRAM_RATE_LIMIT_MAX_ATTEMPTS));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      if (retryAfterMs === null || attempt >= maxAttempts) {
+        throw err;
+      }
+      params.log(
+        `telegram: rate_limit_wait chat_id=${params.chatId} action=${params.action} retry_after_ms=${retryAfterMs} attempt=${attempt}`,
+      );
+      await delay(retryAfterMs);
+    }
+  }
 }
 
 function resolveSendMessageDraft(api: Bot["api"]): TelegramSendMessageDraft | null {
@@ -744,6 +865,8 @@ type TelegramStreamPreviewState = {
   hadPreview: boolean;
   toolSummaryText: string;
   messageId?: number;
+  rateLimitedUntilMs?: number;
+  retryAfterMs?: number;
 };
 
 type TelegramStreamPreview = {
@@ -786,7 +909,7 @@ export function mergeTelegramFinalTextWithToolSummary(finalText: string, toolSum
   return `${summary}\n\n${body}`;
 }
 
-function createTelegramStreamPreview(params: {
+export function createTelegramStreamPreview(params: {
   api: Bot["api"];
   chatId: number;
   messageThreadId?: number;
@@ -795,7 +918,7 @@ function createTelegramStreamPreview(params: {
   log: (msg: string) => void;
   warn: (msg: string) => void;
 }): TelegramStreamPreview {
-  const throttleMs = Math.max(200, Math.floor(params.throttleMs ?? TELEGRAM_STREAM_PREVIEW_THROTTLE_MS));
+  const configuredThrottleMs = Math.max(200, Math.floor(params.throttleMs ?? TELEGRAM_STREAM_PREVIEW_THROTTLE_MS));
   const threadParams =
     typeof params.messageThreadId === "number"
       ? ({ message_thread_id: params.messageThreadId } as const)
@@ -814,6 +937,8 @@ function createTelegramStreamPreview(params: {
   let previewDraftId = mode === "draft" ? allocateTelegramDraftId() : undefined;
   let failed = false;
   let hadPreview = false;
+  let rateLimitedUntilMs: number | undefined;
+  let lastRateLimitRetryAfterMs: number | undefined;
   let pending = false;
   let ending = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -880,6 +1005,13 @@ function createTelegramStreamPreview(params: {
     await sendViaMessageTransport(nextText);
   };
 
+  const currentThrottleMs = () => {
+    if (mode === "message") {
+      return Math.max(configuredThrottleMs, TELEGRAM_STREAM_PREVIEW_MESSAGE_MIN_THROTTLE_MS);
+    }
+    return configuredThrottleMs;
+  };
+
   const runFlush = async () => {
     if (flushing) return;
     flushing = true;
@@ -897,7 +1029,14 @@ function createTelegramStreamPreview(params: {
         try {
           await sendPreviewText(nextText);
           lastSentText = nextText;
+          rateLimitedUntilMs = undefined;
+          lastRateLimitRetryAfterMs = undefined;
         } catch (err) {
+          const retryAfterMs = getTelegramRetryAfterMs(err);
+          if (retryAfterMs !== null) {
+            lastRateLimitRetryAfterMs = retryAfterMs;
+            rateLimitedUntilMs = Date.now() + retryAfterMs;
+          }
           failed = true;
           params.warn(`telegram: stream_preview_error chat_id=${params.chatId} ${toErrorText(err)}`);
         }
@@ -915,7 +1054,7 @@ function createTelegramStreamPreview(params: {
     flushTimer = setTimeout(() => {
       flushTimer = null;
       void runFlush();
-    }, throttleMs);
+    }, currentThrottleMs());
   };
 
   const appendText = (delta: string) => {
@@ -951,11 +1090,20 @@ function createTelegramStreamPreview(params: {
   const clear = async () => {
     await finish();
     if (typeof previewMessageId === "number") {
+      const messageId = previewMessageId;
       try {
-        await params.api.deleteMessage(params.chatId, previewMessageId);
+        await callTelegramApiWithRateLimit(
+          () => params.api.deleteMessage(params.chatId, messageId),
+          {
+            chatId: params.chatId,
+            action: "deleteMessage",
+            log: params.log,
+            maxAttempts: 2,
+          },
+        );
       } catch (err) {
         params.warn(
-          `telegram: stream_preview_cleanup_failed chat_id=${params.chatId} message_id=${previewMessageId} ${toErrorText(err)}`,
+          `telegram: stream_preview_cleanup_failed chat_id=${params.chatId} message_id=${messageId} ${toErrorText(err)}`,
         );
       }
       previewMessageId = undefined;
@@ -990,6 +1138,8 @@ function createTelegramStreamPreview(params: {
       hadPreview,
       toolSummaryText: buildTelegramToolSummaryText(toolSummaryEntries, omittedToolSummaryEntries),
       ...(typeof previewMessageId === "number" ? { messageId: previewMessageId } : {}),
+      ...(typeof rateLimitedUntilMs === "number" ? { rateLimitedUntilMs } : {}),
+      ...(typeof lastRateLimitRetryAfterMs === "number" ? { retryAfterMs: lastRateLimitRetryAfterMs } : {}),
     }),
   };
 }
@@ -1021,24 +1171,45 @@ async function finalizeTelegramStreamPreviewText(params: {
   }
 
   const sendChunk = async (chunk: string) => {
-    if (threadParams) {
-      await params.api.sendMessage(params.chatId, chunk, threadParams);
-    } else {
-      await params.api.sendMessage(params.chatId, chunk);
-    }
+    await callTelegramApiWithRateLimit(
+      () => (threadParams
+        ? params.api.sendMessage(params.chatId, chunk, threadParams)
+        : params.api.sendMessage(params.chatId, chunk)),
+      {
+        chatId: params.chatId,
+        action: "sendMessage",
+        log: params.log,
+      },
+    );
   };
 
   if (params.preview.mode === "message" && typeof params.preview.messageId === "number") {
+    const previewMessageId = params.preview.messageId;
     const firstChunk = chunks[0]!;
     try {
-      await params.api.editMessageText(params.chatId, params.preview.messageId, firstChunk);
+      await callTelegramApiWithRateLimit(
+        () => params.api.editMessageText(params.chatId, previewMessageId, firstChunk),
+        {
+          chatId: params.chatId,
+          action: "editMessageText",
+          log: params.log,
+        },
+      );
     } catch (err) {
       if (!isMessageNotModifiedError(err)) {
         params.log(
-          `telegram: stream_finalize_edit_failed chat_id=${params.chatId} message_id=${params.preview.messageId} ${toErrorText(err)}; replacing preview`,
+          `telegram: stream_finalize_edit_failed chat_id=${params.chatId} message_id=${previewMessageId} ${toErrorText(err)}; replacing preview`,
         );
         try {
-          await params.api.deleteMessage(params.chatId, params.preview.messageId);
+          await callTelegramApiWithRateLimit(
+            () => params.api.deleteMessage(params.chatId, previewMessageId),
+            {
+              chatId: params.chatId,
+              action: "deleteMessage",
+              log: params.log,
+              maxAttempts: 2,
+            },
+          );
         } catch {
           // ignore delete failure
         }
@@ -1185,12 +1356,20 @@ export async function startTelegramBot(deps: {
     const TELEGRAM_PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif"]);
     if (TELEGRAM_PHOTO_MIME_TYPES.has(mimeType)) {
       try {
-        await bot.api.sendPhoto(chatId, new InputFile(absolute), {
-          caption: options?.caption,
-          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
-        });
+        await callTelegramApiWithRateLimit(
+          () => bot.api.sendPhoto(chatId, new InputFile(absolute), {
+            caption: options?.caption,
+            ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+          }),
+          {
+            chatId,
+            action: "sendPhoto",
+            log: deps.log,
+          },
+        );
         return;
       } catch (err) {
+        if (getTelegramRetryAfterMs(err) !== null) throw err;
         // Some valid images still fail Telegram's photo pipeline (dimension/encoding quirks).
         // Fall back to sendDocument so the user still receives the file.
         deps.log(
@@ -1198,10 +1377,17 @@ export async function startTelegramBot(deps: {
         );
       }
     }
-    await bot.api.sendDocument(chatId, new InputFile(absolute), {
-      caption: options?.caption,
-      ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
-    });
+    await callTelegramApiWithRateLimit(
+      () => bot.api.sendDocument(chatId, new InputFile(absolute), {
+        caption: options?.caption,
+        ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+      }),
+      {
+        chatId,
+        action: "sendDocument",
+        log: deps.log,
+      },
+    );
   };
 
   const sendOutput = async (chatId: number, output: string, options?: { messageThreadId?: number }): Promise<void> => {
@@ -1214,9 +1400,16 @@ export async function startTelegramBot(deps: {
     deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);
     for (const chunk of chunks) {
       if (chunk.trim().length === 0) continue;
-      await bot.api.sendMessage(chatId, chunk, {
-        ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
-      });
+      await callTelegramApiWithRateLimit(
+        () => bot.api.sendMessage(chatId, chunk, {
+          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+        }),
+        {
+          chatId,
+          action: "sendMessage",
+          log: deps.log,
+        },
+      );
     }
     for (const img of extracted.imagePaths) {
       try {
@@ -1226,9 +1419,16 @@ export async function startTelegramBot(deps: {
         });
       } catch (err) {
         deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-        await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
-          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
-        });
+        await callTelegramApiWithRateLimit(
+          () => bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+            ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+          }),
+          {
+            chatId,
+            action: "sendMessage",
+            log: deps.log,
+          },
+        );
       }
     }
   };
@@ -1642,16 +1842,33 @@ export async function startTelegramBot(deps: {
               }
 
               const extracted = await extractTelegramImageAttachments(res.output);
+              const rateLimitedPreviewCanFinalize =
+                previewState.failed
+                && typeof previewState.rateLimitedUntilMs === "number"
+                && previewState.mode === "message"
+                && typeof previewState.messageId === "number";
               const shouldFallbackSend =
-                (previewState.failed && streamingFallbackToSendOutput)
+                (previewState.failed && streamingFallbackToSendOutput && !rateLimitedPreviewCanFinalize)
                 || (!previewState.failed && !previewState.hadPreview && extracted.text.trim().length > 0);
               const finalText = mergeTelegramFinalTextWithToolSummary(extracted.text, previewState.toolSummaryText);
               if (shouldFallbackSend) {
                 await streamPreview.clear();
-                if (previewState.failed && streamingEmitFallbackNotice && !previewState.hadPreview) {
-                  await bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
-                    ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
-                  });
+                if (
+                  previewState.failed
+                  && streamingEmitFallbackNotice
+                  && !previewState.hadPreview
+                  && typeof previewState.rateLimitedUntilMs !== "number"
+                ) {
+                  await callTelegramApiWithRateLimit(
+                    () => bot.api.sendMessage(chatId, "Streaming interrupted. Sending complete response.", {
+                      ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                    }),
+                    {
+                      chatId,
+                      action: "sendMessage",
+                      log: deps.log,
+                    },
+                  );
                 }
                 deps.log(
                   `telegram: stream_fallback_send_output chat_id=${chatId} reason=${
@@ -1681,9 +1898,16 @@ export async function startTelegramBot(deps: {
                     });
                   } catch (err) {
                     deps.log(`telegram: failed to send image ${img}: ${err instanceof Error ? err.message : String(err)}`);
-                    await bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
-                      ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
-                    });
+                    await callTelegramApiWithRateLimit(
+                      () => bot.api.sendMessage(chatId, `(failed to attach image: ${path.basename(img)})`, {
+                        ...(typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : {}),
+                      }),
+                      {
+                        chatId,
+                        action: "sendMessage",
+                        log: deps.log,
+                      },
+                    );
                   }
                 }
               }
@@ -1715,11 +1939,28 @@ export async function startTelegramBot(deps: {
         );
       }
     } catch (err) {
-      deps.log(`telegram: handler_error ${err instanceof Error ? err.message : String(err)}`);
+      const userErrorMessage = formatTelegramHandlerErrorMessage(err);
+      deps.log(`telegram: handler_error ${toErrorText(err)} user_message=${JSON.stringify(userErrorMessage)}`);
       try {
-        await ctx.reply("ERROR: internal error (check gateway logs).");
-      } catch {
-        // ignore reply failures
+        const replyChatId = parseTelegramNumericId(ctx.chat?.id);
+        const replyThreadId = resolveMessageThreadId(ctx);
+        if (replyChatId !== null) {
+          await callTelegramApiWithRateLimit(
+            () => bot.api.sendMessage(replyChatId, userErrorMessage, {
+              ...(typeof replyThreadId === "number" ? { message_thread_id: replyThreadId } : {}),
+            }),
+            {
+              chatId: replyChatId,
+              action: "sendMessage",
+              log: deps.log,
+              maxAttempts: 2,
+            },
+          );
+        } else {
+          await ctx.reply(userErrorMessage);
+        }
+      } catch (replyErr) {
+        deps.log(`telegram: handler_error_reply_failed ${toErrorText(replyErr)}`);
       }
     }
   });

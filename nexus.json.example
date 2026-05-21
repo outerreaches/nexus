@@ -135,7 +135,7 @@
         "serializePerChat": true,
         "maxConcurrentPerChat": 1,
         "previewTransport": "message",
-        "previewThrottleMs": 650,
+        "previewThrottleMs": 2500,
         "fallbackToSendOutput": true,
         "emitFallbackNotice": true
       },
