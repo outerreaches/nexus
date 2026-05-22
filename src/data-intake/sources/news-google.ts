@@ -2,7 +2,7 @@ import Parser from "rss-parser";
 import { z } from "zod";
 
 import type { DataSource, DataIntakeContext, NormalizedRecord } from "../types.js";
-import { getSecret } from "../../secrets/resolve-env.js";
+import { firecrawlConfigured, firecrawlScrape } from "../../tools/firecrawl.js";
 
 // ── Google News RSS URL builders ────────────────────────────────────────────
 
@@ -33,40 +33,6 @@ function buildRssUrl(params: { query?: string; topic?: string; region: string; l
   }
 
   return `${base}?hl=${hl}&gl=${params.region}&ceid=${ceid}`;
-}
-
-// ── Firecrawl article scraping ──────────────────────────────────────────────
-
-const FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape";
-
-async function scrapeArticle(url: string, apiKey: string, timeoutMs: number): Promise<string | null> {
-  try {
-    const res = await fetch(FIRECRAWL_SCRAPE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        url,
-        formats: ["markdown"],
-        onlyMainContent: true,
-        timeout: Math.min(timeoutMs, 15_000),
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    if (!res.ok) {
-      void res.body?.cancel();
-      return null;
-    }
-
-    const json = (await res.json()) as { success?: boolean; data?: { markdown?: string } };
-    if (!json.success || !json.data?.markdown) return null;
-    return json.data.markdown;
-  } catch {
-    return null;
-  }
 }
 
 // ── Source definition ───────────────────────────────────────────────────────
@@ -159,18 +125,15 @@ export const googleNewsSource: DataSource = {
     });
 
     // Scrape top articles with Firecrawl if requested
-    if (parsed.scrapeContent) {
-      const apiKey = (getSecret("FIRECRAWL_API_KEY") ?? "").trim();
-      if (apiKey) {
-        const toScrape = articles.slice(0, parsed.maxScrape);
-        const results = await Promise.allSettled(
-          toScrape.map((a) => scrapeArticle(a.url, apiKey, 20_000)),
-        );
-        for (let i = 0; i < results.length; i++) {
-          const result = results[i];
-          if (result.status === "fulfilled" && result.value) {
-            articles[i].content = result.value;
-          }
+    if (parsed.scrapeContent && firecrawlConfigured()) {
+      const toScrape = articles.slice(0, parsed.maxScrape);
+      const results = await Promise.allSettled(
+        toScrape.map((a) => firecrawlScrape(a.url, { timeoutMs: 20_000, scrapeTimeoutCapMs: 15_000 })),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === "fulfilled" && result.value) {
+          articles[i].content = result.value.markdown;
         }
       }
     }

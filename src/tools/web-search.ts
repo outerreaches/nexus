@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { defineTool } from "../core/tools.js";
 import { getSecret } from "../secrets/resolve-env.js";
+import { firecrawlBaseUrl, firecrawlConfigured, firecrawlHeaders, firecrawlUrl } from "./firecrawl.js";
 import type { CacheEntry } from "./web-shared.js";
 import { normalizeCacheKey, readCache, readResponseText, truncateText, withTimeout, writeCache } from "./web-shared.js";
 
@@ -15,6 +16,7 @@ const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+// Firecrawl endpoints (cloud or self-hosted) are resolved via ./firecrawl.js.
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 
@@ -24,7 +26,7 @@ function resolveProvider(preferred: "auto" | "brave" | "perplexity" | "firecrawl
   if (preferred === "brave") return "brave";
   if (preferred === "perplexity") return "perplexity";
   if (preferred === "firecrawl") return "firecrawl";
-  const hasFirecrawl = Boolean((getSecret("FIRECRAWL_API_KEY") ?? "").trim());
+  const hasFirecrawl = firecrawlConfigured();
   const hasBrave = Boolean((getSecret("BRAVE_API_KEY") ?? "").trim());
   const hasPerplexityKey = Boolean((getSecret("PERPLEXITY_API_KEY") ?? "").trim());
   // Prefer Firecrawl (returns page content); fall back to Brave (structured), then Perplexity (LLM).
@@ -169,8 +171,6 @@ async function perplexitySearch(params: {
 
 // ── Firecrawl search ────────────────────────────────────────────────────────
 
-const FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v1/search";
-
 type FirecrawlHit = {
   url?: string;
   title?: string;
@@ -228,18 +228,16 @@ async function firecrawlSearch(params: {
   timeoutMs: number;
   workspaceDir: string;
 }): Promise<Record<string, unknown>> {
-  const apiKey = (getSecret("FIRECRAWL_API_KEY") ?? "").trim();
-  if (!apiKey) {
-    throw new Error("Missing FIRECRAWL_API_KEY (required for web_search provider=firecrawl).");
+  if (!firecrawlConfigured()) {
+    throw new Error(
+      "Missing FIRECRAWL_API_KEY or FIRECRAWL_API_URL (required for web_search provider=firecrawl).",
+    );
   }
 
   const start = Date.now();
-  const res = await fetch(FIRECRAWL_SEARCH_URL, {
+  const res = await fetch(firecrawlUrl("search"), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: firecrawlHeaders(),
     body: JSON.stringify({
       query: params.query,
       limit: params.count,
@@ -310,15 +308,15 @@ export const webSearch = defineTool({
     if (!provider) {
       return [
         "ERROR: web_search is not configured.",
-        "Set FIRECRAWL_API_KEY (Firecrawl, recommended), BRAVE_API_KEY (Brave Search), " +
-          "or PERPLEXITY_API_KEY / OPENROUTER_API_KEY (Perplexity Sonar).",
+        "Set FIRECRAWL_API_KEY or FIRECRAWL_API_URL (Firecrawl — cloud or self-hosted, recommended), " +
+          "BRAVE_API_KEY (Brave Search), or PERPLEXITY_API_KEY / OPENROUTER_API_KEY (Perplexity Sonar).",
       ].join("\n");
     }
 
     const count = clampCount(args.count);
     const cacheKey = normalizeCacheKey(
       provider === "firecrawl"
-        ? `firecrawl:${args.query}:${count}`
+        ? `firecrawl:${firecrawlBaseUrl()}:${args.query}:${count}`
         : provider === "brave"
           ? `brave:${args.query}:${count}:${args.country ?? "default"}:${args.search_lang ?? "default"}:${args.ui_lang ?? "default"}:${args.freshness ?? "default"}`
           : `perplexity:${args.query}:${args.model}`,
