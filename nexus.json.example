@@ -19,6 +19,9 @@
       // Search / scraping
       "BRAVE_API_KEY": "{{secret:sidecar-main/search.brave.api#password}}",
       "FIRECRAWL_API_KEY": "{{secret:sidecar-main/search.firecrawl.api#password}}",
+      // Self-hosted Firecrawl: set the base URL (no /v1 suffix). When the
+      // instance has auth disabled, the FIRECRAWL_API_KEY above is not needed.
+      // "FIRECRAWL_API_URL": "http://firecrawl.internal:3002",
       "PERPLEXITY_API_KEY": "{{secret:sidecar-main/search.perplexity.api#password}}",
 
       // SVG / vector tools
