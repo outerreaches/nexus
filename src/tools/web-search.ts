@@ -287,12 +287,17 @@ async function firecrawlSearch(params: {
 export const webSearch = defineTool({
   name: "web_search",
   description:
-    "Search the web with caching + timeouts. " +
-    "Firecrawl (default) returns structured results with full page content saved to files for on-demand reading. " +
-    "Brave returns structured snippets. Perplexity Sonar returns LLM-synthesized answers.",
+    "Search the web with caching + timeouts. The backend is auto-selected from your " +
+    "configured providers (Firecrawl, Brave, or Perplexity) — leave `provider` at its " +
+    "default ('auto') unless you have a specific reason to override. Returns title + " +
+    "URL + snippet per hit; when the resolved provider supports it, full page markdown " +
+    "is also saved to local files for follow-up reading via file_read.",
   parameters: z.object({
     query: z.string().min(1).max(600),
-    provider: z.enum(["auto", "brave", "perplexity", "firecrawl"]).default("auto"),
+    provider: z
+      .enum(["auto", "brave", "perplexity", "firecrawl"])
+      .default("auto")
+      .describe("Search backend. Leave 'auto' unless you specifically need a particular backend."),
     count: z.number().int().min(1).max(10).optional(),
     country: z.string().max(8).optional(),
     search_lang: z.string().max(16).optional(),
