@@ -193,6 +193,59 @@ export const skillCreate = defineTool({
   },
 });
 
+export const skillSearch = defineTool({
+  name: "skill_search",
+  description:
+    "Search learned skills by keyword (matches name, description, triggers, and category). " +
+    "Returns concise matches with descriptions + triggers. Use `skill_get(name)` to load full instructions.",
+  parameters: z.object({
+    query: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Case-insensitive keyword. Omit to list everything indexed by category."),
+    category: z
+      .string()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe("Optional category filter (e.g. 'operations', 'data/news-lookup')."),
+    limit: z.number().int().min(1).max(50).default(15),
+  }),
+  execute: async (args, ctx) => {
+    if (ctx.skillsConfig?.enabled === false) return "ERROR: skills are disabled in runtime config.";
+
+    const agentId = ctx.request?.agentId;
+    const presetName = ctx.request?.preset;
+    const skills = await loadSkills(ctx.stateDir, agentId, presetName);
+    if (skills.length === 0) return JSON.stringify({ total: 0, matches: [] });
+
+    const q = args.query?.trim().toLowerCase();
+    const cat = args.category?.trim().toLowerCase();
+    const filtered = skills.filter((s) => {
+      if (cat) {
+        const label = (s.categoryPath ?? "root").toLowerCase();
+        if (!label.includes(cat)) return false;
+      }
+      if (!q) return true;
+      if (s.name.toLowerCase().includes(q)) return true;
+      if (s.description.toLowerCase().includes(q)) return true;
+      if ((s.categoryPath ?? "").toLowerCase().includes(q)) return true;
+      if (s.triggers.some((t) => t.toLowerCase().includes(q))) return true;
+      return false;
+    });
+
+    const matches = filtered.slice(0, args.limit).map((s) => ({
+      name: s.name,
+      description: s.description,
+      category: s.categoryPath ?? "root",
+      triggers: s.triggers,
+    }));
+    return JSON.stringify({ total: filtered.length, matches });
+  },
+});
+
 export const skillList = defineTool({
   name: "skill_list",
   description: "List learned skills with descriptions, category paths, triggers, and reference metadata.",

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
-import { defineTool, type Tool, type ToolContext } from "../core/tools.js";
+import { buildRunState, defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
 import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
@@ -612,6 +612,15 @@ async function runInProcess(params: {
       }),
   };
   const effectiveWorkerTools = applyExecutionToolOverrides(workerTools, executionTarget);
+
+  const runState = buildRunState({
+    presetKernel: preset.kernel,
+    presetTools: preset.tools,
+    filteredToolNames: effectiveWorkerTools.map((t) => t.name),
+  });
+  if (runState) {
+    workerCtx.runState = runState;
+  }
 
   // Create and run worker
   const runner = new AgentRunner({

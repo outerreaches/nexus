@@ -60,6 +60,9 @@ export const preset: AgentPreset = {
     "- If you hit a blocking error, stop retry loops and report a concise handoff for the orchestrator: what failed, likely cause, and the highest-value next step.",
   ].join("\n"),
   tools: [
+    "tool_search",
+    "tool_load",
+    "tool_unload",
     "web_search",
     "web_fetch",
     "image_analyze",
@@ -69,6 +72,7 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",
+    "skill_search",
     "skill_list",
     "skill_get",
     "skill_create",
@@ -78,6 +82,15 @@ export const preset: AgentPreset = {
     "edit_file",
     "file_list",
     "file_glob"
+  ],
+  kernel: [
+    "web_search",
+    "web_fetch",
+    "skill_search",
+    "skill_get",
+    "read_from_blackboard",
+    "write_to_blackboard",
+    "spawn_agent",
   ],
   toolCallCaps: {
     web_fetch: 12,

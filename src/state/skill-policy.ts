@@ -7,7 +7,7 @@ export type SkillAccessContext = {
   preset?: string | null;
 };
 
-const SKILL_TOOL_NAMES = new Set(["skill_list", "skill_get", "skill_create", "skill_update"]);
+const SKILL_TOOL_NAMES = new Set(["skill_list", "skill_search", "skill_get", "skill_create", "skill_update"]);
 
 function normalize(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";

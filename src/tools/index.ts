@@ -28,7 +28,7 @@ import { humanAction } from "./human-actions.js";
 import { jobManage } from "./jobs.js";
 import { telegramSend } from "./telegram-send.js";
 import { memoryStore, memoryRecall, memorySearch, memoryDelete } from "./memory.js";
-import { skillCreate, skillGet, skillList, skillUpdate } from "./skills.js";
+import { skillCreate, skillGet, skillList, skillSearch, skillUpdate } from "./skills.js";
 import { writeToBlackboard, readFromBlackboard, blackboardManage } from "./blackboard.js";
 import { dbMaintenance } from "./db-maintenance.js";
 import { dbBackup } from "./db-backup.js";
@@ -37,6 +37,7 @@ import { sessionSearch } from "./session-search.js";
 import { shellInteractive } from "./shell-interactive.js";
 import { mcpManage } from "./mcp.js";
 import { dataIntakeManage } from "./data-intake.js";
+import { toolCatalog, toolLoad, toolSearch, toolUnload } from "./tool-catalog.js";
 import { GENERATED_RUNTIME_TOOLS } from "./generated-runtime-tools.js";
 
 export function getBuiltInTools(): Tool[] {
@@ -82,6 +83,7 @@ export function getBuiltInTools(): Tool[] {
     sessionSearch,
     skillCreate,
     skillList,
+    skillSearch,
     skillGet,
     skillUpdate,
     writeToBlackboard,
@@ -92,6 +94,10 @@ export function getBuiltInTools(): Tool[] {
     dbMaintenance,
     dbBackup,
     mcpManage,
+    toolCatalog,
+    toolSearch,
+    toolLoad,
+    toolUnload,
     ...GENERATED_RUNTIME_TOOLS,
   ];
 }

@@ -132,21 +132,14 @@ function formatSystemPrompt(ctx: PersonalizationContext, skillsSection: string |
   const channelHint = formatChannelRoutingHint(channel);
   if (channelHint) sections.push(channelHint);
 
-  // Runtime notes (always appended — routing/delegation rules live in the orchestrator preset)
+  // Runtime notes — keep this section minimal. Anything situation-specific
+  // should live in a skill the agent can discover via `skill_search`.
   sections.push(
     [
       "## Runtime Notes",
-      "- **Blackboard hygiene**: When switching between unrelated tasks, prune the blackboard. Use `blackboard_manage` with `action=\"delete\"` for specific IDs, `action=\"clear\"` for scope resets, or `action=\"prune\"` for age/TTL cleanup.",
-      "- Credential vault management is operator-only via sidecar workflows (`infra/scripts/ha-secretctl.sh` / `infra/scripts/setup/ha-secrets-onboard.sh`). Never ask users for raw secrets in chat; use secret refs and runbook handoff (`infra/internal-doc`).",
-      "- MCP profiles are MCP-only by default. If a task truly requires extra non-MCP tools, explicitly opt in with `allowNonMcpTools=true` and only the minimum specific tools.",
-      "- Use `memory_store`/`memory_recall`/`memory_search` to persist learnings; use `skill_create` for reusable playbooks, and prefer a relevant skill category instead of the root when saving them.",
-      "- Tool availability is determined by the runtime function-calling schema for this run. Do not claim a tool is unavailable from memory; if uncertain, attempt the tool call and rely on explicit runtime errors.",
+      "- Tool availability is the runtime function-calling schema for this turn. If a tool you need isn't visible, call `tool_search` to find it and `tool_load` to surface it on the next turn — never claim a tool is unavailable from memory.",
       "- Tool errors include `[ERROR_CLASS=... retry=...]` tags. Do not retry `validation_error`/`not_found`/`capability_mismatch` without fixing inputs. Retry `transient_provider_error` once with reduced scope; back off for `rate_limited`.",
-      "- For exploratory shell probes, avoid shell control operators by default. Run a single command, then treat expected no-match/not-found outcomes as signal in your analysis.",
-      "- To notify users from non-telegram contexts, use `telegram_send`. For human help (OTP/MFA/CAPTCHA), call `human_action` with `action=\"request\"`.",
-      "- Use absolute paths for file tools. Personality/state files (SOUL.md, etc.) live under the state directory; prefer `file_edit`/`file_edit_lines` for updates.",
-      "- Memory tiers: keep hot critical facts in `AGENTS.md`; use `MEMORY.md` as an authoritative archive with timestamps/source; keep temporary scratch in `NOTES.md`.",
-      "- When you change your own prompts, tools, or code, leave a short note in `NOTES.md`.",
+      "- Use absolute paths for file tools. Personality/state files (SOUL.md, etc.) live under the state directory.",
       "- Runtime clock context is provided as a per-run system message near the latest user turn. For current events/time-sensitive topics, use that year/date in searches and task planning.",
     ].join("\n"),
   );

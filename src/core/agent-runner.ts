@@ -646,6 +646,19 @@ export class AgentRunner {
     throw new RunCancelledError(reason ? `Run cancelled: ${reason}` : "Run cancelled");
   }
 
+  /** Returns the LLM-facing tool list for the current iteration. When the run
+   *  has lazy-loading state (toolContext.runState), this is `kernel ∪ loaded`;
+   *  otherwise it's the full pool the caller passed in. Execution-side lookups
+   *  (`this.deps.tools.find(...)`) keep using the full pool so already-loaded
+   *  tools remain callable even if dropped from the visible set mid-batch. */
+  private visibleTools(): Tool[] {
+    const runState = this.deps.toolContext.runState;
+    if (!runState) return this.deps.tools;
+    return this.deps.tools.filter(
+      (t) => runState.kernelToolNames.has(t.name) || runState.loadedToolNames.has(t.name),
+    );
+  }
+
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     this.throwIfCancelled();
     // Mark the system prompt as a cache breakpoint (stable across all turns/sessions).
@@ -706,9 +719,13 @@ export class AgentRunner {
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
       this.throwIfCancelled();
+      // Snapshot visible tools (kernel ∪ loaded) once per iteration. All LLM
+      // calls in this iteration — initial, transient retries, timeout retries —
+      // must see the same tool set for consistent token estimates and caching.
+      const currentTools = this.visibleTools();
       // ── Context compaction ─────────────────────────────────────────────
       if (maxContextTokens > 0) {
-        const estimatedRaw = estimateTotalTokens(messages, this.deps.tools);
+        const estimatedRaw = estimateTotalTokens(messages, currentTools);
         const estimated = Math.ceil(estimatedRaw * promptEstimateMultiplier);
         const shouldHardCompact = estimated > maxContextTokens * hardCompactionThreshold;
         const shouldSoftCompact =
@@ -724,7 +741,7 @@ export class AgentRunner {
           try {
             const result = await compactContext({
               messages,
-              tools: this.deps.tools,
+              tools: currentTools,
               llm: this.deps.llm,
               maxContextTokens,
               mode,
@@ -778,16 +795,17 @@ export class AgentRunner {
       let content: string | null = null;
       let toolCalls: import("./types.js").ToolCall[] = [];
       let reasoning: import("./types.js").ReasoningItem[] | undefined;
-      const promptEstimateRaw = estimateTotalTokens(messages, this.deps.tools);
+      const promptEstimateRaw = estimateTotalTokens(messages, currentTools);
       const promptEstimateCalibrated = Math.ceil(promptEstimateRaw * promptEstimateMultiplier);
       this.deps.onLog?.(
         `llm_call iteration=${iteration} messages=${messages.length} tool_calls_used=${toolCallsUsed} ` +
+        `tools_visible=${currentTools.length} ` +
         `est_prompt=${promptEstimateCalibrated} est_prompt_raw=${promptEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
       );
       try {
         const res = await this.deps.llm.completeChat({
           messages,
-          tools: this.deps.tools,
+          tools: currentTools,
           onTextDelta: this.deps.onTextDelta,
           abortSignal: this.deps.abortSignal,
         });
@@ -833,7 +851,7 @@ export class AgentRunner {
             this.throwIfCancelled();
             await new Promise((r) => setTimeout(r, backoffMs));
             this.throwIfCancelled();
-            const retryEstimateRaw = estimateTotalTokens(messages, this.deps.tools);
+            const retryEstimateRaw = estimateTotalTokens(messages, currentTools);
             const retryEstimateCalibrated = Math.ceil(retryEstimateRaw * promptEstimateMultiplier);
             this.deps.onLog?.(
               `llm_call_retry iteration=${iteration} messages=${messages.length} mode=transient attempt=${attempt} ` +
@@ -842,7 +860,7 @@ export class AgentRunner {
             try {
               const retry = await this.deps.llm.completeChat({
                 messages,
-                tools: this.deps.tools,
+                tools: currentTools,
                 onTextDelta: this.deps.onTextDelta,
                 abortSignal: this.deps.abortSignal,
               });
@@ -898,7 +916,7 @@ export class AgentRunner {
             try {
               const compactedResult = await compactContext({
                 messages: [...messages],
-                tools: this.deps.tools,
+                tools: currentTools,
                 llm: this.deps.llm,
                 maxContextTokens,
                 mode: "hard",
@@ -941,7 +959,7 @@ export class AgentRunner {
             ].join("\n"),
           };
 
-          const extendedEstimateRaw = estimateTotalTokens([...retryMessages, retryInstruction], this.deps.tools);
+          const extendedEstimateRaw = estimateTotalTokens([...retryMessages, retryInstruction], currentTools);
           const extendedEstimateCalibrated = Math.ceil(extendedEstimateRaw * promptEstimateMultiplier);
           this.deps.onLog?.(
             `llm_call_retry iteration=${iteration} messages=${retryMessages.length + 1} mode=extended ` +
@@ -950,7 +968,7 @@ export class AgentRunner {
           try {
             const retry = await this.deps.llm.completeChat({
               messages: [...retryMessages, retryInstruction],
-              tools: this.deps.tools,
+              tools: currentTools,
               timeoutMode: "extended",
               abortSignal: this.deps.abortSignal,
             });

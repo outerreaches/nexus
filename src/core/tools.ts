@@ -85,6 +85,22 @@ export type ToolContext = {
   ) => void;
   /** Unregister an isolated worker from stop control tracking. */
   unregisterIsolatedWorker?: (child: ChildProcess) => void;
+  /** Per-run mutable state shared between AgentRunner and tools. Tools that
+   *  mutate this object (e.g. tool_load) affect what the runner exposes to the
+   *  LLM on subsequent iterations. */
+  runState?: RunState;
+};
+
+/** Lazy tool-loading state for a single run. */
+export type RunState = {
+  /** Names of tools always loaded for this preset (immutable for the run). */
+  readonly kernelToolNames: ReadonlySet<string>;
+  /** Names of all tools the agent CAN load (kernel ∪ catalog). Validation set
+   *  for tool_load/tool_search/tool_unload. */
+  readonly availableToolNames: ReadonlySet<string>;
+  /** Mutable set of catalog tools currently loaded in addition to the kernel.
+   *  Mutated by tool_load / tool_unload; read by AgentRunner each iteration. */
+  readonly loadedToolNames: Set<string>;
 };
 
 export type ToolDefinition<TParams extends z.ZodTypeAny> = {
@@ -104,6 +120,50 @@ export type Tool = {
   jsonSchema: Record<string, unknown>;
   execute: (args: unknown, ctx: ToolContext) => Promise<string>;
 };
+
+/** Always loaded into the LLM tool schema, regardless of preset config. Without
+ *  these the agent cannot discover or load anything else. Wired into `RunState`
+ *  by `buildRunState`. */
+export const LAZY_LOADING_KERNEL_TOOLS: readonly string[] = [
+  "tool_search",
+  "tool_load",
+  "tool_unload",
+];
+
+/** Build per-run lazy-tool-loading state for an agent run. If the preset has
+ *  no `kernel` configured, lazy loading is disabled and `null` is returned
+ *  (the runner falls back to exposing every tool the preset is allowed). */
+export function buildRunState(params: {
+  presetKernel: readonly string[] | undefined;
+  presetTools: readonly string[];
+  filteredToolNames: readonly string[];
+}): RunState | null {
+  if (!params.presetKernel || params.presetKernel.length === 0) return null;
+  const filteredSet = new Set(params.filteredToolNames);
+  const presetSet = new Set(params.presetTools);
+  // Kernel = preset.kernel ∩ filteredTools, plus the discovery tools so the
+  // agent can always reach tool_search / tool_load / tool_unload.
+  const kernel = new Set<string>();
+  for (const name of params.presetKernel) {
+    if (filteredSet.has(name)) kernel.add(name);
+  }
+  for (const name of LAZY_LOADING_KERNEL_TOOLS) {
+    if (filteredSet.has(name)) kernel.add(name);
+  }
+  // Available = all tools the preset is allowed to use (after filtering).
+  // The catalog (available − kernel) is what `tool_load` may surface.
+  const available = new Set<string>();
+  for (const name of params.filteredToolNames) {
+    if (presetSet.has(name) || LAZY_LOADING_KERNEL_TOOLS.includes(name)) {
+      available.add(name);
+    }
+  }
+  return {
+    kernelToolNames: kernel,
+    availableToolNames: available,
+    loadedToolNames: new Set<string>(),
+  };
+}
 
 export function defineTool<TParams extends z.ZodTypeAny>(def: ToolDefinition<TParams>): Tool {
   // OpenAI tool schemas expect JSON Schema (Draft 7-ish). In particular, they require

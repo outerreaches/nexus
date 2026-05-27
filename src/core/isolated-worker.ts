@@ -24,7 +24,7 @@ import { McpManager } from "../mcp/manager.js";
 import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
 import { filterToolsBySkillAccess } from "../state/skill-policy.js";
 import { inspectDeployWorktree } from "./deploy-policy.js";
-import type { Tool, ToolContext } from "./tools.js";
+import { buildRunState, type Tool, type ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
 
@@ -147,6 +147,12 @@ process.on("message", async (msg: ParentMessage) => {
       return await requestNodeRouteFromParent(tool, args, routeCtx);
     };
 
+    const runState = buildRunState({
+      presetKernel: preset.kernel,
+      presetTools: preset.tools,
+      filteredToolNames: effectiveWorkerTools.map((t) => t.name),
+    });
+
     // Build ToolContext
     const toolContext: ToolContext = {
       workspaceDir: cfg.workspaceDir,
@@ -201,6 +207,7 @@ process.on("message", async (msg: ParentMessage) => {
       runtimeLimits: cfg.runtimeLimits,
       nowMs: () => Date.now(),
       log,
+      ...(runState ? { runState } : {}),
     };
 
     const runner = new AgentRunner({

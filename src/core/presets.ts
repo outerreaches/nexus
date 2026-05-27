@@ -53,8 +53,14 @@ export interface AgentPreset {
     /** Include preset-scoped skills from stateDir/presets/<name>/skills in this preset's prompt. */
     promptPreset?: boolean;
   };
-  /** Tool name whitelist — only these tools are available to this preset. */
+  /** Tool name whitelist — only these tools are available to this preset.
+   *  Acts as the full pool the agent may load on demand. */
   tools: string[];
+  /** Subset of `tools` always loaded into the LLM schema. Tools in `tools` but
+   *  not in `kernel` are discoverable via `tool_search` and materialized via
+   *  `tool_load`. If `kernel` is omitted, the entire `tools` list is loaded
+   *  (legacy behavior). */
+  kernel?: string[];
   /** Optional per-run hard caps for specific tool names (enforced by AgentRunner). */
   toolCallCaps?: Record<string, number>;
   /** Optional whitelist of preset names this agent may spawn via `spawn_agent`. */

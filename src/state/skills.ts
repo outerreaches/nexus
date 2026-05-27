@@ -209,46 +209,33 @@ export async function loadSkills(stateDir: string, agentId?: string, presetName?
 }
 
 /**
- * Format skills into a prompt section.
- * If within maxInlineSkills, include full instructions. Otherwise, list concise summaries.
+ * Format skills into a compact prompt section: a per-category index of skill
+ * names so the agent knows what's discoverable. Full descriptions/triggers
+ * live behind `skill_search`; full bodies behind `skill_get`.
+ *
+ * The `opts` argument is retained for backwards compatibility but unused —
+ * inlining instructions in the system prompt is no longer supported.
  */
-export function formatSkillsPromptSection(skills: SkillEntry[], opts: SkillPromptFormatOptions = {}): string | null {
+export function formatSkillsPromptSection(skills: SkillEntry[], _opts: SkillPromptFormatOptions = {}): string | null {
   if (skills.length === 0) return null;
-  const maxInlineSkills = Math.max(0, Math.floor(opts.maxInlineSkills ?? 5));
-  const includeReferences = opts.includeReferences ?? true;
-  const maxReferencesPerSkill = Math.max(0, Math.floor(opts.maxReferencesPerSkill ?? 2));
 
-  const lines: string[] = ["## Learned Skills"];
+  const byCategory = new Map<string, string[]>();
+  for (const s of skills) {
+    const label = s.categoryPath ?? "root";
+    const names = byCategory.get(label) ?? [];
+    names.push(s.name);
+    byCategory.set(label, names);
+  }
+  const categories = [...byCategory.keys()].sort((a, b) => a.localeCompare(b));
 
-  if (skills.length <= maxInlineSkills) {
-    for (const s of skills) {
-      lines.push("");
-      lines.push(`### ${s.name}`);
-      if (s.description) lines.push(s.description);
-      lines.push(`Category: ${s.categoryPath ?? "root"}`);
-      if (s.triggers.length > 0) lines.push(`Triggers: ${s.triggers.join(", ")}`);
-      if (includeReferences && s.references.length > 0) {
-        const refs = s.references.slice(0, maxReferencesPerSkill);
-        const remaining = s.references.length - refs.length;
-        lines.push(
-          `References: ${refs.join(", ")}${remaining > 0 ? ` (+${remaining} more)` : ""}`,
-        );
-      }
-      if (s.instructions) {
-        lines.push("");
-        lines.push(s.instructions);
-      }
-    }
-  } else {
-    lines.push("Use `skill_list` to browse skills and `skill_get` for full instructions/references.");
-    lines.push("Available skills:");
-    lines.push("");
-    for (const s of skills) {
-      const triggerHint = s.triggers.length > 0 ? ` (triggers: ${s.triggers.join(", ")})` : "";
-      const referenceHint = includeReferences && s.references.length > 0 ? ` [refs: ${s.references.length}]` : "";
-      const categoryHint = ` [category: ${s.categoryPath ?? "root"}]`;
-      lines.push(`- **${s.name}**: ${s.description}${categoryHint}${triggerHint}${referenceHint}`);
-    }
+  const lines: string[] = [
+    "## Skills Available",
+    "Discoverable playbooks. Call `skill_search(query)` to find one by keyword/trigger, then `skill_get(name)` to load the full instructions.",
+    "",
+  ];
+  for (const category of categories) {
+    const names = byCategory.get(category)!.sort((a, b) => a.localeCompare(b));
+    lines.push(`- **${category}**: ${names.join(", ")}`);
   }
 
   return lines.join("\n");

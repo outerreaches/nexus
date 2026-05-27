@@ -43,7 +43,7 @@ test("loadSkills parses references and resolves safe reference paths", async () 
   }
 });
 
-test("formatSkillsPromptSection includes reference hints and fallback guidance", () => {
+test("formatSkillsPromptSection emits a compact category index pointing at skill_search/skill_get", () => {
   const skills = [
     {
       name: "a",
@@ -67,14 +67,15 @@ test("formatSkillsPromptSection includes reference hints and fallback guidance",
     },
   ];
 
-  const inline = formatSkillsPromptSection(skills, { maxInlineSkills: 5, includeReferences: true, maxReferencesPerSkill: 1 });
-  assert.match(inline ?? "", /References: references\/a\.md/);
-  assert.match(inline ?? "", /Category: operations/);
-
-  const summarized = formatSkillsPromptSection(skills, { maxInlineSkills: 1, includeReferences: true, maxReferencesPerSkill: 1 });
-  assert.match(summarized ?? "", /Use `skill_list` to browse skills and `skill_get` for full instructions\/references\./);
-  assert.match(summarized ?? "", /\[category: operations\]/);
-  assert.match(summarized ?? "", /\[refs: 1\]/);
+  const section = formatSkillsPromptSection(skills);
+  assert.match(section ?? "", /skill_search/);
+  assert.match(section ?? "", /skill_get/);
+  // Categories appear as bullets with their member skill names.
+  assert.match(section ?? "", /\*\*operations\*\*: a/);
+  assert.match(section ?? "", /\*\*root\*\*: b/);
+  // Instructions body must not leak into the system prompt.
+  assert.equal(/do A/.test(section ?? ""), false);
+  assert.equal(/do B/.test(section ?? ""), false);
 });
 
 test("loadSkills discovers nested categorized skill directories", async () => {

@@ -594,7 +594,6 @@ export type PersonalizationContext = {
   soul: string | null;
   agents: string | null;
   user: string | null;
-  codeguide: string | null;
   heartbeat: string | null;
 };
 
@@ -618,15 +617,14 @@ async function loadPersonalizationContextUncached(
   stateDir: string,
   agentId?: string,
 ): Promise<PersonalizationContext> {
-  const [soul, agents, user, codeguide, heartbeat] = await Promise.all([
+  const [soul, agents, user, heartbeat] = await Promise.all([
     readPersonalizationFile(stateDir, SOUL_FILENAME, agentId),
     readPersonalizationFile(stateDir, AGENTS_FILENAME, agentId),
     readPersonalizationFile(stateDir, USER_FILENAME, agentId),
-    readPersonalizationFile(stateDir, CODEGUIDE_FILENAME, agentId),
     readPersonalizationFile(stateDir, HEARTBEAT_FILENAME, agentId),
   ]);
 
-  return { soul, agents, user, codeguide, heartbeat };
+  return { soul, agents, user, heartbeat };
 }
 
 export async function loadPersonalizationContext(

@@ -5,7 +5,7 @@ import path from "node:path";
 import { AgentRunner, RunCancelledError } from "./agent-runner.js";
 import { buildPresetSystemPrompt, buildSystemPrompt } from "./prompt.js";
 import { resolveRunCodeContext } from "./run-code-context.js";
-import type { Tool, ToolContext } from "./tools.js";
+import { buildRunState, type Tool, type ToolContext } from "./tools.js";
 import type { ChatMessage, ChatUserContentPart } from "./types.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { NexusDatabase } from "../storage/database.js";
@@ -760,6 +760,14 @@ export class AgentService {
         controller: abortController,
       });
 
+      const runState = preset
+        ? buildRunState({
+            presetKernel: preset.kernel,
+            presetTools: preset.tools,
+            filteredToolNames: tools.map((t) => t.name),
+          })
+        : null;
+
       const toolContext: ToolContext = {
         ...runBaseContext,
         llm,
@@ -778,6 +786,7 @@ export class AgentService {
           runId,
           modelMode: runModelMode,
         },
+        ...(runState ? { runState } : {}),
       };
 
       const runner = new AgentRunner({
