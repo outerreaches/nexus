@@ -26,7 +26,7 @@ import type {
   WorkerNodeRouteRequestMessage,
 } from "../core/isolated-worker-types.js";
 import { getResolvedSecretsSnapshot } from "../secrets/resolve-env.js";
-import type { ModelRoutingMode } from "../llm/model-router.js";
+import { toSerializableConfig, type ModelRoutingMode } from "../llm/model-router.js";
 import { bindMcpGrantToRun } from "../mcp/store.js";
 import type { McpManager } from "../mcp/manager.js";
 import { enqueueRunReport } from "../storage/run-reports.js";
@@ -622,6 +622,14 @@ async function runInProcess(params: {
     workerCtx.runState = runState;
   }
 
+  // Worker slot key: inherit channel/key from parent context but swap in the
+  // worker's preset so worker traffic doesn't share a physical slot with the
+  // parent orchestrator (different system prompts → cache thrash if shared).
+  const parentReq = ctx.request;
+  const workerSlotKey = parentReq
+    ? `${parentReq.channel}:${parentReq.channelKey}:${parentReq.channel === "telegram" || parentReq.channel === "cli" ? "interactive" : "background"}:${preset.name}`
+    : undefined;
+
   // Create and run worker
   const runner = new AgentRunner({
     llm,
@@ -630,6 +638,7 @@ async function runInProcess(params: {
     budget,
     toolContext: workerCtx,
     onLog,
+    ...(workerSlotKey ? { slotKey: workerSlotKey } : {}),
   });
 
   try {
@@ -1009,7 +1018,7 @@ async function runIsolated(params: {
       candidateRootDir: ctx.candidateRootDir,
       candidate: ctx.candidate,
       dbPath: path.join(ctx.stateDir, "nexus.db"),
-      llmConfig,
+      llmConfig: toSerializableConfig(llmConfig),
       modelRouterConfig,
       llmToolRouting,
       skillsConfig: ctx.skillsConfig,

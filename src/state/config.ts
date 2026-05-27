@@ -183,6 +183,15 @@ const FederationSchema = z
   })
   .default({});
 
+const SlotCacheConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false).describe("Enable llama.cpp slot save/restore for this provider. Requires the server to be started with --slot-save-path."),
+    slotCount: z.number().int().min(1).max(64).describe("Server slot count (must match the llama.cpp server's -np flag)."),
+    requestTimeoutMs: z.number().int().min(1_000).max(600_000).default(60_000).describe("Per-call HTTP timeout for slot save/restore/erase admin endpoints."),
+  })
+  .optional()
+  .describe("Optional llama.cpp slot cache config. Routes calls through a logical-key → physical-slot allocator with save+restore on eviction.");
+
 const OpenAICompatProviderSchema = z
   .object({
     baseUrl: EnvString.default("https://openrouter.ai/api/v1"),
@@ -191,6 +200,7 @@ const OpenAICompatProviderSchema = z
     maxTokens: z.number().int().positive().optional().describe("Max output tokens per LLM call. Defaults to 16384 if omitted."),
     stream: z.boolean().optional().describe("When true, force streaming chat-completions transport for this provider."),
     stripCacheControl: z.boolean().default(false).describe("Strip cache_control fields from messages. Required for providers that reject extra fields (e.g. Fireworks)."),
+    slotCache: SlotCacheConfigSchema,
   })
   .default({});
 

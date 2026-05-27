@@ -12,6 +12,10 @@ export type OpenAICompatConfig = {
   maxTokens?: number;
   stream?: boolean;
   stripCacheControl?: boolean;
+  /** Optional llama.cpp slot save/restore manager. When provided, completeChat
+   *  routes requests through a logical-key → physical-slot allocator so
+   *  long-lived sessions don't thrash the server's small slot pool. */
+  slotCache?: import("./slot-cache.js").SlotCacheManager;
   onLog?: (line: string) => void;
 };
 
@@ -25,6 +29,10 @@ export type LLMCompleteChatParams = {
   /** Called with each text content delta as it arrives from the SSE stream. */
   onTextDelta?: (delta: string) => void;
   abortSignal?: AbortSignal;
+  /** Optional logical session key for llama.cpp slot affinity / save+restore.
+   *  Examples: "telegram:1452:interactive:orchestrator", "heartbeat:gateway:background:orchestrator".
+   *  Ignored unless the client config carries a slotCache manager. */
+  slotKey?: string;
 };
 
 export type LLMUsage = {
@@ -888,6 +896,23 @@ export class OpenAICompatClient implements LLMClient {
     let fallbackAttempted = false;
     let activeMessages = params.messages;
 
+    // Acquire llama.cpp slot lease for the duration of this call (covering
+    // image-fallback retry loops). On opt-in providers this serializes
+    // concurrent calls onto the configured slot pool and triggers save+restore
+    // when ownership rotates.
+    let slotLease: Awaited<ReturnType<NonNullable<typeof this.config.slotCache>["acquire"]>> | null = null;
+    if (this.config.slotCache && params.slotKey) {
+      try {
+        slotLease = await this.config.slotCache.acquire(params.slotKey);
+        log?.(`llm_slot_lease key=${params.slotKey} slot=${slotLease.slotId} restored=${slotLease.restored ? "yes" : "no"}`);
+      } catch (err) {
+        // Slot acquisition failures should not block inference — fall back to
+        // server-managed slot selection.
+        log?.(`llm_slot_lease_failed key=${params.slotKey} err=${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    try {
     for (;;) {
       const timeoutMs = resolveTimeoutForMode({
         mode: params.timeoutMode ?? "default",
@@ -905,6 +930,13 @@ export class OpenAICompatClient implements LLMClient {
         max_tokens: this.config.maxTokens ?? 16384,
         messages: requestMessages,
       };
+      if (slotLease) {
+        // Pin the call to the leased slot so llama.cpp does NOT migrate state
+        // mid-flight. cache_prompt=true keeps the KV cache populated after
+        // the response so the next same-key call hits in-memory.
+        requestPayload.id_slot = slotLease.slotId;
+        requestPayload.cache_prompt = true;
+      }
       const stream = resolveChatCompletionStreaming(this.config, requestPayload);
       if (stream) requestPayload.stream = true;
       const bodyInactivityMs = Math.max(
@@ -1026,6 +1058,9 @@ export class OpenAICompatClient implements LLMClient {
         clearTimeout(timeout);
         externalAbortListener?.();
       }
+    }
+    } finally {
+      slotLease?.release();
     }
   }
 

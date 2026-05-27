@@ -627,6 +627,10 @@ export class AgentRunner {
       transientRetries?: number;
       /** Abort signal used by stop controls to cancel this run. */
       abortSignal?: AbortSignal;
+      /** Optional llama.cpp slot affinity key. Used by OpenAICompatClient when
+       *  the configured provider has a slot cache manager. Stable for the
+       *  entire run so iteration retries hit the same physical slot. */
+      slotKey?: string;
     },
   ) { }
 
@@ -815,6 +819,7 @@ export class AgentRunner {
           tools: currentTools,
           onTextDelta: this.deps.onTextDelta,
           abortSignal: this.deps.abortSignal,
+          ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
         });
         this.recordCircuitSuccess();
         this.throwIfCancelled();
@@ -870,6 +875,7 @@ export class AgentRunner {
                 tools: currentTools,
                 onTextDelta: this.deps.onTextDelta,
                 abortSignal: this.deps.abortSignal,
+                ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
               });
               this.recordCircuitSuccess();
               this.throwIfCancelled();
@@ -978,6 +984,7 @@ export class AgentRunner {
               tools: currentTools,
               timeoutMode: "extended",
               abortSignal: this.deps.abortSignal,
+              ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
             });
             this.recordCircuitSuccess();
             this.throwIfCancelled();

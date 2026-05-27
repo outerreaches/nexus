@@ -12,7 +12,7 @@ import path from "node:path";
 import { openDatabase } from "../storage/database.js";
 import { appendMessage } from "../storage/sessions.js";
 import { OpenAICompatClient } from "../llm/openai-compat.js";
-import { ModelRouter } from "../llm/model-router.js";
+import { ModelRouter, toRuntimeConfig } from "../llm/model-router.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { AgentTracker } from "./agent-tracker.js";
 import { AgentRunner } from "./agent-runner.js";
@@ -72,8 +72,12 @@ process.on("message", async (msg: ParentMessage) => {
     // Set busy timeout for WAL mode concurrent access
     db.db.pragma("busy_timeout = 10000");
 
-    const llm = new OpenAICompatClient(cfg.llmConfig);
     const modelRouter = cfg.modelRouterConfig ? new ModelRouter(cfg.modelRouterConfig) : undefined;
+    // Workers don't share their parent's slot cache (no IPC for live objects).
+    // If the worker's ModelRouter spun up its own SlotCacheManager for the
+    // same provider, use that; otherwise fall back to un-routed direct calls.
+    const llmRuntimeConfig = toRuntimeConfig(cfg.llmConfig, undefined);
+    const llm = new OpenAICompatClient(llmRuntimeConfig);
     const builtIns = getBuiltInTools();
     const preset = getPreset(cfg.presetName);
     if (!preset) {
@@ -162,7 +166,7 @@ process.on("message", async (msg: ParentMessage) => {
       candidateRootDir: cfg.candidateRootDir,
       candidate: cfg.candidate,
       llm,
-      llmConfig: cfg.llmConfig,
+      llmConfig: llmRuntimeConfig,
       modelRouter,
       llmToolRouting: cfg.llmToolRouting,
       skillsConfig: cfg.skillsConfig,

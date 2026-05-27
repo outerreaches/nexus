@@ -7,8 +7,15 @@ import {
   type OpenAICompatConfig,
 } from "./openai-compat.js";
 import { CodexResponsesClient } from "./codex-responses.js";
+import { SlotCacheManager } from "./slot-cache.js";
 
 export type ModelRoutingMode = "default" | "local_only";
+
+export type SerializableSlotCacheConfig = {
+  enabled: boolean;
+  slotCount: number;
+  requestTimeoutMs?: number;
+};
 
 export type SerializableOpenAICompatConfig = {
   baseUrl: string;
@@ -17,6 +24,7 @@ export type SerializableOpenAICompatConfig = {
   maxTokens?: number;
   stream?: boolean;
   stripCacheControl?: boolean;
+  slotCache?: SerializableSlotCacheConfig;
 };
 
 type LlmRouteTarget = {
@@ -53,12 +61,37 @@ export class ModelRouter {
   private readonly credentialResolvers: Record<string, ProviderCredentialResolver>;
   private readonly responsesApiProviders: Set<string>;
   private routing: NexusConfig["llm"]["routing"];
+  /** Slot-cache managers per provider name. One manager per opted-in provider
+   *  so all calls to the same provider share allocator state (LRU, in-flight
+   *  lock map, owner table). */
+  private readonly slotCaches = new Map<string, SlotCacheManager>();
 
   constructor(private readonly opts: ModelRouterConfig) {
-    this.providers = {
+    const sourceProviders: Record<string, SerializableOpenAICompatConfig> = {
       default: opts.defaultProvider,
       ...(opts.providers ?? {}),
     };
+    // Instantiate one slot cache manager per provider that opted in. This must
+    // happen before we materialize this.providers so each runtime config can
+    // carry a reference to its shared manager.
+    for (const [name, cfg] of Object.entries(sourceProviders)) {
+      const slot = cfg.slotCache;
+      if (slot && slot.enabled && slot.slotCount > 0 && cfg.baseUrl && cfg.baseUrl !== "dynamic") {
+        this.slotCaches.set(
+          name,
+          new SlotCacheManager({
+            baseUrl: cfg.baseUrl,
+            apiKey: cfg.apiKey,
+            slotCount: slot.slotCount,
+            requestTimeoutMs: slot.requestTimeoutMs,
+          }),
+        );
+      }
+    }
+    this.providers = {};
+    for (const [name, cfg] of Object.entries(sourceProviders)) {
+      this.providers[name] = toRuntimeConfig(cfg, this.slotCaches.get(name));
+    }
     this.credentialResolvers = { ...(opts.credentialResolvers ?? {}) };
     this.responsesApiProviders = new Set(opts.responsesApiProviders ?? []);
     // Auto-register stub providers for credential resolvers without explicit config.
@@ -69,6 +102,12 @@ export class ModelRouter {
       }
     }
     this.routing = cloneRouting(opts.routing);
+  }
+
+  /** Save every live slot cache to disk. Call from shutdown handlers if you
+   *  want explicit flushes beyond the default eviction-only policy. */
+  async flushSlotCaches(): Promise<void> {
+    await Promise.allSettled([...this.slotCaches.values()].map((m) => m.flushAll()));
   }
 
   resolve(params: {
@@ -212,6 +251,12 @@ function cloneRouting(routing: NexusConfig["llm"]["routing"]): NexusConfig["llm"
 }
 
 function sanitizeConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig {
+  return toSerializableConfig(cfg);
+}
+
+/** Convert a runtime OpenAICompatConfig (may contain a live SlotCacheManager
+ *  instance) to a JSON-safe form for IPC payloads. */
+export function toSerializableConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig {
   return {
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
@@ -219,6 +264,21 @@ function sanitizeConfig(cfg: OpenAICompatConfig): SerializableOpenAICompatConfig
     maxTokens: cfg.maxTokens,
     stream: cfg.stream,
     stripCacheControl: cfg.stripCacheControl,
+  };
+}
+
+/** Convert a JSON-safe config into a runtime config, optionally attaching a
+ *  pre-constructed SlotCacheManager (e.g. the one held by the parent
+ *  ModelRouter). Workers without manager access pass undefined. */
+export function toRuntimeConfig(cfg: SerializableOpenAICompatConfig, slotCache: SlotCacheManager | undefined): OpenAICompatConfig {
+  return {
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    model: cfg.model,
+    maxTokens: cfg.maxTokens,
+    stream: cfg.stream,
+    stripCacheControl: cfg.stripCacheControl,
+    ...(slotCache ? { slotCache } : {}),
   };
 }
 

@@ -15,7 +15,7 @@ import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
 import { getPreset } from "../core/presets.js";
 import { McpManager } from "../mcp/manager.js";
-import { ModelRouter, type ProviderCredentialResolver } from "../llm/model-router.js";
+import { ModelRouter, toRuntimeConfig, type ProviderCredentialResolver } from "../llm/model-router.js";
 import { resolveCodexCredentials } from "../llm/codex-auth.js";
 import { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
 import { openDatabase } from "../storage/database.js";
@@ -366,8 +366,10 @@ export async function startGateway(
     }
   });
 
+  // Circuit breaker runs un-routed health probes; it does not share the
+  // ModelRouter's slot cache. Drop the slot cache config when converting.
   const circuitBreaker = new LlmCircuitBreaker({
-    primaryConfig: defaultLlmConfig,
+    primaryConfig: toRuntimeConfig(defaultLlmConfig, undefined),
     onStateChange: (from, to, reason) => log(`circuit_breaker ${from} → ${to}: ${reason}`),
     onLog: (line) => log(line),
   });

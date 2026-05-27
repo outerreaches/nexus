@@ -120,6 +120,19 @@ function clampNonNegativeInt(value: number): number {
   return Math.max(0, Math.floor(value));
 }
 
+/** Compose the llama.cpp slot-affinity key for a run. Keep granular enough to
+ *  separate distinct logical sessions (different chats, different lanes,
+ *  different presets) but stable across turns of the same logical session so
+ *  the slot owner doesn't churn on every message. */
+function buildSlotKey(params: {
+  channel: string;
+  channelKey: string;
+  lane: ExecutionLane;
+  preset: string;
+}): string {
+  return `${params.channel}:${params.channelKey}:${params.lane}:${params.preset}`;
+}
+
 function buildRuntimeClockSystemMessage(nowMs: number): string {
   // Round to the top of the hour so the trailing hint block is byte-stable
   // within a one-hour window. Coarser than seconds, but fine for current-events
@@ -790,6 +803,17 @@ export class AgentService {
         ...(runState ? { runState } : {}),
       };
 
+      // Slot key for llama.cpp slot affinity. channel:channelKey:lane:preset
+      // — stable across all turns of a logical session+preset, distinguishes
+      // worker presets from the parent orchestrator, and lets heartbeat /
+      // gateway / interactive traffic each own their own slot.
+      const slotKey = buildSlotKey({
+        channel: params.channel,
+        channelKey: params.channelKey,
+        lane,
+        preset: preset?.name ?? presetName ?? "default",
+      });
+
       const runner = new AgentRunner({
         llm,
         tools,
@@ -802,6 +826,7 @@ export class AgentService {
         onToolEnd: params.onToolEnd,
         circuitBreaker: this.deps.circuitBreaker,
         trackCircuitBreaker,
+        slotKey,
         transientRetries: this.deps.transientRetries ?? 5,
         abortSignal: abortController.signal,
       });
