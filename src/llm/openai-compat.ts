@@ -239,6 +239,45 @@ function toOpenAIMessages(messages: ChatMessage[], config: OpenAICompatConfig): 
   });
 }
 
+function estimateOpenAIMessageChars(message: OpenAIChatMessage): number {
+  let total = 0;
+  if (typeof message.content === "string") {
+    total += message.content.length;
+  } else if (Array.isArray(message.content)) {
+    total += message.content.reduce((sum, part) => {
+      if (part.type === "text") return sum + part.text.length;
+      return sum + part.image_url.url.length;
+    }, 0);
+  }
+  if ("tool_calls" in message && Array.isArray(message.tool_calls)) {
+    for (const raw of message.tool_calls) {
+      if (!isRecord(raw)) continue;
+      const fn = isRecord(raw.function) ? raw.function : undefined;
+      total += String(raw.id ?? "").length;
+      total += String(fn?.name ?? "").length;
+      total += String(fn?.arguments ?? "").length;
+    }
+  }
+  if ("name" in message && typeof message.name === "string") total += message.name.length;
+  if ("tool_call_id" in message && typeof message.tool_call_id === "string") total += message.tool_call_id.length;
+  return total;
+}
+
+function describePromptCacheMarkers(messages: OpenAIChatMessage[]): string {
+  const markerIndexes: number[] = [];
+  const roles: Record<string, number> = {};
+  let totalChars = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    roles[message.role] = (roles[message.role] ?? 0) + 1;
+    totalChars += estimateOpenAIMessageChars(message);
+    if (message.cache_control) markerIndexes.push(i);
+  }
+  const roleSummary = Object.entries(roles).map(([role, count]) => `${role}:${count}`).join(",");
+  const markerSummary = markerIndexes.length > 0 ? markerIndexes.join(",") : "none";
+  return `messages=${messages.length} roles=${roleSummary || "none"} chars=${totalChars} cache_markers=${markerIndexes.length} marker_indexes=${markerSummary}`;
+}
+
 function safeJsonParse(raw: string): unknown {
   try {
     return JSON.parse(raw);
@@ -831,13 +870,14 @@ export class OpenAICompatClient implements LLMClient {
       });
       const estimatedTokens = estimateRequestTokens(activeMessages, params.tools);
       const startMs = Date.now();
+      const requestMessages = toOpenAIMessages(activeMessages, this.config);
       const requestPayload: Record<string, unknown> = {
         model: this.config.model,
         tools,
         tool_choice: "auto",
         temperature: params.temperature ?? 0.2,
         max_tokens: this.config.maxTokens ?? 16384,
-        messages: toOpenAIMessages(activeMessages, this.config),
+        messages: requestMessages,
       };
       const stream = resolveChatCompletionStreaming(this.config, requestPayload);
       if (stream) requestPayload.stream = true;
@@ -845,6 +885,7 @@ export class OpenAICompatClient implements LLMClient {
       log?.(
         `llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens} stream=${stream ? "yes" : "no"}`,
       );
+      log?.(`llm_prompt_shape ${describePromptCacheMarkers(requestMessages)}`);
 
       const controller = new AbortController();
       const externalAbortSignal = params.abortSignal;
@@ -925,6 +966,13 @@ export class OpenAICompatClient implements LLMClient {
         const content = normalizeAssistantContent(message?.content);
         const toolCalls = normalizeToolCalls(message?.tool_calls);
         const usage = normalizeUsage(json.usage);
+        if (usage) {
+          log?.(
+            "llm_usage " +
+              `prompt=${usage.promptTokens ?? "n/a"} completion=${usage.completionTokens ?? "n/a"} total=${usage.totalTokens ?? "n/a"} ` +
+              `cached=${usage.cachedPromptTokens ?? "n/a"} cache_write=${usage.cacheWritePromptTokens ?? "n/a"} reasoning=${usage.reasoningTokens ?? "n/a"}`,
+          );
+        }
         if (!content && toolCalls.length === 0) {
           const completion = typeof usage?.completionTokens === "number" ? usage.completionTokens : "n/a";
           const total = typeof usage?.totalTokens === "number" ? usage.totalTokens : "n/a";
