@@ -661,16 +661,23 @@ export class AgentRunner {
 
   async run(params: { systemPrompt: string; history: ChatMessage[]; userMessage: ChatUserContent }): Promise<AgentResult> {
     this.throwIfCancelled();
-    // Mark the system prompt as a cache breakpoint (stable across all turns/sessions).
-    // agent-service marks the last persisted-history message and the trailing hint block;
-    // those second/third breakpoints stay stable within their respective scopes. Marking
-    // here intentionally does NOT touch the last entry — that anchor is owned by the caller
-    // so volatile per-turn hints can sit outside the cached prefix.
+    // Cache breakpoint layout (3 markers; Anthropic budget = 4):
+    //   #1: system prompt — stable across all sessions for the same agent/preset.
+    //   #2: last persisted-history message — agent-service marks this; stable across turns.
+    //   #3: the new user message — stable within a turn (iteration retries see the same user
+    //       input), naturally invalidated across turns at a clean semantic boundary. Anything
+    //       after this point (assistant + tool messages produced in the run loop) sits outside
+    //       the cached prefix, which is fine: token-level prefix matching catches them anyway.
+    // The trailing system block (compaction summary / memory hint / nudges / runtime clock)
+    // is volatile across turns; we deliberately do NOT anchor a breakpoint there so engines
+    // that restore from the most-recent marker don't end up targeting volatile content.
     const baseMessages: ChatMessage[] = [
       { role: "system", content: params.systemPrompt, cacheControl: { type: "ephemeral" } },
       ...params.history,
     ];
-    const newMessages: ChatMessage[] = [{ role: "user", content: params.userMessage }];
+    const newMessages: ChatMessage[] = [
+      { role: "user", content: params.userMessage, cacheControl: { type: "ephemeral" } },
+    ];
     const messages: ChatMessage[] = [...baseMessages, ...newMessages];
 
     let toolCallsUsed = 0;

@@ -587,8 +587,11 @@ export class AgentService {
       };
 
       // Hints below all merge into a single trailing system block (collapseConsecutiveSystemMessages
-      // in openai-compat). Only the last one carries the cacheControl marker that becomes
-      // breakpoint #3 — the rest are unmarked to stay within Anthropic's 4-breakpoint budget.
+      // in openai-compat). None of them carry cacheControl — the trailing block is volatile
+      // across turns (memory hint depends on user keywords, nudges fire periodically, etc.),
+      // so anchoring breakpoint #3 here would target volatile content and confuse engines that
+      // restore from the most-recent marker. Breakpoint #3 lives on the user message in
+      // AgentRunner — stable within a turn, naturally invalidated across turns at a clean boundary.
       const shouldInjectCompactionSummary = !preset || preset.name === "orchestrator" || preset.name === "coder";
       if (shouldInjectCompactionSummary) {
         const compaction = this.loadLatestCompactionSummary(params.agentId, readSessionId);
@@ -637,9 +640,8 @@ export class AgentService {
       }
 
       // Append ephemeral runtime hints right before the latest user message. They merge
-      // into one trailing system block via collapseConsecutiveSystemMessages; the cacheControl
-      // marker on the final clock hint becomes breakpoint #3 covering the whole block, so
-      // within-turn iteration retries hit cache for everything up to here.
+      // into one trailing system block via collapseConsecutiveSystemMessages. No cacheControl
+      // is set here — the user message in AgentRunner carries breakpoint #3.
       if (memoryHint) {
         onRunnerLog?.(`memory_hint_injected length=${memoryHint.length}`);
         runHistory.push({
@@ -673,7 +675,6 @@ export class AgentService {
       runHistory.push({
         role: "system",
         content: runtimeClockHint,
-        cacheControl: { type: "ephemeral" },
       });
       onRunnerLog?.(`runtime_clock_injected length=${runtimeClockHint.length}`);
 
