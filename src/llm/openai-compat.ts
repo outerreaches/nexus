@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../core/types.js";
 import type { Tool } from "../core/tools.js";
+import { Agent } from "undici";
 import { estimateUserContentPayloadChars, renderUserContentForText } from "../core/message-content.js";
 import { CHARS_PER_TOKEN } from "../core/context-compactor.js";
 import { parseSseDataEvents } from "./sse-reader.js";
@@ -49,6 +50,28 @@ const DEFAULT_HTTP_TIMEOUT_MS = 120_000;
 const DEFAULT_HTTP_TIMEOUT_MAX_MS = 420_000;
 const DEFAULT_HTTP_TIMEOUT_PER_1K_TOKENS_MS = 3_000;
 const DEFAULT_HTTP_TIMEOUT_EXTENDED_MULTIPLIER = 2;
+const undiciAgents = new Map<string, Agent>();
+
+type FetchInitWithDispatcher = RequestInit & { dispatcher?: Agent };
+
+function getFetchDispatcher(baseUrl: string, timeoutMs: number, bodyInactivityMs: number): Agent | undefined {
+  let origin: string;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    return undefined;
+  }
+  const headersTimeout = Math.max(1_000, timeoutMs + 5_000);
+  const bodyTimeout = Math.max(1_000, bodyInactivityMs + 5_000);
+  const connectTimeout = Math.max(10_000, Math.min(headersTimeout, 60_000));
+  const key = `${origin}|h=${headersTimeout}|b=${bodyTimeout}|c=${connectTimeout}`;
+  let agent = undiciAgents.get(key);
+  if (!agent) {
+    agent = new Agent({ headersTimeout, bodyTimeout, connectTimeout });
+    undiciAgents.set(key, agent);
+  }
+  return agent;
+}
 
 function envInt(name: string): number | null {
   const raw = (process.env[name] ?? "").trim();
@@ -623,6 +646,11 @@ export async function requestOpenAICompatChatCompletion(params: {
   const controller = new AbortController();
   const startMs = Date.now();
   const stream = resolveChatCompletionStreaming(params.llm, params.payload);
+  const bodyInactivityMs = Math.max(
+    1_000,
+    envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
+  );
+  const dispatcher = getFetchDispatcher(params.llm.baseUrl, params.timeoutMs, bodyInactivityMs);
   const requestPayload: Record<string, unknown> = {
     ...params.payload,
     ...(stream ? { stream: true } : {}),
@@ -651,7 +679,7 @@ export async function requestOpenAICompatChatCompletion(params: {
   }, params.timeoutMs);
 
   try {
-    const res = await fetch(url, {
+    const fetchInit: FetchInitWithDispatcher = {
       method: "POST",
       headers: {
         ...(params.llm.apiKey ? { Authorization: `Bearer ${params.llm.apiKey}` } : {}),
@@ -659,7 +687,9 @@ export async function requestOpenAICompatChatCompletion(params: {
       },
       body: JSON.stringify(requestPayload),
       signal: controller.signal,
-    });
+      ...(dispatcher ? { dispatcher } : {}),
+    };
+    const res = await fetch(url, fetchInit);
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -667,10 +697,6 @@ export async function requestOpenAICompatChatCompletion(params: {
     }
 
     clearTimeout(timeout);
-    const bodyInactivityMs = Math.max(
-      1_000,
-      envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
-    );
     const bodyText = await readBodyWithInactivityTimeout({
       body: res.body,
       controller,
@@ -881,6 +907,11 @@ export class OpenAICompatClient implements LLMClient {
       };
       const stream = resolveChatCompletionStreaming(this.config, requestPayload);
       if (stream) requestPayload.stream = true;
+      const bodyInactivityMs = Math.max(
+        1_000,
+        envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
+      );
+      const dispatcher = getFetchDispatcher(this.config.baseUrl, timeoutMs, bodyInactivityMs);
 
       log?.(
         `llm_fetch_start model=${this.config.model} timeout=${timeoutMs}ms est_tokens=${estimatedTokens} stream=${stream ? "yes" : "no"}`,
@@ -911,7 +942,7 @@ export class OpenAICompatClient implements LLMClient {
         controller.abort();
       }, timeoutMs);
       try {
-        const res = await fetch(url, {
+        const fetchInit: FetchInitWithDispatcher = {
           method: "POST",
           headers: {
             ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),
@@ -919,7 +950,9 @@ export class OpenAICompatClient implements LLMClient {
           },
           body: JSON.stringify(requestPayload),
           signal: controller.signal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        };
+        const res = await fetch(url, fetchInit);
         const headersElapsed = Date.now() - startMs;
         log?.(`llm_fetch_headers status=${res.status} elapsed=${headersElapsed}ms`);
 
@@ -939,10 +972,6 @@ export class OpenAICompatClient implements LLMClient {
 
         // Headers arrived OK — switch from fixed timeout to inactivity-based body read
         clearTimeout(timeout);
-        const bodyInactivityMs = Math.max(
-          1_000,
-          envInt("NEXUS_LLM_BODY_INACTIVITY_TIMEOUT_MS") ?? DEFAULT_BODY_INACTIVITY_TIMEOUT_MS,
-        );
         const sseOnChunk = (stream && params.onTextDelta)
           ? createIncrementalSseTextExtractor(params.onTextDelta)
           : undefined;
