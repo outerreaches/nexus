@@ -112,3 +112,24 @@ test("parseChatCompletionResponseBody reconstructs streaming tool calls", () => 
   assert.equal(tool?.function?.name, "file_read");
   assert.equal(tool?.function?.arguments, '{"path":"/tmp/a"}');
 });
+
+test("parseChatCompletionResponseBody ignores final streaming usage chunk with empty choices", () => {
+  const raw = [
+    'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null,"index":0}],"created":1779477609,"id":"chatcmpl_1","model":"qwen3.6-27b-pflash-test-q8cli","object":"chat.completion.chunk"}',
+    "",
+    'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\\"action\\":\\"list\\"}","name":"node_manage"},"id":"call_1","index":0,"type":"function"}]},"finish_reason":null,"index":0}],"created":1779477609,"id":"chatcmpl_1","model":"qwen3.6-27b-pflash-test-q8cli","object":"chat.completion.chunk"}',
+    "",
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created":1779477609,"id":"chatcmpl_1","model":"qwen3.6-27b-pflash-test-q8cli","object":"chat.completion.chunk"}',
+    "",
+    'data: {"choices":[],"created":1779477609,"id":"chatcmpl_1","model":"qwen3.6-27b-pflash-test-q8cli","object":"chat.completion.chunk","usage":{"completion_tokens":26,"prompt_tokens":265,"total_tokens":291}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const parsed = parseChatCompletionResponseBody(raw, true);
+  const choice = (parsed.choices as Array<{ finish_reason?: string; message?: { tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }>)[0];
+  const tool = choice?.message?.tool_calls?.[0];
+  assert.equal(choice?.finish_reason, "tool_calls");
+  assert.equal(tool?.function?.name, "node_manage");
+  assert.equal(tool?.function?.arguments, '{"action":"list"}');
+});
