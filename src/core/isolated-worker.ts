@@ -72,7 +72,9 @@ process.on("message", async (msg: ParentMessage) => {
     // Set busy timeout for WAL mode concurrent access
     db.db.pragma("busy_timeout = 10000");
 
-    const modelRouter = cfg.modelRouterConfig ? new ModelRouter(cfg.modelRouterConfig) : undefined;
+    const modelRouter = cfg.modelRouterConfig
+      ? new ModelRouter({ ...cfg.modelRouterConfig, log })
+      : undefined;
     // Workers don't share their parent's slot cache (no IPC for live objects).
     // If the worker's ModelRouter spun up its own SlotCacheManager for the
     // same provider, use that; otherwise fall back to un-routed direct calls.

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { AgentRunner, classifyToolResultStatus, toolResultIndicatesDeployApplied } from "./agent-runner.js";
+import { AgentRunner, classifyToolResultStatus, isTransientLlmError, toolResultIndicatesDeployApplied } from "./agent-runner.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { ToolCall } from "./types.js";
 import type { ToolContext } from "./tools.js";
@@ -110,6 +110,12 @@ test("classifyToolResultStatus classifies not_found errors", () => {
   assert.equal(result.status, "error");
   assert.equal(result.errorClass, "not_found");
   assert.equal(result.retryPolicy, "no");
+});
+
+test("isTransientLlmError classifies slot_lease_failed as transient so the runner retries", () => {
+  assert.equal(isTransientLlmError(new Error("slot_lease_failed: slot save failed: 500 Internal Server Error")), true);
+  assert.equal(isTransientLlmError(new Error("Slot_Lease_Failed: foo")), true, "case-insensitive");
+  assert.equal(isTransientLlmError(new Error("unrelated parse error")), false);
 });
 
 test("toolResultIndicatesDeployApplied detects direct ha_deploy apply success", () => {

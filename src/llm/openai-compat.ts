@@ -900,15 +900,22 @@ export class OpenAICompatClient implements LLMClient {
     // image-fallback retry loops). On opt-in providers this serializes
     // concurrent calls onto the configured slot pool and triggers save+restore
     // when ownership rotates.
+    //
+    // On failure we deliberately do NOT fall back to unpinned inference: the
+    // whole point of slot caching is to prevent cross-session KV thrash from
+    // llama.cpp's internal LCP slot selection, so letting requests through
+    // without `id_slot` defeats the cache. Throw a slot_lease_failed error
+    // and let the runner's transient-retry path retry once after backoff —
+    // that fails loud if the cache is genuinely broken.
     let slotLease: Awaited<ReturnType<NonNullable<typeof this.config.slotCache>["acquire"]>> | null = null;
     if (this.config.slotCache && params.slotKey) {
       try {
         slotLease = await this.config.slotCache.acquire(params.slotKey);
         log?.(`llm_slot_lease key=${params.slotKey} slot=${slotLease.slotId} restored=${slotLease.restored ? "yes" : "no"}`);
       } catch (err) {
-        // Slot acquisition failures should not block inference — fall back to
-        // server-managed slot selection.
-        log?.(`llm_slot_lease_failed key=${params.slotKey} err=${err instanceof Error ? err.message : String(err)}`);
+        const reason = err instanceof Error ? err.message : String(err);
+        log?.(`llm_slot_lease_failed key=${params.slotKey} err=${reason}`);
+        throw new Error(`slot_lease_failed: ${reason}`);
       }
     }
 

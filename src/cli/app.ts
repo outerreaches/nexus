@@ -368,6 +368,7 @@ export async function runCli(argv: string[]): Promise<void> {
         routing: config.llm.routing,
         credentialResolvers: { codex: codexResolver },
         responsesApiProviders: ["codex"],
+        log,
       });
       const startupRoute = modelRouter.resolve({
         agentId: String(opts.agent ?? "main"),
@@ -1092,6 +1093,7 @@ export async function runCli(argv: string[]): Promise<void> {
           routing: config.llm.routing,
           credentialResolvers: { codex: codexResolver2 },
           responsesApiProviders: ["codex"],
+          log,
         });
         const startupRoute = modelRouter.resolve({
           agentId: "cli:tool",

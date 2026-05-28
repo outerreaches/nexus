@@ -331,6 +331,7 @@ export async function startGateway(
     routing: config.llm.routing,
     credentialResolvers: { codex: codexResolver },
     responsesApiProviders: ["codex"],
+    log,
   });
   const startupRoute = modelRouter.resolve({
     agentId: "gateway:start",

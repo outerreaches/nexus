@@ -54,6 +54,11 @@ export type ModelRouterConfig = {
   credentialResolvers?: Record<string, ProviderCredentialResolver>;
   /** Providers that use the Responses API instead of chat/completions. */
   responsesApiProviders?: string[];
+  /** Forwarded to every SlotCacheManager this router creates so slot save/
+   *  restore activity surfaces in the host log. Each line is prefixed with
+   *  `slot_cache:<provider> ` so events from different providers stay
+   *  distinguishable. */
+  log?: (line: string) => void;
 };
 
 export class ModelRouter {
@@ -74,6 +79,7 @@ export class ModelRouter {
     // Instantiate one slot cache manager per provider that opted in. This must
     // happen before we materialize this.providers so each runtime config can
     // carry a reference to its shared manager.
+    const routerLog = opts.log;
     for (const [name, cfg] of Object.entries(sourceProviders)) {
       const slot = cfg.slotCache;
       if (slot && slot.enabled && slot.slotCount > 0 && cfg.baseUrl && cfg.baseUrl !== "dynamic") {
@@ -84,6 +90,7 @@ export class ModelRouter {
             apiKey: cfg.apiKey,
             slotCount: slot.slotCount,
             requestTimeoutMs: slot.requestTimeoutMs,
+            ...(routerLog ? { log: (line: string) => routerLog(`slot_cache:${name} ${line}`) } : {}),
           }),
         );
       }

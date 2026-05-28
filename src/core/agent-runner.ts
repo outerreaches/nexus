@@ -193,13 +193,18 @@ function isLlmTimeoutError(err: unknown): boolean {
 }
 
 /** Transient provider errors worth retrying once (429, 5xx, network). */
-function isTransientLlmError(err: unknown): boolean {
+export function isTransientLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   if (/LLM request timed out/i.test(message)) return true;
   if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up/i.test(message)) return true;
   // Codex SSE stream cut off before response.output_item.done — partial tool
   // call discarded by codex-responses.ts. Retry like a network blip.
   if (/Codex stream ended with \d+ unfinalized function call/i.test(message)) return true;
+  // llama.cpp slot lease acquire/save/restore failed. We refuse to fall back
+  // to unpinned inference (would cause cross-session KV thrash); retry once
+  // after backoff. If the slot cache is genuinely broken, the second attempt
+  // fails too and the run surfaces a real error instead of silently degrading.
+  if (/slot_lease_failed/i.test(message)) return true;
   const statusMatch = message.match(/LLM request failed:\s*(\d{3})\b/);
   if (!statusMatch) return false;
   const status = Number(statusMatch[1]);
