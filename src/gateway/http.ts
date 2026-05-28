@@ -62,6 +62,32 @@ export async function startHttpServer(
   deps: GatewayHttpDeps,
 ): Promise<{ stop: () => Promise<void>; listen: () => ReturnType<typeof serve>; app: Hono }> {
   const app = new Hono();
+  // Surface unhandled route exceptions in both the host log and the response
+  // body. Hono's default 500 is a bare "Internal Server Error" with no
+  // detail, which makes operator diagnosis impossible without container log
+  // access. The dashboard is operator-only, so leaking message + truncated
+  // stack frames into the response is an acceptable tradeoff for being able
+  // to read the error directly in the browser.
+  app.onError((err, c) => {
+    const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error && err.stack ? err.stack : "";
+    const path = c.req.path;
+    deps.log(`http_error path=${path} message=${message}`);
+    if (stack) {
+      // Keep the host log compact; full stack lines first 8.
+      const stackLines = stack.split("\n").slice(0, 8).join("\n");
+      deps.log(`http_error_stack path=${path}\n${stackLines}`);
+    }
+    const body = [
+      `Error: ${message}`,
+      "",
+      "Path: " + path,
+      "",
+      stack ? stack.split("\n").slice(0, 12).join("\n") : "(no stack)",
+    ].join("\n");
+    return c.text(body, 500);
+  });
+
   registerGatewayAuth(app, deps);
 
   // Keep this module as pure HTTP bootstrap. Node WebSocket transport is wired

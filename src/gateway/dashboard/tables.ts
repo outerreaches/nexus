@@ -109,10 +109,11 @@ export function renderJobsTable(rows: JobRow[]): string {
         const enabled = j.enabled === 1;
         const toggleLabel = enabled ? "Disable" : "Enable";
         const toggleValue = enabled ? "false" : "true";
+        const safeName = String(j.name ?? "").replace(/'/g, "\\'");
         const toggleConfirm = enabled
-          ? `return confirm('Disable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`
-          : `return confirm('Enable job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"?')`;
-        const deleteConfirm = `return confirm('Permanently delete job "${escapeHtml(j.name.replace(/'/g, "\\'"))}"? This cannot be undone.')`;
+          ? `return confirm('Disable job "${escapeHtml(safeName)}"?')`
+          : `return confirm('Enable job "${escapeHtml(safeName)}"?')`;
+        const deleteConfirm = `return confirm('Permanently delete job "${escapeHtml(safeName)}"? This cannot be undone.')`;
 
         let mode = "agent_task";
         let scheduleLabel = j.cron;
@@ -732,8 +733,14 @@ export function renderHAEventsTable(events: HAEventRow[]): string {
   </table>`;
 }
 
-export function escapeHtml(value: string): string {
-  return value
+// These helpers used to declare `value: string`, but the dashboard pipes data
+// straight from SQLite rows / tracker maps that can hand back null/undefined
+// for nominally-string columns (e.g. a job row with name = NULL). One bad row
+// would then 500 the whole dashboard via "value.replace is not a function".
+// Coerce defensively so a single null cell is rendered as empty instead of
+// taking the page down.
+export function escapeHtml(value: unknown): string {
+  return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -754,13 +761,14 @@ export function safeJsonForScript(value: unknown): string {
     .replace(/\$\{/g, "\\u0024{");
 }
 
-export function escapeClass(value: string): string {
-  return value.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+export function escapeClass(value: unknown): string {
+  return String(value ?? "").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
 }
 
-export function truncate(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}…(+${text.length - maxChars} chars)`;
+export function truncate(text: unknown, maxChars: number): string {
+  const str = String(text ?? "");
+  if (str.length <= maxChars) return str;
+  return `${str.slice(0, maxChars)}…(+${str.length - maxChars} chars)`;
 }
 
 export function formatTime(ms: number): string {
