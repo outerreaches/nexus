@@ -160,28 +160,46 @@ export class SlotCacheManager {
       const prevOwner = stateNow.owner;
 
       // Perform eviction if needed, then attempt restore.
+      //
+      // Save/restore HTTP failures are intentionally soft-failed here. As
+      // long as we end up returning a lease, the caller pins `id_slot` on
+      // the request, so cross-session KV thrash from llama.cpp's LCP picker
+      // is impossible. What we lose on failure is the persistence layer
+      // (cache state doesn't survive eviction), which is a graceful
+      // degradation — far better than blocking the user's request because
+      // the admin API hiccupped.
       let restored = false;
-      try {
-        if (prevOwner && prevOwner !== slotKey) {
+      if (prevOwner && prevOwner !== slotKey) {
+        try {
           await this.saveSlot(candidate, prevOwner);
-          this.ownerToSlot.delete(prevOwner);
+        } catch (err) {
+          this.opts.log?.(
+            `slot_cache_save_failed slot=${candidate} key=${prevOwner} err=${
+              err instanceof Error ? err.message : String(err)
+            } — proceeding without persisting prior state`,
+          );
         }
+        this.ownerToSlot.delete(prevOwner);
+      }
+      try {
         // Try restore; if no file exists this is a cheap no-op (404).
         restored = await this.restoreSlot(candidate, slotKey);
-        stateNow.owner = slotKey;
-        this.ownerToSlot.set(slotKey, candidate);
-        this.touch(candidate);
-        return this.makeLease(slotKey, candidate, restored);
       } catch (err) {
-        // Eviction/restore I/O failed — leave the slot in a safe state. We
-        // erase the slot to avoid handing it back to anyone with stale KV
-        // cache from `prevOwner`, then bubble the error.
+        this.opts.log?.(
+          `slot_cache_restore_failed slot=${candidate} key=${slotKey} err=${
+            err instanceof Error ? err.message : String(err)
+          } — proceeding with fresh slot state`,
+        );
+        // Clear any partial KV state so the request starts from a known
+        // empty slot instead of inheriting whatever survived the failed
+        // restore attempt.
         try { await this.eraseSlot(candidate); } catch { /* best-effort */ }
-        if (prevOwner) this.ownerToSlot.delete(prevOwner);
-        stateNow.owner = null;
-        this.unlock(candidate);
-        throw err;
+        restored = false;
       }
+      stateNow.owner = slotKey;
+      this.ownerToSlot.set(slotKey, candidate);
+      this.touch(candidate);
+      return this.makeLease(slotKey, candidate, restored);
     }
   }
 

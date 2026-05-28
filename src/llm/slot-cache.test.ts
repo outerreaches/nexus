@@ -87,7 +87,7 @@ test("SlotCacheManager honors slotEndpointBaseUrl override for proxy/path-prefix
   }
 });
 
-test("SlotCacheManager surfaces an actionable 404 error on slot save", async () => {
+test("SlotCacheManager soft-fails a 404 on save and surfaces the actionable error via the logger", async () => {
   const stub = stubFetch((url) => {
     if (url.endsWith("?action=save")) {
       return { status: 404, bodyText: '{"error":{"message":"File Not Found","type":"not_found_error","code":404}}' };
@@ -95,18 +95,66 @@ test("SlotCacheManager surfaces an actionable 404 error on slot save", async () 
     if (url.endsWith("?action=restore")) return { status: 404, bodyText: "file not found" };
     return { status: 200, bodyText: "{}" };
   });
+  const logs: string[] = [];
   try {
-    const mgr = new SlotCacheManager({ baseUrl: "http://localhost:8083/v1", slotCount: 1 });
+    const mgr = new SlotCacheManager({
+      baseUrl: "http://localhost:8083/v1",
+      slotCount: 1,
+      log: (line) => logs.push(line),
+    });
     (await mgr.acquire("session-A")).release();
-    await assert.rejects(
-      mgr.acquire("session-B"),
-      (err: Error) => {
-        assert.match(err.message, /slot save failed: 404/);
-        assert.match(err.message, /at http:\/\/localhost:8083\/slots\/0\?action=save/);
-        assert.match(err.message, /--slot-save-path/);
-        return true;
-      },
-    );
+    // Save of A fails when we evict to acquire B. The manager must still
+    // return a usable lease (id_slot pinning is what prevents thrash) and
+    // log a slot_cache_save_failed warning with the actionable hint.
+    const lease = await mgr.acquire("session-B");
+    try {
+      assert.equal(lease.slotId, 0);
+      assert.equal(lease.slotKey, "session-B");
+      assert.equal(lease.restored, false);
+    } finally {
+      lease.release();
+    }
+    const saveFailedLine = logs.find((l) => l.startsWith("slot_cache_save_failed"));
+    assert.ok(saveFailedLine, `expected a slot_cache_save_failed log line, got:\n${logs.join("\n")}`);
+    assert.match(saveFailedLine!, /slot save failed: 404/);
+    assert.match(saveFailedLine!, /at http:\/\/localhost:8083\/slots\/0\?action=save/);
+    assert.match(saveFailedLine!, /--slot-save-path/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("SlotCacheManager soft-fails a restore error and erases the slot before handing it out", async () => {
+  const stub = stubFetch((url) => {
+    if (url.endsWith("?action=save")) return { status: 200, bodyText: "{}" };
+    if (url.endsWith("?action=restore")) {
+      return {
+        status: 400,
+        bodyText: '{"error":{"code":400,"message":"Unable to restore slot, no available space in KV cache or invalid slot save file","type":"invalid_request_error"}}',
+      };
+    }
+    if (url.endsWith("?action=erase")) return { status: 200, bodyText: "{}" };
+    return { status: 200, bodyText: "{}" };
+  });
+  const logs: string[] = [];
+  try {
+    const mgr = new SlotCacheManager({
+      baseUrl: "http://localhost:8083/v1",
+      slotCount: 1,
+      log: (line) => logs.push(line),
+    });
+    const lease = await mgr.acquire("session-fresh");
+    try {
+      assert.equal(lease.restored, false, "restored should be false when the underlying restore failed");
+      assert.equal(lease.slotId, 0, "lease must still pin to a slot so id_slot can be set");
+    } finally {
+      lease.release();
+    }
+    const actions = stub.calls.map((c) => c.url.split("?action=")[1]).filter(Boolean);
+    assert.deepEqual(actions, ["restore", "erase"], "after a restore failure we must erase before serving the lease");
+    const restoreFailedLine = logs.find((l) => l.startsWith("slot_cache_restore_failed"));
+    assert.ok(restoreFailedLine, `expected a slot_cache_restore_failed log line, got:\n${logs.join("\n")}`);
+    assert.match(restoreFailedLine!, /Unable to restore slot/);
   } finally {
     stub.restore();
   }

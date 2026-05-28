@@ -71,15 +71,16 @@ test("ModelRouter prefixes SlotCacheManager log lines with the provider name", a
   }
 });
 
-test("OpenAICompatClient throws slot_lease_failed instead of falling back when slot acquire fails", async () => {
+test("OpenAICompatClient pins id_slot and reaches /chat/completions even when slot save fails", async () => {
   // Stub: restore returns 404 (expected cache miss), save returns 500 — this
-  // models a broken slot persistence endpoint. The first acquire of A
-  // succeeds (no prevOwner to save). The second acquire (B) triggers a save
-  // of A on eviction, which throws and propagates out of completeChat.
-  let chatCalled = false;
-  const stub = stubFetch((url) => {
+  // models a broken slot persistence endpoint. The slot manager soft-fails
+  // the eviction save so id_slot still gets pinned on the request: no
+  // unpinned fallback, no Telegram-visible failure.
+  const chatRequests: Array<Record<string, unknown>> = [];
+  const slotLogs: string[] = [];
+  const stub = stubFetch((url, body) => {
     if (/\/chat\/completions/.test(url)) {
-      chatCalled = true;
+      chatRequests.push(body as Record<string, unknown>);
       return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
     }
     if (url.endsWith("?action=save")) return { status: 500, bodyText: "boom" };
@@ -97,6 +98,7 @@ test("OpenAICompatClient throws slot_lease_failed instead of falling back when s
         },
       },
       routing: baseRouting,
+      log: (line) => slotLogs.push(line),
     });
     const route = router.resolve({ agentId: "main", preset: "orchestrator", mode: "local_only" });
     const cache = route.primary.slotCache;
@@ -106,15 +108,73 @@ test("OpenAICompatClient throws slot_lease_failed instead of falling back when s
     lease.release();
 
     const client = new OpenAICompatClient(route.primary);
-    await assert.rejects(
-      client.completeChat({
-        messages: [{ role: "user", content: "hi" }],
-        tools: [],
-        slotKey: "session-B",
-      }),
-      /slot_lease_failed/,
+    const result = await client.completeChat({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      slotKey: "session-B",
+    });
+    assert.equal(result.content, "ok");
+    assert.equal(chatRequests.length, 1, "expected exactly one /chat/completions call");
+    assert.equal(chatRequests[0]?.id_slot, 0, "id_slot must still be pinned despite save failure");
+    assert.equal(chatRequests[0]?.cache_prompt, true);
+    assert.ok(
+      slotLogs.some((l) => /slot_cache:local slot_cache_save_failed/.test(l)),
+      `expected a slot_cache_save_failed warning, got:\n${slotLogs.join("\n")}`,
     );
-    assert.equal(chatCalled, false, "completeChat must not call /chat/completions when slot lease fails");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("OpenAICompatClient still pins id_slot when slot restore fails with 400", async () => {
+  // Models the user-reported case: restore returns 400 with the "Unable to
+  // restore slot, no available space in KV cache or invalid slot save file"
+  // body. The manager soft-fails to a fresh slot and the user's call
+  // continues.
+  const chatRequests: Array<Record<string, unknown>> = [];
+  const slotLogs: string[] = [];
+  const stub = stubFetch((url, body) => {
+    if (/\/chat\/completions/.test(url)) {
+      chatRequests.push(body as Record<string, unknown>);
+      return { status: 200, bodyText: JSON.stringify({ choices: [{ message: { content: "ok" } }] }) };
+    }
+    if (url.endsWith("?action=save")) return { status: 200, bodyText: "{}" };
+    if (url.endsWith("?action=restore")) {
+      return {
+        status: 400,
+        bodyText: '{"error":{"code":400,"message":"Unable to restore slot, no available space in KV cache or invalid slot save file","type":"invalid_request_error"}}',
+      };
+    }
+    if (url.endsWith("?action=erase")) return { status: 200, bodyText: "{}" };
+    return { status: 200, bodyText: "{}" };
+  });
+  try {
+    const router = new ModelRouter({
+      defaultProvider: { baseUrl: "http://localhost:9999/v1", model: "test-model" },
+      providers: {
+        local: {
+          baseUrl: "http://localhost:9999/v1",
+          model: "test-model",
+          slotCache: { enabled: true, slotCount: 1 },
+        },
+      },
+      routing: baseRouting,
+      log: (line) => slotLogs.push(line),
+    });
+    const route = router.resolve({ agentId: "main", preset: "orchestrator", mode: "local_only" });
+    const client = new OpenAICompatClient(route.primary);
+    const result = await client.completeChat({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      slotKey: "session-fresh",
+    });
+    assert.equal(result.content, "ok");
+    assert.equal(chatRequests.length, 1, "expected one chat call");
+    assert.equal(chatRequests[0]?.id_slot, 0, "id_slot must still be pinned despite restore failure");
+    assert.ok(
+      slotLogs.some((l) => /slot_cache_restore_failed.*Unable to restore slot/.test(l)),
+      `expected a slot_cache_restore_failed warning naming the underlying llama.cpp error, got:\n${slotLogs.join("\n")}`,
+    );
   } finally {
     stub.restore();
   }

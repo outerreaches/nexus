@@ -901,12 +901,12 @@ export class OpenAICompatClient implements LLMClient {
     // concurrent calls onto the configured slot pool and triggers save+restore
     // when ownership rotates.
     //
-    // On failure we deliberately do NOT fall back to unpinned inference: the
-    // whole point of slot caching is to prevent cross-session KV thrash from
-    // llama.cpp's internal LCP slot selection, so letting requests through
-    // without `id_slot` defeats the cache. Throw a slot_lease_failed error
-    // and let the runner's transient-retry path retry once after backoff —
-    // that fails loud if the cache is genuinely broken.
+    // SlotCacheManager.acquire soft-fails save/restore HTTP errors internally
+    // (loud log, restored=false) and always returns a lease, so pinning via
+    // `id_slot` stays intact even when the admin API is broken — no
+    // cross-session LCP thrash. The catch below only fires on programming
+    // errors (e.g. empty slotKey) and is a safety net; we log loud and
+    // proceed unpinned rather than blocking the user's request.
     let slotLease: Awaited<ReturnType<NonNullable<typeof this.config.slotCache>["acquire"]>> | null = null;
     if (this.config.slotCache && params.slotKey) {
       try {
@@ -914,8 +914,7 @@ export class OpenAICompatClient implements LLMClient {
         log?.(`llm_slot_lease key=${params.slotKey} slot=${slotLease.slotId} restored=${slotLease.restored ? "yes" : "no"}`);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        log?.(`llm_slot_lease_failed key=${params.slotKey} err=${reason}`);
-        throw new Error(`slot_lease_failed: ${reason}`);
+        log?.(`llm_slot_lease_unexpected_error key=${params.slotKey} err=${reason} — proceeding unpinned`);
       }
     }
 
