@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { AgentRunner, classifyToolResultStatus, isTransientLlmError, toolResultIndicatesDeployApplied } from "./agent-runner.js";
+import { AgentRunner, classifyToolResultStatus, isContextOverflowError, isTransientLlmError, toolResultIndicatesDeployApplied } from "./agent-runner.js";
 import type { LLMClient } from "../llm/openai-compat.js";
 import type { ToolCall } from "./types.js";
 import type { ToolContext } from "./tools.js";
@@ -116,6 +116,37 @@ test("isTransientLlmError classifies slot_lease_failed as transient so the runne
   assert.equal(isTransientLlmError(new Error("slot_lease_failed: slot save failed: 500 Internal Server Error")), true);
   assert.equal(isTransientLlmError(new Error("Slot_Lease_Failed: foo")), true, "case-insensitive");
   assert.equal(isTransientLlmError(new Error("unrelated parse error")), false);
+});
+
+test("isContextOverflowError recognizes llama.cpp and OpenAI overflow shapes (400 only)", () => {
+  assert.equal(
+    isContextOverflowError(new Error(
+      'LLM request failed: 400 Bad Request — {"error":{"code":400,"message":"request (146482 tokens) exceeds the available context size (131072 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":146482,"n_ctx":131072}}',
+    )),
+    true,
+    "llama.cpp exceed_context_size_error body",
+  );
+  assert.equal(
+    isContextOverflowError(new Error(
+      "LLM request failed: 400 Bad Request — context length exceeded for model",
+    )),
+    true,
+  );
+  assert.equal(
+    isContextOverflowError(new Error(
+      "LLM request failed: 400 Bad Request — This model's maximum context length is 128000 tokens.",
+    )),
+    true,
+  );
+  assert.equal(
+    isContextOverflowError(new Error("LLM request failed: 500 Internal Server Error — exceed_context_size_error mention is incidental")),
+    false,
+    "5xx with incidental match must not be hijacked from the transient retry path",
+  );
+  assert.equal(
+    isContextOverflowError(new Error("LLM request timed out after 60s")),
+    false,
+  );
 });
 
 test("toolResultIndicatesDeployApplied detects direct ha_deploy apply success", () => {
@@ -526,6 +557,130 @@ test("AgentRunner auto-routes shell_exec in remote execution mode", async () => 
   assert.equal(result.status, "complete");
   assert.equal(localShellExecCalls, 0);
   assert.equal(routedCalls, 1);
+});
+
+test("AgentRunner hard-compacts and retries once when the LLM rejects the prompt with exceed_context_size_error", async () => {
+  // compactContext makes its own LLM call to generate a summary — we treat
+  // any short, summary-shaped (≤ 2 message) call as that internal request
+  // and only count "main-loop" calls (the agent's actual LLM turn) toward
+  // step. This keeps the test focused on the recovery path.
+  let mainStep = 0;
+  const mainCallLengths: number[] = [];
+  const llm: LLMClient = {
+    completeChat: async (params) => {
+      const firstSystem = params.messages.find((m) => m.role === "system");
+      const isSummaryCall = typeof firstSystem?.content === "string"
+        && firstSystem.content.includes("context compaction assistant");
+      if (isSummaryCall) {
+        return {
+          content: "Goals: short summary.\nDecisions: keep history compact.",
+          toolCalls: [],
+          usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+        };
+      }
+      mainStep += 1;
+      mainCallLengths.push(params.messages.length);
+      if (mainStep === 1) {
+        throw new Error(
+          'LLM request failed: 400 Bad Request — {"error":{"code":400,"message":"request (146482 tokens) exceeds the available context size (131072 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":146482,"n_ctx":131072}}',
+        );
+      }
+      return {
+        content: "compacted reply",
+        toolCalls: [],
+        usage: { promptTokens: 50, completionTokens: 5, totalTokens: 55 },
+      };
+    },
+  };
+
+  // Build a history long enough for compactContext to find a clean boundary,
+  // but short enough that the iteration-start compaction (60%/75% of 100K)
+  // does NOT fire — only the emergency path on overflow should engage.
+  const history: import("./types.js").ChatMessage[] = [];
+  for (let i = 0; i < 12; i++) {
+    history.push({ role: "user", content: `prior user turn ${i} with some filler content `.repeat(20) });
+    history.push({ role: "assistant", content: `prior assistant turn ${i} with filler `.repeat(20) });
+  }
+
+  const logs: string[] = [];
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 2, maxToolCalls: 4, maxContextTokens: 100_000 },
+    toolContext: makeToolContext(),
+    onLog: (line) => logs.push(line),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history,
+    userMessage: "ping",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "compacted reply");
+  assert.equal(mainStep, 2, "exactly one overflow + one successful retry");
+  assert.ok(
+    mainCallLengths[1]! < mainCallLengths[0]!,
+    `retry prompt should be shorter than original (got ${mainCallLengths.join(", ")} messages)`,
+  );
+  assert.ok(
+    logs.some((l) => l.startsWith("llm_context_overflow:")),
+    `expected an llm_context_overflow log, got:\n${logs.join("\n")}`,
+  );
+  assert.ok(
+    logs.some((l) => l.includes("llm_context_overflow_recovery: retry succeeded")),
+    `expected llm_context_overflow_recovery retry success log, got:\n${logs.join("\n")}`,
+  );
+});
+
+test("AgentRunner surfaces the overflow error when the retry also overflows", async () => {
+  let mainStep = 0;
+  const llm: LLMClient = {
+    completeChat: async (params) => {
+      const firstSystem = params.messages.find((m) => m.role === "system");
+      const isSummaryCall = typeof firstSystem?.content === "string"
+        && firstSystem.content.includes("context compaction assistant");
+      if (isSummaryCall) {
+        return {
+          content: "summary placeholder",
+          toolCalls: [],
+          usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+        };
+      }
+      mainStep += 1;
+      throw new Error(
+        'LLM request failed: 400 Bad Request — {"error":{"code":400,"message":"request (200000 tokens) exceeds the available context size (131072 tokens)","type":"exceed_context_size_error"}}',
+      );
+    },
+  };
+
+  // History long enough that the emergency compaction can engage and produce
+  // `compacted: true`, then the retry still fails.
+  const history: import("./types.js").ChatMessage[] = [];
+  for (let i = 0; i < 12; i++) {
+    history.push({ role: "user", content: `prior user turn ${i} with filler `.repeat(10) });
+    history.push({ role: "assistant", content: `prior assistant turn ${i} with filler `.repeat(10) });
+  }
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 2, maxToolCalls: 4, maxContextTokens: 100_000 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history,
+    userMessage: "ping",
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.output, /exceed_context_size_error/);
+  // Exactly one recovery attempt; we don't loop on context-overflow within a
+  // single iteration even if the second attempt still overflows.
+  assert.equal(mainStep, 2);
 });
 
 test("AgentRunner logs prompt estimate calibration when usage is available", async () => {

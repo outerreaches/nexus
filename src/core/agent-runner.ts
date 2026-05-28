@@ -192,6 +192,24 @@ function isLlmTimeoutError(err: unknown): boolean {
   return /LLM request timed out/i.test(err.message);
 }
 
+/** Context overflow errors: the model rejected the prompt as too long. The
+ *  runner reacts to these by forcing a hard compaction and retrying once,
+ *  similar to the timeout-recovery path. Matches llama.cpp's
+ *  `exceed_context_size_error` body marker, OpenAI's "context length"
+ *  phrasing, and generic "exceeds the available context size" / "maximum
+ *  context length" patterns. Restricted to the 400-class status so a 5xx
+ *  with an incidental "context" string doesn't get hijacked away from the
+ *  transient-retry path. */
+export function isContextOverflowError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!/LLM request failed:\s*4\d{2}\b/.test(message)) return false;
+  if (/exceed_context_size_error/i.test(message)) return true;
+  if (/exceeds the available context size/i.test(message)) return true;
+  if (/context length (?:exceeded|of \d+ tokens)/i.test(message)) return true;
+  if (/maximum context length/i.test(message)) return true;
+  return false;
+}
+
 /** Transient provider errors worth retrying once (429, 5xx, network). */
 export function isTransientLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
@@ -720,10 +738,18 @@ export class AgentRunner {
     let buildOk = false;
 
     const maxContextTokens = this.deps.budget.maxContextTokens ?? 0;
-    const softCompactionThreshold = 0.65;
-    const hardCompactionThreshold = 0.85;
+    // Conservative thresholds: an estimator under-count of ~25% (common when
+    // tool schemas + structured tool outputs dominate the prompt) still
+    // leaves room. Compaction-already-too-aggressive shows up as repeated
+    // summaries on otherwise short runs and is cheaper than a 400 overflow.
+    const softCompactionThreshold = 0.60;
+    const hardCompactionThreshold = 0.75;
     let softCompactionAttempted = false;
-    let promptEstimateMultiplier = 1;
+    // Start above 1.0 so the first LLM call's estimate is biased high before
+    // any usage telemetry has arrived to calibrate the multiplier. Without
+    // this, a dense first-call prompt can slip past the hard threshold and
+    // overflow the model context.
+    let promptEstimateMultiplier = 1.15;
     const runStartedAtMs = this.deps.toolContext.nowMs();
 
     const logUsageAndCalibrate = (
@@ -857,9 +883,119 @@ export class AgentRunner {
         this.recordCircuitFailure(err);
         const isTimeout = isLlmTimeoutError(err);
         const isTransient = isTransientLlmError(err);
+        const isOverflow = isContextOverflowError(err);
 
-        // Non-retryable errors: fail immediately
-        if (!isTimeout && !isTransient) {
+        // Context overflow: the model rejected the prompt as too long.
+        // Force a hard compaction and retry exactly once. If compaction can't
+        // shrink the prompt below the limit (e.g. a single huge tool result
+        // dominates the recent window), fall through to the normal failure
+        // path so the operator sees the underlying error instead of looping.
+        if (isOverflow && maxContextTokens > 0) {
+          const overflowMsg = err instanceof Error ? err.message : String(err);
+          this.deps.onLog?.(`llm_context_overflow: ${truncate(overflowMsg, 240)} — attempting hard-compact + retry`);
+          let recoveryMessages = messages;
+          let recoveryCompacted = false;
+          try {
+            const recoveryResult = await compactContext({
+              messages: [...messages],
+              tools: currentTools,
+              llm: this.deps.llm,
+              maxContextTokens,
+              mode: "hard",
+              // Bias the estimator high so the compactor over-shrinks rather
+              // than landing right at the new threshold.
+              estimationFactor: Math.max(promptEstimateMultiplier, 1.25),
+              minRecentMessages: 6,
+              onLog: this.deps.onLog,
+            });
+            if (recoveryResult.compacted) {
+              recoveryMessages = recoveryResult.messages;
+              recoveryCompacted = true;
+              this.deps.onLog?.(
+                `llm_context_overflow_recovery: compacted ${recoveryResult.tokensBefore} -> ${recoveryResult.tokensAfter} tokens`,
+              );
+            } else {
+              this.deps.onLog?.("llm_context_overflow_recovery: compactor produced no reduction");
+            }
+          } catch (compErr) {
+            this.deps.onLog?.(
+              `llm_context_overflow_recovery: compaction failed (${compErr instanceof Error ? compErr.message : String(compErr)})`,
+            );
+          }
+          // If compactContext refused (estimator thought the prompt was
+          // already small enough) or made no reduction, the LLM is still the
+          // source of truth — it just rejected the prompt. Fall back to an
+          // aggressive trim: keep system + last 6 non-system messages.
+          if (!recoveryCompacted || recoveryMessages.length >= messages.length) {
+            const aggressive = trimMessagesForTimeoutRetry(recoveryMessages, 6);
+            if (aggressive.length < recoveryMessages.length) {
+              this.deps.onLog?.(
+                `llm_context_overflow_recovery: aggressive trim ${recoveryMessages.length} -> ${aggressive.length} messages`,
+              );
+              recoveryMessages = aggressive;
+              recoveryCompacted = true;
+            }
+          }
+
+          if (recoveryCompacted) {
+            messages.length = 0;
+            messages.push(...recoveryMessages);
+            const retryEstimateRaw = estimateTotalTokens(messages, currentTools);
+            const retryEstimateCalibrated = Math.ceil(retryEstimateRaw * promptEstimateMultiplier);
+            this.deps.onLog?.(
+              `llm_call_retry iteration=${iteration} messages=${messages.length} mode=context_overflow ` +
+              `est_prompt=${retryEstimateCalibrated} est_prompt_raw=${retryEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+            );
+            try {
+              const retry = await this.deps.llm.completeChat({
+                messages,
+                tools: currentTools,
+                onTextDelta: this.deps.onTextDelta,
+                abortSignal: this.deps.abortSignal,
+                ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
+              });
+              this.recordCircuitSuccess();
+              this.throwIfCancelled();
+              content = retry.content;
+              toolCalls = retry.toolCalls;
+              reasoning = retry.reasoning;
+              logUsageAndCalibrate("default", retry.usage, retryEstimateRaw, retryEstimateCalibrated);
+              this.deps.onLog?.("llm_context_overflow_recovery: retry succeeded");
+              // Skip the failure-return path; the catch is done.
+              // Fall through to the post-call logic below.
+            } catch (retryErr) {
+              if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {
+                throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM context-overflow recovery");
+              }
+              this.recordCircuitFailure(retryErr);
+              const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+              this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
+              const errorText = `LLM error: ${msg}`;
+              const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
+              newMessages.push(assistantMsg);
+              return {
+                status: "failed",
+                output: errorText,
+                newMessages,
+                toolCallsUsed,
+                iterationsUsed: iteration + 1,
+              };
+            }
+          } else {
+            // Could not compact — fall through to non-retryable failure with the original error.
+            const errorText = `LLM error: ${overflowMsg}`;
+            const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
+            newMessages.push(assistantMsg);
+            return {
+              status: "failed",
+              output: errorText,
+              newMessages,
+              toolCallsUsed,
+              iterationsUsed: iteration + 1,
+            };
+          }
+        } else if (!isTimeout && !isTransient) {
+          // Non-retryable errors: fail immediately
           const msg = err instanceof Error ? err.message : String(err);
           this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
           const errorText = `LLM error: ${msg}`;
@@ -942,7 +1078,7 @@ export class AgentRunner {
               iterationsUsed: iteration + 1,
             };
           }
-        } else {
+        } else if (isTimeout) {
           // Timeout: compact/trim context + retry with extended timeout
           this.deps.onLog?.("llm_timeout: attempting one recovery retry with compacted context and extended timeout");
           let retryMessages = messages;

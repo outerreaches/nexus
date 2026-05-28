@@ -294,7 +294,11 @@ export const ConfigSchema = z.object({
       maxConcurrentAgents: z.number().int().positive().default(5),
       maxToolCallsPerRun: z.number().int().positive().default(200),
       maxIterationsPerRun: z.number().int().positive().default(100),
-      maxContextTokens: z.number().int().min(0).default(128_000),
+      // Default is set well below typical llama.cpp 131_072 / OpenRouter 200K
+      // context sizes so the compaction trigger has real headroom against
+      // estimator drift. Operators with larger context targets should raise
+      // this via NEXUS_MAX_CONTEXT_TOKENS or nexus.json.
+      maxContextTokens: z.number().int().min(0).default(110_000),
     })
     .default({}),
 });
