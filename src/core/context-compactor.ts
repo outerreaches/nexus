@@ -505,6 +505,27 @@ function normalizeEstimationFactor(factor: number | undefined): number {
   return Math.min(2.5, Math.max(0.8, factor));
 }
 
+/** Suffix appended to a run's slot key for the compaction-summary LLM call.
+ *  llama.cpp slot filenames keep [A-Za-z0-9._-]; "::" is sanitized to "_". */
+const COMPACTION_SLOT_KEY_SUFFIX = "::compaction";
+
+/**
+ * Derive the slot key to use for the compaction-summary LLM call from the
+ * conversation's slot key. Summarization is a separate logical session: giving
+ * it its own key keeps llama.cpp's longest-common-prefix picker from landing
+ * the summary on the conversation's physical slot and overwriting its KV cache
+ * with no save. With slotCount>1 the summary gets its own slot; with
+ * slotCount==1 the SlotCacheManager saves the conversation KV to disk before
+ * repurposing the slot and restores it on the next conversation turn.
+ *
+ * Returns undefined when there is no conversation slot key (slot affinity off),
+ * preserving the prior behavior of an unpinned summarization call.
+ */
+export function deriveCompactionSlotKey(slotKey: string | undefined): string | undefined {
+  if (!slotKey) return undefined;
+  return `${slotKey}${COMPACTION_SLOT_KEY_SUFFIX}`;
+}
+
 /**
  * Compact messages using the LLM to generate a summary of older messages.
  * Falls back to heuristic compaction if the LLM call fails.
@@ -518,6 +539,10 @@ export async function compactContext(params: {
   estimationFactor?: number;
   /** Minimum recent messages to preserve (default: 10) */
   minRecentMessages?: number;
+  /** Slot key for the summarization LLM call (llama.cpp slot affinity). Should
+   *  be distinct from the conversation's slot key so summarization does not
+   *  evict the conversation's KV cache — see `deriveCompactionSlotKey`. */
+  summarySlotKey?: string;
   onLog?: (msg: string) => void;
 }): Promise<CompactionResult> {
   const { messages, tools, llm, maxContextTokens } = params;
@@ -561,7 +586,7 @@ export async function compactContext(params: {
   // Generate summary
   let summary: string;
   try {
-    summary = await generateSummary(llm, oldMessages, priorPinned);
+    summary = await generateSummary(llm, oldMessages, priorPinned, params.summarySlotKey);
   } catch (err) {
     params.onLog?.(`compaction: LLM summary failed (${err instanceof Error ? err.message : String(err)}), using heuristic`);
     summary = heuristicSummary(oldMessages);
@@ -615,7 +640,12 @@ export async function compactContext(params: {
  * Use the LLM to generate a concise summary of conversation messages.
  * Uses a minimal context (no tools) to keep the summarization call small.
  */
-async function generateSummary(llm: LLMClient, messages: ChatMessage[], priorPinned: string | null): Promise<string> {
+async function generateSummary(
+  llm: LLMClient,
+  messages: ChatMessage[],
+  priorPinned: string | null,
+  summarySlotKey?: string,
+): Promise<string> {
   const conversationText = messagesToText(messages, 1_100);
 
   // Cap the text we send for summarization to ~30k chars (~8k tokens)
@@ -669,6 +699,7 @@ async function generateSummary(llm: LLMClient, messages: ChatMessage[], priorPin
     ],
     tools: [],
     temperature: 0.1,
+    ...(summarySlotKey ? { slotKey: summarySlotKey } : {}),
   });
 
   return result.content ?? "No summary generated.";

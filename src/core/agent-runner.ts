@@ -7,6 +7,7 @@ import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
 import {
   estimateTotalTokens,
   compactContext,
+  deriveCompactionSlotKey,
   aggressiveTruncate,
   storeCompactionRetentionCandidates,
   storeCompactionSummary,
@@ -808,6 +809,7 @@ export class AgentRunner {
               mode,
               estimationFactor: promptEstimateMultiplier,
               minRecentMessages: shouldHardCompact ? 10 : 14,
+              summarySlotKey: deriveCompactionSlotKey(this.deps.slotKey),
               onLog: this.deps.onLog,
             });
             if (result.compacted) {
@@ -906,6 +908,7 @@ export class AgentRunner {
               // than landing right at the new threshold.
               estimationFactor: Math.max(promptEstimateMultiplier, 1.25),
               minRecentMessages: 6,
+              summarySlotKey: deriveCompactionSlotKey(this.deps.slotKey),
               onLog: this.deps.onLog,
             });
             if (recoveryResult.compacted) {
@@ -1100,6 +1103,7 @@ export class AgentRunner {
                 mode: "hard",
                 estimationFactor: promptEstimateMultiplier,
                 minRecentMessages: 8,
+                summarySlotKey: deriveCompactionSlotKey(this.deps.slotKey),
                 onLog: this.deps.onLog,
               });
               if (compactedResult.compacted) {

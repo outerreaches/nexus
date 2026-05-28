@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { compactContext, extractTieredRetentionCandidates, storeCompactionRetentionCandidates } from "./context-compactor.js";
+import { compactContext, deriveCompactionSlotKey, extractTieredRetentionCandidates, storeCompactionRetentionCandidates } from "./context-compactor.js";
 import type { ChatMessage } from "./types.js";
-import type { LLMClient } from "../llm/openai-compat.js";
+import type { LLMClient, LLMCompleteChatParams } from "../llm/openai-compat.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
@@ -67,6 +67,48 @@ test("compactContext boundary counts non-system messages and preserves required 
   assert.match(keptUserLabels, /U2/);
   assert.match(keptUserLabels, /U3/);
   assert.doesNotMatch(keptUserLabels, /U0/);
+});
+
+test("deriveCompactionSlotKey suffixes the conversation key and passes through undefined", () => {
+  assert.equal(deriveCompactionSlotKey(undefined), undefined);
+  assert.equal(deriveCompactionSlotKey(""), undefined);
+  assert.equal(
+    deriveCompactionSlotKey("telegram:1452:interactive:orchestrator"),
+    "telegram:1452:interactive:orchestrator::compaction",
+  );
+});
+
+test("compactContext routes the summarization call to summarySlotKey (no conversation-slot eviction)", async () => {
+  const seenSlotKeys: Array<string | undefined> = [];
+  const llm: LLMClient = {
+    async completeChat(params: LLMCompleteChatParams) {
+      seenSlotKeys.push(params.slotKey);
+      return { content: "summary-from-llm", toolCalls: [] };
+    },
+  };
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: "system-prompt" },
+    { role: "user", content: longText("U0") },
+    { role: "assistant", content: longText("A0") },
+    { role: "user", content: longText("U1") },
+    { role: "assistant", content: longText("A1") },
+    { role: "user", content: longText("U2") },
+    { role: "assistant", content: longText("A2") },
+    { role: "user", content: longText("U3") },
+  ];
+
+  const result = await compactContext({
+    messages,
+    tools: [],
+    llm,
+    maxContextTokens: 180,
+    minRecentMessages: 4,
+    summarySlotKey: "conv-key::compaction",
+  });
+
+  assert.equal(result.compacted, true);
+  assert.deepEqual(seenSlotKeys, ["conv-key::compaction"]);
 });
 
 test("compactContext aggressive truncation compacts oversized user payloads when no boundary exists", async () => {
