@@ -10,6 +10,7 @@ type TestCtx = {
   stateDir: string;
   workspaceDir: string;
   codeDir: string;
+  candidateRootDir: string;
   allowCodeEdit: boolean;
   allowCodeWrite: boolean;
   request?: {
@@ -24,14 +25,17 @@ async function withToolCtx(fn: (ctx: TestCtx) => Promise<void> | void): Promise<
   const stateDir = path.join(root, "state");
   const workspaceDir = path.join(root, "workspace");
   const codeDir = path.join(root, "code");
+  const candidateRootDir = path.join(stateDir, "candidates");
   await fs.mkdir(stateDir, { recursive: true });
   await fs.mkdir(workspaceDir, { recursive: true });
   await fs.mkdir(codeDir, { recursive: true });
+  await fs.mkdir(candidateRootDir, { recursive: true });
 
   const ctx: TestCtx = {
     stateDir,
     workspaceDir,
     codeDir,
+    candidateRootDir,
     allowCodeEdit: true,
     allowCodeWrite: true,
     nowMs: () => Date.now(),
@@ -169,8 +173,47 @@ test("orchestrator cannot edit repository code directly", async () => {
       } as any,
     );
 
-    assert.match(result, /orchestrator must not edit repository code directly/i);
+    assert.match(result, /orchestrator/i);
+    assert.match(result, /must not edit repository code directly/i);
     const unchanged = await fs.readFile(filePath, "utf8");
     assert.equal(unchanged, "export const value = 1;\n");
+  });
+});
+
+test("orchestrator cannot edit code inside a candidate workspace", async () => {
+  await withToolCtx(async (ctx) => {
+    // Candidate repo lives under <stateDir>/candidates — an allowed root for
+    // ordinary state writes, so the policy must catch source paths there too.
+    const candidateSrc = path.join(ctx.candidateRootDir, "cand-1", "repo", "src");
+    await fs.mkdir(candidateSrc, { recursive: true });
+    const filePath = path.join(candidateSrc, "blocked.ts");
+    await fs.writeFile(filePath, "export const value = 1;\n", "utf8");
+
+    const result = await fileEdit.execute(
+      { path: filePath, find: "1", replace: "2" },
+      { ...ctx, request: { preset: "orchestrator" } } as any,
+    );
+
+    assert.match(result, /must not edit repository code directly/i);
+    const unchanged = await fs.readFile(filePath, "utf8");
+    assert.equal(unchanged, "export const value = 1;\n");
+  });
+});
+
+test("coder can edit code inside its candidate workspace", async () => {
+  await withToolCtx(async (ctx) => {
+    const candidateSrc = path.join(ctx.candidateRootDir, "cand-1", "repo", "src");
+    await fs.mkdir(candidateSrc, { recursive: true });
+    const filePath = path.join(candidateSrc, "ok.ts");
+    await fs.writeFile(filePath, "export const value = 1;\n", "utf8");
+
+    const result = await fileEdit.execute(
+      { path: filePath, find: "1", replace: "2" },
+      { ...ctx, request: { preset: "coder" } } as any,
+    );
+
+    assert.doesNotMatch(result, /must not edit repository code directly/i);
+    const updated = await fs.readFile(filePath, "utf8");
+    assert.equal(updated, "export const value = 2;\n");
   });
 });

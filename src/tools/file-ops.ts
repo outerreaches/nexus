@@ -23,12 +23,21 @@ type FileToolContext = {
   workspaceDir: string;
   stateDir: string;
   codeDir: string;
+  /** Root under which coder candidate workspaces live (<stateDir>/candidates).
+   *  Treated as repository code for write-policy purposes so non-coder presets
+   *  can't edit source by targeting a candidate path under stateDir. */
+  candidateRootDir?: string;
   allowCodeEdit?: boolean;
   allowCodeWrite?: boolean;
   request?: {
     preset?: string;
   };
 };
+
+/** Presets permitted to edit repository source (live checkout or candidate).
+ *  Everything else (orchestrator, analyst, researcher, trader, graphic-designer)
+ *  must delegate code changes to a coder worker. */
+const CODE_EDITING_PRESETS = new Set(["coder", "security-researcher"]);
 
 function allowedRoots(ctx: FileToolContext): string[] {
   return [ctx.stateDir, ctx.workspaceDir, ...(ctx.allowCodeEdit ? [ctx.codeDir] : [])];
@@ -77,14 +86,29 @@ function codeWritePolicyError(params: {
   ctx: FileToolContext;
   targetPath: string;
 }): string | null {
-  if (!isUnderRoot(params.targetPath, params.ctx.codeDir)) return null;
-  if (params.ctx.request?.preset === "orchestrator") {
+  const { ctx, targetPath } = params;
+  const underCode = isUnderRoot(targetPath, ctx.codeDir);
+  const underCandidate = !!ctx.candidateRootDir && isUnderRoot(targetPath, ctx.candidateRootDir);
+  // Only repository source (the live checkout or a candidate workspace) is
+  // policy-gated; ordinary state/workspace writes fall through.
+  if (!underCode && !underCandidate) return null;
+
+  const preset = (ctx.request?.preset ?? "").trim();
+  // A named non-code-editing preset must never write source — not the live
+  // checkout and not a candidate path under stateDir. Code changes go through a
+  // coder worker, which owns the edit → verify → ha_deploy flow. Preset-less
+  // contexts (direct CLI / admin) fall through to the allowCodeWrite gate.
+  if (preset && !CODE_EDITING_PRESETS.has(preset)) {
     return (
-      "ERROR: orchestrator must not edit repository code directly. " +
-      "Spawn a coder worker with taskType='write' for code changes, or taskType='review'/'walkthrough' for read-only code tasks."
+      `ERROR: the '${preset}' agent must not edit repository code directly. ` +
+      "Spawn a coder worker with taskType='write' for code changes, " +
+      "or taskType='review'/'walkthrough' for read-only code tasks."
     );
   }
-  if (!params.ctx.allowCodeWrite) {
+
+  // Live code root still requires the explicit write opt-in. Candidate
+  // workspaces are per-run sandboxes and don't need it.
+  if (underCode && !underCandidate && !ctx.allowCodeWrite) {
     return (
       "ERROR: code root is read-only in this runtime. " +
       "Enable host writable code mount and set NEXUS_ALLOW_CODE_WRITE=1 for direct code edits."
