@@ -906,6 +906,90 @@ test("AgentRunner keeps identical-call blocks when only read-only tools succeed 
   assert.ok(blockedToolMessage);
 });
 
+test("AgentRunner clears identical-call blocks after successful job_manage state change", async () => {
+  let step = 0;
+  let runNowCalls = 0;
+  let resumeCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      switch (step++) {
+        case 0:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-job-run-now-1",
+                name: "job_manage",
+                arguments: JSON.stringify({ action: "run_now", id: "JTEST1" }),
+              },
+            ],
+          };
+        case 1:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-job-resume-1",
+                name: "job_manage",
+                arguments: JSON.stringify({ action: "resume", id: "JTEST1" }),
+              },
+            ],
+          };
+        case 2:
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call-job-run-now-2",
+                name: "job_manage",
+                arguments: JSON.stringify({ action: "run_now", id: "JTEST1" }),
+              },
+            ],
+          };
+        default:
+          return { content: "done", toolCalls: [] };
+      }
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "job_manage",
+        description: "test",
+        jsonSchema: {},
+        execute: async (args) => {
+          const action = (args as { action?: string }).action;
+          if (action === "run_now") {
+            runNowCalls += 1;
+            if (runNowCalls === 1) return "ERROR: job is disabled (resume it first)";
+            return "OK";
+          }
+          if (action === "resume") {
+            resumeCalls += 1;
+            return "OK";
+          }
+          return "ERROR: unexpected action";
+        },
+      },
+    ],
+    budget: { maxIterations: 5, maxToolCalls: 6 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "resume and rerun the job",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "done");
+  assert.equal(runNowCalls, 2);
+  assert.equal(resumeCalls, 1);
+});
+
 test("AgentRunner allows one identical retry for telegram_send file-not-found results", async () => {
   let step = 0;
   let telegramCalls = 0;

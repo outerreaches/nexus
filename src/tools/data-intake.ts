@@ -347,6 +347,34 @@ const DATA_INTAKE_ACTIONS = [
 
 type DataIntakeAction = typeof DATA_INTAKE_ACTIONS[number];
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function unwrapSelfNestedArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (isRecord(value)) {
+      const keys = Object.keys(value);
+      if (keys.length === 1 && keys[0] === key) {
+        out[key] = value[key];
+        continue;
+      }
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function dataIntakeActionArgs(input: { args?: Record<string, unknown> } & Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = isRecord(input.args) ? { ...input.args } : {};
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "action" || key === "args" || value === undefined) continue;
+    merged[key] = value;
+  }
+  return unwrapSelfNestedArgs(merged);
+}
+
 const DATA_INTAKE_DISPATCH: Record<DataIntakeAction, Tool> = {
   list_sources: dataIntakeListSources,
   source_list: dataIntakeSourceList,
@@ -374,10 +402,10 @@ export const dataIntakeManage = defineTool({
     args: z.record(z.unknown()).default({}).describe(
       "Action-specific arguments (same schema as the individual data_intake_* tools).",
     ),
-  }),
+  }).passthrough(),
   execute: async (args, ctx) => {
     const target = DATA_INTAKE_DISPATCH[args.action];
     if (!target) return `ERROR: unsupported action '${args.action}'`;
-    return target.execute(args.args, ctx);
+    return target.execute(dataIntakeActionArgs(args), ctx);
   },
 });

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { jobCreate } from "./jobs.js";
+import { jobCreate, jobManage } from "./jobs.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
@@ -129,5 +129,187 @@ test("job_create recovers telegram ancestor origin for nested runs", async () =>
     assert.equal(spec.originRunId, "run-parent-telegram");
     assert.equal(spec.originPreset, "orchestrator");
     assert.equal(spec.originRecoveredFrom, "telegram_ancestor");
+  });
+});
+
+test("job_manage accepts nested jobId for run_now", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JALIAS1",
+        "main",
+        "alias test",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({ mode: "agent_task", task: "test", deliveryMode: "report_only" }),
+        now + 60_000,
+        now,
+        now,
+      );
+
+    const raw = await jobManage.execute(
+      {
+        action: "run_now",
+        args: { jobId: "JALIAS1" },
+      },
+      {
+        db,
+        nowMs: () => now,
+        log: () => {},
+      } as any,
+    );
+
+    assert.equal(raw, "OK");
+    const row = db.db.prepare("SELECT next_run_at FROM jobs WHERE id = ?").get("JALIAS1") as { next_run_at: number };
+    assert.equal(row.next_run_at, now);
+  });
+});
+
+test("job_manage update can directly replace spec_json", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JSPEC1",
+        "main",
+        "spec repair",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({
+          mode: "tool_call",
+          tool: "data_intake_run",
+          args: {
+            mode: "tool_call",
+            tool: "data_intake_manage",
+            args: { action: "run", args: { instanceId: "DINST1" } },
+          },
+        }),
+        now + 60_000,
+        now,
+        now,
+      );
+
+    const raw = await jobManage.execute(
+      {
+        action: "update",
+        id: "JSPEC1",
+        spec: {
+          mode: "tool_call",
+          tool: "data_intake_manage",
+          args: { action: "run", args: { instanceId: "DINST1" } },
+        },
+      },
+      {
+        db,
+        nowMs: () => now,
+        log: () => {},
+      } as any,
+    );
+
+    const row = JSON.parse(raw) as { spec_json: string };
+    const spec = JSON.parse(row.spec_json) as Record<string, unknown>;
+    assert.deepEqual(spec, {
+      mode: "tool_call",
+      tool: "data_intake_manage",
+      args: { action: "run", args: { instanceId: "DINST1" } },
+    });
+  });
+});
+
+test("job_manage list adds operational status", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JSTATUS1",
+        "main",
+        "pending one-shot",
+        "@once",
+        "UTC",
+        1,
+        JSON.stringify({
+          mode: "agent_task",
+          task: "check",
+          oneShotAtMs: now + 60_000,
+          scheduleKind: "one_shot",
+          autoDeleteAfterRun: true,
+          deliveryMode: "report_only",
+        }),
+        now + 60_000,
+        now,
+        now,
+      );
+
+    const raw = await jobManage.execute(
+      {
+        action: "list",
+        limit: 1,
+      },
+      {
+        db,
+        nowMs: () => now,
+        log: () => {},
+      } as any,
+    );
+
+    const rows = JSON.parse(raw) as Array<{ id: string; status: string }>;
+    assert.equal(rows[0]?.id, "JSTATUS1");
+    assert.equal(rows[0]?.status, "pending");
+  });
+});
+
+test("job_manage run_history aliases runs with nested args", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JHIST1",
+        "main",
+        "history",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({ mode: "agent_task", task: "test", deliveryMode: "report_only" }),
+        now + 60_000,
+        now,
+        now,
+      );
+    db.db
+      .prepare(
+        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("JR1", "JHIST1", "main", now, now, now + 1, "failed", "Budget exhausted while iterating (maxIterations=100).", "details");
+
+    const raw = await jobManage.execute(
+      {
+        action: "run_history",
+        args: { jobId: "JHIST1", limit: 5 },
+      },
+      {
+        db,
+        nowMs: () => now,
+        log: () => {},
+      } as any,
+    );
+
+    const rows = JSON.parse(raw) as Array<{ id: string; error: string }>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.id, "JR1");
+    assert.match(rows[0]?.error ?? "", /maxIterations=100/);
   });
 });

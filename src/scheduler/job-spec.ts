@@ -225,3 +225,86 @@ export function migrateLegacyAgentTaskJobSpecs(
     recoverySkippedAmbiguous,
   };
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const JOB_SPEC_METADATA_KEYS = ["oneShotAtMs", "scheduleKind", "autoDeleteAfterRun"] as const;
+
+function copyJobSpecMetadata(from: Record<string, unknown>, to: Record<string, unknown>): void {
+  for (const key of JOB_SPEC_METADATA_KEYS) {
+    if (from[key] !== undefined && to[key] === undefined) {
+      to[key] = from[key];
+    }
+  }
+}
+
+function migrateLegacyDataIntakeToolCallSpec(
+  spec: Record<string, unknown>,
+): { migrated: Record<string, unknown>; kind: "legacy_tool" | "corrupt_nested_manage" } | null {
+  if (spec.mode !== "tool_call" || spec.tool !== "data_intake_run") return null;
+
+  const rawArgs = isRecord(spec.args) ? spec.args : {};
+  if (rawArgs.mode === "tool_call" && rawArgs.tool === "data_intake_manage" && isRecord(rawArgs.args)) {
+    const migrated = { ...rawArgs };
+    copyJobSpecMetadata(spec, migrated);
+    return { migrated, kind: "corrupt_nested_manage" };
+  }
+
+  return {
+    migrated: {
+      ...spec,
+      tool: "data_intake_manage",
+      args: {
+        action: "run",
+        args: rawArgs,
+      },
+    },
+    kind: "legacy_tool",
+  };
+}
+
+export function migrateLegacyDataIntakeJobSpecs(
+  db: NexusDatabase,
+  log?: (msg: string) => void,
+): {
+  scanned: number;
+  migratedLegacyTool: number;
+  repairedCorruptNestedManage: number;
+} {
+  const rows = db.db.prepare("SELECT id, spec_json FROM jobs ORDER BY created_at ASC").all() as Array<{
+    id: string;
+    spec_json: string;
+  }>;
+
+  let scanned = 0;
+  let migratedLegacyTool = 0;
+  let repairedCorruptNestedManage = 0;
+
+  for (const row of rows) {
+    const spec = parseJobSpec(row.spec_json);
+    const migration = migrateLegacyDataIntakeToolCallSpec(spec);
+    if (!migration) continue;
+
+    scanned += 1;
+    if (migration.kind === "legacy_tool") migratedLegacyTool += 1;
+    if (migration.kind === "corrupt_nested_manage") repairedCorruptNestedManage += 1;
+
+    db.db
+      .prepare("UPDATE jobs SET spec_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(migration.migrated), Date.now(), row.id);
+  }
+
+  if (scanned > 0) {
+    log?.(
+      `job_spec_data_intake_migration: scanned=${scanned} migrated_legacy_tool=${migratedLegacyTool} repaired_corrupt_nested_manage=${repairedCorruptNestedManage}`,
+    );
+  }
+
+  return {
+    scanned,
+    migratedLegacyTool,
+    repairedCorruptNestedManage,
+  };
+}

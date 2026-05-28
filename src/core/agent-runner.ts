@@ -345,6 +345,10 @@ function successfulToolCallClearsRetryGuards(
   result: string,
 ): boolean {
   if (result.trimStart().startsWith("ERROR:")) return false;
+  if (call.name === "job_manage" && isPlainObject(args)) {
+    const action = typeof args.action === "string" ? args.action.trim().toLowerCase() : "";
+    return ["create", "update", "pause", "resume", "run_now", "delete", "migrate_specs"].includes(action);
+  }
   if (RETRY_GUARD_RESETTING_FILE_TOOLS.has(call.name)) return true;
   if (call.name !== "shell_exec" || !isPlainObject(args)) return false;
   const command = typeof args.command === "string" ? args.command.trim() : "";
@@ -1397,7 +1401,7 @@ export class AgentRunner {
               if (toolCallsUsed > this.deps.budget.maxToolCalls) {
                 return {
                   status: "budget_exhausted",
-                  output: "Budget exhausted while executing tools.",
+                  output: `Budget exhausted while executing tools (maxToolCalls=${this.deps.budget.maxToolCalls}).`,
                   newMessages,
                   toolCallsUsed,
                   iterationsUsed: iteration + 1,
@@ -1419,7 +1423,7 @@ export class AgentRunner {
         if (toolCallsUsed > this.deps.budget.maxToolCalls) {
           return {
             status: "budget_exhausted",
-            output: "Budget exhausted while executing tools.",
+            output: `Budget exhausted while executing tools (maxToolCalls=${this.deps.budget.maxToolCalls}).`,
             newMessages,
             toolCallsUsed,
             iterationsUsed: iteration + 1,
@@ -1533,7 +1537,7 @@ export class AgentRunner {
 
     return {
       status: "budget_exhausted",
-      output: "Budget exhausted while iterating.",
+      output: `Budget exhausted while iterating (maxIterations=${this.deps.budget.maxIterations}).`,
       newMessages,
       toolCallsUsed,
       iterationsUsed: this.deps.budget.maxIterations,

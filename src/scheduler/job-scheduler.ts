@@ -14,6 +14,7 @@ import { nextCronTimeMs, parseCron, validateTimeZone } from "./cron.js";
 import {
   getOneShotAtMs,
   migrateLegacyAgentTaskJobSpecs,
+  migrateLegacyDataIntakeJobSpecs,
   ONE_SHOT_CRON,
   parseJobSpec,
   readDeliveryMode,
@@ -164,6 +165,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
   {
     const nowMs = Date.now();
     migrateLegacyAgentTaskJobSpecs(deps.db, (line) => deps.log(`scheduler: ${line}`));
+    migrateLegacyDataIntakeJobSpecs(deps.db, (line) => deps.log(`scheduler: ${line}`));
     const swept = deps.db.db
       .prepare("UPDATE job_runs SET status = 'failed', ended_at = ?, error = 'orphaned: gateway restarted' WHERE status = 'running'")
       .run(nowMs);
@@ -371,6 +373,68 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
     } catch (err) {
       deps.log(
         `scheduler: report queue failed job=${params.job.id} run=${params.runId} err=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  const queueAutoPausedReport = (params: {
+    job: JobRow;
+    runId: string;
+    scheduledFor: number;
+    endedAt: number;
+    status: string;
+    output: string;
+    consecutiveFailures: number;
+  }) => {
+    const body = [
+      "JOB AUTO-PAUSED",
+      `job_id=${params.job.id}`,
+      `job_name=${params.job.name}`,
+      `run_id=${params.runId}`,
+      `status=${params.status}`,
+      `consecutive_failures=${params.consecutiveFailures}/${maxConsecutiveFailures}`,
+      `scheduled_for=${new Date(params.scheduledFor).toISOString()}`,
+      `ended_at=${new Date(params.endedAt).toISOString()}`,
+      "",
+      "The scheduler disabled this job after repeated failures.",
+      "",
+      "Last output:",
+      truncate(params.output, reportOutputMaxChars),
+    ].join("\n");
+
+    try {
+      const reportId = enqueueRunReport(deps.db, {
+        kind: "job_auto_paused",
+        title: "JOB AUTO-PAUSED",
+        body,
+        sourceRunId: params.runId,
+        sourceAgentId: schedulerAgentId,
+        sourceChannel: "job",
+        sourceChannelKey: params.job.id,
+        targetAgentId: schedulerAgentId,
+        targetChannel: "home_channel",
+        metadata: {
+          jobId: params.job.id,
+          jobName: params.job.name,
+          status: params.status,
+          consecutiveFailures: params.consecutiveFailures,
+          maxConsecutiveFailures,
+        },
+        nowMs: params.endedAt,
+      });
+      insertEvent({
+        jobId: params.job.id,
+        runId: params.runId,
+        agentId: schedulerAgentId,
+        kind: "auto_pause_report_queued",
+        payload: { reportId },
+        nowMs: params.endedAt,
+      });
+    } catch (err) {
+      deps.log(
+        `scheduler: auto-pause report queue failed job=${params.job.id} run=${params.runId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
       );
     }
   };
@@ -750,6 +814,18 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         nowMs: endedAt,
       });
 
+      if (shouldPause) {
+        queueAutoPausedReport({
+          job,
+          runId,
+          scheduledFor,
+          endedAt,
+          status: res.status,
+          output: res.output,
+          consecutiveFailures,
+        });
+      }
+
       await notifyAgent(
         { ...job, consecutive_failures: consecutiveFailures, enabled: shouldPause ? 0 : job.enabled },
         runId,
@@ -819,6 +895,18 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         payload: { endedAt, nextScheduled, nextRunAt, error: output },
         nowMs: endedAt,
       });
+
+      if (shouldPause) {
+        queueAutoPausedReport({
+          job,
+          runId,
+          scheduledFor,
+          endedAt,
+          status: "exception",
+          output,
+          consecutiveFailures,
+        });
+      }
 
       await notifyAgent(
         { ...job, consecutive_failures: consecutiveFailures, enabled: shouldPause ? 0 : job.enabled },

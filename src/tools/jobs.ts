@@ -20,6 +20,7 @@ import {
   type AgentTaskDeliveryMode,
   type AgentTaskOrigin,
   isOneShotCron,
+  migrateLegacyDataIntakeJobSpecs,
 } from "../scheduler/job-spec.js";
 
 function randomId(prefix: string): string {
@@ -105,6 +106,72 @@ function isHeartbeatChannel(channel: unknown, channelKey: unknown): boolean {
 function getNextRunAtMs(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return Math.max(0, Math.floor(value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nestedManageArgs(value: { args?: Record<string, unknown> }): Record<string, unknown> {
+  return isRecord(value.args) ? value.args : {};
+}
+
+function readStringArg(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function readNumberArg(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : undefined;
+}
+
+function readBooleanArg(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function resolveJobManageId(value: { id?: string; jobId?: string; args?: Record<string, unknown> }): string | undefined {
+  const nested = nestedManageArgs(value);
+  return readStringArg(value.id) ?? readStringArg(value.jobId) ?? readStringArg(nested.id) ?? readStringArg(nested.jobId);
+}
+
+function resolveJobManageRunId(value: { runId?: string; args?: Record<string, unknown> }): string | undefined {
+  const nested = nestedManageArgs(value);
+  return readStringArg(value.runId) ?? readStringArg(nested.runId);
+}
+
+function resolveJobManageLimit(value: { limit?: number; args?: Record<string, unknown> }): number | undefined {
+  const nested = nestedManageArgs(value);
+  return readNumberArg(value.limit) ?? readNumberArg(nested.limit);
+}
+
+function resolveJobManageIncludeDisabled(value: { includeDisabled?: boolean; args?: Record<string, unknown> }): boolean | undefined {
+  const nested = nestedManageArgs(value);
+  return readBooleanArg(value.includeDisabled) ?? readBooleanArg(nested.includeDisabled);
+}
+
+function jobListStatus(row: Record<string, unknown>, nowMs: number): string {
+  const enabled = Number(row.enabled) === 1;
+  const consecutiveFailures = typeof row.consecutive_failures === "number" ? row.consecutive_failures : 0;
+  const lastFailureAt = typeof row.last_failure_at === "number" ? row.last_failure_at : null;
+  const lastRunAt = typeof row.last_run_at === "number" ? row.last_run_at : null;
+  const nextRunAt = getNextRunAtMs(row.next_run_at);
+  const spec = parseJobSpec(typeof row.spec_json === "string" ? row.spec_json : "{}");
+  const cron = typeof row.cron === "string" ? row.cron : "";
+  const oneShot = isOneShotJob(cron, spec);
+
+  if (!enabled) {
+    if (lastFailureAt !== null && consecutiveFailures > 0) return "failed";
+    if (oneShot && lastRunAt !== null) return "executed";
+    return "disabled";
+  }
+  if (oneShot) {
+    if (nextRunAt === null && lastRunAt !== null) return "executed";
+    return "pending";
+  }
+  if (lastFailureAt !== null && consecutiveFailures > 0) return "failed";
+  if (nextRunAt !== null && nextRunAt <= nowMs) return "pending";
+  return "scheduled";
 }
 
 function isInteractiveOriginChannel(channel: string): boolean {
@@ -367,7 +434,8 @@ export const jobList = defineTool({
     const sql = "SELECT * FROM jobs WHERE (? = 1 OR enabled = 1) ORDER BY created_at DESC LIMIT ?";
     const stmt = db.db.prepare(sql);
     const rows = stmt.all(args.includeDisabled ? 1 : 0, args.limit) as any[];
-    return JSON.stringify(rows);
+    const nowMs = ctx.nowMs();
+    return JSON.stringify(rows.map((row) => ({ ...row, status: jobListStatus(row, nowMs) })));
   },
 });
 
@@ -405,6 +473,7 @@ export const jobUpdate = defineTool({
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
+    spec: z.record(z.unknown()).optional().describe("Direct replacement for spec_json. Use for repair/migration; explicit mode/task/tool/args fields still override it."),
     contextMode: z
       .enum(["full", "delta", "none"])
       .optional()
@@ -436,10 +505,14 @@ export const jobUpdate = defineTool({
     const enabled = args.enabled === undefined ? Number(existing.enabled) === 1 : args.enabled;
 
     let spec: any = null;
-    try {
-      spec = JSON.parse(String(existing.spec_json ?? "{}"));
-    } catch {
-      spec = {};
+    if (args.spec !== undefined) {
+      spec = { ...args.spec };
+    } else {
+      try {
+        spec = JSON.parse(String(existing.spec_json ?? "{}"));
+      } catch {
+        spec = {};
+      }
     }
 
     // Merge updates
@@ -717,12 +790,28 @@ export const jobEvents = defineTool({
 export const jobManage = defineTool({
   name: "job_manage",
   description:
-    "Unified scheduler management tool. Action can create/list/get/update/pause/resume/run_now/delete jobs, list runs/events, or fetch a specific run.",
+    "Unified scheduler management tool. Action can create/list/get/update/pause/resume/run_now/delete jobs, list runs/events/history, migrate legacy specs, or fetch a specific run.",
   parameters: z.object({
     action: z
-      .enum(["create", "list", "get", "update", "pause", "resume", "run_now", "delete", "runs", "run_get", "events"])
+      .enum([
+        "create",
+        "list",
+        "get",
+        "update",
+        "pause",
+        "resume",
+        "run_now",
+        "delete",
+        "runs",
+        "list_runs",
+        "run_history",
+        "run_get",
+        "events",
+        "migrate_specs",
+      ])
       .default("list"),
     id: z.string().min(1).max(32).optional(),
+    jobId: z.string().min(1).max(32).optional().describe("Alias of id for job-oriented actions."),
     runId: z.string().min(1).max(32).optional(),
     name: z.string().min(1).max(120).optional(),
     cron: z.string().min(1).max(120).optional(),
@@ -736,20 +825,21 @@ export const jobManage = defineTool({
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
+    spec: z.record(z.unknown()).optional().describe("Direct replacement for spec_json when action='update'."),
     cleanSpec: z.boolean().default(false),
     nextRunAtMs: z.number().int().min(0).optional(),
     includeDisabled: z.boolean().optional(),
     limit: z.number().int().min(1).max(200).optional(),
   }).superRefine((value, issueCtx) => {
-    const requiresId = new Set(["get", "update", "pause", "resume", "run_now", "delete", "runs", "events"]);
-    if (requiresId.has(value.action) && !value.id) {
+    const requiresId = new Set(["get", "update", "pause", "resume", "run_now", "delete", "runs", "list_runs", "run_history", "events"]);
+    if (requiresId.has(value.action) && !resolveJobManageId(value)) {
       issueCtx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `id is required when action='${value.action}'`,
         path: ["id"],
       });
     }
-    if (value.action === "run_get" && !value.runId) {
+    if (value.action === "run_get" && !resolveJobManageRunId(value)) {
       issueCtx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "runId is required when action='run_get'",
@@ -765,6 +855,11 @@ export const jobManage = defineTool({
     }
   }),
   execute: async (args, ctx) => {
+    const id = resolveJobManageId(args) ?? "";
+    const runId = resolveJobManageRunId(args) ?? "";
+    const limit = resolveJobManageLimit(args);
+    const includeDisabled = resolveJobManageIncludeDisabled(args);
+
     switch (args.action) {
       case "create":
         return jobCreate.execute(
@@ -787,17 +882,17 @@ export const jobManage = defineTool({
       case "list":
         return jobList.execute(
           {
-            ...(args.includeDisabled !== undefined ? { includeDisabled: args.includeDisabled } : {}),
-            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+            ...(includeDisabled !== undefined ? { includeDisabled } : {}),
+            ...(limit !== undefined ? { limit } : {}),
           },
           ctx,
         );
       case "get":
-        return jobGet.execute({ id: args.id ?? "" }, ctx);
+        return jobGet.execute({ id }, ctx);
       case "update":
         return jobUpdate.execute(
           {
-            id: args.id ?? "",
+            id,
             ...(args.name !== undefined ? { name: args.name } : {}),
             ...(args.cron !== undefined ? { cron: args.cron } : {}),
             ...(args.at !== undefined ? { at: args.at } : {}),
@@ -809,6 +904,7 @@ export const jobManage = defineTool({
             ...(args.command !== undefined ? { command: args.command } : {}),
             ...(args.tool !== undefined ? { tool: args.tool } : {}),
             ...(args.args !== undefined ? { args: args.args } : {}),
+            ...(args.spec !== undefined ? { spec: args.spec } : {}),
             ...(args.contextMode !== undefined ? { contextMode: args.contextMode } : {}),
             ...(args.cleanSpec !== undefined ? { cleanSpec: args.cleanSpec } : {}),
             ...(args.nextRunAtMs !== undefined ? { nextRunAtMs: args.nextRunAtMs } : {}),
@@ -816,31 +912,38 @@ export const jobManage = defineTool({
           ctx,
         );
       case "pause":
-        return jobPause.execute({ id: args.id ?? "" }, ctx);
+        return jobPause.execute({ id }, ctx);
       case "resume":
-        return jobResume.execute({ id: args.id ?? "" }, ctx);
+        return jobResume.execute({ id }, ctx);
       case "run_now":
-        return jobRunNow.execute({ id: args.id ?? "" }, ctx);
+        return jobRunNow.execute({ id }, ctx);
       case "delete":
-        return jobDelete.execute({ id: args.id ?? "" }, ctx);
+        return jobDelete.execute({ id }, ctx);
       case "runs":
+      case "list_runs":
+      case "run_history":
         return jobRuns.execute(
           {
-            id: args.id ?? "",
-            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+            id,
+            ...(limit !== undefined ? { limit } : {}),
           },
           ctx,
         );
       case "run_get":
-        return jobRunGet.execute({ runId: args.runId ?? "" }, ctx);
+        return jobRunGet.execute({ runId }, ctx);
       case "events":
         return jobEvents.execute(
           {
-            id: args.id ?? "",
-            ...(args.limit !== undefined ? { limit: args.limit } : {}),
+            id,
+            ...(limit !== undefined ? { limit } : {}),
           },
           ctx,
         );
+      case "migrate_specs": {
+        const db = requireDb(ctx);
+        if (!db) return "ERROR: database is not available";
+        return JSON.stringify(migrateLegacyDataIntakeJobSpecs(db, (line) => ctx.log(`job_manage: ${line}`)));
+      }
       default:
         return `ERROR: unsupported action '${args.action}'`;
     }

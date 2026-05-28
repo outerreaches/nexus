@@ -49,6 +49,33 @@ function deriveDeployRequestStatusFromHumanAction(params: {
   return { status: "failed", lastError: "deploy approval had an unrecognized response" };
 }
 
+function deployRequestMatchesHumanActionSync(
+  current: DeployRequestRow,
+  next: {
+    status: DeployRequestStatus;
+    metadataJson: string | null;
+    policy: string | null;
+    changeFingerprint: string | null;
+    continuationHash: string | null;
+    candidateId: string | null;
+    sourceBaseSha: string | null;
+    approvedAt: number | null;
+    lastError: string | null;
+    createdAt: number;
+  },
+): boolean {
+  return current.status === next.status
+    && current.metadataJson === next.metadataJson
+    && current.policy === next.policy
+    && current.changeFingerprint === next.changeFingerprint
+    && current.continuationHash === next.continuationHash
+    && current.candidateId === next.candidateId
+    && current.sourceBaseSha === next.sourceBaseSha
+    && current.approvedAt === next.approvedAt
+    && current.lastError === next.lastError
+    && current.createdAt === next.createdAt;
+}
+
 export function syncDeployRequestForHumanAction(params: {
   db: NexusDatabase;
   approvalId: string;
@@ -70,8 +97,8 @@ export function syncDeployRequestForHumanAction(params: {
       : derived.status === "pending_approval" && current && current.status !== "pending_approval"
         ? current.status
         : derived.status;
-  return upsertDeployRequest(params.db, {
-    approvalId: params.approvalId,
+  const next = {
+    status: nextStatus,
     metadataJson: params.metadataJson,
     policy: metadata.policy,
     changeFingerprint: metadata.changeFingerprint,
@@ -81,7 +108,6 @@ export function syncDeployRequestForHumanAction(params: {
         : hashDeployApprovalContinuation(metadata.continuation),
     candidateId: metadata.candidateId,
     sourceBaseSha: metadata.sourceBaseSha,
-    status: nextStatus,
     approvedAt:
       derived.status === "approved"
         ? current?.approvedAt ?? params.nowMs
@@ -93,6 +119,20 @@ export function syncDeployRequestForHumanAction(params: {
           ? null
           : derived.lastError,
     createdAt: current?.createdAt ?? params.nowMs,
+  };
+  if (current && deployRequestMatchesHumanActionSync(current, next)) return null;
+  return upsertDeployRequest(params.db, {
+    approvalId: params.approvalId,
+    metadataJson: next.metadataJson,
+    policy: next.policy,
+    changeFingerprint: next.changeFingerprint,
+    continuationHash: next.continuationHash,
+    candidateId: next.candidateId,
+    sourceBaseSha: next.sourceBaseSha,
+    status: next.status,
+    approvedAt: next.approvedAt,
+    lastError: next.lastError,
+    createdAt: next.createdAt,
     nowMs: params.nowMs,
   });
 }

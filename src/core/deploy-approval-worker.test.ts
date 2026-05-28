@@ -167,3 +167,50 @@ test("deploy approval worker backfills fulfilled approvals and queues the deploy
     assert.equal(record.approvalStatus, "approved");
   });
 });
+
+test("deploy approval worker does not recount unchanged human action syncs", async () => {
+  await withRepoAndDb(async ({ db, stateDir, nowMs }) => {
+    const logs: string[] = [];
+    const approval = createHumanAction(db, {
+      nowMs: nowMs(),
+      ttlMs: 60_000,
+      sessionId: "session-unchanged",
+      channel: "telegram",
+      channelKey: "12345",
+      agentId: "main:coder",
+      kind: "confirm",
+      prompt: "approve deploy",
+      metadata: buildDeployApprovalMetadata({
+        policy: "approval_required",
+        changeFingerprint: "fingerprint-unchanged",
+      }),
+    });
+    const fulfilled = fulfillHumanAction(db, {
+      id: approval.id,
+      responseText: "approve",
+      respondedByChannel: "telegram",
+      respondedByKey: "12345",
+      nowMs: nowMs() + 1_000,
+    });
+    assert.equal(fulfilled.ok, true);
+
+    const worker = startDeployApprovalWorker({
+      db,
+      stateDir,
+      log: (msg) => logs.push(msg),
+    });
+    assert.ok(worker, "worker should start");
+
+    const firstProcessed = await worker.tick();
+    const afterFirst = getDeployRequest(db, { approvalId: approval.id });
+    logs.length = 0;
+    const secondProcessed = await worker.tick();
+    const afterSecond = getDeployRequest(db, { approvalId: approval.id });
+    await worker.stop();
+
+    assert.ok(firstProcessed > 0, "expected initial sync to process the fulfilled approval");
+    assert.equal(secondProcessed, 0);
+    assert.equal(afterSecond?.updatedAt, afterFirst?.updatedAt);
+    assert.deepEqual(logs.filter((line) => line.includes("deploy_approval_worker: processed=")), []);
+  });
+});

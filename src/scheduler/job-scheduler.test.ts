@@ -209,3 +209,79 @@ test("scheduler keeps legacy one-shot report_only agent tasks on the report pipe
     assert.equal(reportCount.count, 1);
   });
 });
+
+test("scheduler queues home-channel report when a recurring job auto-pauses", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JPAUSE1",
+        "main",
+        "failing report",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({
+          mode: "agent_task",
+          task: "Fail this job.",
+          deliveryMode: "report_only",
+        }),
+        now - 1_000,
+        now - 2_000,
+        now - 2_000,
+      );
+
+    const config = schedulerConfig();
+    config.scheduler.maxConsecutiveFailures = 1;
+    config.scheduler.notifyAgentOnFailure = false;
+
+    const scheduler = startJobScheduler({
+      config,
+      db,
+      log: () => {},
+      workspaceDir: process.cwd(),
+      getTools: () => [],
+      toolContext: {
+        nowMs: () => Date.now(),
+        log: () => {},
+      } as any,
+      agent: {
+        handleUserMessage: async () => ({
+          runId: "agent-run-failed",
+          sessionId: "job-session-failed",
+          output: "LLM error: 503 Service Unavailable",
+          status: "failed",
+          toolCallsUsed: 0,
+          iterationsUsed: 1,
+        }),
+        ackDeployIfPending: () => {},
+        withTelegramDeliveryAck: async (_ctx: unknown, deliver: () => Promise<unknown>) => deliver(),
+      } as any,
+    });
+    assert.ok(scheduler);
+    await scheduler.tick();
+    scheduler.stop();
+
+    const job = db.db.prepare("SELECT enabled, next_run_at, consecutive_failures FROM jobs WHERE id = ?").get("JPAUSE1") as {
+      enabled: number;
+      next_run_at: number | null;
+      consecutive_failures: number;
+    };
+    assert.equal(job.enabled, 0);
+    assert.equal(job.next_run_at, null);
+    assert.equal(job.consecutive_failures, 1);
+
+    const report = db.db.prepare("SELECT kind, target_channel, body FROM run_reports WHERE kind = ?").get("job_auto_paused") as {
+      kind: string;
+      target_channel: string;
+      body: string;
+    };
+    assert.equal(report.kind, "job_auto_paused");
+    assert.equal(report.target_channel, "home_channel");
+    assert.match(report.body, /JOB AUTO-PAUSED/);
+    assert.match(report.body, /JPAUSE1/);
+  });
+});

@@ -102,3 +102,43 @@ test("data_intake_manage query action forwards sourceType alias correctly", asyn
     assert.equal(rows[0]?.source_id, "weather.open-meteo");
   });
 });
+
+test("data_intake_manage query action accepts top-level action args", async () => {
+  await withDb(async (db) => {
+    seedDataItems(db);
+
+    const result = await dataIntakeManage.execute(
+      {
+        action: "query",
+        tag: "weather",
+        limit: 10,
+      },
+      createToolContext(db),
+    );
+
+    const rows = JSON.parse(result) as Array<{ source_id: string }>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.source_id, "weather.open-meteo");
+  });
+});
+
+test("data_intake_manage query action unwraps self-nested args", async () => {
+  await withDb(async (db) => {
+    seedDataItems(db);
+
+    const result = await dataIntakeManage.execute(
+      {
+        action: "query",
+        args: {
+          tag: { tag: "weather" },
+          limit: { limit: 10 },
+        },
+      },
+      createToolContext(db),
+    );
+
+    const rows = JSON.parse(result) as Array<{ source_id: string }>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.source_id, "weather.open-meteo");
+  });
+});
