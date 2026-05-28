@@ -15,6 +15,9 @@ export type SerializableSlotCacheConfig = {
   enabled: boolean;
   slotCount: number;
   requestTimeoutMs?: number;
+  /** Optional override for the slot endpoint root URL. Defaults to the
+   *  provider's baseUrl with its path stripped. */
+  endpointBaseUrl?: string;
 };
 
 export type SerializableOpenAICompatConfig = {
@@ -90,6 +93,7 @@ export class ModelRouter {
             apiKey: cfg.apiKey,
             slotCount: slot.slotCount,
             requestTimeoutMs: slot.requestTimeoutMs,
+            ...(slot.endpointBaseUrl ? { slotEndpointBaseUrl: slot.endpointBaseUrl } : {}),
             ...(routerLog ? { log: (line: string) => routerLog(`slot_cache:${name} ${line}`) } : {}),
           }),
         );

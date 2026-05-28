@@ -18,9 +18,30 @@ function joinUrl(baseUrl: string, path: string): string {
   return new URL(path, normalizedBase).toString();
 }
 
+/** Strip any path/query/fragment from `baseUrl` and return the server origin
+ *  (`scheme://host[:port]`). llama.cpp registers slot save/restore handlers at
+ *  the server ROOT (`/slots/{id_slot}`), not under the OpenAI-compat `/v1/`
+ *  prefix, so we must hit the origin directly — otherwise every save/restore
+ *  POST 404s with llama.cpp's generic "route not registered" body. */
+export function deriveSlotEndpointBaseUrl(baseUrl: string): string {
+  try {
+    const u = new URL(baseUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return baseUrl;
+  }
+}
+
 export type SlotCacheManagerOptions = {
-  /** Base URL of the llama.cpp server (same as OpenAICompatConfig.baseUrl). */
+  /** Base URL of the llama.cpp server (same as OpenAICompatConfig.baseUrl).
+   *  Used to derive the slot endpoint root (path stripped) unless
+   *  `slotEndpointBaseUrl` overrides it. */
   baseUrl: string;
+  /** Optional explicit override for the slot save/restore endpoint root.
+   *  Use this when the server lives behind a reverse proxy / path prefix
+   *  (e.g. `https://gateway/llama`). Defaults to `baseUrl` with its path
+   *  stripped, which is correct for raw `llama-server` deployments. */
+  slotEndpointBaseUrl?: string;
   /** Bearer token if the server requires auth. */
   apiKey?: string;
   /** Slot count, must match the server's -np flag. */
@@ -75,6 +96,7 @@ export class SlotCacheManager {
   private readonly slots: SlotState[];
   private readonly ownerToSlot = new Map<string, number>();
   private readonly opts: SlotCacheManagerOptions;
+  private readonly slotEndpointBaseUrl: string;
   private tick = 0;
 
   constructor(opts: SlotCacheManagerOptions) {
@@ -82,12 +104,14 @@ export class SlotCacheManager {
       throw new Error(`SlotCacheManager: slotCount must be >= 1 (got ${opts.slotCount})`);
     }
     this.opts = opts;
+    this.slotEndpointBaseUrl = opts.slotEndpointBaseUrl ?? deriveSlotEndpointBaseUrl(opts.baseUrl);
     this.slots = Array.from({ length: opts.slotCount }, () => ({
       owner: null,
       lastUsedTick: 0,
       queue: [],
       locked: false,
     }));
+    opts.log?.(`slot_cache_init slots=${opts.slotCount} endpoint=${this.slotEndpointBaseUrl}/slots/{N}`);
   }
 
   /** Acquire the slot for a logical key. Serializes concurrent acquires for
@@ -232,16 +256,16 @@ export class SlotCacheManager {
   private async saveSlot(slotId: number, slotKey: string): Promise<void> {
     const filename = sanitizeSlotFilename(slotKey);
     this.opts.log?.(`slot_cache_save slot=${slotId} key=${slotKey} file=${filename}`);
-    const res = await this.slotRequest(slotId, "save", { filename });
+    const { res, url } = await this.slotRequest(slotId, "save", { filename });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`slot save failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+      throw new Error(this.formatSlotEndpointError("save", res.status, res.statusText, body, url));
     }
   }
 
   private async restoreSlot(slotId: number, slotKey: string): Promise<boolean> {
     const filename = sanitizeSlotFilename(slotKey);
-    const res = await this.slotRequest(slotId, "restore", { filename });
+    const { res, url } = await this.slotRequest(slotId, "restore", { filename });
     if (res.ok) {
       this.opts.log?.(`slot_cache_restore slot=${slotId} key=${slotKey} file=${filename} status=ok`);
       return true;
@@ -256,7 +280,7 @@ export class SlotCacheManager {
       this.opts.log?.(`slot_cache_restore slot=${slotId} key=${slotKey} status=not_found`);
       return false;
     }
-    throw new Error(`slot restore failed: ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+    throw new Error(this.formatSlotEndpointError("restore", res.status, res.statusText, body, url));
   }
 
   private async eraseSlot(slotId: number): Promise<void> {
@@ -264,12 +288,16 @@ export class SlotCacheManager {
     await this.slotRequest(slotId, "erase", {});
   }
 
-  private async slotRequest(slotId: number, action: "save" | "restore" | "erase", body: Record<string, unknown>): Promise<Response> {
-    const url = `${joinUrl(this.opts.baseUrl, `slots/${slotId}`)}?action=${action}`;
+  private async slotRequest(
+    slotId: number,
+    action: "save" | "restore" | "erase",
+    body: Record<string, unknown>,
+  ): Promise<{ res: Response; url: string }> {
+    const url = `${joinUrl(this.slotEndpointBaseUrl, `slots/${slotId}`)}?action=${action}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
     try {
-      return await fetch(url, {
+      const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -278,8 +306,32 @@ export class SlotCacheManager {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      return { res, url };
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  /** Format a slot endpoint error with the URL we hit + a hint about the two
+   *  common llama.cpp misconfigurations (wrong path or `--slot-save-path`
+   *  unset). Operators reading the log get an actionable message instead of
+   *  a generic 404. */
+  private formatSlotEndpointError(
+    action: "save" | "restore",
+    status: number,
+    statusText: string,
+    body: string,
+    url: string,
+  ): string {
+    const tail = body ? ` — ${body}` : "";
+    if (status === 404) {
+      return (
+        `slot ${action} failed: 404 ${statusText} at ${url}${tail}. ` +
+        `llama.cpp returns 404 here when (a) the slot endpoint URL is wrong ` +
+        `(must be POST <server_root>/slots/{N}, not under /v1) or (b) the ` +
+        `server was started without --slot-save-path. Verify both.`
+      );
+    }
+    return `slot ${action} failed: ${status} ${statusText} at ${url}${tail}`;
   }
 }

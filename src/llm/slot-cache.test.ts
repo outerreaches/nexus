@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SlotCacheManager, sanitizeSlotFilename } from "./slot-cache.js";
+import { SlotCacheManager, deriveSlotEndpointBaseUrl, sanitizeSlotFilename } from "./slot-cache.js";
 
 type FetchRecord = {
   url: string;
@@ -25,6 +25,92 @@ function stubFetch(handler: (url: string, body: unknown) => { status: number; bo
     },
   };
 }
+
+test("deriveSlotEndpointBaseUrl strips path/query so /slots/{N} hits the server root", () => {
+  assert.equal(deriveSlotEndpointBaseUrl("http://localhost:8083/v1"), "http://localhost:8083");
+  assert.equal(deriveSlotEndpointBaseUrl("http://localhost:8083/v1/"), "http://localhost:8083");
+  assert.equal(deriveSlotEndpointBaseUrl("http://localhost:8083"), "http://localhost:8083");
+  assert.equal(deriveSlotEndpointBaseUrl("https://gateway.local/llama/v1"), "https://gateway.local");
+  // Invalid input falls through unchanged so a misconfigured value is at
+  // least visible to the operator instead of becoming an empty URL.
+  assert.equal(deriveSlotEndpointBaseUrl("not-a-url"), "not-a-url");
+});
+
+test("SlotCacheManager hits /slots/{N} at the server root (not under /v1)", async () => {
+  const calls: Array<{ url: string }> = [];
+  const stub = stubFetch((url) => {
+    calls.push({ url });
+    if (url.endsWith("?action=save")) return { status: 200, bodyText: "{}" };
+    if (url.endsWith("?action=restore")) return { status: 404, bodyText: "file not found" };
+    return { status: 200, bodyText: "{}" };
+  });
+  try {
+    const mgr = new SlotCacheManager({ baseUrl: "http://localhost:8083/v1", slotCount: 1 });
+    const a = await mgr.acquire("session-A");
+    a.release();
+    const b = await mgr.acquire("session-B");
+    b.release();
+    for (const call of calls) {
+      assert.match(call.url, /^http:\/\/localhost:8083\/slots\/0\?action=(save|restore|erase)$/,
+        `expected root-level /slots URL but got ${call.url}`);
+      assert.doesNotMatch(call.url, /\/v1\/slots\//,
+        `slot endpoint must not include the /v1 OpenAI-compat prefix (got ${call.url})`);
+    }
+  } finally {
+    stub.restore();
+  }
+});
+
+test("SlotCacheManager honors slotEndpointBaseUrl override for proxy/path-prefix deployments", async () => {
+  const calls: Array<{ url: string }> = [];
+  const stub = stubFetch((url) => {
+    calls.push({ url });
+    if (url.endsWith("?action=save")) return { status: 200, bodyText: "{}" };
+    if (url.endsWith("?action=restore")) return { status: 404, bodyText: "file not found" };
+    return { status: 200, bodyText: "{}" };
+  });
+  try {
+    const mgr = new SlotCacheManager({
+      baseUrl: "https://gateway.local/llama/v1",
+      slotEndpointBaseUrl: "https://gateway.local/llama",
+      slotCount: 1,
+    });
+    const a = await mgr.acquire("session-A");
+    a.release();
+    const b = await mgr.acquire("session-B");
+    b.release();
+    for (const call of calls) {
+      assert.match(call.url, /^https:\/\/gateway\.local\/llama\/slots\/0\?action=(save|restore|erase)$/);
+    }
+  } finally {
+    stub.restore();
+  }
+});
+
+test("SlotCacheManager surfaces an actionable 404 error on slot save", async () => {
+  const stub = stubFetch((url) => {
+    if (url.endsWith("?action=save")) {
+      return { status: 404, bodyText: '{"error":{"message":"File Not Found","type":"not_found_error","code":404}}' };
+    }
+    if (url.endsWith("?action=restore")) return { status: 404, bodyText: "file not found" };
+    return { status: 200, bodyText: "{}" };
+  });
+  try {
+    const mgr = new SlotCacheManager({ baseUrl: "http://localhost:8083/v1", slotCount: 1 });
+    (await mgr.acquire("session-A")).release();
+    await assert.rejects(
+      mgr.acquire("session-B"),
+      (err: Error) => {
+        assert.match(err.message, /slot save failed: 404/);
+        assert.match(err.message, /at http:\/\/localhost:8083\/slots\/0\?action=save/);
+        assert.match(err.message, /--slot-save-path/);
+        return true;
+      },
+    );
+  } finally {
+    stub.restore();
+  }
+});
 
 test("sanitizeSlotFilename produces safe filenames and uses hash fallback for pathological keys", () => {
   assert.equal(sanitizeSlotFilename("telegram:1234:interactive:orchestrator"), "telegram_1234_interactive_orchestrator.bin");
