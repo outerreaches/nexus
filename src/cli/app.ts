@@ -303,7 +303,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { resolveCodexCredentials } = await import("../llm/codex-auth.js");
-      const { getPreset } = await import("../core/presets.js");
+      const { getPreset, applyPresetConfigOverrides } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
       const { AgentTracker } = await import("../core/agent-tracker.js");
       const { BrowserManager } = await import("../browser/manager.js");
@@ -327,6 +327,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
+      applyPresetConfigOverrides(config.presets);
       process.env.NEXUS_RUNTIME_PROFILE = config.runtime.profile;
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);
@@ -1046,13 +1047,14 @@ export async function runCli(argv: string[]): Promise<void> {
       const { openDatabase } = await import("../storage/database.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { resolveCodexCredentials: resolveCodexCreds } = await import("../llm/codex-auth.js");
-      const { getPreset } = await import("../core/presets.js");
+      const { getPreset, applyPresetConfigOverrides } = await import("../core/presets.js");
       const { ToolRegistry } = await import("../core/tool-registry.js");
       const { getBuiltInTools } = await import("../tools/index.js");
       const { McpManager } = await import("../mcp/manager.js");
 
       await ensureConfigExists(options.config);
       const config = await loadConfig(options.config);
+      applyPresetConfigOverrides(config.presets);
       process.env.NEXUS_RUNTIME_PROFILE = config.runtime.profile;
       await bootstrapState(config);
       const paths = await resolveRuntimePaths(config);

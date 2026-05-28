@@ -8,7 +8,7 @@ import { z } from "zod";
 
 import { buildRunState, defineTool, type Tool, type ToolContext } from "../core/tools.js";
 import { AgentRunner } from "../core/agent-runner.js";
-import { getPreset, getPresetNames, type AgentPreset } from "../core/presets.js";
+import { getPreset, getPresetNames, getPresetKernelExtra, type AgentPreset } from "../core/presets.js";
 import { buildPresetSystemPrompt } from "../core/prompt.js";
 import { resolveRunCodeContext } from "../core/run-code-context.js";
 import type { AgentTracker } from "../core/agent-tracker.js";
@@ -1026,6 +1026,9 @@ async function runIsolated(params: {
       allowCodeEdit: ctx.allowCodeEdit ?? false,
       allowCodeWrite: workerAllowCodeWrite,
       presetName: preset.name,
+      ...(getPresetKernelExtra(preset.name).length > 0
+        ? { presetKernelExtra: [...getPresetKernelExtra(preset.name)] }
+        : {}),
       systemPrompt,
       userMessage: task,
       budget,

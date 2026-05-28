@@ -86,6 +86,18 @@ export const preset: AgentPreset = {
     "write_to_blackboard",
     "blackboard_manage",
     "shell_exec",
+    // Everyday tools promoted to kernel so they skip the tool_load discovery
+    // round-trip. The long tail (node_* family, media, mcp_manage, authoring,
+    // data_intake_manage, session_search, file_edit_lines, shell_interactive,
+    // process_manage, memory_delete) stays lazy.
+    "web_search",
+    "web_fetch",
+    "file_write",
+    "file_edit",
+    "file_list",
+    "job_manage",
+    "memory_store",
+    "human_action",
   ],
   budget: { maxIterations: 100, maxToolCalls: 200 },
 };

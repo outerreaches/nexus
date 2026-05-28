@@ -201,6 +201,12 @@
     "maxContextTokens": 32768
   },
 
+  "presets": {
+    "orchestrator": {
+      "kernelExtra": ["data_intake_manage"]
+    }
+  },
+
   "federation": {
     "enabled": true,
     "localInstanceId": "local"

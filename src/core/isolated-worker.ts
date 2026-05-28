@@ -18,7 +18,7 @@ import { AgentTracker } from "./agent-tracker.js";
 import { AgentRunner } from "./agent-runner.js";
 import { ProcessManager } from "../process/manager.js";
 import { getBuiltInTools } from "../tools/index.js";
-import { getPreset } from "./presets.js";
+import { getPreset, setPresetKernelOverrides } from "./presets.js";
 import { hydrateResolvedSecrets } from "../secrets/resolve-env.js";
 import { McpManager } from "../mcp/manager.js";
 import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
@@ -81,6 +81,11 @@ process.on("message", async (msg: ParentMessage) => {
     const llmRuntimeConfig = toRuntimeConfig(cfg.llmConfig, undefined);
     const llm = new OpenAICompatClient(llmRuntimeConfig);
     const builtIns = getBuiltInTools();
+    // Re-apply the parent's kernelExtra tuning for this preset before resolving
+    // it (this is a separate process with its own preset-module state).
+    if (cfg.presetKernelExtra && cfg.presetKernelExtra.length > 0) {
+      setPresetKernelOverrides({ [cfg.presetName]: cfg.presetKernelExtra });
+    }
     const preset = getPreset(cfg.presetName);
     if (!preset) {
       throw new Error(`Unknown preset: ${cfg.presetName}`);

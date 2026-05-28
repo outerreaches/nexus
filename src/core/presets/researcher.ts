@@ -77,9 +77,9 @@ export const preset: AgentPreset = {
     "skill_get",
     "skill_create",
     "skill_update",
-    "read_file",
+    "file_read",
     "file_write",
-    "edit_file",
+    "file_edit",
     "file_list",
     "file_glob"
   ],
@@ -91,6 +91,11 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",
+    // Everyday file work for note/report writing (promoted to kernel so they
+    // skip the tool_load discovery round-trip on large-context deployments).
+    "file_read",
+    "file_write",
+    "file_list",
   ],
   toolCallCaps: {
     web_fetch: 12,

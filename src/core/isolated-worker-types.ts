@@ -38,6 +38,9 @@ export type WorkerConfig = {
 
   // Preset
   presetName: string;
+  // Operator-configured kernelExtra for this preset (presets.<name>.kernelExtra),
+  // forwarded so the worker honors the same lazy-loading tuning as the parent.
+  presetKernelExtra?: string[];
 
   // Task
   systemPrompt: string;

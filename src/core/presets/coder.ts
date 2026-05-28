@@ -71,6 +71,16 @@ export const preset: AgentPreset = {
     "spawn_agent",
     "read_from_blackboard",
     "write_to_blackboard",
+    // Everyday coding tools promoted to kernel so they skip the tool_load
+    // discovery round-trip. High-stakes/situational tools (ha_deploy,
+    // shell_interactive, process_manage, file_patch, file_edit_lines,
+    // authoring, data_intake_manage, session_search) stay lazy.
+    "file_write",
+    "file_list",
+    "file_glob",
+    "code_diff",
+    "web_search",
+    "web_fetch",
   ],
   toolCallCaps: {
     web_search: 15,

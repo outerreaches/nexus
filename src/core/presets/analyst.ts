@@ -66,6 +66,13 @@ export const preset: AgentPreset = {
     "read_from_blackboard",
     "write_to_blackboard",
     "spawn_agent",
+    // Everyday research/reporting tools promoted to kernel so they skip the
+    // tool_load discovery round-trip. Situational tools (file_edit,
+    // file_edit_lines, image/video_analyze, session_search, authoring) stay lazy.
+    "web_fetch",
+    "file_read",
+    "file_write",
+    "file_list",
   ],
   toolCallCaps: {
     web_fetch: 8,

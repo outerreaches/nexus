@@ -301,6 +301,21 @@ export const ConfigSchema = z.object({
       maxContextTokens: z.number().int().min(0).default(110_000),
     })
     .default({}),
+  // Per-preset overrides. `kernelExtra` promotes additional preset tools into
+  // the always-loaded kernel so they skip the `tool_load` discovery round-trip.
+  // Only tools already in the preset's `tools` pool are honored; unknown names
+  // are ignored. Useful on large-context deployments where extra tool-schema
+  // tokens are cheap relative to the per-turn latency saved.
+  presets: z
+    .record(
+      z.string(),
+      z
+        .object({
+          kernelExtra: z.array(z.string()).default([]),
+        })
+        .default({}),
+    )
+    .default({}),
 });
 
 export type NexusConfig = z.infer<typeof ConfigSchema>;

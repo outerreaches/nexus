@@ -96,8 +96,56 @@ const PRESETS: Record<string, AgentPreset> = {
 
 const DYNAMIC_PRESETS = new Map<string, AgentPreset>();
 
+// Operator-configured per-preset kernel additions (nexus.json `presets.<name>.
+// kernelExtra`). Promoting a tool into the kernel makes it visible to the LLM
+// every turn, skipping the `tool_load` discovery round-trip — useful on
+// large-context deployments where the extra schema tokens are cheap relative to
+// the per-turn latency saved. Applied at process startup via
+// `setPresetKernelOverrides`; the isolated worker re-applies its preset's entry
+// from the serialized worker config so sub-agents honor the same tuning.
+let kernelOverrides: Record<string, readonly string[]> = {};
+
+export function setPresetKernelOverrides(overrides: Record<string, readonly string[]>): void {
+  kernelOverrides = { ...overrides };
+}
+
+/** The configured kernelExtra list for a preset (empty if none). Used by the
+ *  spawn path to forward the relevant entry into the isolated worker config. */
+export function getPresetKernelExtra(name: string): readonly string[] {
+  return kernelOverrides[name] ?? [];
+}
+
+/** Apply the nexus.json `presets` config (per-preset `kernelExtra`) to the
+ *  kernel-override registry. Call once at process startup after config load. */
+export function applyPresetConfigOverrides(
+  presetsConfig: Record<string, { kernelExtra?: readonly string[] }> | undefined,
+): void {
+  const map: Record<string, readonly string[]> = {};
+  for (const [name, cfg] of Object.entries(presetsConfig ?? {})) {
+    const extra = cfg?.kernelExtra;
+    if (extra && extra.length > 0) map[name] = [...extra];
+  }
+  setPresetKernelOverrides(map);
+}
+
+/** Merge configured kernelExtra into a preset's kernel. Only tools the preset
+ *  is actually allowed (`tools`) can be promoted, and only when lazy loading is
+ *  active (a non-empty `kernel`); otherwise the override is a no-op and the base
+ *  preset is returned unchanged (preserving object identity). */
+function applyKernelOverride(preset: AgentPreset): AgentPreset {
+  const extra = kernelOverrides[preset.name];
+  if (!extra || extra.length === 0) return preset;
+  if (!preset.kernel || preset.kernel.length === 0) return preset;
+  const allowed = new Set(preset.tools);
+  const promoted = extra.filter((t) => allowed.has(t) && !preset.kernel!.includes(t));
+  if (promoted.length === 0) return preset;
+  return { ...preset, kernel: [...preset.kernel, ...promoted] };
+}
+
 export function getPreset(name: string): AgentPreset | undefined {
-  return DYNAMIC_PRESETS.get(name) ?? PRESETS[name];
+  const base = DYNAMIC_PRESETS.get(name) ?? PRESETS[name];
+  if (!base) return undefined;
+  return applyKernelOverride(base);
 }
 
 export function listPresets(): AgentPreset[] {

@@ -47,6 +47,10 @@ export const preset: AgentPreset = {
     "skill_get",
     "read_from_blackboard",
     "write_to_blackboard",
+    // Everyday design tools promoted to kernel so they skip the tool_load
+    // discovery round-trip. vectorize (rare) and skill authoring stay lazy.
+    "image_edit",
+    "generate_svg",
   ],
   budget: { maxIterations: 20, maxToolCalls: 50 },
   isolated: true,

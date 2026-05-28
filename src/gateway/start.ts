@@ -13,7 +13,7 @@ import { startDeployApprovalWorker, type DeployApprovalWorker } from "../core/de
 import { startRunReportBroker, type RunReportBroker } from "../core/run-report-broker.js";
 import { BrowserManager } from "../browser/manager.js";
 import { ToolRegistry } from "../core/tool-registry.js";
-import { getPreset } from "../core/presets.js";
+import { getPreset, applyPresetConfigOverrides } from "../core/presets.js";
 import { McpManager } from "../mcp/manager.js";
 import { ModelRouter, toRuntimeConfig, type ProviderCredentialResolver } from "../llm/model-router.js";
 import { resolveCodexCredentials } from "../llm/codex-auth.js";
@@ -411,6 +411,9 @@ export async function startGateway(
   const allowCodeEdit = monetizationProfile ? false : config.permissions.allowCodeEdit;
   const allowCodeWrite = !monetizationProfile && (config.permissions.allowCodeWrite || process.env.NEXUS_ALLOW_CODE_WRITE === "1");
   const maxContextTokens = Math.max(0, envInt("NEXUS_MAX_CONTEXT_TOKENS") ?? config.limits.maxContextTokens);
+  // Apply per-preset kernel overrides (presets.<name>.kernelExtra) before any
+  // run resolves a preset via getPreset.
+  applyPresetConfigOverrides(config.presets);
   const proactiveEnabled = envBool("NEXUS_PROACTIVE") ?? config.proactive.enabled;
   const proactiveNotifyTelegram = envBool("NEXUS_PROACTIVE_NOTIFY_TELEGRAM") ?? config.proactive.notifyTelegram;
   const defaultStopAllCooldownMs = Math.max(
