@@ -107,6 +107,82 @@ test("node router rejects explicit transparent node when request carries secret 
   );
 });
 
+test("node router refuses an explicitly-targeted draining node with NODE_DRAINING", async () => {
+  const registry = new NodeRegistry({ log: () => {} });
+  registry.registerOrUpdate({
+    id: "node-draining",
+    label: "Draining Node",
+    publicKey: "pk-draining",
+    fingerprint: "fp-draining",
+    status: "draining",
+    backend: "nexus",
+    firewallMode: "transparent",
+    capabilities: ["test_tool"],
+    tags: [],
+  });
+
+  const router = new NodeToolRouter({
+    registry,
+    log: () => {},
+    executeOnNode: async () => "ok",
+  });
+
+  await assert.rejects(
+    () =>
+      router.routeToolExecution(
+        makeTool("test_tool"),
+        { input: "hello" },
+        makeContext({ executionNode: "node-draining" }),
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof NodeRoutingError);
+      assert.equal(err.code, "NODE_DRAINING");
+      assert.match(err.message, /draining/i);
+      return true;
+    },
+  );
+});
+
+test("node router auto-selection skips draining nodes", async () => {
+  const registry = new NodeRegistry({ log: () => {} });
+  registry.registerOrUpdate({
+    id: "node-draining",
+    label: "Draining Node",
+    publicKey: "pk-draining",
+    fingerprint: "fp-draining",
+    status: "draining",
+    backend: "nexus",
+    firewallMode: "transparent",
+    capabilities: ["test_tool"],
+    tags: [],
+  });
+  registry.registerOrUpdate({
+    id: "node-online",
+    label: "Online Node",
+    publicKey: "pk-online",
+    fingerprint: "fp-online",
+    status: "online",
+    backend: "nexus",
+    firewallMode: "transparent",
+    capabilities: ["test_tool"],
+    tags: [],
+  });
+
+  let routedNodeId: string | null = null;
+  const router = new NodeToolRouter({
+    registry,
+    log: () => {},
+    executeOnNode: async ({ nodeId }) => {
+      routedNodeId = nodeId;
+      return "ok";
+    },
+  });
+
+  const result = await router.routeToolExecution(makeTool("test_tool"), { input: "hi" }, makeContext());
+  assert.equal(result, "ok");
+  assert.equal(routedNodeId, "node-online");
+});
+
 test("node router treats provider/path secret references as secret-bearing", async () => {
   const registry = new NodeRegistry({ log: () => {} });
   registry.registerOrUpdate({

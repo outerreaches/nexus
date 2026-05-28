@@ -210,7 +210,7 @@ export const nodeList = defineTool({
   description: "List registered execution nodes with backend, status, capabilities, and firewall mode.",
   parameters: z.object({
     limit: z.number().int().min(1).max(500).default(200),
-    status: z.enum(["pending", "approved", "blocked", "offline", "online"]).optional(),
+    status: z.enum(["pending", "approved", "blocked", "offline", "online", "draining"]).optional(),
     backend: z.enum(["nexus", "openclaw"]).optional(),
   }),
   execute: async (args, ctx) => {
@@ -266,7 +266,7 @@ export const nodeSetStatus = defineTool({
     "Set node approval/lifecycle status. Use status=approved to allow pending nodes to connect, or blocked to revoke access.",
   parameters: z.object({
     id: z.string().min(1).max(128),
-    status: z.enum(["pending", "approved", "blocked", "offline", "online"]),
+    status: z.enum(["pending", "approved", "blocked", "offline", "online", "draining"]),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -296,6 +296,65 @@ export const nodeSetStatus = defineTool({
       null,
       2,
     );
+  },
+});
+
+export const nodeDrain = defineTool({
+  name: "node_drain",
+  description:
+    "Mark a node as draining ahead of a code update/restart. The gateway stops routing new work to a draining node; in-flight work continues. Undrain (or a reconnect after restart) returns it to service.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.status === "pending" || row.status === "blocked") {
+      return `ERROR: node ${row.id} is ${row.status}; only an approved/online node can be drained.`;
+    }
+    if (row.status === "draining") {
+      return JSON.stringify({ ok: true, alreadyDraining: true, node: row }, null, 2);
+    }
+    // Preserve connectedAt so undrain can tell whether a live session exists.
+    setNodeStatus(db, { id: row.id, status: "draining", connectedAt: row.connectedAt, nowMs: ctx.nowMs() });
+    const updated = getNodeById(db, row.id);
+    return JSON.stringify(
+      {
+        ok: true,
+        node: updated,
+        note:
+          "Node is draining: the gateway will no longer route new work to it. In-flight work continues. " +
+          "It is safe to restart once in-flight work has finished. After restart the node reconnects and returns to service automatically.",
+      },
+      null,
+      2,
+    );
+  },
+});
+
+export const nodeUndrain = defineTool({
+  name: "node_undrain",
+  description:
+    "Cancel a drain and return a node to service. Only valid for a node in 'draining' status.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (row.status !== "draining") {
+      return `ERROR: node ${row.id} is ${row.status}, not draining; nothing to undrain.`;
+    }
+    // If a live session is still attached (connectedAt set), restore online;
+    // otherwise fall back to approved and let the next connect flip it online.
+    const nextStatus = row.connectedAt ? "online" : "approved";
+    setNodeStatus(db, { id: row.id, status: nextStatus, connectedAt: row.connectedAt, nowMs: ctx.nowMs() });
+    const updated = getNodeById(db, row.id);
+    return JSON.stringify({ ok: true, node: updated }, null, 2);
   },
 });
 
@@ -1155,6 +1214,8 @@ export const nodeManage = defineTool({
         "get",
         "delete",
         "set_status",
+        "drain",
+        "undrain",
         "system_run",
         "system_which",
         "process_start",
@@ -1166,7 +1227,7 @@ export const nodeManage = defineTool({
       ])
       .default("list"),
     id: z.string().min(1).max(128).optional(),
-    status: z.enum(["pending", "approved", "blocked", "offline", "online"]).optional(),
+    status: z.enum(["pending", "approved", "blocked", "offline", "online", "draining"]).optional(),
     backend: z.enum(["nexus", "openclaw"]).optional(),
     limit: z.number().int().min(1).max(500).optional(),
     command: z.string().min(1).max(4000).optional(),
@@ -1194,6 +1255,8 @@ export const nodeManage = defineTool({
       "get",
       "delete",
       "set_status",
+      "drain",
+      "undrain",
       "system_run",
       "system_which",
       "process_start",
@@ -1286,6 +1349,10 @@ export const nodeManage = defineTool({
         return nodeDelete.execute({ id: args.id ?? "" }, ctx);
       case "set_status":
         return nodeSetStatus.execute({ id: args.id ?? "", status: args.status ?? "pending" }, ctx);
+      case "drain":
+        return nodeDrain.execute({ id: args.id ?? "" }, ctx);
+      case "undrain":
+        return nodeUndrain.execute({ id: args.id ?? "" }, ctx);
       case "system_run":
         return nodeSystemRun.execute(
           {

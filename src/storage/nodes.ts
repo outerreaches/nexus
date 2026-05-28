@@ -1,7 +1,7 @@
 import type { NexusDatabase } from "./database.js";
 
 export type NodeBackend = "nexus" | "openclaw";
-export type NodeStatus = "pending" | "approved" | "blocked" | "offline" | "online";
+export type NodeStatus = "pending" | "approved" | "blocked" | "offline" | "online" | "draining";
 export type NodeTrustLevel = "untrusted" | "standard" | "secure";
 export type NodeFirewallMode = "hermes" | "audit-only" | "transparent";
 
@@ -114,6 +114,7 @@ function normalizeStatus(value: string): NodeStatus {
     case "blocked":
     case "offline":
     case "online":
+    case "draining":
       return value;
     default:
       return "pending";
@@ -187,10 +188,11 @@ export function listNodes(db: NexusDatabase, limit: number = 200): NodeRecord[] 
        ORDER BY
          CASE status
            WHEN 'online' THEN 0
-           WHEN 'offline' THEN 1
-           WHEN 'pending' THEN 2
-           WHEN 'approved' THEN 3
-           ELSE 4
+           WHEN 'draining' THEN 1
+           WHEN 'offline' THEN 2
+           WHEN 'pending' THEN 3
+           WHEN 'approved' THEN 4
+           ELSE 5
          END,
          COALESCE(last_seen_at, 0) DESC,
          created_at DESC

@@ -9,6 +9,7 @@ import type {
 
 export type NodeRoutingErrorCode =
   | "NODE_OFFLINE"
+  | "NODE_DRAINING"
   | "CAPABILITY_UNAVAILABLE"
   | "SECURITY_CONSTRAINT_UNSATISFIED"
   | "NODE_SOCKET_UNAVAILABLE"

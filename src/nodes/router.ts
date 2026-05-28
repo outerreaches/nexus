@@ -173,6 +173,12 @@ export class NodeToolRouter implements NodeRouter {
     constraints: RoutingSecurityConstraints,
     carriesSecretRefs: boolean,
   ): void {
+    if (node.status === "draining") {
+      throw new NodeRoutingError(
+        "NODE_DRAINING",
+        `Node ${node.id} is draining for an update and is not accepting new work. Undrain it (node_manage action=undrain) or target another node.`,
+      );
+    }
     if (node.status !== "online") {
       throw new NodeRoutingError("NODE_OFFLINE", `Node ${node.id} is ${node.status}.`);
     }
