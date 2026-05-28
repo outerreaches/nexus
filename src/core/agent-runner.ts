@@ -7,6 +7,7 @@ import { isSuccessfulApplyDeployResult } from "./deploy-result.js";
 import {
   estimateTotalTokens,
   compactContext,
+  aggressiveTruncate,
   storeCompactionRetentionCandidates,
   storeCompactionSummary,
 } from "./context-compactor.js";
@@ -893,8 +894,7 @@ export class AgentRunner {
         if (isOverflow && maxContextTokens > 0) {
           const overflowMsg = err instanceof Error ? err.message : String(err);
           this.deps.onLog?.(`llm_context_overflow: ${truncate(overflowMsg, 240)} — attempting hard-compact + retry`);
-          let recoveryMessages = messages;
-          let recoveryCompacted = false;
+          let recoveryMessages: ChatMessage[] = messages;
           try {
             const recoveryResult = await compactContext({
               messages: [...messages],
@@ -910,7 +910,6 @@ export class AgentRunner {
             });
             if (recoveryResult.compacted) {
               recoveryMessages = recoveryResult.messages;
-              recoveryCompacted = true;
               this.deps.onLog?.(
                 `llm_context_overflow_recovery: compacted ${recoveryResult.tokensBefore} -> ${recoveryResult.tokensAfter} tokens`,
               );
@@ -922,68 +921,75 @@ export class AgentRunner {
               `llm_context_overflow_recovery: compaction failed (${compErr instanceof Error ? compErr.message : String(compErr)})`,
             );
           }
-          // If compactContext refused (estimator thought the prompt was
-          // already small enough) or made no reduction, the LLM is still the
-          // source of truth — it just rejected the prompt. Fall back to an
-          // aggressive trim: keep system + last 6 non-system messages.
-          if (!recoveryCompacted || recoveryMessages.length >= messages.length) {
-            const aggressive = trimMessagesForTimeoutRetry(recoveryMessages, 6);
-            if (aggressive.length < recoveryMessages.length) {
-              this.deps.onLog?.(
-                `llm_context_overflow_recovery: aggressive trim ${recoveryMessages.length} -> ${aggressive.length} messages`,
-              );
-              recoveryMessages = aggressive;
-              recoveryCompacted = true;
-            }
-          }
-
-          if (recoveryCompacted) {
-            messages.length = 0;
-            messages.push(...recoveryMessages);
-            const retryEstimateRaw = estimateTotalTokens(messages, currentTools);
-            const retryEstimateCalibrated = Math.ceil(retryEstimateRaw * promptEstimateMultiplier);
+          // Belt-and-suspenders fallback: the LLM is the source of truth on
+          // what fits. compactContext respects the estimator (and may early-
+          // return `compacted: false` when it under-counts the real prompt),
+          // and even a successful compaction can leave a single huge recent
+          // tool result intact. So regardless of what compactContext returned:
+          //   1. Drop old messages — keep system + last 6 non-system.
+          //   2. Run aggressiveTruncate over what remains, with a tight
+          //      half-of-maxContext target, so huge tool results / user
+          //      content / assistant text in the recent window get shrunk.
+          // This guarantees forward progress even when the estimator is wrong.
+          const trimmedBefore = recoveryMessages.length;
+          const trimmed = trimMessagesForTimeoutRetry(recoveryMessages, 6);
+          if (trimmed.length < trimmedBefore) {
             this.deps.onLog?.(
-              `llm_call_retry iteration=${iteration} messages=${messages.length} mode=context_overflow ` +
-              `est_prompt=${retryEstimateCalibrated} est_prompt_raw=${retryEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+              `llm_context_overflow_recovery: trimmed ${trimmedBefore} -> ${trimmed.length} messages`,
             );
-            try {
-              const retry = await this.deps.llm.completeChat({
-                messages,
-                tools: currentTools,
-                onTextDelta: this.deps.onTextDelta,
-                abortSignal: this.deps.abortSignal,
-                ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
-              });
-              this.recordCircuitSuccess();
-              this.throwIfCancelled();
-              content = retry.content;
-              toolCalls = retry.toolCalls;
-              reasoning = retry.reasoning;
-              logUsageAndCalibrate("default", retry.usage, retryEstimateRaw, retryEstimateCalibrated);
-              this.deps.onLog?.("llm_context_overflow_recovery: retry succeeded");
-              // Skip the failure-return path; the catch is done.
-              // Fall through to the post-call logic below.
-            } catch (retryErr) {
-              if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {
-                throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM context-overflow recovery");
-              }
-              this.recordCircuitFailure(retryErr);
-              const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-              this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
-              const errorText = `LLM error: ${msg}`;
-              const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
-              newMessages.push(assistantMsg);
-              return {
-                status: "failed",
-                output: errorText,
-                newMessages,
-                toolCallsUsed,
-                iterationsUsed: iteration + 1,
-              };
+          }
+          // Half of maxContextTokens is roughly 65K on a 131K-ctx server —
+          // well under any reasonable model limit, and the LLM will tell us
+          // again if it's still too much. `force: true` bypasses the
+          // estimator-based gate inside aggressiveTruncate; the estimator is
+          // by definition wrong here (the LLM just rejected what it thought
+          // was a fine prompt), so its early-return must not apply.
+          const truncationTarget = Math.max(2_000, Math.floor(maxContextTokens / 2));
+          recoveryMessages = aggressiveTruncate(trimmed, truncationTarget, { force: true });
+          const truncatedEstimate = estimateTotalTokens(recoveryMessages, currentTools);
+          this.deps.onLog?.(
+            `llm_context_overflow_recovery: aggressive_truncate target=${truncationTarget} est_after=${truncatedEstimate}`,
+          );
+
+          // Always retry: belt-and-suspenders above guarantees recoveryMessages
+          // is now both trimmed and aggressively truncated. Snapshot before
+          // clearing — when no shrinking happened, recoveryMessages may share
+          // a reference with `messages`, and `messages.length = 0` would clear
+          // both, leaving the retry with an empty list.
+          const retryMessages = [...recoveryMessages];
+          messages.length = 0;
+          messages.push(...retryMessages);
+          const retryEstimateRaw = estimateTotalTokens(messages, currentTools);
+          const retryEstimateCalibrated = Math.ceil(retryEstimateRaw * promptEstimateMultiplier);
+          this.deps.onLog?.(
+            `llm_call_retry iteration=${iteration} messages=${messages.length} mode=context_overflow ` +
+            `est_prompt=${retryEstimateCalibrated} est_prompt_raw=${retryEstimateRaw} est_factor=${promptEstimateMultiplier.toFixed(2)}`,
+          );
+          try {
+            const retry = await this.deps.llm.completeChat({
+              messages,
+              tools: currentTools,
+              onTextDelta: this.deps.onTextDelta,
+              abortSignal: this.deps.abortSignal,
+              ...(this.deps.slotKey ? { slotKey: this.deps.slotKey } : {}),
+            });
+            this.recordCircuitSuccess();
+            this.throwIfCancelled();
+            content = retry.content;
+            toolCalls = retry.toolCalls;
+            reasoning = retry.reasoning;
+            logUsageAndCalibrate("default", retry.usage, retryEstimateRaw, retryEstimateCalibrated);
+            this.deps.onLog?.("llm_context_overflow_recovery: retry succeeded");
+            // Skip the failure-return path; the catch is done.
+            // Fall through to the post-call logic below.
+          } catch (retryErr) {
+            if (this.deps.abortSignal?.aborted || isAbortLikeError(retryErr)) {
+              throw new RunCancelledError(abortReasonToText(this.deps.abortSignal?.reason) ?? "Run cancelled during LLM context-overflow recovery");
             }
-          } else {
-            // Could not compact — fall through to non-retryable failure with the original error.
-            const errorText = `LLM error: ${overflowMsg}`;
+            this.recordCircuitFailure(retryErr);
+            const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            this.deps.onLog?.(`llm_error ${truncate(msg, 240)}`);
+            const errorText = `LLM error: ${msg}`;
             const assistantMsg: ChatMessage = { role: "assistant", content: errorText };
             newMessages.push(assistantMsg);
             return {

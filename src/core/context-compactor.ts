@@ -721,10 +721,20 @@ function heuristicSummary(messages: ChatMessage[]): string {
 /**
  * Aggressively truncate tool results in messages to fit within a token budget.
  * Preserves message structure but shortens tool output content.
+ *
+ * When `opts.force` is true the per-message char caps are computed against
+ * `targetTokens` directly, bypassing the early-return that compares against
+ * the current estimator output. Use this when the model has already rejected
+ * the prompt as too long — the estimator is by definition under-counting in
+ * that scenario, so its gate would otherwise skip the truncation we need.
  */
-function aggressiveTruncate(messages: ChatMessage[], targetTokens: number): ChatMessage[] {
+export function aggressiveTruncate(
+  messages: ChatMessage[],
+  targetTokens: number,
+  opts: { force?: boolean } = {},
+): ChatMessage[] {
   const current = estimateMessageTokens(messages);
-  if (current <= targetTokens) return messages;
+  if (!opts.force && current <= targetTokens) return messages;
 
   const ratio = Math.max(0.05, targetTokens / current);
   // Calculate max chars per tool result based on how much we need to shrink

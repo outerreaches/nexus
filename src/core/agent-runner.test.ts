@@ -634,6 +634,72 @@ test("AgentRunner hard-compacts and retries once when the LLM rejects the prompt
   );
 });
 
+test("AgentRunner recovery truncates a huge recent tool result instead of just dropping old messages", async () => {
+  // Reproduces the real-world overflow: a recent tool result is itself huge
+  // enough to push the prompt over context, so dropping older messages isn't
+  // enough — the recovery must also shrink the tool result.
+  const hugeToolOutput = "x".repeat(200_000); // ~57K estimated tokens
+  let mainStep = 0;
+  const mainCallToolMessageLengths: number[] = [];
+  const llm: LLMClient = {
+    completeChat: async (params) => {
+      const firstSystem = params.messages.find((m) => m.role === "system");
+      const isSummaryCall = typeof firstSystem?.content === "string"
+        && firstSystem.content.includes("context compaction assistant");
+      if (isSummaryCall) {
+        return { content: "summary placeholder", toolCalls: [], usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 } };
+      }
+      mainStep += 1;
+      const lastToolMsg = [...params.messages].reverse().find((m) => m.role === "tool");
+      mainCallToolMessageLengths.push(typeof lastToolMsg?.content === "string" ? lastToolMsg.content.length : 0);
+      if (mainStep === 1) {
+        throw new Error(
+          'LLM request failed: 400 Bad Request — {"error":{"code":400,"message":"request (145000 tokens) exceeds the available context size (131072 tokens)","type":"exceed_context_size_error"}}',
+        );
+      }
+      return { content: "ok after truncation", toolCalls: [], usage: { promptTokens: 1000, completionTokens: 5, totalTokens: 1005 } };
+    },
+  };
+
+  // Build a small history that the iteration-start estimator counts as fine
+  // (estimate well below 75% of maxContextTokens), but with one giant tool
+  // result the LLM stub will reject on first call.
+  const history: import("./types.js").ChatMessage[] = [
+    { role: "user", content: "kick off" },
+    { role: "assistant", content: null, toolCalls: [{ id: "call-1", name: "shell_exec", arguments: "{}" }] },
+    { role: "tool", name: "shell_exec", toolCallId: "call-1", content: hugeToolOutput },
+  ];
+
+  const logs: string[] = [];
+  const runner = new AgentRunner({
+    llm,
+    tools: [],
+    budget: { maxIterations: 2, maxToolCalls: 4, maxContextTokens: 131_072 },
+    toolContext: makeToolContext(),
+    onLog: (line) => logs.push(line),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history,
+    userMessage: "respond",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.output, "ok after truncation");
+  assert.equal(mainStep, 2);
+  // First call saw the huge tool result, second saw a shrunken one.
+  assert.equal(mainCallToolMessageLengths[0], hugeToolOutput.length);
+  assert.ok(
+    mainCallToolMessageLengths[1]! > 0 && mainCallToolMessageLengths[1]! < hugeToolOutput.length / 10,
+    `expected the retry's tool message to be aggressively shrunken, got ${mainCallToolMessageLengths[1]}`,
+  );
+  assert.ok(
+    logs.some((l) => /llm_context_overflow_recovery: aggressive_truncate target=/.test(l)),
+    `expected aggressive_truncate log, got:\n${logs.join("\n")}`,
+  );
+});
+
 test("AgentRunner surfaces the overflow error when the retry also overflows", async () => {
   let mainStep = 0;
   const llm: LLMClient = {
