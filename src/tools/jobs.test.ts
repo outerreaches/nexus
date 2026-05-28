@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { jobCreate, jobManage } from "./jobs.js";
+import { jobCreate, jobManage, unwrapJobSpec } from "./jobs.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 
 async function withDb(fn: (db: NexusDatabase) => Promise<void> | void): Promise<void> {
@@ -222,6 +222,113 @@ test("job_manage update can directly replace spec_json", async () => {
       tool: "data_intake_manage",
       args: { action: "run", args: { instanceId: "DINST1" } },
     });
+  });
+});
+
+test("unwrapJobSpec flattens single-key wrappers when the inner carries real spec fields", () => {
+  // deliveryMode-as-wrapper (the actual user-reported shape).
+  const wrapped = {
+    deliveryMode: {
+      deliveryMode: "report_only",
+      mode: "agent_task",
+      task: "Multi-source report",
+      originAgentId: "main",
+    },
+  };
+  const unwrapped = unwrapJobSpec(wrapped);
+  assert.equal(unwrapped.mode, "agent_task");
+  assert.equal(unwrapped.task, "Multi-source report");
+  assert.equal(unwrapped.deliveryMode, "report_only");
+  assert.equal(unwrapped.originAgentId, "main");
+
+  // Already flat — pass through unchanged.
+  const flat = { mode: "agent_task", task: "hi" };
+  assert.deepEqual(unwrapJobSpec(flat), flat);
+
+  // Single key but inner has no spec field — leave alone (don't false-positive).
+  const single = { metadata: { note: "anything" } };
+  assert.deepEqual(unwrapJobSpec(single), single);
+});
+
+test("job_manage update auto-unwraps a deliveryMode-wrapped spec instead of erroring", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JWRAP1",
+        "main",
+        "Report - Multi-Source",
+        "*/30 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({ mode: "agent_task", task: "old task", deliveryMode: "report_only" }),
+        now + 60_000,
+        now,
+        now,
+      );
+
+    const raw = await jobManage.execute(
+      {
+        action: "update",
+        id: "JWRAP1",
+        spec: {
+          deliveryMode: {
+            deliveryMode: "report_only",
+            mode: "agent_task",
+            task: "Multi-source report. STEP 1 — Run intakes.",
+            originAgentId: "main",
+            originChannel: "telegram",
+            originChannelKey: "1000000001",
+          },
+        },
+      },
+      { db, nowMs: () => now, log: () => {} } as any,
+    );
+    const row = JSON.parse(raw) as { spec_json: string };
+    const spec = JSON.parse(row.spec_json) as Record<string, unknown>;
+    assert.equal(spec.mode, "agent_task");
+    assert.equal(spec.task, "Multi-source report. STEP 1 — Run intakes.");
+    assert.equal(spec.deliveryMode, "report_only");
+    assert.equal(spec.originChannel, "telegram");
+  });
+});
+
+test("job_manage update error message names the bad spec keys when validation fails", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JBAD1",
+        "main",
+        "bad shape",
+        "*/30 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({ mode: "agent_task", task: "old task" }),
+        now + 60_000,
+        now,
+        now,
+      );
+
+    // A spec with multiple keys but missing mode/task — auto-unwrap won't
+    // touch it; validation must fire with a structured, actionable error.
+    const raw = await jobManage.execute(
+      {
+        action: "update",
+        id: "JBAD1",
+        spec: { note: "I forgot mode and task", random: "field" },
+      },
+      { db, nowMs: () => now, log: () => {} } as any,
+    );
+    assert.match(raw, /^ERROR: 'task' is required for agent_task mode/);
+    assert.match(raw, /top-level keys:.*note.*random/);
+    assert.match(raw, /do not nest mode\/task inside another wrapper key/);
   });
 });
 

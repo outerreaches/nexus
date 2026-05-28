@@ -112,6 +112,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const JOB_SPEC_TOP_LEVEL_FIELDS = [
+  "mode",
+  "task",
+  "tool",
+  "command",
+  "args",
+  "deliveryMode",
+  "contextMode",
+  "oneShotAtMs",
+  "scheduleKind",
+  "autoDeleteAfterRun",
+] as const;
+
+/**
+ * Some LLMs nest the entire job spec inside a single wrapper key (most
+ * commonly `deliveryMode`, because the field name is suggestive), producing
+ * shapes like `{ deliveryMode: { mode, task, deliveryMode: "report_only", ... } }`.
+ * The top-level then has no `mode` or `task`, and the per-mode validators
+ * reject the update with a generic "'task' is required" error.
+ *
+ * Detect that single-key-wrapper pattern: if the spec has exactly one key
+ * AND that key's value is a record carrying at least one real spec field,
+ * flatten it. This is the same family of fix as `unwrapSelfNestedArgs` in
+ * data-intake.ts for `data_intake_manage`.
+ */
+export function unwrapJobSpec(spec: Record<string, unknown>): Record<string, unknown> {
+  const keys = Object.keys(spec);
+  if (keys.length !== 1) return spec;
+  const inner = spec[keys[0]!];
+  if (!isRecord(inner)) return spec;
+  const innerKeys = Object.keys(inner);
+  const hasSpecField = innerKeys.some((k) => (JOB_SPEC_TOP_LEVEL_FIELDS as readonly string[]).includes(k));
+  if (!hasSpecField) return spec;
+  return { ...inner };
+}
+
+function describeSpecShapeForError(spec: Record<string, unknown>): string {
+  const keys = Object.keys(spec);
+  if (keys.length === 0) return "empty spec";
+  return `top-level keys: ${keys.join(", ")}`;
+}
+
 function nestedManageArgs(value: { args?: Record<string, unknown> }): Record<string, unknown> {
   return isRecord(value.args) ? value.args : {};
 }
@@ -502,7 +544,7 @@ export const jobUpdate = defineTool({
     command: z.string().optional(),
     tool: z.string().optional(),
     args: z.record(z.any()).optional(),
-    spec: z.record(z.unknown()).optional().describe("Direct replacement for spec_json. Use for repair/migration; explicit mode/task/tool/args fields still override it."),
+    spec: z.record(z.unknown()).optional().describe("Direct replacement for spec_json. Top-level keys: `mode` ('agent_task'|'script'|'tool_call'), and one of `task` (agent_task), `command` (script), `tool`+`args` (tool_call). Optional: `deliveryMode` ('session_resume'|'report_only', string), `contextMode`, `oneShotAtMs`, `scheduleKind`, `autoDeleteAfterRun`. Do NOT nest mode/task inside a wrapper key like `deliveryMode`. Explicit `mode`/`task`/`tool`/`args` args on this call still override matching fields in `spec`."),
     contextMode: z
       .enum(["full", "delta", "none"])
       .optional()
@@ -535,7 +577,7 @@ export const jobUpdate = defineTool({
 
     let spec: any = null;
     if (args.spec !== undefined) {
-      spec = { ...args.spec };
+      spec = unwrapJobSpec({ ...args.spec });
     } else {
       try {
         spec = JSON.parse(String(existing.spec_json ?? "{}"));
@@ -555,6 +597,28 @@ export const jobUpdate = defineTool({
 
     // Ensure mode defaults if missing
     if (!spec.mode) spec.mode = "agent_task";
+
+    // If `deliveryMode` was passed as an object (LLM nesting mistake), and
+    // none of the actual spec fields it would carry are at the top level
+    // yet, try to recover the nested fields too. Common shape:
+    // spec.deliveryMode = { deliveryMode: "report_only", mode, task, ... }
+    if (isRecord(spec.deliveryMode)) {
+      const nested = spec.deliveryMode as Record<string, unknown>;
+      const innerDelivery = nested.deliveryMode;
+      if (typeof innerDelivery === "string") {
+        for (const field of JOB_SPEC_TOP_LEVEL_FIELDS) {
+          if (field === "deliveryMode") continue;
+          if (spec[field] === undefined && nested[field] !== undefined) {
+            spec[field] = nested[field];
+          }
+        }
+        // Pull origin* metadata too if the nested object had it.
+        for (const [k, v] of Object.entries(nested)) {
+          if (k.startsWith("origin") && spec[k] === undefined) spec[k] = v;
+        }
+        spec.deliveryMode = innerDelivery;
+      }
+    }
 
     if (args.at !== undefined) {
       let atMs = 0;
@@ -578,9 +642,15 @@ export const jobUpdate = defineTool({
     }
 
     // Validate
-    if (spec.mode === "agent_task" && !spec.task) return "ERROR: 'task' is required for agent_task mode";
-    if (spec.mode === "script" && !spec.command) return "ERROR: 'command' is required for script mode";
-    if (spec.mode === "tool_call" && !spec.tool) return "ERROR: 'tool' is required for tool_call mode";
+    if (spec.mode === "agent_task" && !spec.task) {
+      return `ERROR: 'task' is required for agent_task mode (${describeSpecShapeForError(spec)}). Pass spec like {"mode":"agent_task","task":"...","deliveryMode":"report_only"} — do not nest mode/task inside another wrapper key.`;
+    }
+    if (spec.mode === "script" && !spec.command) {
+      return `ERROR: 'command' is required for script mode (${describeSpecShapeForError(spec)}).`;
+    }
+    if (spec.mode === "tool_call" && !spec.tool) {
+      return `ERROR: 'tool' is required for tool_call mode (${describeSpecShapeForError(spec)}).`;
+    }
     if (args.cleanSpec) cleanSpecForMode(spec);
     if (spec.mode !== "agent_task") {
       clearAgentTaskDeliveryMetadata(spec);
