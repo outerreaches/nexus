@@ -270,7 +270,7 @@ test("job_manage list adds operational status", async () => {
   });
 });
 
-test("job_manage run_history aliases runs with nested args", async () => {
+test("job_manage run_history returns structured shape with durationMs and ISO timestamps", async () => {
   await withDb(async (db) => {
     const now = Date.now();
     db.db
@@ -291,9 +291,21 @@ test("job_manage run_history aliases runs with nested args", async () => {
       );
     db.db
       .prepare(
-        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, output, tool_calls_used, iterations_used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run("JR1", "JHIST1", "main", now, now, now + 1, "failed", "Budget exhausted while iterating (maxIterations=100).", "details");
+      .run(
+        "JR1",
+        "JHIST1",
+        "main",
+        now - 1_000,
+        now,
+        now + 1_500,
+        "failed",
+        "Budget exhausted while iterating (maxIterations=100).",
+        "stderr details",
+        12,
+        4,
+      );
 
     const raw = await jobManage.execute(
       {
@@ -307,9 +319,61 @@ test("job_manage run_history aliases runs with nested args", async () => {
       } as any,
     );
 
-    const rows = JSON.parse(raw) as Array<{ id: string; error: string }>;
+    const rows = JSON.parse(raw) as Array<Record<string, unknown>>;
     assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.id, "JR1");
-    assert.match(rows[0]?.error ?? "", /maxIterations=100/);
+    const row = rows[0]!;
+    assert.equal(row.id, "JR1");
+    assert.equal(row.jobId, "JHIST1");
+    assert.equal(row.status, "failed");
+    assert.equal(row.startedAt, now);
+    assert.equal(row.endedAt, now + 1_500);
+    assert.equal(row.durationMs, 1_500);
+    assert.equal(row.scheduledFor, now - 1_000);
+    assert.equal(row.scheduledForIso, new Date(now - 1_000).toISOString());
+    assert.equal(row.startedAtIso, new Date(now).toISOString());
+    assert.equal(row.endedAtIso, new Date(now + 1_500).toISOString());
+    assert.equal(row.toolCallsUsed, 12);
+    assert.equal(row.iterationsUsed, 4);
+    assert.match(String(row.error ?? ""), /maxIterations=100/);
+    assert.equal(row.output, "stderr details");
+  });
+});
+
+test("job_manage runs keeps raw row shape for backward compatibility", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JHIST2",
+        "main",
+        "raw history",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({ mode: "agent_task", task: "test", deliveryMode: "report_only" }),
+        now + 60_000,
+        now,
+        now,
+      );
+    db.db
+      .prepare(
+        "INSERT INTO job_runs (id, job_id, owner_agent_id, scheduled_for, started_at, ended_at, status, error, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("JR2", "JHIST2", "main", now, now, now + 1, "failed", "boom", "details");
+
+    const raw = await jobManage.execute(
+      { action: "runs", id: "JHIST2" },
+      { db, nowMs: () => now, log: () => {} } as any,
+    );
+
+    const rows = JSON.parse(raw) as Array<Record<string, unknown>>;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.id, "JR2");
+    assert.equal(rows[0]?.job_id, "JHIST2");
+    assert.equal(rows[0]?.started_at, now);
+    assert.equal((rows[0] as any).durationMs, undefined);
   });
 });

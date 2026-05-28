@@ -150,6 +150,35 @@ function resolveJobManageIncludeDisabled(value: { includeDisabled?: boolean; arg
   return readBooleanArg(value.includeDisabled) ?? readBooleanArg(nested.includeDisabled);
 }
 
+function toIsoOrNull(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return new Date(Math.floor(value)).toISOString();
+}
+
+function formatJobRunHistoryRow(row: Record<string, unknown>): Record<string, unknown> {
+  const startedAt = typeof row.started_at === "number" ? row.started_at : null;
+  const endedAt = typeof row.ended_at === "number" ? row.ended_at : null;
+  const durationMs =
+    startedAt !== null && endedAt !== null && endedAt >= startedAt ? endedAt - startedAt : null;
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    ownerAgentId: row.owner_agent_id,
+    status: row.status,
+    scheduledFor: row.scheduled_for ?? null,
+    scheduledForIso: toIsoOrNull(row.scheduled_for),
+    startedAt,
+    startedAtIso: toIsoOrNull(startedAt),
+    endedAt,
+    endedAtIso: toIsoOrNull(endedAt),
+    durationMs,
+    error: row.error ?? null,
+    output: row.output ?? null,
+    toolCallsUsed: row.tool_calls_used ?? null,
+    iterationsUsed: row.iterations_used ?? null,
+  };
+}
+
 function jobListStatus(row: Record<string, unknown>, nowMs: number): string {
   const enabled = Number(row.enabled) === 1;
   const consecutiveFailures = typeof row.consecutive_failures === "number" ? row.consecutive_failures : 0;
@@ -753,6 +782,27 @@ export const jobRuns = defineTool({
   },
 });
 
+export const jobRunHistory = defineTool({
+  name: "job_run_history",
+  description:
+    "List recent runs for a job with timestamps (epoch + ISO), duration, status, error, and full output. " +
+    "Use this for debugging failures; prefer job_runs when you only need raw rows.",
+  parameters: z.object({
+    id: z.string().min(1).max(32),
+    limit: z.number().int().min(1).max(200).default(25),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const job = db.db.prepare("SELECT id FROM jobs WHERE id = ?").get(args.id) as any;
+    if (!job) return "ERROR: not found";
+    const rows = db.db
+      .prepare("SELECT * FROM job_runs WHERE job_id = ? ORDER BY started_at DESC LIMIT ?")
+      .all(args.id, args.limit) as any[];
+    return JSON.stringify(rows.map((row) => formatJobRunHistoryRow(row)));
+  },
+});
+
 export const jobRunGet = defineTool({
   name: "job_run_get",
   description: "Get a specific job run by id.",
@@ -790,7 +840,9 @@ export const jobEvents = defineTool({
 export const jobManage = defineTool({
   name: "job_manage",
   description:
-    "Unified scheduler management tool. Action can create/list/get/update/pause/resume/run_now/delete jobs, list runs/events/history, migrate legacy specs, or fetch a specific run.",
+    "Unified scheduler management tool. Action can create/list/get/update/pause/resume/run_now/delete jobs, " +
+    "list runs (`runs`/`list_runs` return raw rows; `run_history` returns timestamps + durationMs + full error/output for debugging), " +
+    "fetch a specific run, list events, or migrate legacy specs.",
   parameters: z.object({
     action: z
       .enum([
@@ -921,8 +973,15 @@ export const jobManage = defineTool({
         return jobDelete.execute({ id }, ctx);
       case "runs":
       case "list_runs":
-      case "run_history":
         return jobRuns.execute(
+          {
+            id,
+            ...(limit !== undefined ? { limit } : {}),
+          },
+          ctx,
+        );
+      case "run_history":
+        return jobRunHistory.execute(
           {
             id,
             ...(limit !== undefined ? { limit } : {}),

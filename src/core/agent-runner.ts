@@ -360,6 +360,20 @@ function successfulToolCallClearsRetryGuards(
   );
 }
 
+// Identical-call retry blocks are skipped entirely for these calls. They are
+// already gated by the per-run tool-call budget, and operationally we want the
+// agent to be able to force-retry a state-changing scheduler action without
+// having to issue an unrelated reset call first. The per-run abort at
+// `maxSameToolFailures` still applies, so genuinely stuck retries terminate.
+function isUnblockableToolCall(
+  call: import("./types.js").ToolCall,
+  args: unknown,
+): boolean {
+  if (call.name !== "job_manage" || !isPlainObject(args)) return false;
+  const action = typeof args.action === "string" ? args.action.trim().toLowerCase() : "";
+  return action === "run_now";
+}
+
 const DEPLOY_HANDOFF_LINE_1 =
   "Deploy applied. Stopping this run to avoid post-deploy tool calls on a stale process image.";
 const DEPLOY_HANDOFF_LINE_2 =
@@ -1130,6 +1144,7 @@ export class AgentRunner {
         }
 
         const sig = toolCallSignature(call);
+        const unblockable = isUnblockableToolCall(call, args);
         if (status === "error") {
           const next = (repeatedFailures.get(sig) ?? 0) + 1;
           repeatedFailures.set(sig, next);
@@ -1144,7 +1159,7 @@ export class AgentRunner {
           const retriesUsed = Math.max(0, next - 1);
           const retriesRemaining = Math.max(0, retryBudget - retriesUsed);
 
-          if (next === 1) {
+          if (next === 1 && !unblockable) {
             if (retryBudget === 0) {
               toolResultMsg.content +=
                 "\n\n[RETRY GUARD] This failure is non-retriable with identical arguments. " +
@@ -1157,7 +1172,7 @@ export class AgentRunner {
             }
           }
 
-          if (next >= maxFailuresBeforeBlock) {
+          if (next >= maxFailuresBeforeBlock && !unblockable) {
             const reason =
               retryBudget === 0
                 ? `retry=no for ${errorClass ?? "unknown_error"}`
@@ -1166,12 +1181,12 @@ export class AgentRunner {
             toolResultMsg.content +=
               `\n\n[RETRY GUARD] Identical call is now blocked for this run (${reason}). ` +
               "Use different arguments or a different tool.";
-          } else if (retriesRemaining === 1) {
+          } else if (retriesRemaining === 1 && !unblockable) {
             toolResultMsg.content += "\n\n[RETRY GUARD] You have one identical retry remaining for this call.";
           }
 
           // Escalating warnings before hard abort so the agent can self-correct.
-          if (next >= 2 && next < maxSameToolFailures) {
+          if (next >= 2 && next < maxSameToolFailures && !unblockable) {
             const severity = next === 2 ? "WARNING" : "CRITICAL WARNING";
             const remaining = maxSameToolFailures - next;
             const escalation =

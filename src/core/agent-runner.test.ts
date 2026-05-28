@@ -990,6 +990,67 @@ test("AgentRunner clears identical-call blocks after successful job_manage state
   assert.equal(resumeCalls, 1);
 });
 
+test("AgentRunner does not block identical job_manage run_now retries", async () => {
+  let step = 0;
+  let runNowCalls = 0;
+  const llm: LLMClient = {
+    completeChat: async () => {
+      if (step >= 3) return { content: "done", toolCalls: [] };
+      const callId = `call-job-run-now-${step + 1}`;
+      step += 1;
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: callId,
+            name: "job_manage",
+            arguments: JSON.stringify({ action: "run_now", id: "JTEST2" }),
+          },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({
+    llm,
+    tools: [
+      {
+        name: "job_manage",
+        description: "test",
+        jsonSchema: {},
+        execute: async (args) => {
+          const action = (args as { action?: string }).action;
+          if (action === "run_now") {
+            runNowCalls += 1;
+            if (runNowCalls < 3) return "ERROR: capability_mismatch underlying model is 503";
+            return "OK";
+          }
+          return "ERROR: unexpected action";
+        },
+      },
+    ],
+    budget: { maxIterations: 5, maxToolCalls: 6 },
+    toolContext: makeToolContext(),
+  });
+
+  const result = await runner.run({
+    systemPrompt: "You are a test runner.",
+    history: [],
+    userMessage: "force-retry the job",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(runNowCalls, 3);
+  const blockedToolMessage = result.newMessages.find(
+    (m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("blocked by retry policy"),
+  );
+  assert.equal(blockedToolMessage, undefined, "run_now should never be blocked by the retry policy");
+  const retryGuardWarning = result.newMessages.find(
+    (m) => m.role === "tool" && typeof m.content === "string" && m.content.includes("[RETRY GUARD]"),
+  );
+  assert.equal(retryGuardWarning, undefined, "run_now should not surface retry-guard warnings");
+});
+
 test("AgentRunner allows one identical retry for telegram_send file-not-found results", async () => {
   let step = 0;
   let telegramCalls = 0;
