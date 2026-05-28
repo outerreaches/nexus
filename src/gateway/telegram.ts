@@ -293,6 +293,54 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── Per-chat rate-limit registry ────────────────────────────────────────────
+//
+// Telegram's "retry after N seconds" escalates fast when a bot keeps firing
+// requests during the cooldown. To prevent independent callers (preview
+// stream, finalizeMessage, deleteMessage, sendOutput, …) from each
+// re-triggering the penalty, we record the cooldown deadline per chat in a
+// shared module-level map and have every API helper consult it BEFORE
+// issuing the request. One caller eating a 429 is enough — everyone else
+// waits the same retry-after window in parallel instead of compounding it.
+const telegramChatRateLimitUntilMs = new Map<number, number>();
+
+/** Mark a chat as rate-limited until `Date.now() + retryAfterMs`. Idempotent;
+ *  records only the strictest (latest) deadline. */
+function recordTelegramRateLimit(chatId: number, retryAfterMs: number): void {
+  if (!Number.isFinite(chatId) || retryAfterMs <= 0) return;
+  const untilMs = Date.now() + retryAfterMs;
+  const current = telegramChatRateLimitUntilMs.get(chatId);
+  if (current === undefined || untilMs > current) {
+    telegramChatRateLimitUntilMs.set(chatId, untilMs);
+  }
+}
+
+/** Return ms remaining until the chat's rate-limit window ends, or 0 if not
+ *  currently rate-limited. Cleans up stale entries as a side-effect. */
+function telegramRateLimitWaitMs(chatId: number): number {
+  const until = telegramChatRateLimitUntilMs.get(chatId);
+  if (until === undefined) return 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) {
+    telegramChatRateLimitUntilMs.delete(chatId);
+    return 0;
+  }
+  return remaining;
+}
+
+/** Block until any active per-chat rate-limit window has elapsed. */
+async function waitForTelegramRateLimit(chatId: number, log?: (msg: string) => void, action?: string): Promise<void> {
+  const waitMs = telegramRateLimitWaitMs(chatId);
+  if (waitMs <= 0) return;
+  log?.(`telegram: rate_limit_block chat_id=${chatId} action=${action ?? "unknown"} wait_ms=${waitMs}`);
+  await delay(waitMs);
+}
+
+/** Test-only helper for resetting registry state between tests. */
+export function __resetTelegramRateLimitRegistryForTests(): void {
+  telegramChatRateLimitUntilMs.clear();
+}
+
 async function callTelegramApiWithRateLimit<T>(
   operation: () => Promise<T>,
   params: {
@@ -304,11 +352,18 @@ async function callTelegramApiWithRateLimit<T>(
 ): Promise<T> {
   const maxAttempts = Math.max(1, Math.floor(params.maxAttempts ?? TELEGRAM_RATE_LIMIT_MAX_ATTEMPTS));
   for (let attempt = 1; ; attempt += 1) {
+    // Pre-flight registry check so multiple callers cooperate on one cooldown.
+    await waitForTelegramRateLimit(params.chatId, params.log, params.action);
     try {
       return await operation();
     } catch (err) {
       const retryAfterMs = getTelegramRetryAfterMs(err);
-      if (retryAfterMs === null || attempt >= maxAttempts) {
+      if (retryAfterMs === null) {
+        throw err;
+      }
+      // Record the cooldown so other concurrent callers also wait.
+      recordTelegramRateLimit(params.chatId, retryAfterMs);
+      if (attempt >= maxAttempts) {
         throw err;
       }
       params.log(
@@ -941,14 +996,26 @@ export function createTelegramStreamPreview(params: {
   let lastRateLimitRetryAfterMs: number | undefined;
   let pending = false;
   let ending = false;
+  // True while we're deferred behind a rate-limit cooldown; the recovery
+  // flushTimer will pick up the buffered text once it fires. We treat this
+  // as "idle for the purposes of flush()" so a mid-stream flush() called
+  // during cooldown doesn't hang — it just returns with pending still set,
+  // and the cooldown timer takes care of delivery.
+  let inCooldown = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let flushing = false;
+  // Bounds how many times the mid-stream recovery path can re-fire and 429
+  // again before we give up on the preview entirely. Prevents infinite
+  // recovery loops when Telegram keeps the chat in flood-wait.
+  const MAX_CONSECUTIVE_RATE_LIMIT_ATTEMPTS = 3;
+  let consecutiveRateLimitedAttempts = 0;
   const toolSummaryEntries: Array<{ name: string; preview: string }> = [];
   let omittedToolSummaryEntries = 0;
   const idleWaiters: Array<() => void> = [];
 
   const resolveIdleWaiters = () => {
-    if (pending || flushing) return;
+    if (flushing) return;
+    if (pending && !inCooldown) return;
     const waiters = idleWaiters.splice(0);
     for (const resolve of waiters) resolve();
   };
@@ -1026,16 +1093,70 @@ export function createTelegramStreamPreview(params: {
           );
           continue;
         }
+        // If the chat is currently rate-limited by another caller, wait the
+        // remainder of that window rather than firing a doomed edit.
+        const preWaitMs = telegramRateLimitWaitMs(params.chatId);
+        if (preWaitMs > 0) {
+          params.log(
+            `telegram: stream_preview_rate_limit_block chat_id=${params.chatId} wait_ms=${preWaitMs}`,
+          );
+          await delay(preWaitMs);
+        }
         try {
           await sendPreviewText(nextText);
           lastSentText = nextText;
-          rateLimitedUntilMs = undefined;
-          lastRateLimitRetryAfterMs = undefined;
+          // Reset the consecutive-failure counter on success, but retain
+          // lastRateLimitRetryAfterMs / rateLimitedUntilMs so the stream
+          // state still reflects the most recent rate-limit hit for
+          // diagnostics (cleared at clear()/finish() time).
+          consecutiveRateLimitedAttempts = 0;
         } catch (err) {
           const retryAfterMs = getTelegramRetryAfterMs(err);
           if (retryAfterMs !== null) {
             lastRateLimitRetryAfterMs = retryAfterMs;
             rateLimitedUntilMs = Date.now() + retryAfterMs;
+            recordTelegramRateLimit(params.chatId, retryAfterMs);
+            if (ending) {
+              // At finish time, don't block on a long cooldown — give up on
+              // the preview gracefully. The final message will be sent fresh
+              // by finalizeTelegramStreamPreviewText, which itself consults
+              // the registry and waits before editing.
+              failed = true;
+              params.warn(
+                `telegram: stream_preview_rate_limited_at_finish chat_id=${params.chatId} retry_after_ms=${retryAfterMs}`,
+              );
+              break;
+            }
+            // Mid-stream: survive the 429. Keep the stream alive, reschedule
+            // a recovery flush after the cooldown so the next batch (and any
+            // intervening deltas) go out once we're allowed back in.
+            consecutiveRateLimitedAttempts += 1;
+            if (consecutiveRateLimitedAttempts > MAX_CONSECUTIVE_RATE_LIMIT_ATTEMPTS) {
+              // The chat is in sustained flood-wait. Give up rather than
+              // keep firing doomed edits forever. Finalize path will deliver
+              // the response fresh once the cooldown elapses.
+              failed = true;
+              params.warn(
+                `telegram: stream_preview_rate_limit_persistent chat_id=${params.chatId} ` +
+                `attempts=${consecutiveRateLimitedAttempts} giving_up`,
+              );
+              break;
+            }
+            params.warn(
+              `telegram: stream_preview_rate_limited chat_id=${params.chatId} retry_after_ms=${retryAfterMs} ` +
+              `attempt=${consecutiveRateLimitedAttempts}/${MAX_CONSECUTIVE_RATE_LIMIT_ATTEMPTS} ` +
+              `(stream continues; resume after cooldown)`,
+            );
+            pending = true;
+            inCooldown = true;
+            if (!flushTimer) {
+              flushTimer = setTimeout(() => {
+                flushTimer = null;
+                inCooldown = false;
+                void runFlush();
+              }, retryAfterMs);
+            }
+            break;
           }
           failed = true;
           params.warn(`telegram: stream_preview_error chat_id=${params.chatId} ${toErrorText(err)}`);
@@ -1051,10 +1172,16 @@ export function createTelegramStreamPreview(params: {
     if (ending || failed) return;
     pending = true;
     if (flushTimer) return;
+    // When the chat is rate-limited, defer the next flush to the END of the
+    // cooldown so we don't burn a wakeup just to await delay() inside
+    // runFlush. Adds a tiny grace on top of the configured throttle.
+    const baseDelayMs = currentThrottleMs();
+    const rateLimitWaitMs = telegramRateLimitWaitMs(params.chatId);
+    const delayMs = Math.max(baseDelayMs, rateLimitWaitMs);
     flushTimer = setTimeout(() => {
       flushTimer = null;
       void runFlush();
-    }, currentThrottleMs());
+    }, delayMs);
   };
 
   const appendText = (delta: string) => {
@@ -1269,10 +1396,12 @@ export async function startTelegramBot(deps: {
   }
 
   const bot = new Bot<Context>(token);
-  // Auto-retry on 429 rate limits and transient 5xx errors for both preview
-  // updates and normal message sends.
+  // Auto-retry on 429 rate limits and transient 5xx errors. 60s is wide
+  // enough to cover Telegram's normal in-the-moment cooldowns without giving
+  // up — sustained long penalties (e.g. retry-after >60s) still surface to
+  // the caller, which can then choose to wait via the per-chat registry.
   const { autoRetry } = await import("@grammyjs/auto-retry");
-  bot.api.config.use(autoRetry({ maxDelaySeconds: 10, maxRetryAttempts: 3 }));
+  bot.api.config.use(autoRetry({ maxDelaySeconds: 60, maxRetryAttempts: 3 }));
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
