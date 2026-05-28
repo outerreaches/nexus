@@ -1025,6 +1025,25 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
       UNIQUE(scope, kid)
     );
     CREATE INDEX IF NOT EXISTS idx_identity_keyring_scope_status ON identity_keyring(scope, status, not_after DESC);
+
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Prompt-token estimator calibration (per provider+model)
+    -- ───────────────────────────────────────────────────────────────────────
+    -- Running sums of actual vs. estimated prompt tokens. The learned
+    -- multiplier is sum_actual / sum_estimated; storing additive sums keeps the
+    -- write race-free across the HA slots and isolated-worker processes that
+    -- share this DB file (no read-modify-write). The runner seeds each run's
+    -- cold-start multiplier from here instead of the static default.
+
+    CREATE TABLE IF NOT EXISTS token_calibration (
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      sum_actual REAL NOT NULL DEFAULT 0,
+      sum_estimated REAL NOT NULL DEFAULT 0,
+      samples INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (provider, model)
+    );
   `);
 
   try {

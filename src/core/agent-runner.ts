@@ -13,6 +13,11 @@ import {
   storeCompactionSummary,
 } from "./context-compactor.js";
 import type { NexusDatabase } from "../storage/database.js";
+import {
+  deriveCalibrationKey,
+  readCalibrationMultiplier,
+  recordCalibrationSample,
+} from "../storage/token-calibration.js";
 import type { ReasoningItem, ToolCall } from "./types.js";
 
 function truncate(text: string, maxChars: number): string {
@@ -751,8 +756,28 @@ export class AgentRunner {
     // any usage telemetry has arrived to calibrate the multiplier. Without
     // this, a dense first-call prompt can slip past the hard threshold and
     // overflow the model context.
-    let promptEstimateMultiplier = 1.15;
+    const COLD_START_MULTIPLIER = 1.15;
+    let promptEstimateMultiplier = COLD_START_MULTIPLIER;
     const runStartedAtMs = this.deps.toolContext.nowMs();
+
+    // Persistent per-(provider, model) estimator calibration. Seed the
+    // cold-start multiplier from prior runs so a known model's first call is
+    // already accurately sized (the in-run EWMA still refines it from here).
+    const calibrationDb = this.deps.toolContext.db as NexusDatabase | undefined;
+    const calibrationKey = deriveCalibrationKey(
+      this.deps.toolContext.llmConfig?.baseUrl,
+      this.deps.toolContext.llmConfig?.model,
+    );
+    if (calibrationDb && calibrationKey) {
+      const seed = readCalibrationMultiplier(calibrationDb, calibrationKey);
+      if (seed) {
+        promptEstimateMultiplier = seed.multiplier;
+        this.deps.onLog?.(
+          `calibration: seeded multiplier=${seed.multiplier.toFixed(2)} from ${seed.samples} samples ` +
+          `for ${calibrationKey.model}`,
+        );
+      }
+    }
 
     const logUsageAndCalibrate = (
       mode: "default" | "transient_retry" | "extended",
@@ -777,6 +802,18 @@ export class AgentRunner {
         `actual=${actualPrompt} ratio_raw=${rawRatio.toFixed(2)} ratio_cal=${calibratedRatio.toFixed(2)} ` +
         `multiplier=${prevMultiplier.toFixed(2)}->${promptEstimateMultiplier.toFixed(2)}`,
       );
+      // Persist only default-mode samples: transient/timeout retries run on
+      // trimmed or truncated prompts, so their (actual vs. raw-estimate) ratio
+      // is not representative of normal turns and would skew the aggregate.
+      if (mode === "default" && calibrationDb && calibrationKey) {
+        recordCalibrationSample({
+          db: calibrationDb,
+          key: calibrationKey,
+          actualTokens: actualPrompt,
+          estimatedRawTokens: estimateRaw,
+          nowMs: this.deps.toolContext.nowMs(),
+        });
+      }
     };
 
     for (let iteration = 0; iteration < this.deps.budget.maxIterations; iteration++) {
