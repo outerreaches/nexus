@@ -101,6 +101,19 @@ function computeFailureBackoffMs(consecutiveFailures: number): number {
   return minutes * 60_000;
 }
 
+// Infrastructure failures (LLM unreachable, slot-cache lease errors, etc.)
+// are not the job's fault and should never cause auto-pause. Detect them by
+// the agent-runner's "LLM error:" prefix or explicit transport markers; the
+// scheduler keeps incrementing consecutive_failures so backoff still grows
+// but does not flip enabled=0 when the threshold is reached.
+function isInfrastructureFailureOutput(output: string | null | undefined): boolean {
+  if (!output) return false;
+  const head = output.trimStart().slice(0, 400);
+  if (/^LLM error:/i.test(head)) return true;
+  if (/slot_lease_failed\b/i.test(head)) return true;
+  return false;
+}
+
 function isOneShotJob(job: JobRow): boolean {
   return job.cron.trim() === ONE_SHOT_CRON;
 }
@@ -790,7 +803,14 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
       const nextScheduled = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
       const nextRunAt = Math.max(nextScheduled, endedAt + backoffMs);
 
-      const shouldPause = consecutiveFailures >= maxConsecutiveFailures;
+      const infraFailure = isInfrastructureFailureOutput(res.output);
+      const shouldPause = !infraFailure && consecutiveFailures >= maxConsecutiveFailures;
+      if (infraFailure && consecutiveFailures >= maxConsecutiveFailures) {
+        deps.log(
+          `scheduler: infra_failure_no_pause job=${job.id} run=${runId} consecutive=${consecutiveFailures} ` +
+          `error=${truncate(errText ?? "", 120)}`,
+        );
+      }
 
       deps.db.db
         .prepare(
@@ -802,7 +822,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         jobId: job.id,
         runId,
         agentId: schedulerAgentId,
-        kind: shouldPause ? "run_failed_paused" : "run_failed",
+        kind: shouldPause ? "run_failed_paused" : infraFailure ? "run_failed_infra" : "run_failed",
         payload: {
           endedAt,
           nextScheduled,
@@ -810,6 +830,7 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
           backoffMs,
           runnerStatus: res.status,
           error: errText,
+          ...(infraFailure ? { infraFailure: true } : {}),
         },
         nowMs: endedAt,
       });
@@ -869,7 +890,14 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         archiveOneShot({ endedAt, runId, outcome: "exception", output });
         return;
       }
-      const shouldPause = consecutiveFailures >= maxConsecutiveFailures;
+      const infraFailure = isInfrastructureFailureOutput(output);
+      const shouldPause = !infraFailure && consecutiveFailures >= maxConsecutiveFailures;
+      if (infraFailure && consecutiveFailures >= maxConsecutiveFailures) {
+        deps.log(
+          `scheduler: infra_failure_no_pause job=${job.id} run=${runId} consecutive=${consecutiveFailures} ` +
+          `error=${truncate(output, 120)}`,
+        );
+      }
       let nextRunAt: number | null = null;
       let nextScheduled: number | null = null;
       try {
@@ -891,8 +919,14 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         jobId: job.id,
         runId,
         agentId: schedulerAgentId,
-        kind: shouldPause ? "run_exception_paused" : "run_exception",
-        payload: { endedAt, nextScheduled, nextRunAt, error: output },
+        kind: shouldPause ? "run_exception_paused" : infraFailure ? "run_exception_infra" : "run_exception",
+        payload: {
+          endedAt,
+          nextScheduled,
+          nextRunAt,
+          error: output,
+          ...(infraFailure ? { infraFailure: true } : {}),
+        },
         nowMs: endedAt,
       });
 

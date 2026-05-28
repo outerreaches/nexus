@@ -210,7 +210,7 @@ test("scheduler keeps legacy one-shot report_only agent tasks on the report pipe
   });
 });
 
-test("scheduler queues home-channel report when a recurring job auto-pauses", async () => {
+test("scheduler queues home-channel report when a recurring job auto-pauses on a job-level failure", async () => {
   await withDb(async (db) => {
     const now = Date.now();
     db.db
@@ -252,10 +252,11 @@ test("scheduler queues home-channel report when a recurring job auto-pauses", as
         handleUserMessage: async () => ({
           runId: "agent-run-failed",
           sessionId: "job-session-failed",
-          output: "LLM error: 503 Service Unavailable",
+          // Non-infra failure: the agent ran but produced an error output.
+          output: "JOB_STATUS: error — required data source returned 'no rows'.",
           status: "failed",
-          toolCallsUsed: 0,
-          iterationsUsed: 1,
+          toolCallsUsed: 4,
+          iterationsUsed: 3,
         }),
         ackDeployIfPending: () => {},
         withTelegramDeliveryAck: async (_ctx: unknown, deliver: () => Promise<unknown>) => deliver(),
@@ -283,5 +284,85 @@ test("scheduler queues home-channel report when a recurring job auto-pauses", as
     assert.equal(report.target_channel, "home_channel");
     assert.match(report.body, /JOB AUTO-PAUSED/);
     assert.match(report.body, /JPAUSE1/);
+  });
+});
+
+test("scheduler does NOT auto-pause when the failure output is an LLM/infra error", async () => {
+  await withDb(async (db) => {
+    const now = Date.now();
+    db.db
+      .prepare(
+        "INSERT INTO jobs (id, owner_agent_id, name, cron, timezone, enabled, spec_json, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        "JINFRA1",
+        "main",
+        "llm-unreachable report",
+        "*/10 * * * *",
+        "UTC",
+        1,
+        JSON.stringify({
+          mode: "agent_task",
+          task: "Do the thing.",
+          deliveryMode: "report_only",
+        }),
+        now - 1_000,
+        now - 2_000,
+        now - 2_000,
+      );
+
+    const config = schedulerConfig();
+    config.scheduler.maxConsecutiveFailures = 1;
+    config.scheduler.notifyAgentOnFailure = false;
+
+    const scheduler = startJobScheduler({
+      config,
+      db,
+      log: () => {},
+      workspaceDir: process.cwd(),
+      getTools: () => [],
+      toolContext: {
+        nowMs: () => Date.now(),
+        log: () => {},
+      } as any,
+      agent: {
+        handleUserMessage: async () => ({
+          runId: "agent-run-infra",
+          sessionId: "job-session-infra",
+          output: "LLM error: slot_lease_failed: slot save failed: 404 Not Found",
+          status: "failed",
+          toolCallsUsed: 0,
+          iterationsUsed: 1,
+        }),
+        ackDeployIfPending: () => {},
+        withTelegramDeliveryAck: async (_ctx: unknown, deliver: () => Promise<unknown>) => deliver(),
+      } as any,
+    });
+    assert.ok(scheduler);
+    await scheduler.tick();
+    scheduler.stop();
+
+    const job = db.db.prepare("SELECT enabled, next_run_at, consecutive_failures FROM jobs WHERE id = ?").get("JINFRA1") as {
+      enabled: number;
+      next_run_at: number | null;
+      consecutive_failures: number;
+    };
+    assert.equal(job.enabled, 1, "infra failures must not flip enabled=0");
+    assert.equal(job.consecutive_failures, 1, "consecutive_failures still increments so backoff grows");
+    assert.ok(job.next_run_at !== null && job.next_run_at > Date.now(), "next_run_at should be set with backoff");
+
+    const reportRow = db.db.prepare("SELECT count(*) AS count FROM run_reports WHERE kind = ?").get("job_auto_paused") as {
+      count: number;
+    };
+    assert.equal(reportRow.count, 0, "no auto-paused report should be queued for an infra failure");
+
+    const infraEventCount = db.db
+      .prepare("SELECT count(*) AS count FROM job_events WHERE job_id = ? AND kind = ?")
+      .get("JINFRA1", "run_failed_infra") as { count: number };
+    assert.equal(infraEventCount.count, 1, "expected a run_failed_infra event");
+    const pausedEventCount = db.db
+      .prepare("SELECT count(*) AS count FROM job_events WHERE job_id = ? AND kind = ?")
+      .get("JINFRA1", "run_failed_paused") as { count: number };
+    assert.equal(pausedEventCount.count, 0, "expected no run_failed_paused event");
   });
 });
