@@ -352,6 +352,11 @@ class ReferenceNodeClient {
   private reconnectAttempt = 0;
   private readonly processes = new Map<string, ReferenceProcess>();
   private drainingOutbox = false;
+  // Graceful-update drain: when set, the node refuses new work and lets in-flight
+  // work finish so the gateway can safely restart it. Distinct from drainingOutbox
+  // (which flushes the process.update delivery outbox).
+  private workDraining = false;
+  private inFlightWork = 0;
 
   private gatewayPublicKey: KeyObject | null = null;
   private gatewayFingerprint: string | null = null;
@@ -1318,7 +1323,56 @@ class ReferenceNodeClient {
     }
   }
 
+  /** Methods that start new work; refused while draining for an update. */
+  private static readonly NEW_WORK_METHODS = new Set<string>([
+    "tool.execute",
+    "process.start",
+    "file.pull",
+    "file.push",
+    "mcp.call",
+  ]);
+  /** Synchronous work methods whose execution we count as in-flight (process.start
+   *  returns quickly; its long-running work is tracked via the processes map). */
+  private static readonly SYNC_WORK_METHODS = new Set<string>([
+    "tool.execute",
+    "file.pull",
+    "file.push",
+    "mcp.call",
+  ]);
+
   private async handleRequest(msg: RequestEnvelope): Promise<void> {
+    // Drain control plane — always handled, never counted/blocked.
+    if (msg.method === "node.drain") {
+      await this.handleDrain(msg);
+      return;
+    }
+    if (msg.method === "node.undrain") {
+      this.handleUndrain(msg);
+      return;
+    }
+
+    // While draining, refuse new work but keep serving read/control methods
+    // (status, logs, cancel, ack, ping, …) so in-flight work can be monitored.
+    if (this.workDraining && ReferenceNodeClient.NEW_WORK_METHODS.has(msg.method)) {
+      this.sendRequestError(
+        msg.id,
+        "NODE_DRAINING",
+        "Node is draining for an update and is not accepting new work.",
+        true,
+      );
+      return;
+    }
+
+    const counted = ReferenceNodeClient.SYNC_WORK_METHODS.has(msg.method);
+    if (counted) this.inFlightWork += 1;
+    try {
+      await this.dispatchRequest(msg);
+    } finally {
+      if (counted) this.inFlightWork = Math.max(0, this.inFlightWork - 1);
+    }
+  }
+
+  private async dispatchRequest(msg: RequestEnvelope): Promise<void> {
     switch (msg.method) {
       case "ping":
         this.sendSignedEnvelope({
@@ -1370,6 +1424,51 @@ class ReferenceNodeClient {
       default:
         this.sendRequestError(msg.id, "METHOD_NOT_IMPLEMENTED", `Method ${msg.method} is not implemented by reference node.`, false);
     }
+  }
+
+  private countActiveProcesses(): number {
+    let active = 0;
+    for (const entry of this.processes.values()) {
+      if (entry.status === "running" || entry.status === "queued") active += 1;
+    }
+    return active;
+  }
+
+  /** Work a restart would interrupt: in-flight synchronous requests + running/queued processes. */
+  private drainRemaining(): number {
+    return this.inFlightWork + this.countActiveProcesses();
+  }
+
+  private async handleDrain(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const deadlineMs = clampInt(asNumber(params.deadlineMs), 0, 600_000) ?? 60_000;
+    this.workDraining = true;
+    this.log(`drain requested deadline_ms=${deadlineMs} remaining=${this.drainRemaining()}`);
+    const startedAt = Date.now();
+    const pollMs = 500;
+    while (this.drainRemaining() > 0 && Date.now() - startedAt < deadlineMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+    }
+    const remaining = this.drainRemaining();
+    const drained = remaining === 0;
+    this.log(`drain ${drained ? "complete" : "deadline_reached"} remaining=${remaining} waited_ms=${Date.now() - startedAt}`);
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: { drained, remaining, deadlineMs },
+    });
+  }
+
+  private handleUndrain(msg: RequestEnvelope): void {
+    this.workDraining = false;
+    this.log("drain cancelled (undrain)");
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: { draining: false },
+    });
   }
 
   private async handleToolExecute(msg: RequestEnvelope): Promise<void> {

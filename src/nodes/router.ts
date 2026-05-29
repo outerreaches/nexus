@@ -1,7 +1,7 @@
 import type { Tool, ToolContext } from "../core/tools.js";
 import { evaluateUnifiedFirewallPolicy } from "../firewall/policy.js";
 import { NodeRegistry } from "./registry.js";
-import type { NodeDescriptor, NodeRouter } from "./types.js";
+import type { NodeDescriptor, NodeDrainResult, NodeRouter } from "./types.js";
 import { NodeRoutingError } from "./types.js";
 import { containsRawSecretMaterial } from "../secrets/policy.js";
 
@@ -27,8 +27,19 @@ export class NodeToolRouter implements NodeRouter {
       registry: NodeRegistry;
       log: (line: string) => void;
       executeOnNode?: (params: ExecuteOnNodeParams) => Promise<string>;
+      awaitNodeDrained?: (params: { nodeId: string; deadlineMs?: number }) => Promise<NodeDrainResult>;
     },
   ) { }
+
+  async awaitNodeDrained(nodeId: string, opts?: { deadlineMs?: number }): Promise<NodeDrainResult> {
+    if (!this.deps.awaitNodeDrained) {
+      throw new NodeRoutingError(
+        "NODE_ROUTING_NOT_IMPLEMENTED",
+        "Drain handshake transport is not wired on this gateway.",
+      );
+    }
+    return this.deps.awaitNodeDrained({ nodeId, ...(opts?.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}) });
+  }
 
   async routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string> {
     const remoteToolName = this.resolveRemoteToolName(tool.name);

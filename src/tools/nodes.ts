@@ -7,6 +7,7 @@ import { z } from "zod";
 import { defineTool, type Tool } from "../core/tools.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { deleteNodeCascadeById, getNodeById, listNodes, setNodeStatus } from "../storage/nodes.js";
+import type { NodeDrainResult } from "../nodes/types.js";
 
 function requireDb(ctx: { db?: unknown }): NexusDatabase | null {
   const db = ctx.db as NexusDatabase | undefined;
@@ -305,6 +306,13 @@ export const nodeDrain = defineTool({
     "Mark a node as draining ahead of a code update/restart. The gateway stops routing new work to a draining node; in-flight work continues. Undrain (or a reconnect after restart) returns it to service.",
   parameters: z.object({
     id: z.string().min(1).max(128),
+    deadlineMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(600_000)
+      .optional()
+      .describe("Max time to wait for in-flight work to finish before reporting drain status (default 60s)."),
   }),
   execute: async (args, ctx) => {
     const db = requireDb(ctx);
@@ -314,19 +322,41 @@ export const nodeDrain = defineTool({
     if (row.status === "pending" || row.status === "blocked") {
       return `ERROR: node ${row.id} is ${row.status}; only an approved/online node can be drained.`;
     }
-    if (row.status === "draining") {
-      return JSON.stringify({ ok: true, alreadyDraining: true, node: row }, null, 2);
-    }
+    // Gateway-enforced stop: flip status so the router stops routing new work.
     // Preserve connectedAt so undrain can tell whether a live session exists.
     setNodeStatus(db, { id: row.id, status: "draining", connectedAt: row.connectedAt, nowMs: ctx.nowMs() });
     const updated = getNodeById(db, row.id);
+
+    // Best-effort handshake: ask the node (or gateway pending-count fallback)
+    // whether in-flight work has finished, so we can tell the operator if it's
+    // safe to restart.
+    let drain: NodeDrainResult | null = null;
+    let drainHandshakeError: string | null = null;
+    if (ctx.nodeRouter?.awaitNodeDrained) {
+      try {
+        drain = await ctx.nodeRouter.awaitNodeDrained(
+          row.id,
+          args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : undefined,
+        );
+      } catch (err) {
+        drainHandshakeError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    const note = drain
+      ? drain.drained
+        ? "Drained: no in-flight work remains. Safe to restart the node now."
+        : `Draining: ${drain.remaining} item(s) still in flight at the deadline. Wait and re-run drain, or restart anyway (in-flight work will be interrupted and reported as failed).`
+      : "Node marked draining (the gateway will stop routing new work). Drain handshake unavailable; confirm in-flight work is done before restarting.";
+
     return JSON.stringify(
       {
         ok: true,
         node: updated,
-        note:
-          "Node is draining: the gateway will no longer route new work to it. In-flight work continues. " +
-          "It is safe to restart once in-flight work has finished. After restart the node reconnects and returns to service automatically.",
+        drained: drain ? drain.drained : false,
+        ...(drain ? { remaining: drain.remaining, nodeAcked: drain.nodeAcked } : {}),
+        ...(drainHandshakeError ? { drainHandshakeError } : {}),
+        note,
       },
       null,
       2,
@@ -1350,7 +1380,10 @@ export const nodeManage = defineTool({
       case "set_status":
         return nodeSetStatus.execute({ id: args.id ?? "", status: args.status ?? "pending" }, ctx);
       case "drain":
-        return nodeDrain.execute({ id: args.id ?? "" }, ctx);
+        return nodeDrain.execute(
+          { id: args.id ?? "", ...(args.timeoutMs !== undefined ? { deadlineMs: args.timeoutMs } : {}) },
+          ctx,
+        );
       case "undrain":
         return nodeUndrain.execute({ id: args.id ?? "" }, ctx);
       case "system_run":

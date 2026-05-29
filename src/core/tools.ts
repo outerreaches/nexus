@@ -61,6 +61,12 @@ export type ToolContext = {
   /** Optional node-aware execution router for remote tool dispatch. */
   nodeRouter?: {
     routeToolExecution: (tool: Tool, args: unknown, ctx: ToolContext) => Promise<string>;
+    /** Drain handshake: report whether a node's in-flight work has finished.
+     *  Structurally matches nodes/types NodeDrainResult (inlined to avoid a cycle). */
+    awaitNodeDrained?: (
+      nodeId: string,
+      opts?: { deadlineMs?: number },
+    ) => Promise<{ drained: boolean; remaining: number; nodeAcked: boolean }>;
   };
   /** Global runtime caps for agent budgets; worker budgets should not exceed these. */
   runtimeLimits?: {

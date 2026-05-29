@@ -68,6 +68,19 @@ export interface NodeBackend {
   ): Promise<string>;
 }
 
+export type NodeDrainResult = {
+  /** True when no work a restart would interrupt remains. */
+  drained: boolean;
+  /** Work still in flight (in-flight synchronous requests + running/queued processes). */
+  remaining: number;
+  /** True if the node answered the node.drain handshake; false if we fell back to
+   *  the gateway's pending-request count (older/third-party node). */
+  nodeAcked: boolean;
+};
+
 export interface NodeRouter {
   routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string>;
+  /** Drive the node.drain handshake (or gateway-side fallback) and report whether
+   *  in-flight work has finished. Optional: only wired when a node transport is present. */
+  awaitNodeDrained?(nodeId: string, opts?: { deadlineMs?: number }): Promise<NodeDrainResult>;
 }

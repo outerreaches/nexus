@@ -16,7 +16,7 @@ import {
   type GatewayNodeIdentity,
 } from "./auth.js";
 import { NodeRegistry } from "./registry.js";
-import { NodeRoutingError } from "./types.js";
+import { NodeRoutingError, type NodeDrainResult } from "./types.js";
 import type { NodeBackend, NodeFirewallMode, NodeStatus, NodeTrustLevel } from "../storage/nodes.js";
 
 type HandshakeChallenge = {
@@ -250,6 +250,61 @@ export class NodeWebSocketGateway {
       message: `Node ${params.nodeId} failed to execute ${params.tool}.`,
     });
     return this.normalizeToolResult(response.payload);
+  }
+
+  /** Drain handshake. Prefers the node-side node.drain method (authoritative — it
+   *  accounts for background processes); falls back to the gateway's own pending
+   *  request count for nodes that don't implement node.drain. Does not change the
+   *  node's registry status (the caller owns that); this only reports progress. */
+  async awaitNodeDrained(params: { nodeId: string; deadlineMs?: number }): Promise<NodeDrainResult> {
+    const deadlineMs = Math.max(0, Math.min(600_000, params.deadlineMs ?? 60_000));
+    const target = this.resolveActiveNodeSocket(params.nodeId);
+    if (!target) {
+      // No live session — nothing in flight on the gateway side to wait for.
+      return { drained: true, remaining: 0, nodeAcked: false };
+    }
+    const sessionId = target.session.sessionId;
+
+    // Authoritative path: ask the node. It refuses new work, lets in-flight work
+    // finish, and replies { drained, remaining } at completion or its own deadline.
+    try {
+      const response = await this.requestNode({
+        nodeId: params.nodeId,
+        method: "node.drain",
+        params: { deadlineMs },
+        timeoutMs: deadlineMs + 10_000,
+      });
+      if (response.ok) {
+        const payload = this.asObject(response.payload);
+        const remaining = typeof payload.remaining === "number" && payload.remaining >= 0 ? payload.remaining : 0;
+        const drained = payload.drained === true || remaining === 0;
+        return { drained, remaining, nodeAcked: true };
+      }
+      this.deps.log(
+        `nodes/ws: node.drain not honored by ${params.nodeId} (code=${response.error?.code ?? "?"}); using pending-request fallback`,
+      );
+    } catch (err) {
+      this.deps.log(
+        `nodes/ws: node.drain handshake failed for ${params.nodeId} (${err instanceof Error ? err.message : String(err)}); using pending-request fallback`,
+      );
+    }
+
+    // Fallback: wait until no synchronous gateway->node requests remain for this
+    // session, or the deadline elapses. Misses node-local background processes,
+    // but is the best we can do without node cooperation.
+    const countPending = (): number => {
+      let n = 0;
+      for (const pending of this.pendingGatewayRequests.values()) {
+        if (pending.sessionId === sessionId && pending.method !== "node.drain") n += 1;
+      }
+      return n;
+    };
+    const startedAt = Date.now();
+    while (countPending() > 0 && Date.now() - startedAt < deadlineMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    }
+    const remaining = countPending();
+    return { drained: remaining === 0, remaining, nodeAcked: false };
   }
 
   async executeRoutedCall(params: {
