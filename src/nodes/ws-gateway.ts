@@ -129,6 +129,13 @@ type SymbolCatalogCache = {
   symbols: string[];
 };
 
+// Wire-protocol version range this gateway speaks. Raise MAX (and add handling)
+// when the protocol changes; raise MIN to drop support for old node builds. Nodes
+// that predate the explicit `protocolVersion` field are treated as v1.
+export const MIN_SUPPORTED_NODE_PROTOCOL = 1;
+export const MAX_SUPPORTED_NODE_PROTOCOL = 1;
+export const GATEWAY_NODE_PROTOCOL = 1;
+
 export class NodeWebSocketGateway {
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<WebSocket, NodeSocketSession>();
@@ -1725,6 +1732,27 @@ export class NodeWebSocketGateway {
       return;
     }
 
+    // Protocol version gate. Nodes that predate the explicit field are treated as
+    // v1. Reject (with an actionable upgrade target) rather than letting a skewed
+    // node fail later with confusing per-call errors.
+    const protocolVersion = this.asNumber(params.protocolVersion) ?? 1;
+    if (protocolVersion < MIN_SUPPORTED_NODE_PROTOCOL || protocolVersion > MAX_SUPPORTED_NODE_PROTOCOL) {
+      const upgradeTarget = protocolVersion < MIN_SUPPORTED_NODE_PROTOCOL ? "node" : "gateway";
+      const message =
+        `Node protocol v${protocolVersion} is not supported by this gateway ` +
+        `(supported: v${MIN_SUPPORTED_NODE_PROTOCOL}-v${MAX_SUPPORTED_NODE_PROTOCOL}). Upgrade the ${upgradeTarget}.`;
+      this.deps.log(`nodes/ws: rejected node=${nodeId} reason=protocol_version_unsupported node_protocol=${protocolVersion}`);
+      this.sendErrorResponse(ws, msg.id, "VERSION_UNSUPPORTED", message, false);
+      this.closeForAuthFailure(ws, "unsupported protocol version");
+      return;
+    }
+    const appVersion = this.asString(params.version);
+    const nodeMetadata: Record<string, unknown> = {
+      ...this.asObject(params.metadata),
+      protocolVersion,
+      ...(appVersion ? { appVersion } : {}),
+    };
+
     const label = this.asString(params.displayName) ?? (nodeId ? `Node ${nodeId.slice(0, 8)}` : "Unknown Node");
 
     const nowMs = Date.now();
@@ -1748,7 +1776,7 @@ export class NodeWebSocketGateway {
         firewallMode,
         capabilities,
         tags,
-        metadata: this.asObject(params.metadata),
+        metadata: nodeMetadata,
         connectedAt: null,
         lastSeenAt: nowMs,
         nowMs,
@@ -1795,7 +1823,7 @@ export class NodeWebSocketGateway {
         firewallMode,
         capabilities,
         tags,
-        metadata: this.asObject(params.metadata),
+        metadata: nodeMetadata,
         connectedAt: null,
         lastSeenAt: nowMs,
         nowMs,
@@ -1862,6 +1890,12 @@ export class NodeWebSocketGateway {
       gatewayProofSig: signDetachedPayload(proofPayload, this.identity.privateKey),
       ts: nowMs,
       sessionId: session.sessionId,
+      // Advertise the protocol range so the node can detect/log skew client-side.
+      gatewayProtocol: {
+        min: MIN_SUPPORTED_NODE_PROTOCOL,
+        max: MAX_SUPPORTED_NODE_PROTOCOL,
+        current: GATEWAY_NODE_PROTOCOL,
+      },
     };
     this.sendEvent(ws, "connect.challenge", challenge);
     this.sendOkResponse(ws, msg.id, {

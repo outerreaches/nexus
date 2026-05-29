@@ -52,6 +52,9 @@ const SHELLCTL_MAX_IDLE_MS = 1_000;
 const SHELLCTL_MAX_CHARS = 12_000;
 const SHELLCTL_MAX_READ_BYTES = 128_000;
 const SHELLCTL_SESSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+// Wire-protocol version this node speaks (sent in connect.hello). Bump in lockstep
+// with the gateway's supported range when the protocol changes.
+const NODE_PROTOCOL_VERSION = 1;
 const POLICY_ALLOWED_FIELDS = new Set(["version", "label", "defaultQuarantine", "firewallMode", "denyCommands", "updatedAt"]);
 const DEFAULT_FILE_TRANSFER_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_CAPABILITIES = [
@@ -1126,6 +1129,7 @@ class ReferenceNodeClient {
         role: "node",
         displayName: this.config.displayName,
         version: "0.1.0",
+        protocolVersion: NODE_PROTOCOL_VERSION,
         nodeId: this.config.nodeId,
         backend: "nexus",
         trustLevel: "standard",
@@ -1259,6 +1263,18 @@ class ReferenceNodeClient {
     if (!gatewayNonce || !gatewayProofSig || !sessionId) {
       this.log("challenge payload is missing required fields");
       return;
+    }
+
+    // Surface protocol skew loudly. The gateway already rejects unsupported nodes
+    // at hello, so reaching here means we're in range — but if a future gateway
+    // advertises a higher range than this node speaks, log it so operators see
+    // the node is behind before subtler failures appear.
+    const gatewayProtocol = asObject(payload.gatewayProtocol);
+    const gwMax = asNumber(gatewayProtocol.max);
+    if (gwMax !== null && gwMax > NODE_PROTOCOL_VERSION) {
+      this.log(
+        `WARN protocol skew: gateway supports up to v${gwMax}, this node speaks v${NODE_PROTOCOL_VERSION}; consider upgrading the node`,
+      );
     }
 
     const transcript = buildHandshakeTranscript({
