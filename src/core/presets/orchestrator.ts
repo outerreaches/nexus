@@ -87,15 +87,19 @@ export const preset: AgentPreset = {
     "blackboard_manage",
     "shell_exec",
     // Everyday tools promoted to kernel so they skip the tool_load discovery
-    // round-trip. The long tail (node_* family, media, mcp_manage, authoring,
-    // data_intake_manage, session_search, file_edit_lines, shell_interactive,
-    // process_manage, memory_delete) stays lazy.
+    // round-trip. Node management + running tasks on nodes is a core capability,
+    // so node_manage (list/get/drain/update/system_run/process_*/file_*) is in
+    // the kernel. The remaining long tail stays lazy: node_* introspection/MCP
+    // (node_mcp_*, node_symbols_list, node_audit_query), media, mcp_manage,
+    // authoring, data_intake_manage, session_search, file_edit_lines,
+    // shell_interactive, process_manage, memory_delete.
     "web_search",
     "web_fetch",
     "file_write",
     "file_edit",
     "file_list",
     "job_manage",
+    "node_manage",
     "memory_store",
     "human_action",
   ],
