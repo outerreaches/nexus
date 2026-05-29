@@ -227,6 +227,10 @@ type Config = {
   capabilities: string[];
   allowCommands: Set<string>;
   allowShellOperators: boolean;
+  /** Gateway-coordinated self-update opt-in (NEXUS_NODE_ALLOW_UPDATE). Default off. */
+  allowUpdate: boolean;
+  /** Update strategies this node may advertise/accept (e.g. ["local"]). */
+  updateStrategies: string[];
   runTimeoutMs: number;
   reconnectMinMs: number;
   reconnectMaxMs: number;
@@ -1079,6 +1083,12 @@ class ReferenceNodeClient {
     out.add("backend.nexus");
     out.add(`hermes.mode.${mode}`);
     if (mode !== "transparent") out.add("hermes.enabled");
+    // Advertise gateway-coordinated self-update support (opt-in gated).
+    const updateStrategies = this.supportedUpdateStrategies();
+    if (updateStrategies.length > 0) {
+      out.add("update");
+      for (const strategy of updateStrategies) out.add(`update.${strategy}`);
+    }
     return [...out.values()].sort((a, b) => a.localeCompare(b));
   }
 
@@ -1357,13 +1367,17 @@ class ReferenceNodeClient {
   ]);
 
   private async handleRequest(msg: RequestEnvelope): Promise<void> {
-    // Drain control plane — always handled, never counted/blocked.
+    // Drain/update control plane — always handled, never counted/blocked.
     if (msg.method === "node.drain") {
       await this.handleDrain(msg);
       return;
     }
     if (msg.method === "node.undrain") {
       this.handleUndrain(msg);
+      return;
+    }
+    if (msg.method === "node.update") {
+      await this.handleUpdate(msg);
       return;
     }
 
@@ -1485,6 +1499,95 @@ class ReferenceNodeClient {
       ok: true,
       payload: { draining: false },
     });
+  }
+
+  /** Absolute path to the host-mode local updater script, or null if unavailable
+   *  (e.g. the bundled lite node, which has no repo checkout to pull). */
+  private localUpdaterScriptPath(): string | null {
+    try {
+      const dir = path.dirname(fileURLToPath(import.meta.url));
+      const scriptPath = path.join(dir, "update-node-background.sh");
+      return fsSync.existsSync(scriptPath) ? scriptPath : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Update strategies this node can actually perform right now (opt-in gated). */
+  private supportedUpdateStrategies(): string[] {
+    if (!this.config.allowUpdate) return [];
+    const out: string[] = [];
+    for (const strategy of this.config.updateStrategies) {
+      if (strategy === "local" && this.localUpdaterScriptPath() !== null) out.push("local");
+      // "artifact" (chunked+encrypted push) is added in a later phase.
+    }
+    return out;
+  }
+
+  private async handleUpdate(msg: RequestEnvelope): Promise<void> {
+    const params = asObject(msg.params);
+    const strategy = asString(params.strategy) ?? "local";
+    if (!this.config.allowUpdate) {
+      this.sendRequestError(
+        msg.id,
+        "NODE_UPDATE_DISABLED",
+        "Node self-update is disabled. Set NEXUS_NODE_ALLOW_UPDATE=1 on the node to enable it.",
+        false,
+      );
+      return;
+    }
+    if (!this.supportedUpdateStrategies().includes(strategy)) {
+      this.sendRequestError(
+        msg.id,
+        "NODE_UPDATE_STRATEGY_UNSUPPORTED",
+        `Update strategy '${strategy}' is not supported by this node (supported: ${this.supportedUpdateStrategies().join(", ") || "none"}).`,
+        false,
+      );
+      return;
+    }
+    if (strategy === "local") {
+      this.applyLocalUpdate(msg, params);
+      return;
+    }
+    this.sendRequestError(msg.id, "NODE_UPDATE_STRATEGY_UNSUPPORTED", `Update strategy '${strategy}' is not implemented yet.`, false);
+  }
+
+  /** Hand off to the already-installed host-mode updater (git pull + build +
+   *  replace running node), then exit so the refreshed instance takes over. The
+   *  code that runs is operator-installed on the box — not pushed by the gateway. */
+  private applyLocalUpdate(msg: RequestEnvelope, params: Record<string, unknown>): void {
+    const scriptPath = this.localUpdaterScriptPath();
+    if (!scriptPath) {
+      this.sendRequestError(msg.id, "NODE_UPDATE_FAILED", "Local updater script not found on this node.", false);
+      return;
+    }
+    const ref = asString(params.ref);
+    // Ack first so the gateway records acceptance before we tear down.
+    this.sendSignedEnvelope({
+      type: "res",
+      id: msg.id,
+      ok: true,
+      payload: { accepted: true, strategy: "local", willRestart: true },
+    });
+    this.log(`node.update local: handing off to ${scriptPath}${ref ? ` ref=${ref}` : ""}`);
+    // Let the ack flush, then spawn the detached updater. Only exit if the spawn
+    // succeeds — otherwise stay up so the gateway's reconnect wait reports failure
+    // instead of leaving the node down.
+    setTimeout(() => {
+      try {
+        const args = ref ? ["--ref", ref] : [];
+        const child = spawnChild("bash", [scriptPath, ...args], {
+          detached: true,
+          stdio: "ignore",
+          env: { ...process.env, NEXUS_NODE_REPLACE_RUNNING: "1" },
+        });
+        child.unref();
+        this.log("node.update local: updater spawned; exiting for replacement");
+        process.exit(0);
+      } catch (err) {
+        this.log(`node.update local: failed to spawn updater (${err instanceof Error ? err.message : String(err)}); staying up`);
+      }
+    }, 500);
   }
 
   private async handleToolExecute(msg: RequestEnvelope): Promise<void> {
@@ -4617,6 +4720,8 @@ function buildConfig(
   const allowShellOperators = isTruthyFlag(
     values["allow-shell-operators"] ?? process.env.NEXUS_NODE_ALLOW_SHELL_OPERATORS,
   );
+  const allowUpdate = isTruthyFlag(values["allow-update"] ?? process.env.NEXUS_NODE_ALLOW_UPDATE);
+  const updateStrategies = splitCsv(values["update-strategies"] ?? process.env.NEXUS_NODE_UPDATE_STRATEGIES, ["local"]);
   const legacyFileTransferSetting = (values["allow-file-transfer"] ?? process.env.NEXUS_NODE_ALLOW_FILE_TRANSFER ?? "").trim();
   if (legacyFileTransferSetting) {
     throw new Error(
@@ -4685,6 +4790,8 @@ function buildConfig(
     capabilities,
     allowCommands,
     allowShellOperators,
+    allowUpdate,
+    updateStrategies,
     runTimeoutMs,
     reconnectMinMs,
     reconnectMaxMs,
@@ -5615,6 +5722,8 @@ function printHelp(): void {
       "  --caps <csv>                    Capability list (default system.run,system.which,process.start,process.status,process.logs,process.cancel,symbols.list,audit.query)",
       "  --allow <csv>                   Allowlisted command names for system.run/process.start (include nexus-policyctl,nexus-shellctl,file_pull,file_push to enable control surfaces)",
       "  --allow-shell-operators 1       Allow shell control operators (&&, ||, ;, pipes, redirects, substitutions) in system.run/process.start",
+      "  --allow-update 1                Opt in to gateway-coordinated self-update (node.update). Default off.",
+      "  --update-strategies <csv>       Update strategies to advertise/accept when --allow-update (default: local)",
       "  --policy-required 1             Fail startup when hermes-policy.json is missing/invalid",
       "  --init                          Bootstrap state dir, keys, policy file, and env template then exit",
       "  --run-after-init 1              Continue startup after --init completes",
