@@ -67,6 +67,22 @@ export type ToolContext = {
       nodeId: string,
       opts?: { deadlineMs?: number },
     ) => Promise<{ drained: boolean; remaining: number; nodeAcked: boolean }>;
+    /** Coordinated update orchestration; structurally matches nodes/types
+     *  NodeUpdateResult (inlined to avoid a cycle). */
+    updateNode?: (
+      nodeId: string,
+      opts?: { strategy?: string; ref?: string; deadlineMs?: number; drainDeadlineMs?: number },
+    ) => Promise<{
+      ok: boolean;
+      stage: "preflight" | "drain" | "update" | "reconnect" | "complete";
+      strategy: string;
+      message: string;
+      drain?: { drained: boolean; remaining: number; nodeAcked: boolean };
+      accepted?: boolean;
+      reconnected?: boolean;
+      protocolVersion?: number | null;
+      appVersion?: string | null;
+    }>;
   };
   /** Global runtime caps for agent budgets; worker budgets should not exceed these. */
   runtimeLimits?: {

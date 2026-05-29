@@ -1,7 +1,7 @@
 import type { Tool, ToolContext } from "../core/tools.js";
 import { evaluateUnifiedFirewallPolicy } from "../firewall/policy.js";
 import { NodeRegistry } from "./registry.js";
-import type { NodeDescriptor, NodeDrainResult, NodeRouter } from "./types.js";
+import type { NodeDescriptor, NodeDrainResult, NodeRouter, NodeUpdateResult } from "./types.js";
 import { NodeRoutingError } from "./types.js";
 import { containsRawSecretMaterial } from "../secrets/policy.js";
 
@@ -28,6 +28,13 @@ export class NodeToolRouter implements NodeRouter {
       log: (line: string) => void;
       executeOnNode?: (params: ExecuteOnNodeParams) => Promise<string>;
       awaitNodeDrained?: (params: { nodeId: string; deadlineMs?: number }) => Promise<NodeDrainResult>;
+      updateNode?: (params: {
+        nodeId: string;
+        strategy?: string;
+        ref?: string;
+        deadlineMs?: number;
+        drainDeadlineMs?: number;
+      }) => Promise<NodeUpdateResult>;
     },
   ) { }
 
@@ -39,6 +46,19 @@ export class NodeToolRouter implements NodeRouter {
       );
     }
     return this.deps.awaitNodeDrained({ nodeId, ...(opts?.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}) });
+  }
+
+  async updateNode(
+    nodeId: string,
+    opts?: { strategy?: string; ref?: string; deadlineMs?: number; drainDeadlineMs?: number },
+  ): Promise<NodeUpdateResult> {
+    if (!this.deps.updateNode) {
+      throw new NodeRoutingError(
+        "NODE_ROUTING_NOT_IMPLEMENTED",
+        "Coordinated update transport is not wired on this gateway.",
+      );
+    }
+    return this.deps.updateNode({ nodeId, ...(opts ?? {}) });
   }
 
   async routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string> {

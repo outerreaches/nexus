@@ -78,9 +78,31 @@ export type NodeDrainResult = {
   nodeAcked: boolean;
 };
 
+export type NodeUpdateResult = {
+  ok: boolean;
+  /** Where the flow ended: preflight | drain | update | reconnect | complete. */
+  stage: "preflight" | "drain" | "update" | "reconnect" | "complete";
+  strategy: string;
+  message: string;
+  drain?: NodeDrainResult;
+  /** Node accepted the node.update request. */
+  accepted?: boolean;
+  /** Node disconnected and reconnected online after the update. */
+  reconnected?: boolean;
+  /** Node's protocol/app version after reconnect (from the new hello). */
+  protocolVersion?: number | null;
+  appVersion?: string | null;
+};
+
 export interface NodeRouter {
   routeToolExecution(tool: Tool, args: unknown, ctx: ToolContext): Promise<string>;
   /** Drive the node.drain handshake (or gateway-side fallback) and report whether
    *  in-flight work has finished. Optional: only wired when a node transport is present. */
   awaitNodeDrained?(nodeId: string, opts?: { deadlineMs?: number }): Promise<NodeDrainResult>;
+  /** Orchestrate a coordinated update: drain -> node.update -> await reconnect ->
+   *  verify. Optional: only wired when a node transport is present. */
+  updateNode?(
+    nodeId: string,
+    opts?: { strategy?: string; ref?: string; deadlineMs?: number; drainDeadlineMs?: number },
+  ): Promise<NodeUpdateResult>;
 }

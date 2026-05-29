@@ -229,6 +229,7 @@ export async function startGateway(
       }),
     awaitNodeDrained: async ({ nodeId, deadlineMs }) =>
       nodeWsGateway.awaitNodeDrained({ nodeId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) }),
+    updateNode: async (p) => nodeWsGateway.updateNode(p),
   });
   initDataIntake();
   ensureSystemJobs({ db, nowMs: Date.now(), stateDir: paths.stateDir, log });

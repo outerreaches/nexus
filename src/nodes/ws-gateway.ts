@@ -16,7 +16,7 @@ import {
   type GatewayNodeIdentity,
 } from "./auth.js";
 import { NodeRegistry } from "./registry.js";
-import { NodeRoutingError, type NodeDrainResult } from "./types.js";
+import { NodeRoutingError, type NodeDrainResult, type NodeUpdateResult } from "./types.js";
 import type { NodeBackend, NodeFirewallMode, NodeStatus, NodeTrustLevel } from "../storage/nodes.js";
 
 type HandshakeChallenge = {
@@ -312,6 +312,114 @@ export class NodeWebSocketGateway {
     }
     const remaining = countPending();
     return { drained: remaining === 0, remaining, nodeAcked: false };
+  }
+
+  /** Coordinated update: drain in place → node.update → await reconnect → verify.
+   *  The caller (node_manage) owns the draining status flip; this orchestrates the
+   *  handshake and the reconnect/verify wait. */
+  async updateNode(params: {
+    nodeId: string;
+    strategy?: string;
+    ref?: string;
+    deadlineMs?: number;
+    drainDeadlineMs?: number;
+  }): Promise<NodeUpdateResult> {
+    const strategy = params.strategy ?? "local";
+    const node = this.deps.registry.get(params.nodeId);
+    if (!node) {
+      return { ok: false, stage: "preflight", strategy, message: `Node ${params.nodeId} is not registered.` };
+    }
+    const target = this.resolveActiveNodeSocket(params.nodeId);
+    if (!target) {
+      return { ok: false, stage: "preflight", strategy, message: `Node ${params.nodeId} has no active session.` };
+    }
+    if (!node.capabilities.includes(`update.${strategy}`)) {
+      return {
+        ok: false,
+        stage: "preflight",
+        strategy,
+        message:
+          `Node ${params.nodeId} does not advertise update.${strategy}. Enable NEXUS_NODE_ALLOW_UPDATE on the node ` +
+          `and include '${strategy}' in its update strategies.`,
+      };
+    }
+    const preSessionId = target.session.sessionId;
+
+    // 1) Drain in place (also flips registry status via the caller; here we just
+    //    wait for in-flight work to settle).
+    const drain = await this.awaitNodeDrained({
+      nodeId: params.nodeId,
+      ...(params.drainDeadlineMs !== undefined ? { deadlineMs: params.drainDeadlineMs } : {}),
+    });
+
+    // 2) Send node.update. The node acks, then restarts (which disconnects it).
+    let accepted = false;
+    try {
+      const resp = await this.requestNode({
+        nodeId: params.nodeId,
+        method: "node.update",
+        params: { strategy, ...(params.ref ? { ref: params.ref } : {}) },
+        timeoutMs: 15_000,
+      });
+      if (!resp.ok) {
+        return { ok: false, stage: "update", strategy, drain, message: resp.error?.message ?? "Node refused the update." };
+      }
+      accepted = this.asObject(resp.payload).accepted === true;
+    } catch (err) {
+      return {
+        ok: false,
+        stage: "update",
+        strategy,
+        drain,
+        message: `node.update request failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    if (!accepted) {
+      return { ok: false, stage: "update", strategy, drain, accepted: false, message: "Node did not accept the update." };
+    }
+
+    // 3) Await reconnect: a fresh session for this node, online, within the deadline.
+    const deadlineMs = Math.max(10_000, Math.min(600_000, params.deadlineMs ?? 180_000));
+    const startedAt = Date.now();
+    let reconnected = false;
+    while (Date.now() - startedAt < deadlineMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      const sid = this.activeNodeSessions.get(params.nodeId);
+      const current = this.deps.registry.get(params.nodeId);
+      if (sid && sid !== preSessionId && current?.status === "online") {
+        reconnected = true;
+        break;
+      }
+    }
+    if (!reconnected) {
+      return {
+        ok: false,
+        stage: "reconnect",
+        strategy,
+        drain,
+        accepted: true,
+        message: `Node did not reconnect online within ${deadlineMs}ms after the update (it may be down — check the node host).`,
+      };
+    }
+
+    // 4) Report the post-update version recorded from the new hello.
+    const after = this.deps.registry.get(params.nodeId);
+    const meta = this.asObject(after?.metadata);
+    const protocolVersion = typeof meta.protocolVersion === "number" ? meta.protocolVersion : null;
+    const appVersion = typeof meta.appVersion === "string" ? meta.appVersion : null;
+    return {
+      ok: true,
+      stage: "complete",
+      strategy,
+      drain,
+      accepted: true,
+      reconnected: true,
+      protocolVersion,
+      appVersion,
+      message:
+        `Node ${params.nodeId} updated and reconnected online ` +
+        `(protocol v${protocolVersion ?? "?"}${appVersion ? `, app ${appVersion}` : ""}).`,
+    };
   }
 
   async executeRoutedCall(params: {

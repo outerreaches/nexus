@@ -388,6 +388,53 @@ export const nodeUndrain = defineTool({
   },
 });
 
+export const nodeUpdate = defineTool({
+  name: "node_update",
+  description:
+    "Coordinated node code update: drain the node, send node.update (default strategy 'local'), wait for it to restart and reconnect, then verify it is online. The node must opt in (NEXUS_NODE_ALLOW_UPDATE) and advertise update.<strategy>.",
+  parameters: z.object({
+    id: z.string().min(1).max(128),
+    strategy: z.string().min(1).max(40).optional().describe("Update strategy (default 'local')."),
+    ref: z.string().min(1).max(200).optional().describe("Optional git ref/version for the update."),
+    deadlineMs: z
+      .number()
+      .int()
+      .min(10_000)
+      .max(600_000)
+      .optional()
+      .describe("Max time to wait for the node to restart and reconnect (default 180s)."),
+  }),
+  execute: async (args, ctx) => {
+    const db = requireDb(ctx);
+    if (!db) return "ERROR: database is not available";
+    const row = getNodeById(db, args.id);
+    if (!row) return "ERROR: node not found";
+    if (!ctx.nodeRouter?.updateNode) {
+      return "ERROR: coordinated update transport is not available on this gateway";
+    }
+    // Stop routing new work for the duration of the update (gateway-enforced).
+    setNodeStatus(db, { id: row.id, status: "draining", connectedAt: row.connectedAt, nowMs: ctx.nowMs() });
+    let result;
+    try {
+      result = await ctx.nodeRouter.updateNode(row.id, {
+        ...(args.strategy ? { strategy: args.strategy } : {}),
+        ...(args.ref ? { ref: args.ref } : {}),
+        ...(args.deadlineMs !== undefined ? { deadlineMs: args.deadlineMs } : {}),
+      });
+    } catch (err) {
+      // Update transport failed outright; the node may need manual recovery.
+      return JSON.stringify(
+        { ok: false, stage: "update", error: err instanceof Error ? err.message : String(err), node: getNodeById(db, row.id) },
+        null,
+        2,
+      );
+    }
+    // On success the node already reconnected online (prove flow restored status).
+    // On failure leave the current status for the operator to investigate/undrain.
+    return JSON.stringify({ ...result, node: getNodeById(db, row.id) }, null, 2);
+  },
+});
+
 export const nodeSymbolsList = defineTool({
   name: "node_symbols_list",
   description:
@@ -1246,6 +1293,7 @@ export const nodeManage = defineTool({
         "set_status",
         "drain",
         "undrain",
+        "update",
         "system_run",
         "system_which",
         "process_start",
@@ -1268,6 +1316,8 @@ export const nodeManage = defineTool({
     signal: z.enum(["SIGTERM", "SIGINT", "SIGKILL"]).optional(),
     killAfterMs: z.number().int().min(0).max(60_000).optional(),
     reason: z.string().min(1).max(200).optional(),
+    strategy: z.string().min(1).max(40).optional(),
+    ref: z.string().min(1).max(200).optional(),
     localPath: z.string().min(1).max(4096).optional(),
     remotePath: z.string().min(1).max(4096).optional(),
     overwrite: z.boolean().optional(),
@@ -1287,6 +1337,7 @@ export const nodeManage = defineTool({
       "set_status",
       "drain",
       "undrain",
+      "update",
       "system_run",
       "system_which",
       "process_start",
@@ -1386,6 +1437,16 @@ export const nodeManage = defineTool({
         );
       case "undrain":
         return nodeUndrain.execute({ id: args.id ?? "" }, ctx);
+      case "update":
+        return nodeUpdate.execute(
+          {
+            id: args.id ?? "",
+            ...(args.strategy ? { strategy: args.strategy } : {}),
+            ...(args.ref ? { ref: args.ref } : {}),
+            ...(args.timeoutMs !== undefined ? { deadlineMs: args.timeoutMs } : {}),
+          },
+          ctx,
+        );
       case "system_run":
         return nodeSystemRun.execute(
           {
