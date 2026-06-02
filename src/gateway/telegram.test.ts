@@ -95,7 +95,6 @@ test("stream preview survives a mid-stream 429 and recovers after the cooldown",
       deleteMessage: async () => true,
     } as any,
     chatId: 123,
-    transport: "message",
     throttleMs: 30,
     log: (msg) => logs.push(msg),
     warn: (msg) => logs.push(msg),
@@ -139,7 +138,6 @@ test("stream preview gives up after sustained 429s (bounded recovery)", async ()
       deleteMessage: async () => true,
     } as any,
     chatId: 124,
-    transport: "message",
     throttleMs: 30,
     log: (msg) => logs.push(msg),
     warn: (msg) => logs.push(msg),
@@ -175,7 +173,6 @@ test("stream preview at finish time gives up on a long cooldown instead of block
       deleteMessage: async () => true,
     } as any,
     chatId: 456,
-    transport: "message",
     throttleMs: 50,
     log: (msg) => logs.push(msg),
     warn: (msg) => logs.push(msg),
@@ -194,6 +191,41 @@ test("stream preview at finish time gives up on a long cooldown instead of block
   const state = preview.state();
   assert.equal(state.failed, true, "finish-time 429 sets failed so the finalize path can take over");
   assert.match(logs.join("\n"), /stream_preview_rate_limited_at_finish/);
+  __resetTelegramRateLimitRegistryForTests();
+});
+
+test("stream preview gives up immediately on a long mid-stream cooldown", async () => {
+  __resetTelegramRateLimitRegistryForTests();
+  const logs: string[] = [];
+  let editCalls = 0;
+  const preview = createTelegramStreamPreview({
+    api: {
+      sendMessage: async () => ({ message_id: 77 }),
+      editMessageText: async () => {
+        editCalls += 1;
+        throw new Error("Call to 'editMessageText' failed! (429: Too Many Requests: retry after 20)");
+      },
+      deleteMessage: async () => true,
+    } as any,
+    chatId: 457,
+    throttleMs: 50,
+    log: (msg) => logs.push(msg),
+    warn: (msg) => logs.push(msg),
+  });
+
+  preview.onTextDelta("hello");
+  await preview.flush();
+  preview.onTextDelta(" world");
+  const before = Date.now();
+  await preview.flush();
+  const elapsed = Date.now() - before;
+
+  const state = preview.state();
+  assert.equal(editCalls, 1, "long cooldown should not schedule preview retries");
+  assert.equal(state.failed, true);
+  assert.equal(state.retryAfterMs, 21_000);
+  assert.ok(elapsed < 1_000, `long cooldown preview shutdown should be quick, took ${elapsed}ms`);
+  assert.match(logs.join("\n"), /stream_preview_rate_limit_suspended/);
   __resetTelegramRateLimitRegistryForTests();
 });
 
@@ -218,7 +250,6 @@ test("per-chat registry: a 429 in one preview makes subsequent flushes on the sa
       deleteMessage: async () => true,
     } as any,
     chatId: 789,
-    transport: "message",
     throttleMs: 30,
     log: () => {},
     warn: () => {},

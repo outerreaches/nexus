@@ -168,29 +168,11 @@ function resolveMessageThreadId(ctx: Context): number | undefined {
 const TELEGRAM_STREAM_PREVIEW_MAX_CHARS = 4096;
 const TELEGRAM_STREAM_PREVIEW_THROTTLE_MS = 2_500;
 const TELEGRAM_STREAM_PREVIEW_MESSAGE_MIN_THROTTLE_MS = 2_500;
-const TELEGRAM_DRAFT_ID_MAX = 2_147_483_647;
+const TELEGRAM_STREAM_PREVIEW_DISABLE_RETRY_AFTER_MS = 15_000;
 const TELEGRAM_RATE_LIMIT_GRACE_MS = 1_000;
 const TELEGRAM_RATE_LIMIT_MAX_ATTEMPTS = 3;
-const DRAFT_METHOD_UNAVAILABLE_RE = /(unknown method|method .*not (found|available|supported)|unsupported)/i;
-const DRAFT_CHAT_UNSUPPORTED_RE = /(can't be used|can be used only)/i;
 const MESSAGE_NOT_MODIFIED_RE = /message is not modified/i;
 const TELEGRAM_RETRY_AFTER_RE = /\bretry after\s+(\d+)\b/i;
-
-type TelegramSendMessageDraft = (
-  chatId: number,
-  draftId: number,
-  text: string,
-  params?: {
-    message_thread_id?: number;
-  },
-) => Promise<unknown>;
-
-let nextTelegramDraftId = 0;
-
-function allocateTelegramDraftId(): number {
-  nextTelegramDraftId = nextTelegramDraftId >= TELEGRAM_DRAFT_ID_MAX ? 1 : nextTelegramDraftId + 1;
-  return nextTelegramDraftId;
-}
 
 function toErrorText(err: unknown): string {
   if (typeof err === "string") return err;
@@ -372,18 +354,6 @@ async function callTelegramApiWithRateLimit<T>(
       await delay(retryAfterMs);
     }
   }
-}
-
-function resolveSendMessageDraft(api: Bot["api"]): TelegramSendMessageDraft | null {
-  const fn = (api as Bot["api"] & { sendMessageDraft?: TelegramSendMessageDraft }).sendMessageDraft;
-  if (typeof fn !== "function") return null;
-  return fn.bind(api as object);
-}
-
-function shouldFallbackFromDraftTransport(err: unknown): boolean {
-  const text = toErrorText(err);
-  if (!/sendMessageDraft/i.test(text)) return false;
-  return DRAFT_METHOD_UNAVAILABLE_RE.test(text) || DRAFT_CHAT_UNSUPPORTED_RE.test(text);
 }
 
 function isMessageNotModifiedError(err: unknown): boolean {
@@ -912,7 +882,7 @@ function writeTelegramUploadBlackboardEntry(params: {
   return id;
 }
 
-type TelegramStreamPreviewMode = "draft" | "message";
+type TelegramStreamPreviewMode = "message";
 
 type TelegramStreamPreviewState = {
   mode: TelegramStreamPreviewMode;
@@ -968,7 +938,6 @@ export function createTelegramStreamPreview(params: {
   api: Bot["api"];
   chatId: number;
   messageThreadId?: number;
-  transport: "auto" | "message" | "draft";
   throttleMs?: number;
   log: (msg: string) => void;
   warn: (msg: string) => void;
@@ -979,17 +948,11 @@ export function createTelegramStreamPreview(params: {
       ? ({ message_thread_id: params.messageThreadId } as const)
       : undefined;
 
-  const prefersDraft = params.transport !== "message";
-  const sendMessageDraft = prefersDraft ? resolveSendMessageDraft(params.api) : null;
-  let mode: TelegramStreamPreviewMode = prefersDraft && sendMessageDraft ? "draft" : "message";
-  if (prefersDraft && !sendMessageDraft) {
-    params.warn("telegram: sendMessageDraft unavailable; preview transport fallback=message");
-  }
+  const mode: TelegramStreamPreviewMode = "message";
 
   let textBuffer = "";
   let lastSentText = "";
   let previewMessageId: number | undefined;
-  let previewDraftId = mode === "draft" ? allocateTelegramDraftId() : undefined;
   let failed = false;
   let hadPreview = false;
   let rateLimitedUntilMs: number | undefined;
@@ -1023,7 +986,15 @@ export function createTelegramStreamPreview(params: {
   const sendViaMessageTransport = async (nextText: string) => {
     if (typeof previewMessageId === "number") {
       try {
-        await params.api.editMessageText(params.chatId, previewMessageId, nextText);
+        await callTelegramApiWithRateLimit(
+          () => params.api.editMessageText(params.chatId, previewMessageId!, nextText),
+          {
+            chatId: params.chatId,
+            action: "editMessageText",
+            log: params.log,
+            maxAttempts: 1,
+          },
+        );
       } catch (err) {
         if (!isMessageNotModifiedError(err)) {
           throw err;
@@ -1033,9 +1004,17 @@ export function createTelegramStreamPreview(params: {
       return;
     }
 
-    const sent = threadParams
-      ? await params.api.sendMessage(params.chatId, nextText, threadParams)
-      : await params.api.sendMessage(params.chatId, nextText);
+    const sent = await callTelegramApiWithRateLimit(
+      () => (threadParams
+        ? params.api.sendMessage(params.chatId, nextText, threadParams)
+        : params.api.sendMessage(params.chatId, nextText)),
+      {
+        chatId: params.chatId,
+        action: "sendMessage",
+        log: params.log,
+        maxAttempts: 1,
+      },
+    );
     const sentId = sent?.message_id;
     if (typeof sentId === "number" && Number.isFinite(sentId)) {
       previewMessageId = Math.trunc(sentId);
@@ -1044,39 +1023,11 @@ export function createTelegramStreamPreview(params: {
   };
 
   const sendPreviewText = async (nextText: string) => {
-    if (mode === "draft") {
-      const draftId = previewDraftId ?? allocateTelegramDraftId();
-      previewDraftId = draftId;
-      try {
-        if (threadParams) {
-          await sendMessageDraft!(params.chatId, draftId, nextText, threadParams);
-        } else {
-          await sendMessageDraft!(params.chatId, draftId, nextText);
-        }
-        hadPreview = true;
-        return;
-      } catch (err) {
-        if (isMessageNotModifiedError(err)) {
-          hadPreview = true;
-          return;
-        }
-        if (!shouldFallbackFromDraftTransport(err)) {
-          throw err;
-        }
-        mode = "message";
-        previewDraftId = undefined;
-        params.warn("telegram: sendMessageDraft rejected by API; preview transport fallback=message");
-      }
-    }
-
     await sendViaMessageTransport(nextText);
   };
 
   const currentThrottleMs = () => {
-    if (mode === "message") {
-      return Math.max(configuredThrottleMs, TELEGRAM_STREAM_PREVIEW_MESSAGE_MIN_THROTTLE_MS);
-    }
-    return configuredThrottleMs;
+    return Math.max(configuredThrottleMs, TELEGRAM_STREAM_PREVIEW_MESSAGE_MIN_THROTTLE_MS);
   };
 
   const runFlush = async () => {
@@ -1097,9 +1048,17 @@ export function createTelegramStreamPreview(params: {
         // remainder of that window rather than firing a doomed edit.
         const preWaitMs = telegramRateLimitWaitMs(params.chatId);
         if (preWaitMs > 0) {
-          params.log(
-            `telegram: stream_preview_rate_limit_block chat_id=${params.chatId} wait_ms=${preWaitMs}`,
-          );
+          lastRateLimitRetryAfterMs = preWaitMs;
+          rateLimitedUntilMs = Date.now() + preWaitMs;
+          if (ending || preWaitMs >= TELEGRAM_STREAM_PREVIEW_DISABLE_RETRY_AFTER_MS) {
+            failed = true;
+            params.warn(
+              `telegram: stream_preview_rate_limit_suspended chat_id=${params.chatId} wait_ms=${preWaitMs} ` +
+              `reason=${ending ? "finish" : "long_cooldown"}`,
+            );
+            break;
+          }
+          params.log(`telegram: stream_preview_rate_limit_block chat_id=${params.chatId} wait_ms=${preWaitMs}`);
           await delay(preWaitMs);
         }
         try {
@@ -1124,6 +1083,14 @@ export function createTelegramStreamPreview(params: {
               failed = true;
               params.warn(
                 `telegram: stream_preview_rate_limited_at_finish chat_id=${params.chatId} retry_after_ms=${retryAfterMs}`,
+              );
+              break;
+            }
+            if (retryAfterMs >= TELEGRAM_STREAM_PREVIEW_DISABLE_RETRY_AFTER_MS) {
+              failed = true;
+              params.warn(
+                `telegram: stream_preview_rate_limit_suspended chat_id=${params.chatId} ` +
+                `retry_after_ms=${retryAfterMs} reason=long_cooldown`,
               );
               break;
             }
@@ -1396,12 +1363,6 @@ export async function startTelegramBot(deps: {
   }
 
   const bot = new Bot<Context>(token);
-  // Auto-retry on 429 rate limits and transient 5xx errors. 60s is wide
-  // enough to cover Telegram's normal in-the-moment cooldowns without giving
-  // up — sustained long penalties (e.g. retry-after >60s) still surface to
-  // the caller, which can then choose to wait via the per-chat registry.
-  const { autoRetry } = await import("@grammyjs/auto-retry");
-  bot.api.config.use(autoRetry({ maxDelaySeconds: 60, maxRetryAttempts: 3 }));
   const me = await bot.api.getMe();
   const botUsername = me.username ?? "";
   const allowAllUsers = process.env.NEXUS_TELEGRAM_ALLOW_ALL === "1";
@@ -1562,6 +1523,37 @@ export async function startTelegramBot(deps: {
     }
   };
 
+  const sendTypingAction = async (
+    chatId: number,
+    options?: { messageThreadId?: number },
+  ): Promise<void> => {
+    const waitMs = telegramRateLimitWaitMs(chatId);
+    if (waitMs > 0) {
+      deps.log(`telegram: chat_action_suppressed chat_id=${chatId} action=typing wait_ms=${waitMs}`);
+      return;
+    }
+    try {
+      await callTelegramApiWithRateLimit(
+        () => bot.api.sendChatAction(chatId, "typing", {
+          ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+        }),
+        {
+          chatId,
+          action: "sendChatAction",
+          log: deps.log,
+          maxAttempts: 1,
+        },
+      );
+    } catch (err) {
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      if (retryAfterMs !== null) {
+        deps.log(`telegram: chat_action_rate_limited chat_id=${chatId} retry_after_ms=${retryAfterMs}`);
+        return;
+      }
+      deps.log(`telegram: chat_action_failed chat_id=${chatId} ${toErrorText(err)}`);
+    }
+  };
+
   bot.on("message", async (ctx) => {
     try {
       const message = (ctx.message ?? {}) as unknown as Record<string, unknown>;
@@ -1588,10 +1580,11 @@ export async function startTelegramBot(deps: {
         ? Number((message as { message_id?: unknown }).message_id)
         : Date.now();
       if (!chatId) return;
+      const reply = (output: string) => sendOutput(chatId, output, { messageThreadId: resolveMessageThreadId(ctx) });
       if (actorId === null) {
         deps.log(`telegram: ignore chat_id=${chatId} reason=missing_sender_identity`);
         if (isGroupChat(ctx) && tg.requireMentionInGroups && (mentioned || invoked)) {
-          await ctx.reply(
+          await reply(
             "I can't identify this sender in the group message. Send as your personal account (not anonymous/send-as-chat) and try again.",
           );
         }
@@ -1607,7 +1600,7 @@ export async function startTelegramBot(deps: {
       if (!allowed) {
         deps.log(`telegram: ignore actor_id=${actorId} reason=not_allowlisted pairing=${tg.pairing.enabled ? "on" : "off"}`);
         if (!userId && senderChatId !== null && isGroupChat(ctx)) {
-          await ctx.reply(
+          await reply(
             [
               "I can't authenticate anonymous/send-as-chat group messages by user allowlist.",
               "Send as your personal account, or ask the operator to allowlist this group chat id:",
@@ -1617,12 +1610,12 @@ export async function startTelegramBot(deps: {
           return;
         }
         if (!userId) {
-          await ctx.reply("Unable to authenticate this Telegram sender. Please DM this bot from your personal account and send /pair.");
+          await reply("Unable to authenticate this Telegram sender. Please DM this bot from your personal account and send /pair.");
           return;
         }
         if (tg.pairing.enabled && !isGroupChat(ctx)) {
           if (!isPairInvocation(rawInputText, botUsername)) {
-            await ctx.reply("Pairing required. Send /pair in this DM to request a pairing code.");
+            await reply("Pairing required. Send /pair in this DM to request a pairing code.");
             return;
           }
           const nowMs = Date.now();
@@ -1636,7 +1629,7 @@ export async function startTelegramBot(deps: {
           if (req.status === "created") {
             const ttlMinutes = Math.max(1, Math.ceil((req.expiresAt - nowMs) / 60_000));
             deps.log(`telegram: pairing request user_id=${userId} code=${req.code}`);
-            await ctx.reply(
+            await reply(
               [
                 "Pairing required.",
                 "",
@@ -1652,7 +1645,7 @@ export async function startTelegramBot(deps: {
           } else if (req.status === "already_pending") {
             const ttlMinutes = Math.max(1, Math.ceil((req.expiresAt - nowMs) / 60_000));
             deps.log(`telegram: pairing request already pending user_id=${userId} code=${req.code}`);
-            await ctx.reply(
+            await reply(
               [
                 "Pairing is still pending.",
                 "",
@@ -1665,19 +1658,19 @@ export async function startTelegramBot(deps: {
             );
           } else if (req.status === "max_pending") {
             deps.log(`telegram: pairing request not created user_id=${userId} reason=max_pending`);
-            await ctx.reply("Pairing queue is full right now. Please try again in a few minutes.");
+            await reply("Pairing queue is full right now. Please try again in a few minutes.");
           } else {
             deps.log(`telegram: pairing request not created user_id=${userId} reason=${req.reason}`);
-            await ctx.reply("Unable to issue a pairing code right now. Please try again shortly.");
+            await reply("Unable to issue a pairing code right now. Please try again shortly.");
           }
           return;
         }
 
         if (tg.pairing.enabled && isGroupChat(ctx)) {
           deps.log(`telegram: pairing request rejected user_id=${userId} reason=group_chat`);
-          await ctx.reply("Pairing is only supported in private chat. Please DM this bot and send /pair.");
+          await reply("Pairing is only supported in private chat. Please DM this bot and send /pair.");
         } else {
-          await ctx.reply("You are not allowlisted for this bot.");
+          await reply("You are not allowlisted for this bot.");
         }
         return;
       }
@@ -1691,27 +1684,27 @@ export async function startTelegramBot(deps: {
           nowMs: Date.now(),
         });
         deps.log(`telegram: sethome agent=${tg.agentId} chat_id=${chatId}`);
-        await ctx.reply("OK: this chat is now the home session for background events.");
+        await reply("OK: this chat is now the home session for background events.");
         return;
       }
 
       if (/^\/unsethome\b/i.test(text.trim())) {
         clearHomeSession({ db: deps.db, agentId: tg.agentId });
         deps.log(`telegram: unsethome agent=${tg.agentId}`);
-        await ctx.reply("OK: home session cleared. Background events will target the most recent chat.");
+        await reply("OK: home session cleared. Background events will target the most recent chat.");
         return;
       }
 
       if (/^\/(act|action)\b/i.test(text.trim())) {
         if (!userId) {
-          await ctx.reply("Action responses must come from a personal Telegram account (not anonymous/send-as-chat).");
+          await reply("Action responses must come from a personal Telegram account (not anonymous/send-as-chat).");
           return;
         }
         const parts = text.trim().split(/\s+/);
         const id = parts[1] ?? "";
         const response = parts.slice(2).join(" ").trim();
         if (!id || !response) {
-          await ctx.reply("Usage: /act <ID> <response>");
+          await reply("Usage: /act <ID> <response>");
           return;
         }
 
@@ -1724,7 +1717,7 @@ export async function startTelegramBot(deps: {
           nowMs: Date.now(),
         });
         if (!actionRes.ok) {
-          await ctx.reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
+          await reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
           return;
         }
         const actionRow = getHumanAction(deps.db, { id, nowMs: Date.now() });
@@ -1748,7 +1741,7 @@ export async function startTelegramBot(deps: {
           });
         }
 
-        await ctx.reply(`OK: recorded action ${id}`);
+        await reply(`OK: recorded action ${id}`);
         const metadata = parseMetadataJson(actionRow?.metadataJson ?? null);
         if (isDeployApprovalMetadata(metadata)) {
           const responseText = actionRow?.responseText ?? response;
@@ -1805,7 +1798,7 @@ export async function startTelegramBot(deps: {
       const cleanedText = sanitizeMessageText(rawInputText, botUsername);
       const incomingAttachments = collectIncomingAttachments(message);
       if (incomingAttachments.length > maxInboundFilesPerMessage) {
-        await ctx.reply(`Too many attachments in one message. Max ${maxInboundFilesPerMessage} files per message.`);
+        await reply(`Too many attachments in one message. Max ${maxInboundFilesPerMessage} files per message.`);
         return;
       }
 
@@ -1826,7 +1819,7 @@ export async function startTelegramBot(deps: {
         });
 
         if (ingest.stored.length === 0) {
-          await ctx.reply(`Unable to ingest attached files: ${ingest.rejected.join("; ") || "unknown error"}`);
+          await reply(`Unable to ingest attached files: ${ingest.rejected.join("; ") || "unknown error"}`);
           return;
         }
 
@@ -1854,7 +1847,7 @@ export async function startTelegramBot(deps: {
         );
 
         if (ingest.rejected.length > 0) {
-          await ctx.reply(`Processed ${ingest.stored.length} file(s), skipped ${ingest.rejected.length}: ${ingest.rejected.join("; ")}`);
+          await reply(`Processed ${ingest.stored.length} file(s), skipped ${ingest.rejected.length}: ${ingest.rejected.join("; ")}`);
         }
 
         dispatchText = buildAttachmentDispatchText({
@@ -1896,18 +1889,17 @@ export async function startTelegramBot(deps: {
 
       const isPrivateChat = ctx.chat?.type === "private";
       const messageThreadId = resolveMessageThreadId(ctx);
-      const typingParams = typeof messageThreadId === "number" ? { message_thread_id: messageThreadId } : undefined;
 
       if (streamingEnabled && isPrivateChat) {
         await withChatStreamLock(chatId, async () => {
-          // --- Streaming path: native preview updates (draft-first with runtime fallback) ---
+          // --- Streaming path: throttled message preview updates ---
           // Show typing while waiting for first tokens and during tool gaps.
           let typingTimer: ReturnType<typeof setInterval> | null = null;
           let lastTypingSentMs = 0;
           const TYPING_COALESCE_MS = 2_000;
           const sendTypingNow = () => {
             lastTypingSentMs = Date.now();
-            bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+            void sendTypingAction(chatId, { messageThreadId });
           };
           const startTyping = () => {
             if (typingTimer) return;
@@ -1933,7 +1925,6 @@ export async function startTelegramBot(deps: {
             api: bot.api,
             chatId,
             messageThreadId,
-            transport: streamingPreviewTransport,
             throttleMs: tg.streaming.previewThrottleMs,
             log: deps.log,
             warn: deps.log,
@@ -2045,9 +2036,9 @@ export async function startTelegramBot(deps: {
         });
       } else {
         // --- Non-streaming path for groups/channels: existing behavior ---
-        bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+        void sendTypingAction(chatId, { messageThreadId });
         const typingInterval = setInterval(() => {
-          bot.api.sendChatAction(chatId, "typing", typingParams).catch(() => { });
+          void sendTypingAction(chatId, { messageThreadId });
         }, 4_000);
         let res: Awaited<ReturnType<typeof deps.agent.handleUserMessage>>;
         try {
@@ -2086,7 +2077,7 @@ export async function startTelegramBot(deps: {
             },
           );
         } else {
-          await ctx.reply(userErrorMessage);
+          deps.log("telegram: handler_error_reply_skipped reason=missing_chat_id");
         }
       } catch (replyErr) {
         deps.log(`telegram: handler_error_reply_failed ${toErrorText(replyErr)}`);

@@ -15,7 +15,7 @@ const TelegramStreamingSchema = z
     enabled: z.boolean().default(true),
     serializePerChat: z.boolean().default(true),
     maxConcurrentPerChat: z.number().int().positive().max(8).default(1),
-    previewTransport: z.enum(["auto", "message", "draft"]).default("message"),
+    previewTransport: z.literal("message").default("message"),
     previewThrottleMs: z.number().int().min(200).max(5000).default(2500),
     fallbackToSendOutput: z.boolean().default(true),
     emitFallbackNotice: z.boolean().default(true),
