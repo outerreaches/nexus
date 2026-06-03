@@ -10,6 +10,7 @@ import { startSecretSidecar } from "../secrets/sidecar.js";
 import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import type { NexusDatabase } from "../storage/database.js";
+import type { ParsedProviderModelCommand } from "../control/model-settings-command.js";
 import type { NexusConfig } from "../state/config.js";
 import { getPromptLayout } from "./input-layout.js";
 
@@ -323,6 +324,9 @@ export async function runCli(argv: string[]): Promise<void> {
         saveTerminalThemePreference,
       } = await import("./terminal-theme.js");
       const { createSharedTui } = await import("./tui.js");
+      const { InputHistory } = await import("./input-history.js");
+      const { promptListSelection } = await import("./select-list.js");
+      const { listProviderModels, collectConfiguredModels, mergeModelLists } = await import("../llm/list-models.js");
       const { stopLocalInteractiveSessions } = await import("../tools/shell-interactive.js");
 
       await ensureConfigExists(options.config);
@@ -598,6 +602,10 @@ export async function runCli(argv: string[]): Promise<void> {
         }
       };
 
+      // Session-scoped ↑/↓ recall. Persists across prompts; an in-progress draft
+      // is preserved so an accidental ↑ never loses unsent text (↓ restores it).
+      const inputHistory = new InputHistory();
+
       const readInteractiveInput = async (): Promise<string | null> => {
         const promptPrefix = buildPromptPrefix();
         if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
@@ -612,6 +620,9 @@ export async function runCli(argv: string[]): Promise<void> {
 
         const { clearScreenDown, cursorTo, moveCursor } = await import("node:readline");
         const previousRawMode = process.stdin.isRaw;
+        // Start each prompt at the live-draft position so a cancelled prompt that
+        // left the cursor mid-history doesn't carry over into this one.
+        inputHistory.resetCursor();
         // Visible prompt width = "[…] " (prefix + space) + "> " (2). Empty prefix → just 2.
         const promptLen = promptPrefix ? promptPrefix.length + 1 + 2 : 2;
 
@@ -687,6 +698,13 @@ export async function runCli(argv: string[]): Promise<void> {
                     else if (ch === "D" && cursorPos > 0) { cursorPos--; dirty = true; } // left
                     else if (ch === "H") { cursorPos = 0; dirty = true; } // home
                     else if (ch === "F") { cursorPos = value.length; dirty = true; } // end
+                    else if (ch === "A") { // up — recall previous history entry
+                      const recalled = inputHistory.up(value);
+                      if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; }
+                    } else if (ch === "B") { // down — recall next entry / restore draft
+                      const recalled = inputHistory.down();
+                      if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; }
+                    }
                   }
                   continue;
                 }
@@ -795,7 +813,94 @@ export async function runCli(argv: string[]): Promise<void> {
         });
       };
 
-      const handleControlCommand = async (text: string): Promise<string | null> => {
+      // Cache live `/models` results per baseUrl so repeated /model picks in a
+      // session don't refetch the (sometimes large) provider catalogue.
+      const providerModelsCache = new Map<string, string[]>();
+
+      /**
+       * Open the arrow-key picker for a bare `/model` or `/provider` command.
+       * Returns the chosen value, or null when the picker is cancelled, the
+       * target isn't pickable, or no candidates could be assembled (caller then
+       * falls back to the text status view).
+       */
+      const runModelSettingsPicker = async (
+        command: ParsedProviderModelCommand,
+      ): Promise<string | null> => {
+        const target = command.target;
+        // Only orchestrator + preset targets are pickable; tool targets fall back.
+        if (target.kind !== "orchestrator" && target.kind !== "preset") return null;
+        const presetName = target.kind === "orchestrator" ? "orchestrator" : target.preset;
+        const agentId = presetName === "orchestrator" ? "main" : `main:${presetName}`;
+        const targetLabel = target.kind === "orchestrator" ? "orchestrator" : `preset:${target.preset}`;
+
+        let route;
+        try {
+          route = modelRouter.resolve({
+            agentId,
+            preset: presetName,
+            mode: "default",
+            presetLlm: getPreset(presetName)?.llm,
+          });
+        } catch (err) {
+          log(`model_picker: resolve failed ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        }
+        const providerName = route.primaryProvider;
+
+        if (command.kind === "provider") {
+          const providers = modelRouter.listProviderNames();
+          if (providers.length === 0) return null;
+          return await promptListSelection({
+            title: `Select provider — ${targetLabel}`,
+            items: providers.map((value) => ({ value })),
+            tui,
+            currentValue: providerName,
+          });
+        }
+
+        // command.kind === "model"
+        const baseUrl = route.primary.baseUrl;
+        const currentModel = route.primary.model;
+        const configured = collectConfiguredModels(config, providerName);
+
+        let models: string[];
+        let footerNote: string | undefined;
+        const cached = providerModelsCache.get(baseUrl);
+        if (cached) {
+          models = mergeModelLists(cached, configured);
+        } else if (baseUrl && baseUrl !== "dynamic") {
+          process.stdout.write(tui.paint("dim", `Fetching models from ${providerName}…`));
+          const live = await listProviderModels({ baseUrl, apiKey: route.primary.apiKey });
+          process.stdout.write("\r\x1b[2K"); // erase the transient "Fetching…" line
+          if (live.ok) {
+            providerModelsCache.set(baseUrl, live.models);
+            models = mergeModelLists(live.models, configured);
+          } else {
+            models = configured;
+            footerNote = `live list unavailable (${live.error})`;
+            log(`model_picker: live fetch failed for ${providerName}: ${live.error}`);
+          }
+        } else {
+          models = configured;
+          footerNote = "provider exposes no /models endpoint — showing configured models";
+        }
+
+        if (models.length === 0 && currentModel) models = [currentModel];
+        if (models.length === 0) return null;
+
+        const footer = footerNote
+          ? `↑/↓ move · type to filter · Enter select · Esc cancel — ${footerNote}`
+          : undefined;
+        return await promptListSelection({
+          title: `Select model — ${targetLabel} (${providerName})`,
+          items: models.map((value) => ({ value })),
+          tui,
+          currentValue: currentModel,
+          footer,
+        });
+      };
+
+      const handleControlCommand = async (text: string, interactive: boolean): Promise<string | null> => {
         const parsed = parseTerminalCommandText(text);
         if (!parsed) return null;
         const nowMs = Date.now();
@@ -839,20 +944,34 @@ export async function runCli(argv: string[]): Promise<void> {
           return infoText;
         }
         if (controlParsed.kind === "model_settings") {
-          const result = await executeModelSettingsCommand({
-            command: controlParsed.modelSettings,
-            deps: {
-              configPath: options.config,
-              config,
-              modelRouter,
-              listTools: () => registry.list(),
-              applyRuntimeConfig: (nextConfig) => {
-                toolContext.llmToolRouting = nextConfig.llm.toolRouting;
-              },
-              log,
+          const cmd = controlParsed.modelSettings;
+          const deps = {
+            configPath: options.config,
+            config,
+            modelRouter,
+            listTools: () => registry.list(),
+            applyRuntimeConfig: (nextConfig: typeof config) => {
+              toolContext.llmToolRouting = nextConfig.llm.toolRouting;
             },
-          });
-          return result;
+            stateDir: paths.stateDir,
+            log,
+          };
+          // Bare `/model` / `/provider` (the "show" action) opens an arrow-key
+          // picker in interactive mode. Picking runs the equivalent "set";
+          // cancelling (Esc) falls through to the plain text status view.
+          if (
+            interactive &&
+            (cmd.kind === "provider" || cmd.kind === "model") &&
+            cmd.action === "show" &&
+            !cmd.error
+          ) {
+            const picked = await runModelSettingsPicker(cmd);
+            const effectiveCommand = picked
+              ? { ...cmd, action: "set" as const, value: picked }
+              : cmd;
+            return await executeModelSettingsCommand({ command: effectiveCommand, deps });
+          }
+          return await executeModelSettingsCommand({ command: cmd, deps });
         }
         if (controlParsed.kind === "home") {
           const agentId = String(opts.agent ?? "main");
@@ -930,7 +1049,7 @@ export async function runCli(argv: string[]): Promise<void> {
 
       async function send(text: string, sendOptions: { interactive: boolean }): Promise<void> {
         const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const intercepted = normalized.includes("\n") ? null : await handleControlCommand(normalized);
+        const intercepted = normalized.includes("\n") ? null : await handleControlCommand(normalized, sendOptions.interactive);
         if (intercepted !== null) {
           if (sendOptions.interactive) {
             renderSystemMessage(intercepted);
@@ -991,10 +1110,10 @@ export async function runCli(argv: string[]): Promise<void> {
             "Interactive chat ready. Ask anything, or run slash commands below.",
           ),
           tui.panel("Quick Commands", [
-            "Enter send | Alt+Enter/Ctrl+J newline",
+            "Enter send | Alt+Enter/Ctrl+J newline | ↑/↓ recall history",
             "/help",
-            "/provider [target] [provider]",
-            "/model [target] [model]",
+            "/provider — arrow-key picker (or /provider [target] [provider])",
+            "/model — arrow-key picker (or /model [target] [model])",
             "/presets [name]",
             "/tools [limit]",
             "/sethome | /unsethome",
@@ -1019,6 +1138,7 @@ export async function runCli(argv: string[]): Promise<void> {
             running = false;
             continue;
           }
+          inputHistory.push(line);
           await send(line, { interactive: true });
         }
       } finally {

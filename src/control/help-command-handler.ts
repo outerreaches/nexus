@@ -27,6 +27,8 @@ export function renderHelpText(channel: HelpChannel): string {
     lines.push("- /theme [name]");
     lines.push("- /exit (or /quit)");
     lines.push("- Enter sends, Alt+Enter/Ctrl+J inserts newline");
+    lines.push("- Up/Down arrows recall previous input (drafts are preserved)");
+    lines.push("- Bare /model and /provider open an arrow-key picker (type to filter, Esc cancels)");
   } else if (channel === "telegram") {
     lines.push("");
     lines.push("Telegram-specific:");
