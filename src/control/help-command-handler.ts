@@ -28,6 +28,8 @@ export function renderHelpText(channel: HelpChannel): string {
     lines.push("- /exit (or /quit)");
     lines.push("- Enter sends, Alt+Enter/Ctrl+J inserts newline");
     lines.push("- Up/Down arrows recall previous input (drafts are preserved)");
+    lines.push("- Tab completes slash commands and arguments (repeat Tab to cycle matches)");
+    lines.push("- Alt/Ctrl+Left/Right jump by word; Alt+Backspace/Alt+d delete a word");
     lines.push("- Bare /model and /provider open an arrow-key picker (type to filter, Esc cancels)");
   } else if (channel === "telegram") {
     lines.push("");

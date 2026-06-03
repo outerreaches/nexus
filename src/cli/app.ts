@@ -11,6 +11,7 @@ import { resolveEnvSecrets, getSecret } from "../secrets/resolve-env.js";
 import { parseSecretReference, resolveSecretReference, revokeSecretLease } from "../secrets/provider.js";
 import type { NexusDatabase } from "../storage/database.js";
 import type { ParsedProviderModelCommand } from "../control/model-settings-command.js";
+import type { CompletionContext, CompletionCycle } from "./editor-actions.js";
 import type { NexusConfig } from "../state/config.js";
 import { getPromptLayout } from "./input-layout.js";
 
@@ -304,7 +305,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const { getOrCreateSessionId, setHomeSession, clearHomeSession } = await import("../storage/sessions.js");
       const { ModelRouter } = await import("../llm/model-router.js");
       const { resolveCodexCredentials } = await import("../llm/codex-auth.js");
-      const { getPreset, applyPresetConfigOverrides } = await import("../core/presets.js");
+      const { getPreset, getPresetNames, applyPresetConfigOverrides } = await import("../core/presets.js");
       const { AgentService } = await import("../core/agent-service.js");
       const { AgentTracker } = await import("../core/agent-tracker.js");
       const { BrowserManager } = await import("../browser/manager.js");
@@ -319,12 +320,21 @@ export async function runCli(argv: string[]): Promise<void> {
       const { formatDurationMs } = await import("../control/stop-command.js");
       const {
         formatThemeList,
+        listTerminalThemes,
         loadTerminalThemePreference,
         resolveTerminalThemeId,
         saveTerminalThemePreference,
       } = await import("./terminal-theme.js");
       const { createSharedTui } = await import("./tui.js");
       const { InputHistory } = await import("./input-history.js");
+      const {
+        classifyCsi,
+        deleteWordAfter,
+        deleteWordBefore,
+        planCompletion,
+        wordLeft,
+        wordRight,
+      } = await import("./editor-actions.js");
       const { promptListSelection } = await import("./select-list.js");
       const { listProviderModels, collectConfiguredModels, mergeModelLists } = await import("../llm/list-models.js");
       const { stopLocalInteractiveSessions } = await import("../tools/shell-interactive.js");
@@ -606,6 +616,21 @@ export async function runCli(argv: string[]): Promise<void> {
       // is preserved so an accidental ↑ never loses unsent text (↓ restores it).
       const inputHistory = new InputHistory();
 
+      // Slash commands recognised in the terminal, used for Tab completion. Kept
+      // in sync with renderHelpText("terminal") / the Quick Commands panel.
+      const SLASH_COMMANDS = [
+        "/help", "/model", "/provider", "/presets", "/tools", "/nodes", "/jobs",
+        "/intakes", "/processes", "/mcp", "/federation", "/blackboard", "/status",
+        "/sethome", "/unsethome", "/theme", "/stop", "/stopall", "/codex", "/exit", "/quit",
+      ];
+      // Rebuilt per Tab press since presets/providers can change mid-session.
+      const buildCompletionContext = (): CompletionContext => ({
+        commands: SLASH_COMMANDS,
+        presets: getPresetNames(),
+        themes: listTerminalThemes().map((theme) => theme.id),
+        providers: modelRouter.listProviderNames(),
+      });
+
       const readInteractiveInput = async (): Promise<string | null> => {
         const promptPrefix = buildPromptPrefix();
         if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
@@ -632,6 +657,8 @@ export async function runCli(argv: string[]): Promise<void> {
           let renderedRows = 0;
           let escaped = false;
           let inCsi = false;
+          let csiBuf = "";
+          let completionCycle: CompletionCycle | null = null;
           let closed = false;
 
           const cleanup = () => {
@@ -689,21 +716,29 @@ export async function runCli(argv: string[]): Promise<void> {
               const input = raw.length > 1 ? raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n") : raw;
               let dirty = false;
               for (const ch of input) {
+                // Any key other than Tab abandons an in-progress completion cycle.
+                if (ch !== "\t") completionCycle = null;
                 if (inCsi) {
+                  csiBuf += ch;
                   const code = ch.codePointAt(0) ?? 0;
                   if (code >= 0x40 && code <= 0x7e) {
                     inCsi = false;
-                    // Arrow keys and navigation
-                    if (ch === "C" && cursorPos < value.length) { cursorPos++; dirty = true; } // right
-                    else if (ch === "D" && cursorPos > 0) { cursorPos--; dirty = true; } // left
-                    else if (ch === "H") { cursorPos = 0; dirty = true; } // home
-                    else if (ch === "F") { cursorPos = value.length; dirty = true; } // end
-                    else if (ch === "A") { // up — recall previous history entry
-                      const recalled = inputHistory.up(value);
-                      if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; }
-                    } else if (ch === "B") { // down — recall next entry / restore draft
-                      const recalled = inputHistory.down();
-                      if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; }
+                    const seq = csiBuf;
+                    csiBuf = "";
+                    switch (classifyCsi(seq)) {
+                      case "right": if (cursorPos < value.length) { cursorPos++; dirty = true; } break;
+                      case "left": if (cursorPos > 0) { cursorPos--; dirty = true; } break;
+                      case "home": cursorPos = 0; dirty = true; break;
+                      case "end": cursorPos = value.length; dirty = true; break;
+                      case "word-left": { const p = wordLeft(value, cursorPos); if (p !== cursorPos) { cursorPos = p; dirty = true; } break; }
+                      case "word-right": { const p = wordRight(value, cursorPos); if (p !== cursorPos) { cursorPos = p; dirty = true; } break; }
+                      case "delete": // forward-delete char under cursor
+                        if (cursorPos < value.length) { value = value.slice(0, cursorPos) + value.slice(cursorPos + 1); dirty = true; }
+                        break;
+                      case "delete-word": { const r = deleteWordAfter(value, cursorPos); if (r.value !== value) { value = r.value; cursorPos = r.cursorPos; dirty = true; } break; }
+                      case "up": { const recalled = inputHistory.up(value); if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; } break; }
+                      case "down": { const recalled = inputHistory.down(); if (recalled !== null) { value = recalled; cursorPos = value.length; dirty = true; } break; }
+                      default: break;
                     }
                   }
                   continue;
@@ -712,6 +747,7 @@ export async function runCli(argv: string[]): Promise<void> {
                   escaped = false;
                   if (ch === "[") {
                     inCsi = true;
+                    csiBuf = "";
                     continue;
                   }
                   if (ch === "\n" || ch === "\r") {
@@ -719,6 +755,11 @@ export async function runCli(argv: string[]): Promise<void> {
                     dirty = true;
                     continue;
                   }
+                  // Alt-prefixed editing keys (emacs/readline style word ops).
+                  if (ch === "b" || ch === "B") { const p = wordLeft(value, cursorPos); if (p !== cursorPos) { cursorPos = p; dirty = true; } continue; }
+                  if (ch === "f" || ch === "F") { const p = wordRight(value, cursorPos); if (p !== cursorPos) { cursorPos = p; dirty = true; } continue; }
+                  if (ch === "d" || ch === "D") { const r = deleteWordAfter(value, cursorPos); if (r.value !== value) { value = r.value; cursorPos = r.cursorPos; dirty = true; } continue; }
+                  { const c = ch.codePointAt(0) ?? 0; if (c === 0x7f || c === 0x08) { const r = deleteWordBefore(value, cursorPos); if (r.value !== value) { value = r.value; cursorPos = r.cursorPos; dirty = true; } continue; } } // Alt+Backspace
                   const code = ch.codePointAt(0) ?? 0;
                   if (code >= 0x20 && code !== 0x7f) {
                     insertAt(ch);
@@ -761,12 +802,8 @@ export async function runCli(argv: string[]): Promise<void> {
                 }
                 // Ctrl+W — delete word backward
                 if (ch === "\u0017") {
-                  const before = value.slice(0, cursorPos);
-                  const trimmed = before.replace(/\s+$/, "");
-                  const wordStart = Math.max(0, trimmed.lastIndexOf(" ") + 1);
-                  value = value.slice(0, wordStart) + value.slice(cursorPos);
-                  cursorPos = wordStart;
-                  dirty = true;
+                  const r = deleteWordBefore(value, cursorPos);
+                  if (r.value !== value) { value = r.value; cursorPos = r.cursorPos; dirty = true; }
                   continue;
                 }
                 // Enter — submit
@@ -790,8 +827,22 @@ export async function runCli(argv: string[]): Promise<void> {
                   continue;
                 }
 
+                // Tab — complete slash commands / arguments. A pasted tab (part
+                // of a larger chunk) is inserted literally so code paste survives.
+                if (ch === "\t") {
+                  if (input.length > 1) { insertAt("\t"); dirty = true; continue; }
+                  const plan = planCompletion(value, cursorPos, buildCompletionContext(), completionCycle);
+                  if (plan) {
+                    value = plan.value;
+                    cursorPos = plan.cursorPos;
+                    completionCycle = plan.cycle;
+                    dirty = true;
+                  }
+                  continue;
+                }
+
                 const code = ch.codePointAt(0) ?? 0;
-                if (ch === "\t" || code >= 0x20) {
+                if (code >= 0x20) {
                   insertAt(ch);
                   dirty = true;
                 }
@@ -1110,7 +1161,7 @@ export async function runCli(argv: string[]): Promise<void> {
             "Interactive chat ready. Ask anything, or run slash commands below.",
           ),
           tui.panel("Quick Commands", [
-            "Enter send | Alt+Enter/Ctrl+J newline | ↑/↓ recall history",
+            "Enter send | Alt+Enter/Ctrl+J newline | ↑/↓ history | Tab complete",
             "/help",
             "/provider — arrow-key picker (or /provider [target] [provider])",
             "/model — arrow-key picker (or /model [target] [model])",
