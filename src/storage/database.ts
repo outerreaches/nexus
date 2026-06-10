@@ -983,6 +983,26 @@ export async function openDatabase(dbPath: string): Promise<NexusDatabase> {
     CREATE INDEX IF NOT EXISTS idx_secret_access_events_created ON secret_access_events(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_secret_access_events_trace ON secret_access_events(trace_id, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS tool_gate_events (
+      id TEXT PRIMARY KEY,
+      tool_name TEXT NOT NULL,
+      decision TEXT NOT NULL, -- allow | ask | deny
+      source TEXT NOT NULL,   -- hard_deny | config | builtin_default | fallback
+      rule_id TEXT NOT NULL,
+      reason TEXT,
+      enforced INTEGER NOT NULL DEFAULT 0, -- 1 when the call was blocked
+      args_hash TEXT NOT NULL,
+      args_preview TEXT,
+      agent_id TEXT,
+      session_id TEXT,
+      run_id TEXT,
+      channel TEXT,
+      approval_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_gate_events_created ON tool_gate_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tool_gate_events_tool ON tool_gate_events(tool_name, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS secret_leases (
       id TEXT PRIMARY KEY,
       provider_profile_id TEXT REFERENCES secret_provider_profiles(id) ON DELETE SET NULL,

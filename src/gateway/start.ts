@@ -461,6 +461,7 @@ export async function startGateway(
     allowShellExec,
     allowCodeEdit,
     allowCodeWrite,
+    toolGate: config.permissions.gate,
     requestRestart: (reason: string, delayMs: number = 2500) => {
       requestRestartImpl(reason, delayMs);
     },

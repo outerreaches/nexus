@@ -1,4 +1,6 @@
 import type { Tool, ToolContext } from "./tools.js";
+import { evaluateToolGate, verdictBlocksExecution } from "./tool-gate.js";
+import { appendToolGateEvent, hashToolGateArgs } from "../storage/tool-gate-events.js";
 import type { ChatMessage, ChatUserContent } from "./types.js";
 import { OpenAICompatClient, type LLMClient, type LLMUsage } from "../llm/openai-compat.js";
 import type { LlmCircuitBreaker } from "../llm/circuit-breaker.js";
@@ -1690,6 +1692,69 @@ export class AgentRunner {
           continue;
         }
         toolCallsPerName.set(call.name, usedForTool + 1);
+
+        // Tool gate (internal-doc): policy verdict before any dispatch,
+        // covering both the local and node-routed execution branches below.
+        const gateVerdict = evaluateToolGate({
+          toolName: call.name,
+          args,
+          context: {
+            agentId: this.deps.toolContext.request?.agentId,
+            preset: this.deps.toolContext.request?.preset,
+            channel: this.deps.toolContext.request?.channel,
+          },
+          config: this.deps.toolContext.toolGate,
+        });
+        const gateBlocks = verdictBlocksExecution(gateVerdict);
+        if (gateVerdict.decision !== "allow" || gateVerdict.source !== "fallback") {
+          // Audit every non-trivial verdict (allow-by-fallback is the
+          // overwhelmingly common case and would only add noise).
+          const gateDb = this.deps.toolContext.db as NexusDatabase | undefined;
+          if (gateDb) {
+            try {
+              appendToolGateEvent(gateDb, {
+                verdict: gateVerdict,
+                toolName: call.name,
+                enforced: gateBlocks,
+                argsHash: hashToolGateArgs(args),
+                argsPreview: safeJson(redactForLog(args)),
+                agentId: this.deps.toolContext.request?.agentId ?? null,
+                sessionId: this.deps.toolContext.request?.sessionId ?? null,
+                runId: this.deps.toolContext.request?.runId ?? null,
+                channel: this.deps.toolContext.request?.channel ?? null,
+                nowMs: Date.now(),
+              });
+            } catch (err) {
+              this.deps.onLog?.(
+                `tool_gate audit write failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        }
+        if (gateBlocks) {
+          const gateResult =
+            `ERROR: blocked by tool gate (rule=${gateVerdict.ruleId}): ${gateVerdict.reason}. ` +
+            (gateVerdict.decision === "ask"
+              ? "This call requires operator approval, which is not available in this run. " +
+                "Ask the operator to run it manually or to adjust permissions.gate in nexus.json."
+              : "Do not retry this call; choose a different approach.");
+          this.deps.onLog?.(
+            `tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))} ` +
+            `blocked_by_gate rule=${gateVerdict.ruleId} decision=${gateVerdict.decision}`,
+          );
+          const abort = handleToolResult(call, args, gateResult, i);
+          if (abort) {
+            return abort;
+          }
+          continue;
+        }
+        if (gateVerdict.decision === "ask") {
+          // Audit-only in Phase 1 (builtin-default ask): allow but log.
+          this.deps.onLog?.(
+            `tool_gate would_ask name=${call.name} rule=${gateVerdict.ruleId} (audit-only, not enforced)`,
+          );
+        }
+
         this.deps.onLog?.(`tool_call name=${call.name} id=${call.id} args=${safeJson(redactForLog(args))}`);
         this.deps.onToolStart?.(call.name, toolCallPreview(call.name, args));
         let result: string;

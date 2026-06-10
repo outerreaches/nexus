@@ -107,6 +107,53 @@ const MaintenanceSchema = z
   })
   .default({});
 
+const GateActionSchema = z.enum(["allow", "ask", "deny"]);
+
+const GateMatcherSchema = z
+  .object({
+    arg: z.string().min(1).max(200),
+    prefix: z.array(z.string().min(1)).optional(),
+    equals: z.array(z.string()).optional(),
+    regex: z
+      .string()
+      .min(1)
+      .max(500)
+      .superRefine((value, ctx) => {
+        try {
+          new RegExp(value);
+        } catch {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `invalid regex: ${value}` });
+        }
+      })
+      .optional(),
+  })
+  .refine((m) => Boolean(m.prefix?.length || m.equals?.length || m.regex), {
+    message: "matcher needs at least one of prefix/equals/regex",
+  });
+
+const GateRuleSchema = z.object({
+  id: z.string().min(1).max(100),
+  tools: z.array(z.string().min(1)).min(1),
+  match: z.array(GateMatcherSchema).optional(),
+  agents: z.array(z.string().min(1)).optional(),
+  presets: z.array(z.string().min(1)).optional(),
+  channels: z.array(z.string().min(1)).optional(),
+  unattended: z.boolean().optional(),
+  action: GateActionSchema,
+});
+
+/** Tool gate (see internal-doc). `default` is the fallback when no rule
+ *  or built-in default matches; `unattended` controls how `ask` resolves for
+ *  runs without a live human (deny now, queue once the approval flow ships —
+ *  pre-approval is an allow rule scoped `unattended: true`). */
+const ToolGateSchema = z
+  .object({
+    default: GateActionSchema.default("allow"),
+    unattended: z.enum(["deny", "queue"]).default("deny"),
+    rules: z.array(GateRuleSchema).default([]),
+  })
+  .default({});
+
 const RuntimeProfileSchema = z.enum([
   "standard",
   "primary",
@@ -287,6 +334,7 @@ export const ConfigSchema = z.object({
       allowShellExec: z.boolean().default(false),
       allowCodeEdit: z.boolean().default(true),
       allowCodeWrite: z.boolean().default(false),
+      gate: ToolGateSchema,
     })
     .default({}),
   limits: z
@@ -319,6 +367,7 @@ export const ConfigSchema = z.object({
 });
 
 export type NexusConfig = z.infer<typeof ConfigSchema>;
+export type ToolGateConfigFromSchema = z.infer<typeof ToolGateSchema>;
 export type LlmToolRouting = z.infer<typeof LlmToolRoutingSchema>;
 export type LlmToolRouteTarget = z.infer<typeof LlmToolRouteTargetSchema>;
 export type SkillsConfig = z.infer<typeof SkillsSchema>;
