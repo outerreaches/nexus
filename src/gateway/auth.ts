@@ -17,6 +17,11 @@ const DEFAULT_SESSION_COOKIE = "nexus_dashboard_session";
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_SESSION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_CSRF_BODY_BYTES = 64 * 1024;
+const LOGIN_FAILURE_THRESHOLD = 5;
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_BACKOFF_BASE_MS = 30 * 1000;
+const LOGIN_BACKOFF_MAX_MS = 15 * 60 * 1000;
+const LOGIN_LIMITER_MAX_ENTRIES = 10_000;
 
 type GatewayAuthMode = "api_key" | "session";
 
@@ -47,10 +52,108 @@ export function getGatewayRequestAuth(c: Context): GatewayRequestAuth | null {
   return auth ?? null;
 }
 
+type LoginLimiterEntry = {
+  failures: number;
+  firstFailureAt: number;
+  blockedUntil: number;
+};
+
+/** In-memory failed-login limiter keyed by client identity. After
+ *  LOGIN_FAILURE_THRESHOLD failures inside the window, each further attempt is
+ *  blocked with exponential backoff. Successful login clears the entry. */
+export class LoginRateLimiter {
+  private entries = new Map<string, LoginLimiterEntry>();
+
+  /** Returns remaining block ms when the key is currently blocked, else 0. */
+  blockedForMs(key: string, nowMs: number): number {
+    const entry = this.entries.get(key);
+    if (!entry) return 0;
+    if (nowMs - entry.firstFailureAt > LOGIN_FAILURE_WINDOW_MS && nowMs >= entry.blockedUntil) {
+      this.entries.delete(key);
+      return 0;
+    }
+    return Math.max(0, entry.blockedUntil - nowMs);
+  }
+
+  recordFailure(key: string, nowMs: number): void {
+    const entry = this.entries.get(key);
+    if (!entry || (nowMs - entry.firstFailureAt > LOGIN_FAILURE_WINDOW_MS && nowMs >= entry.blockedUntil)) {
+      this.entries.set(key, { failures: 1, firstFailureAt: nowMs, blockedUntil: 0 });
+      this.pruneIfNeeded(nowMs);
+      return;
+    }
+    entry.failures += 1;
+    if (entry.failures >= LOGIN_FAILURE_THRESHOLD) {
+      const excess = entry.failures - LOGIN_FAILURE_THRESHOLD;
+      const backoff = Math.min(LOGIN_BACKOFF_MAX_MS, LOGIN_BACKOFF_BASE_MS * 2 ** excess);
+      entry.blockedUntil = nowMs + backoff;
+    }
+  }
+
+  recordSuccess(key: string): void {
+    this.entries.delete(key);
+  }
+
+  private pruneIfNeeded(nowMs: number): void {
+    if (this.entries.size <= LOGIN_LIMITER_MAX_ENTRIES) return;
+    for (const [key, entry] of this.entries) {
+      if (nowMs - entry.firstFailureAt > LOGIN_FAILURE_WINDOW_MS && nowMs >= entry.blockedUntil) {
+        this.entries.delete(key);
+      }
+    }
+    // Still over the cap (active attack from many keys): drop oldest entries.
+    if (this.entries.size > LOGIN_LIMITER_MAX_ENTRIES) {
+      const overflow = this.entries.size - LOGIN_LIMITER_MAX_ENTRIES;
+      let dropped = 0;
+      for (const key of this.entries.keys()) {
+        if (dropped >= overflow) break;
+        this.entries.delete(key);
+        dropped += 1;
+      }
+    }
+  }
+}
+
+function loginLimiterKey(c: Context): string {
+  const forwarded = (c.req.header("x-forwarded-for") ?? "").split(",")[0]?.trim();
+  if (forwarded) return forwarded;
+  const realIp = (c.req.header("x-real-ip") ?? "").trim();
+  if (realIp) return realIp;
+  return "local";
+}
+
 export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled: boolean } {
   const settings = resolveGatewayHttpAuthSettings();
   if (!settings.enabled) {
-    deps.log("WARNING: HTTP auth disabled - missing required credentials (set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD)");
+    if (envBool("NEXUS_HTTP_AUTH_ALLOW_INSECURE") === true) {
+      deps.log(
+        "WARNING: HTTP auth disabled by NEXUS_HTTP_AUTH_ALLOW_INSECURE=1 - /api and /dashboard are unauthenticated",
+      );
+      return { enabled: false };
+    }
+    deps.log(
+      "ERROR: HTTP auth credentials missing (set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD); " +
+      "refusing requests to protected routes. Set NEXUS_HTTP_AUTH_ALLOW_INSECURE=1 to bypass (dev only).",
+    );
+    const lockdown: MiddlewareHandler = async (c, next) => {
+      const path = requestPath(c);
+      if (isDashboardPath(path) || isApiPath(path) || isLoginPath(path) || path.startsWith("/auth/")) {
+        // /api/mode and federation inbox endpoints stay reachable: they are
+        // public by design and required by HA tooling even without auth.
+        // Login routes are excluded — they are not registered in this mode,
+        // and a 503 with guidance beats a bare 404.
+        if (isPublicPath(path) && !isLoginPath(path) && path !== "/auth/login") {
+          await next();
+          return;
+        }
+        return c.json(
+          { error: "http auth is not configured; set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD" },
+          503,
+        );
+      }
+      await next();
+    };
+    app.use("*", lockdown);
     return { enabled: false };
   }
 
@@ -127,8 +230,23 @@ export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled
     return c.html(html);
   });
 
+  const loginLimiter = new LoginRateLimiter();
+
   app.post("/auth/login", async (c) => {
     if (!deps.db) return c.text("database is required for dashboard sessions", 503);
+    const limiterKey = loginLimiterKey(c);
+    const blockedMs = loginLimiter.blockedForMs(limiterKey, Date.now());
+    if (blockedMs > 0) {
+      const retrySeconds = Math.ceil(blockedMs / 1000);
+      deps.log(`http/auth: login throttled key=${limiterKey} retry_in=${retrySeconds}s`);
+      c.header("retry-after", String(retrySeconds));
+      const html = renderLoginPage({
+        nextPath: "/dashboard",
+        username: settings.dashboardUsername,
+        errorMessage: `Too many failed attempts. Try again in ${retrySeconds}s.`,
+      });
+      return c.html(html, 429);
+    }
     const body = await c.req.parseBody();
     const username = String(body.username ?? "").trim();
     const password = String(body.password ?? "");
@@ -138,6 +256,7 @@ export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled
       ? safeTokenEquals(password, settings.dashboardPassword)
       : false;
     if (!validUser || !validPassword) {
+      loginLimiter.recordFailure(limiterKey, Date.now());
       const html = renderLoginPage({
         nextPath: nextPath || "/dashboard",
         username: settings.dashboardUsername,
@@ -145,6 +264,7 @@ export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled
       });
       return c.html(html, 401);
     }
+    loginLimiter.recordSuccess(limiterKey);
 
     const nowMs = Date.now();
     maybePurgeSessions(nowMs);
@@ -331,8 +451,8 @@ function safeTokenEquals(a: string, b: string): boolean {
 async function readCsrfToken(c: Context): Promise<string | null> {
   const header = readHeaderToken(c.req.header("x-csrf-token"));
   if (header) return header;
-  const query = readHeaderToken(c.req.query(CSRF_FIELD_NAME));
-  if (query) return query;
+  // Note: query-param tokens are intentionally not accepted — they leak into
+  // proxy/access logs and browser history.
   const lengthRaw = c.req.header("content-length");
   if (lengthRaw) {
     const contentLength = Number(lengthRaw);

@@ -9,7 +9,7 @@ import type { ModelRoutingMode } from "../llm/model-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
-import { registerGatewayAuth } from "./auth.js";
+import { getGatewayRequestAuth, registerGatewayAuth } from "./auth.js";
 
 export type GatewayHttpDeps = {
   port: number;
@@ -62,12 +62,14 @@ export async function startHttpServer(
   deps: GatewayHttpDeps,
 ): Promise<{ stop: () => Promise<void>; listen: () => ReturnType<typeof serve>; app: Hono }> {
   const app = new Hono();
-  // Surface unhandled route exceptions in both the host log and the response
-  // body. Hono's default 500 is a bare "Internal Server Error" with no
-  // detail, which makes operator diagnosis impossible without container log
-  // access. The dashboard is operator-only, so leaking message + truncated
-  // stack frames into the response is an acceptable tradeoff for being able
-  // to read the error directly in the browser.
+  // Surface unhandled route exceptions in the host log, and — for
+  // authenticated requests only — in the response body. Hono's default 500 is
+  // a bare "Internal Server Error" with no detail, which makes operator
+  // diagnosis impossible without container log access. The dashboard is
+  // operator-only, so leaking message + truncated stack frames to an
+  // authenticated session is an acceptable tradeoff. Unauthenticated callers
+  // (public paths, or auth disabled) get a generic 500 to avoid disclosing
+  // internals.
   app.onError((err, c) => {
     const message = err instanceof Error ? err.message : String(err);
     const stack = err instanceof Error && err.stack ? err.stack : "";
@@ -77,6 +79,9 @@ export async function startHttpServer(
       // Keep the host log compact; full stack lines first 8.
       const stackLines = stack.split("\n").slice(0, 8).join("\n");
       deps.log(`http_error_stack path=${path}\n${stackLines}`);
+    }
+    if (!getGatewayRequestAuth(c)) {
+      return c.text("Internal Server Error", 500);
     }
     const body = [
       `Error: ${message}`,

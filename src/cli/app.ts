@@ -616,13 +616,10 @@ export async function runCli(argv: string[]): Promise<void> {
       // is preserved so an accidental ↑ never loses unsent text (↓ restores it).
       const inputHistory = new InputHistory();
 
-      // Slash commands recognised in the terminal, used for Tab completion. Kept
-      // in sync with renderHelpText("terminal") / the Quick Commands panel.
-      const SLASH_COMMANDS = [
-        "/help", "/model", "/provider", "/presets", "/tools", "/nodes", "/jobs",
-        "/intakes", "/processes", "/mcp", "/federation", "/blackboard", "/status",
-        "/sethome", "/unsethome", "/theme", "/stop", "/stopall", "/codex", "/exit", "/quit",
-      ];
+      // Slash commands recognised in the terminal, used for Tab completion.
+      // Derived from the shared command catalog so completion and /help can't drift.
+      const { listSlashCommands } = await import("../control/help-command-handler.js");
+      const SLASH_COMMANDS = listSlashCommands("terminal");
       // Rebuilt per Tab press since presets/providers can change mid-session.
       const buildCompletionContext = (): CompletionContext => ({
         commands: SLASH_COMMANDS,

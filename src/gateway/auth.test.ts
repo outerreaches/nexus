@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { startHttpServer, type GatewayHttpDeps } from "./http.js";
+import { LoginRateLimiter } from "./auth.js";
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => Promise<void> | void): Promise<void> | void {
   const previous = new Map<string, string | undefined>();
@@ -98,6 +99,72 @@ function extractCsrfToken(html: string): string | null {
   const match = html.match(/name="csrfToken" value="([^"]+)"/);
   return match?.[1] ?? null;
 }
+
+test("gateway HTTP auth fails closed when credentials are missing", async () => {
+  await withEnv(
+    {
+      NEXUS_HTTP_API_KEY: undefined,
+      NEXUS_DASHBOARD_PASSWORD: undefined,
+      NEXUS_HTTP_AUTH_ALLOW_INSECURE: undefined,
+    },
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nexus-auth-lockdown-"));
+      const http = await startHttpServer({
+        port: 0,
+        stateDir: dir,
+        getStatus: () => ({ mode: "active" }),
+        log: () => {},
+      });
+      try {
+        const api = await http.app.request("http://localhost/api/federation/status");
+        assert.equal(api.status, 503);
+
+        const dashboard = await http.app.request("http://localhost/dashboard");
+        assert.equal(dashboard.status, 503);
+
+        const login = await http.app.request("http://localhost/login");
+        assert.equal(login.status, 503);
+
+        // Health and HA control probes must stay reachable for rollout tooling.
+        const mode = await http.app.request("http://localhost/api/mode");
+        assert.notEqual(mode.status, 503);
+        const live = await http.app.request("http://localhost/health/live");
+        assert.notEqual(live.status, 503);
+      } finally {
+        await http.stop();
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+test("login rate limiter blocks after repeated failures and resets on success", () => {
+  const limiter = new LoginRateLimiter();
+  const t0 = 1_000_000;
+
+  // Below the threshold nothing is blocked.
+  for (let i = 0; i < 4; i += 1) {
+    assert.equal(limiter.blockedForMs("1.2.3.4", t0 + i), 0);
+    limiter.recordFailure("1.2.3.4", t0 + i);
+  }
+  assert.equal(limiter.blockedForMs("1.2.3.4", t0 + 10), 0);
+
+  // Fifth failure trips the block.
+  limiter.recordFailure("1.2.3.4", t0 + 10);
+  assert.ok(limiter.blockedForMs("1.2.3.4", t0 + 11) > 0);
+
+  // Other keys are unaffected.
+  assert.equal(limiter.blockedForMs("5.6.7.8", t0 + 11), 0);
+
+  // Block expires after the backoff window (base 30s for the first block).
+  assert.equal(limiter.blockedForMs("1.2.3.4", t0 + 10 + 30_001), 0);
+
+  // Success clears the entry entirely.
+  limiter.recordFailure("9.9.9.9", t0);
+  limiter.recordSuccess("9.9.9.9");
+  for (let i = 0; i < 4; i += 1) limiter.recordFailure("9.9.9.9", t0 + i);
+  assert.equal(limiter.blockedForMs("9.9.9.9", t0 + 5), 0);
+});
 
 test("gateway HTTP auth enforces API key, dashboard session login, and CSRF", async () => {
   await withEnv(

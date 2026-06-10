@@ -172,6 +172,50 @@ async function moveAside(sourcePath: string, suffix: string): Promise<string> {
   return targetPath;
 }
 
+const DEFAULT_NOTIFIED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_DEAD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Deletes processed artifacts past their retention window so the
+ *  deploy-completions directory does not grow without bound. */
+async function pruneProcessedArtifacts(params: {
+  dir: string;
+  notifiedRetentionMs: number;
+  deadRetentionMs: number;
+  log: (msg: string) => void;
+}): Promise<number> {
+  let names: string[];
+  try {
+    names = await fs.readdir(params.dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+    throw err;
+  }
+  const nowMs = Date.now();
+  let pruned = 0;
+  for (const name of names) {
+    const retentionMs = name.endsWith(".notified")
+      ? params.notifiedRetentionMs
+      : name.endsWith(".dead")
+        ? params.deadRetentionMs
+        : null;
+    if (retentionMs === null) continue;
+    const fullPath = path.join(params.dir, name);
+    try {
+      const stats = await fs.stat(fullPath);
+      if (nowMs - stats.mtimeMs <= retentionMs) continue;
+      await fs.unlink(fullPath);
+      pruned += 1;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+      const message = err instanceof Error ? err.message : String(err);
+      params.log(`deploy_completion_worker: prune_failed path=${name} err=${message}`);
+    }
+  }
+  if (pruned > 0) params.log(`deploy_completion_worker: pruned=${pruned}`);
+  return pruned;
+}
+
 async function enqueueCompletionReport(db: NexusDatabase, artifact: DeployCompletionArtifact): Promise<void> {
   const targetAgentId = artifact.request?.homeAgentId ?? artifact.request?.agentId ?? null;
   if (!targetAgentId) throw new Error("missing_target_agent");
@@ -213,10 +257,13 @@ export function startDeployCompletionWorker(params: {
 
   const tickIntervalMs = clamp(envInt("NEXUS_DEPLOY_COMPLETION_TICK_MS") ?? 10_000, 1_000, 120_000);
   const maxPerTick = clamp(envInt("NEXUS_DEPLOY_COMPLETION_MAX_PER_TICK") ?? 12, 1, 100);
+  const notifiedRetentionMs = Math.max(60_000, envInt("NEXUS_DEPLOY_COMPLETION_NOTIFIED_RETENTION_MS") ?? DEFAULT_NOTIFIED_RETENTION_MS);
+  const deadRetentionMs = Math.max(60_000, envInt("NEXUS_DEPLOY_COMPLETION_DEAD_RETENTION_MS") ?? DEFAULT_DEAD_RETENTION_MS);
   const dir = completionsDir(params.stateDir);
   let stopped = false;
   let running = false;
   let lastTickPromise: Promise<unknown> | null = null;
+  let lastPruneAt = 0;
 
   const tick = async (): Promise<number> => {
     if (stopped || running) return 0;
@@ -298,6 +345,21 @@ export function startDeployCompletionWorker(params: {
       }
 
       if (processed > 0) params.log(`deploy_completion_worker: processed=${processed}`);
+
+      if (Date.now() - lastPruneAt >= PRUNE_INTERVAL_MS) {
+        lastPruneAt = Date.now();
+        try {
+          await pruneProcessedArtifacts({
+            dir,
+            notifiedRetentionMs,
+            deadRetentionMs,
+            log: params.log,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          params.log(`deploy_completion_worker: prune_pass_failed err=${message}`);
+        }
+      }
       return processed;
     } finally {
       running = false;

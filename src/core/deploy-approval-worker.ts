@@ -58,7 +58,7 @@ function mapHumanActionRow(row: any): DeployApprovalHumanActionRow {
 const LIST_DEPLOY_APPROVAL_HUMAN_ACTIONS_SQL =
   "SELECT id, status, created_at, responded_at, response_text, metadata_json " +
   "FROM human_actions " +
-  "WHERE kind = 'confirm' AND metadata_json LIKE ? " +
+  "WHERE kind = 'confirm' AND json_extract(metadata_json, '$.kind') = 'ha_deploy_approval' " +
   "ORDER BY COALESCE(responded_at, created_at) ASC, created_at ASC " +
   "LIMIT ?";
 
@@ -67,7 +67,7 @@ function listDeployApprovalHumanActions(
   maxPerTick: number,
 ): DeployApprovalHumanActionRow[] {
   const rows = cachedPrepare(db, LIST_DEPLOY_APPROVAL_HUMAN_ACTIONS_SQL)
-    .all('%"kind":"ha_deploy_approval"%', maxPerTick);
+    .all(maxPerTick);
   return (rows as any[]).map(mapHumanActionRow);
 }
 
