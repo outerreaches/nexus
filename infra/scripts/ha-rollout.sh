@@ -377,6 +377,11 @@ ensure_runtime_dir_ownership() {
   done
 }
 
+check_docker_health() {
+  docker ps > /dev/null 2>&1 || fail "Docker daemon is not running"
+  compose config --quiet > /dev/null 2>&1 || fail "Docker Compose configuration is invalid — check COMPOSE_FILES"
+}
+
 compose_has_service() {
   local service="$1"
   compose config --services 2>/dev/null | grep -Fxq "$service"
@@ -442,7 +447,8 @@ load_state() {
 
 write_state() {
   mkdir -p "$STATE_DIR"
-  cat >"$STATE_FILE" <<EOF
+  local state_tmp="${STATE_FILE}.tmp.$$"
+  cat >"$state_tmp" <<EOF
 LAST_GOOD_SHA=${LAST_GOOD_SHA}
 LAST_DEPLOY_SHA=${LAST_DEPLOY_SHA}
 LAST_STATUS=${LAST_STATUS}
@@ -453,6 +459,7 @@ LAST_EFFECTIVE_SHA=$(sanitize_state_value "${LAST_EFFECTIVE_SHA}")
 LAST_FAILURE_REASON=$(sanitize_state_value "${LAST_FAILURE_REASON}")
 LAST_TRIGGER_ID=$(sanitize_state_value "${LAST_TRIGGER_ID}")
 EOF
+  mv "$state_tmp" "$STATE_FILE"
 }
 
 # Detect if a previous deploy was interrupted (state says "deploying" but no
@@ -1396,6 +1403,7 @@ main() {
       [ -d "$CODE_DIR" ] || fail "missing code dir: $CODE_DIR"
       resolve_control_plane_api_key
       init_compose_files
+      check_docker_health
       ensure_runtime_dir_ownership
       ensure_tls_preflight
       ensure_secrets_preflight

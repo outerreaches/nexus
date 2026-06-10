@@ -68,6 +68,8 @@ function completionRunReportId(artifactId: string): string {
   return `RRDC${digest}`;
 }
 
+const KNOWN_COMPLETION_ACTIONS = new Set(["apply", "rollback"]);
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -245,6 +247,9 @@ export function startDeployCompletionWorker(params: {
         try {
           const raw = await fs.readFile(claimedPath, "utf8");
           const artifact = parseArtifact(raw);
+          if (!KNOWN_COMPLETION_ACTIONS.has(artifact.action)) {
+            params.log(`deploy_completion_worker: unknown_action action=${artifact.action} id=${artifact.id}`);
+          }
           const nowMs = Date.now();
           if (artifact.approvalId) {
             syncDeployRequestForCompletion({

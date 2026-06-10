@@ -176,10 +176,10 @@ function mapCompletionState(params: {
     };
   }
   return {
-    requestStatus: "deployed",
+    requestStatus: "failed",
     terminal: true,
-    candidateStatus: "deployed",
-    candidateLastError: failureReason,
+    candidateStatus: "failed",
+    candidateLastError: failureReason ?? `deploy ended with unrecognised status=${params.status}`,
   };
 }
 

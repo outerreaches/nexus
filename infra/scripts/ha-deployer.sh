@@ -162,7 +162,8 @@ write_failure_state() {
   [ -n "$last_effective_sha" ] || last_effective_sha="${last_good_sha}"
   [ -n "$last_trigger_id" ] || last_trigger_id="${NEXUS_DEPLOY_TRIGGER_ID:-}"
 
-  cat >"$STATE_FILE" <<EOF
+  local state_tmp="${STATE_FILE}.tmp.$$"
+  cat >"$state_tmp" <<EOF
 LAST_GOOD_SHA=${last_good_sha}
 LAST_DEPLOY_SHA=${last_deploy_sha}
 LAST_STATUS=${status}
@@ -173,6 +174,27 @@ LAST_EFFECTIVE_SHA=$(sanitize_state_value "${last_effective_sha}")
 LAST_FAILURE_REASON=$(sanitize_state_value "${reason}")
 LAST_TRIGGER_ID=$(sanitize_state_value "${last_trigger_id}")
 EOF
+  mv "$state_tmp" "$STATE_FILE"
+}
+
+write_finalize_state() {
+  local finalize_status="$1"
+  local deployed_sha="$2"
+  local failure_reason="$3"
+  local trigger_id="$4"
+  local state_tmp="${STATE_FILE}.tmp.$$"
+  cat >"$state_tmp" <<EOF
+LAST_GOOD_SHA=${deployed_sha}
+LAST_DEPLOY_SHA=${deployed_sha}
+LAST_STATUS=${finalize_status}
+LAST_ACTIVE_SLOT=$(sanitize_state_value "$(read_state_value "LAST_ACTIVE_SLOT")")
+LAST_UPDATED_AT=$(date +%s)
+LAST_DEPLOY_PID=
+LAST_EFFECTIVE_SHA=$(sanitize_state_value "${deployed_sha}")
+LAST_FAILURE_REASON=$(sanitize_state_value "${failure_reason}")
+LAST_TRIGGER_ID=$(sanitize_state_value "${trigger_id}")
+EOF
+  mv "$state_tmp" "$STATE_FILE"
 }
 
 write_completion_artifact() {
@@ -413,6 +435,10 @@ process_trigger() {
       sleep "$POLL_INTERVAL"
       waited=$((waited + POLL_INTERVAL))
     done
+    # One final check: ack may have arrived during the last sleep interval
+    if [ "$acked" -eq 0 ] && [ -f "$ack_file" ]; then
+      acked=1
+    fi
     rm -f "$ack_file" "$FINALIZE_PENDING"
 
     if [ "$acked" -eq 1 ]; then
@@ -438,17 +464,7 @@ process_trigger() {
         finalize_status="finalized_without_ack"
         finalize_reason="$ack_timeout_reason"
       fi
-      cat >"$STATE_FILE" <<EOF
-LAST_GOOD_SHA=${deployed_sha}
-LAST_DEPLOY_SHA=${deployed_sha}
-LAST_STATUS=${finalize_status}
-LAST_ACTIVE_SLOT=$(sanitize_state_value "$(read_state_value "LAST_ACTIVE_SLOT")")
-LAST_UPDATED_AT=$(date +%s)
-LAST_DEPLOY_PID=
-LAST_EFFECTIVE_SHA=$(sanitize_state_value "${deployed_sha}")
-LAST_FAILURE_REASON=$(sanitize_state_value "${finalize_reason}")
-LAST_TRIGGER_ID=$(sanitize_state_value "${trigger_id}")
-EOF
+      write_finalize_state "$finalize_status" "$deployed_sha" "$finalize_reason" "$trigger_id"
       write_completion_artifact \
         "$action" \
         "$finalize_status" \
@@ -467,6 +483,7 @@ EOF
         "$finalize_reason"
       log "old primary rebuilt successfully — both containers up to date"
     else
+      tail -n 5 "$finalize_log" 2>/dev/null | while IFS= read -r _line; do warn "finalize log: ${_line}"; done
       failure_reason="$(extract_last_nonempty_line "$finalize_log")"
       [ -n "$failure_reason" ] || failure_reason="finalize failed rebuilding old primary"
       finalize_status="finalize_failed"
@@ -474,17 +491,7 @@ EOF
         finalize_status="finalize_failed_without_ack"
         failure_reason="${failure_reason}; ${ack_timeout_reason}"
       fi
-      cat >"$STATE_FILE" <<EOF
-LAST_GOOD_SHA=${deployed_sha}
-LAST_DEPLOY_SHA=${deployed_sha}
-LAST_STATUS=${finalize_status}
-LAST_ACTIVE_SLOT=$(sanitize_state_value "$(read_state_value "LAST_ACTIVE_SLOT")")
-LAST_UPDATED_AT=$(date +%s)
-LAST_DEPLOY_PID=
-LAST_EFFECTIVE_SHA=$(sanitize_state_value "${deployed_sha}")
-LAST_FAILURE_REASON=$(sanitize_state_value "${failure_reason}")
-LAST_TRIGGER_ID=$(sanitize_state_value "${trigger_id}")
-EOF
+      write_finalize_state "$finalize_status" "$deployed_sha" "$failure_reason" "$trigger_id"
       write_completion_artifact \
         "$action" \
         "$finalize_status" \
@@ -508,6 +515,7 @@ EOF
     apply_status=$?
     state_after_updated="$(read_state_value "LAST_UPDATED_AT")"
     state_after_status="$(read_state_value "LAST_STATUS")"
+    tail -n 5 "$rollout_log" 2>/dev/null | while IFS= read -r _line; do warn "rollout log: ${_line}"; done
     failure_reason="$(extract_last_nonempty_line "$rollout_log")"
     if [ -z "$failure_reason" ]; then
       if [ "$action" = "rollback" ]; then
