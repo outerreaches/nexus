@@ -10,17 +10,16 @@ import { getSecret } from "../secrets/resolve-env.js";
 import type { AgentService } from "../core/agent-service.js";
 import { Semaphore } from "../core/semaphore.js";
 import type { ChatUserContentPart } from "../core/types.js";
-import {
-  formatDeployApprovalFulfillmentMessage,
-  isDeployApprovalMetadata,
-  parseMetadataJson,
-  syncCandidateForDeployApproval,
-} from "../core/deploy-approval.js";
-import { syncDeployRequestForHumanAction } from "../core/deploy-requests.js";
 import type { NexusDatabase } from "../storage/database.js";
 import { getOrCreateSessionId, setHomeSession, clearHomeSession } from "../storage/sessions.js";
 import { createPairingRequest, isTelegramUserAllowed } from "./telegram-store.js";
-import { fulfillHumanAction, getHumanAction } from "../storage/human-actions.js";
+import {
+  decodeQuickResponseCallback,
+  encodeQuickResponseCallback,
+  fulfillHumanActionWithSync,
+  listPendingConfirmActionsInText,
+  quickResponsesForHumanAction,
+} from "../control/human-action-responses.js";
 import {
   detectMimeType,
   extensionFromMime,
@@ -159,10 +158,14 @@ function splitTelegramMessage(text: string, maxLen: number = 3900): string[] {
   return chunks.length === 0 ? [""] : chunks;
 }
 
-function resolveMessageThreadId(ctx: Context): number | undefined {
-  const msg = ctx.msg;
+function resolveTelegramMessageThreadId(message: unknown): number | undefined {
+  const msg = message as { is_topic_message?: unknown; message_thread_id?: unknown } | null | undefined;
   if (!msg || !msg.is_topic_message) return undefined;
   return typeof msg.message_thread_id === "number" ? msg.message_thread_id : undefined;
+}
+
+function resolveMessageThreadId(ctx: Context): number | undefined {
+  return resolveTelegramMessageThreadId(ctx.msg);
 }
 
 const TELEGRAM_STREAM_PREVIEW_MAX_CHARS = 4096;
@@ -1488,11 +1491,43 @@ export async function startTelegramBot(deps: {
     const extracted = await extractTelegramImageAttachments(output);
     const chunks = splitTelegramMessage(extracted.text);
     deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);
-    for (const chunk of chunks) {
+
+    // One-tap quick responses: when the outgoing text references pending
+    // confirm-kind human actions (approvals etc.), attach an inline keyboard
+    // to the final chunk so the user doesn't have to type /act <id> <answer>.
+    let quickResponseKeyboard: { inline_keyboard: { text: string; callback_data: string }[][] } | null = null;
+    try {
+      const pendingActions = listPendingConfirmActionsInText(deps.db, extracted.text, Date.now());
+      if (pendingActions.length > 0) {
+        const keyboardRows: { text: string; callback_data: string }[][] = [];
+        for (const action of pendingActions) {
+          const responses = quickResponsesForHumanAction(action);
+          if (!responses) continue;
+          keyboardRows.push(responses.map((option) => ({
+            text: pendingActions.length > 1 ? `${option.label} ${action.id}` : option.label,
+            callback_data: encodeQuickResponseCallback(action.id, option.response),
+          })));
+        }
+        if (keyboardRows.length > 0) quickResponseKeyboard = { inline_keyboard: keyboardRows };
+      }
+    } catch (err) {
+      deps.log(`telegram: quick-response keyboard skipped: ${toErrorText(err)}`);
+    }
+
+    const lastChunkIndex = (() => {
+      for (let i = chunks.length - 1; i >= 0; i -= 1) {
+        if ((chunks[i] ?? "").trim().length > 0) return i;
+      }
+      return -1;
+    })();
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i] ?? "";
       if (chunk.trim().length === 0) continue;
+      const withKeyboard = i === lastChunkIndex && quickResponseKeyboard !== null;
       await callTelegramApiWithRateLimit(
         () => bot.api.sendMessage(chatId, chunk, {
           ...(typeof options?.messageThreadId === "number" ? { message_thread_id: options.messageThreadId } : {}),
+          ...(withKeyboard ? { reply_markup: quickResponseKeyboard! } : {}),
         }),
         {
           chatId,
@@ -1553,6 +1588,81 @@ export async function startTelegramBot(deps: {
       deps.log(`telegram: chat_action_failed chat_id=${chatId} ${toErrorText(err)}`);
     }
   };
+
+  // One-tap quick responses for pending human actions (inline keyboard
+  // attached by sendOutput). Same auth gate and fulfillment path as /act.
+  bot.on("callback_query:data", async (ctx) => {
+    try {
+      const decoded = decodeQuickResponseCallback(ctx.callbackQuery.data ?? "");
+      if (!decoded) {
+        await ctx.answerCallbackQuery({ text: "Unsupported action." });
+        return;
+      }
+      const userId = parseTelegramNumericId(ctx.from?.id);
+      const chatId = parseTelegramNumericId(ctx.callbackQuery.message?.chat?.id);
+      const messageThreadId = resolveTelegramMessageThreadId(ctx.callbackQuery.message);
+      if (!userId || chatId === null) {
+        await ctx.answerCallbackQuery({ text: "Cannot identify sender." });
+        return;
+      }
+      const allowed = isTelegramUserAllowed(deps.db, {
+        userId,
+        staticAllowFrom: allowFrom,
+        allowAll: allowAllUsers,
+      });
+      if (!allowed) {
+        deps.log(`telegram: callback ignore user_id=${userId} reason=not_allowlisted`);
+        await ctx.answerCallbackQuery({ text: "Not authorized." });
+        return;
+      }
+
+      deps.log(`telegram: callback user_id=${userId} id=${decoded.id} response=${decoded.response}`);
+      const actionRes = await fulfillHumanActionWithSync({
+        db: deps.db,
+        id: decoded.id,
+        responseText: decoded.response,
+        respondedByChannel: "telegram",
+        respondedByKey: String(userId),
+        candidateRootDir: deps.candidateRootDir,
+        nowMs: Date.now(),
+        log: deps.log,
+      });
+      if (!actionRes.ok) {
+        await ctx.answerCallbackQuery({ text: `Unable to record (${actionRes.error ?? "unknown"}).` });
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: `Recorded: ${decoded.response}` });
+      // Drop the keyboard so the choice can't be re-tapped; non-fatal if the
+      // message is too old to edit.
+      try {
+        await ctx.editMessageReplyMarkup();
+      } catch {
+        // ignore
+      }
+      await sendOutput(chatId, `OK: recorded ${decoded.response} for ${decoded.id}.`, { messageThreadId });
+      if (actionRes.deployFulfillmentMessage) {
+        await sendOutput(chatId, actionRes.deployFulfillmentMessage, { messageThreadId });
+        return;
+      }
+      const res = await deps.agent.handleUserMessage({
+        channel: "telegram",
+        channelKey: String(chatId),
+        agentId: tg.agentId,
+        text: `Human action ${decoded.id} is fulfilled.`,
+      });
+      await deps.agent.withTelegramDeliveryAck(
+        { chatId, runId: res.runId, sessionId: res.sessionId, agentId: tg.agentId },
+        () => sendOutput(chatId, res.output, { messageThreadId }),
+      );
+    } catch (err) {
+      deps.log(`telegram: callback error ${toErrorText(err)}`);
+      try {
+        await ctx.answerCallbackQuery({ text: "Something went wrong recording the response." });
+      } catch {
+        // ignore
+      }
+    }
+  });
 
   bot.on("message", async (ctx) => {
     try {
@@ -1709,46 +1819,25 @@ export async function startTelegramBot(deps: {
         }
 
         deps.log(`telegram: act user_id=${userId} id=${id} response_chars=${response.length}`);
-        const actionRes = fulfillHumanAction(deps.db, {
+        const actionRes = await fulfillHumanActionWithSync({
+          db: deps.db,
           id,
           responseText: response,
           respondedByChannel: "telegram",
           respondedByKey: String(userId),
+          candidateRootDir: deps.candidateRootDir,
           nowMs: Date.now(),
+          log: deps.log,
         });
         if (!actionRes.ok) {
           await reply(`ERROR: unable to record action (${actionRes.error ?? "unknown"})`);
           return;
         }
-        const actionRow = getHumanAction(deps.db, { id, nowMs: Date.now() });
-        if (actionRow) {
-          await syncCandidateForDeployApproval({
-            candidateRootDir: deps.candidateRootDir,
-            approvalId: actionRow.id,
-            metadataJson: actionRow.metadataJson,
-            status: actionRow.status,
-            responseText: actionRow.responseText,
-            nowMs: Date.now(),
-            log: deps.log,
-          });
-          syncDeployRequestForHumanAction({
-            db: deps.db,
-            approvalId: actionRow.id,
-            metadataJson: actionRow.metadataJson,
-            status: actionRow.status,
-            responseText: actionRow.responseText,
-            nowMs: Date.now(),
-          });
-        }
 
         await reply(`OK: recorded action ${id}`);
-        const metadata = parseMetadataJson(actionRow?.metadataJson ?? null);
-        if (isDeployApprovalMetadata(metadata)) {
-          const responseText = actionRow?.responseText ?? response;
-          await sendOutput(chatId, formatDeployApprovalFulfillmentMessage({
-            approvalId: id,
-            responseText,
-          }));
+        const actionMessageThreadId = resolveMessageThreadId(ctx);
+        if (actionRes.deployFulfillmentMessage) {
+          await sendOutput(chatId, actionRes.deployFulfillmentMessage, { messageThreadId: actionMessageThreadId });
           return;
         }
         const res = await deps.agent.handleUserMessage({
@@ -1759,7 +1848,7 @@ export async function startTelegramBot(deps: {
         });
         await deps.agent.withTelegramDeliveryAck(
           { chatId, runId: res.runId, sessionId: res.sessionId, agentId: tg.agentId },
-          () => sendOutput(chatId, res.output),
+          () => sendOutput(chatId, res.output, { messageThreadId: actionMessageThreadId }),
         );
         return;
       }

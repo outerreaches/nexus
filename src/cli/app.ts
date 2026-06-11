@@ -1147,6 +1147,51 @@ export async function runCli(argv: string[]): Promise<void> {
         }
       }
 
+      // One-tap approval picker: after a reply, surface any pending
+      // confirm-kind human actions created for this CLI session as an
+      // arrow-key Approve/Deny prompt instead of requiring a typed /act.
+      const promptPendingHumanActions = async (): Promise<void> => {
+        const { listHumanActions } = await import("../storage/human-actions.js");
+        const { fulfillHumanActionWithSync, quickResponsesForHumanAction } = await import(
+          "../control/human-action-responses.js"
+        );
+        const pending = listHumanActions(db, { status: "pending", nowMs: Date.now() })
+          .filter((row) => row.kind === "confirm" && row.channel === "cli");
+        for (const row of pending) {
+          const responses = quickResponsesForHumanAction(row);
+          if (!responses) continue;
+          const choice = await promptListSelection({
+            title: `Pending action ${row.id}: ${row.prompt.slice(0, 120)}`,
+            items: [
+              ...responses.map((option) => ({ value: option.response, label: option.label })),
+              { value: "", label: "Skip (decide later)", hint: `/act ${row.id} <response>` },
+            ],
+            tui,
+          });
+          if (!choice) continue;
+          const result = await fulfillHumanActionWithSync({
+            db,
+            id: row.id,
+            responseText: choice,
+            respondedByChannel: "cli",
+            respondedByKey: "local",
+            candidateRootDir: paths.candidateRootDir,
+            nowMs: Date.now(),
+            log,
+          });
+          if (!result.ok) {
+            renderSystemMessage(`Unable to record ${row.id}: ${result.error ?? "unknown"}`);
+            continue;
+          }
+          renderSystemMessage(`Recorded ${choice} for ${row.id}.`);
+          if (result.deployFulfillmentMessage) {
+            renderSystemMessage(result.deployFulfillmentMessage);
+            continue;
+          }
+          await send(`Human action ${row.id} is fulfilled.`, { interactive: true });
+        }
+      };
+
       try {
         if (typeof message === "string" && message.trim().length > 0) {
           await send(message, { interactive: false });
@@ -1189,6 +1234,11 @@ export async function runCli(argv: string[]): Promise<void> {
           }
           inputHistory.push(line);
           await send(line, { interactive: true });
+          try {
+            await promptPendingHumanActions();
+          } catch (err) {
+            log(`pending-action picker failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       } finally {
         if (colorEnabled) process.stdout.write("\x1b[0m");
