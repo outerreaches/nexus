@@ -31,6 +31,10 @@ const TelegramChannelSchema = z
     webhookPublicUrl: EnvString.optional(),
     webhookPath: z.string().default("/telegram-webhook"),
     webhookSecretToken: EnvString.optional(),
+    // Explicit escape hatch for running webhook mode without a secret token
+    // (e.g. behind a reverse proxy that authenticates the path). Without a
+    // secret, anyone who can reach the HTTP port can forge Telegram updates.
+    webhookAllowInsecure: z.boolean().default(false),
     allowFrom: z.array(z.number().int()).default([]),
     requireMentionInGroups: z.boolean().default(true),
     agentId: z.string().default("main"),

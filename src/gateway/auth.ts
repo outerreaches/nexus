@@ -132,7 +132,7 @@ export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled
       return { enabled: false };
     }
     deps.log(
-      "ERROR: HTTP auth credentials missing (set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD); " +
+      "ERROR: HTTP auth credentials missing (set NEXUS_HTTP_API_KEY and/or NEXUS_DASHBOARD_PASSWORD); " +
       "refusing requests to protected routes. Set NEXUS_HTTP_AUTH_ALLOW_INSECURE=1 to bypass (dev only).",
     );
     const lockdown: MiddlewareHandler = async (c, next) => {
@@ -147,7 +147,7 @@ export function registerGatewayAuth(app: Hono, deps: GatewayHttpDeps): { enabled
           return;
         }
         return c.json(
-          { error: "http auth is not configured; set NEXUS_HTTP_API_KEY and NEXUS_DASHBOARD_PASSWORD" },
+          { error: "http auth is not configured; set NEXUS_HTTP_API_KEY and/or NEXUS_DASHBOARD_PASSWORD" },
           503,
         );
       }
@@ -351,7 +351,9 @@ function resolveGatewayHttpAuthSettings(): GatewayHttpAuthSettings {
   const apiKey = readEnvTrimmed("NEXUS_HTTP_API_KEY");
   const dashboardPassword = readEnvTrimmed("NEXUS_DASHBOARD_PASSWORD");
   const dashboardUsername = readEnvTrimmed("NEXUS_DASHBOARD_USERNAME") ?? "admin";
-  const enabledBySecrets = Boolean(apiKey && dashboardPassword);
+  // Either credential is sufficient to enable auth: an API-key-only deployment
+  // (e.g. HA peer control) must not silently serve /api and /dashboard unauthenticated.
+  const enabledBySecrets = Boolean(apiKey || dashboardPassword);
   const enabled = enabledBySecrets;
   return {
     enabled,

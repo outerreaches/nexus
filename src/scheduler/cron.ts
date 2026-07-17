@@ -170,12 +170,7 @@ export function parseCron(expr: string): CronSchedule {
   };
 }
 
-export function matchesCron(schedule: CronSchedule, tsMs: number, timeZone: string): boolean {
-  const p = getZonedParts(tsMs, timeZone);
-  if (!schedule.minute.has(p.minute)) return false;
-  if (!schedule.hour.has(p.hour)) return false;
-  if (!schedule.month.has(p.month)) return false;
-
+function dayMatchesCron(schedule: CronSchedule, p: ZonedParts): boolean {
   const domMatch = schedule.dayOfMonth.has(p.day);
   const dowMatch = schedule.dayOfWeek.has(p.weekday);
 
@@ -188,6 +183,44 @@ export function matchesCron(schedule: CronSchedule, tsMs: number, timeZone: stri
   return domMatch || dowMatch;
 }
 
+export function matchesCron(schedule: CronSchedule, tsMs: number, timeZone: string): boolean {
+  const p = getZonedParts(tsMs, timeZone);
+  if (!schedule.minute.has(p.minute)) return false;
+  if (!schedule.hour.has(p.hour)) return false;
+  if (!schedule.month.has(p.month)) return false;
+  return dayMatchesCron(schedule, p);
+}
+
+const MINUTE_MS = 60_000;
+
+/**
+ * Convert a zoned wall-clock target to a UTC instant by iterative offset
+ * refinement. Returns null when the wall time never occurs in that zone
+ * (e.g. skipped by a DST transition or a calendar skip like Pacific/Apia
+ * 2011-12-30). For ambiguous wall times (fall-back) one of the two
+ * occurrences is returned deterministically.
+ */
+function zonedWallToUtcMs(
+  target: { year: number; month: number; day: number; hour: number; minute: number },
+  timeZone: string,
+): number | null {
+  const targetWall = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute);
+  let guess = targetWall;
+  for (let i = 0; i < 4; i++) {
+    const p = getZonedParts(guess, timeZone);
+    const observedWall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute);
+    if (observedWall === targetWall) return guess;
+    guess += targetWall - observedWall;
+  }
+  return null;
+}
+
+function nextCalendarDay(year: number, month: number, day: number): { year: number; month: number; day: number } {
+  // Date.UTC normalizes day overflow across month/year boundaries.
+  const dt = new Date(Date.UTC(year, month - 1, day + 1));
+  return { year: dt.getUTCFullYear(), month: dt.getUTCMonth() + 1, day: dt.getUTCDate() };
+}
+
 export function nextCronTimeMs(params: {
   schedule: CronSchedule;
   afterMs: number;
@@ -197,19 +230,65 @@ export function nextCronTimeMs(params: {
 }): number {
   const timeZone = validateTimeZone(params.timeZone);
   const inclusive = Boolean(params.inclusive);
-  const maxLookaheadDays = Math.max(1, Math.min(3660, Math.floor(params.maxLookaheadDays ?? 366)));
+  // Field-wise jumping makes deep lookaheads cheap (day/hour hops instead of
+  // minute-stepping), so the default horizon covers ultra-sparse but valid
+  // schedules — e.g. '0 0 29 2 *' (Feb 29) occurs ~4 years out.
+  const maxLookaheadDays = Math.max(1, Math.min(3660, Math.floor(params.maxLookaheadDays ?? 3660)));
+  const schedule = params.schedule;
+  const sortedHours = [...schedule.hour].sort((a, b) => a - b);
 
-  const minuteMs = 60_000;
   const start = inclusive
-    ? Math.floor(params.afterMs / minuteMs) * minuteMs
-    : Math.floor(params.afterMs / minuteMs) * minuteMs + minuteMs;
+    ? Math.floor(params.afterMs / MINUTE_MS) * MINUTE_MS
+    : Math.floor(params.afterMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+  const deadlineMs = start + maxLookaheadDays * 86_400_000;
 
-  const maxSteps = maxLookaheadDays * 24 * 60 + 5;
   let t = start;
-  for (let i = 0; i < maxSteps; i++) {
-    if (matchesCron(params.schedule, t, timeZone)) return t;
-    t += minuteMs;
+  // Generous bound for pathological inputs (impossible crons hop day-by-day
+  // for the full lookahead); normal schedules resolve in tens of iterations.
+  for (let i = 0; i < 500_000; i++) {
+    if (t > deadlineMs) break;
+    const p = getZonedParts(t, timeZone);
+
+    if (!schedule.month.has(p.month)) {
+      // Nothing in this month can match; jump to the first minute of the next.
+      const y = p.month === 12 ? p.year + 1 : p.year;
+      const m = p.month === 12 ? 1 : p.month + 1;
+      const jump = zonedWallToUtcMs({ year: y, month: m, day: 1, hour: 0, minute: 0 }, timeZone);
+      t = jump ?? t + MINUTE_MS;
+      continue;
+    }
+
+    if (!dayMatchesCron(schedule, p)) {
+      const next = nextCalendarDay(p.year, p.month, p.day);
+      const jump = zonedWallToUtcMs({ ...next, hour: 0, minute: 0 }, timeZone);
+      t = jump ?? t + MINUTE_MS;
+      continue;
+    }
+
+    if (!schedule.hour.has(p.hour)) {
+      const later = sortedHours.find((h) => h > p.hour);
+      if (later !== undefined) {
+        const jump = zonedWallToUtcMs({ year: p.year, month: p.month, day: p.day, hour: later, minute: 0 }, timeZone);
+        t = jump ?? t + MINUTE_MS;
+      } else {
+        // No allowed hour left today; restart tomorrow and let the loop pick
+        // the first allowed hour then.
+        const next = nextCalendarDay(p.year, p.month, p.day);
+        const jump = zonedWallToUtcMs({ ...next, hour: 0, minute: 0 }, timeZone);
+        t = jump ?? t + MINUTE_MS;
+      }
+      continue;
+    }
+
+    if (!schedule.minute.has(p.minute)) {
+      // Within an allowed hour: minute-step (<=60 iterations, and crossing an
+      // hour boundary re-enters the hour check above).
+      t += MINUTE_MS;
+      continue;
+    }
+
+    return t;
   }
-  throw new Error(`No matching cron time found within ${maxLookaheadDays} days for '${params.schedule.expr}'`);
+  throw new Error(`No matching cron time found within ${maxLookaheadDays} days for '${schedule.expr}'`);
 }
 

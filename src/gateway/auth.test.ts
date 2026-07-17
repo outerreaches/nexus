@@ -300,3 +300,86 @@ test("gateway HTTP auth enforces API key, dashboard session login, and CSRF", as
     },
   );
 });
+
+test("gateway HTTP auth stays enabled with only an API key configured", async () => {
+  await withEnv(
+    {
+      NEXUS_HTTP_API_KEY: "api-only-key",
+      NEXUS_DASHBOARD_USERNAME: undefined,
+      NEXUS_DASHBOARD_PASSWORD: undefined,
+      NEXUS_HTTP_AUTH_COOKIE_SECURE: "0",
+    },
+    async () => {
+      await withGatewayApp(async ({ app }) => {
+        const apiWithoutAuth = await app.request("http://localhost/api/federation/status");
+        assert.equal(apiWithoutAuth.status, 401);
+
+        const apiWithKey = await app.request("http://localhost/api/federation/status", {
+          headers: { authorization: "Bearer api-only-key" },
+        });
+        assert.equal(apiWithKey.status, 200);
+
+        // Dashboard must fail closed: no password configured, so no session can be created.
+        const dashboardUnauthed = await app.request("http://localhost/dashboard");
+        assert.equal(dashboardUnauthed.status, 302);
+        assert.match(dashboardUnauthed.headers.get("location") ?? "", /^\/login\?/);
+
+        const loginAttempt = await app.request("http://localhost/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ username: "admin", password: "anything", next: "/dashboard" }),
+        });
+        assert.equal(loginAttempt.status, 401);
+      });
+    },
+  );
+});
+
+test("gateway HTTP auth stays enabled with only a dashboard password configured", async () => {
+  await withEnv(
+    {
+      NEXUS_HTTP_API_KEY: undefined,
+      NEXUS_DASHBOARD_USERNAME: "admin",
+      NEXUS_DASHBOARD_PASSWORD: "dashboard-only-pass",
+      NEXUS_HTTP_AUTH_COOKIE_NAME: "nexus_dashboard_session",
+      NEXUS_HTTP_AUTH_COOKIE_SECURE: "0",
+    },
+    async () => {
+      await withGatewayApp(async ({ app }) => {
+        // No API key configured: bearer/header credentials must not authenticate.
+        const apiWithMadeUpKey = await app.request("http://localhost/api/federation/status", {
+          headers: { authorization: "Bearer made-up-key" },
+        });
+        assert.equal(apiWithMadeUpKey.status, 401);
+
+        const login = await app.request("http://localhost/auth/login", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            username: "admin",
+            password: "dashboard-only-pass",
+            next: "/dashboard",
+          }),
+        });
+        assert.equal(login.status, 303);
+        const sessionCookie = extractSessionCookie(login, "nexus_dashboard_session");
+        assert.ok(sessionCookie);
+
+        const dashboardAuthed = await app.request("http://localhost/dashboard", {
+          headers: { cookie: sessionCookie! },
+        });
+        assert.equal(dashboardAuthed.status, 200);
+
+        const dashboardHtml = await dashboardAuthed.text();
+        const csrfToken = extractCsrfToken(dashboardHtml);
+        assert.ok(csrfToken);
+
+        // Session auth also gates /api (with CSRF for mutations).
+        const apiSession = await app.request("http://localhost/api/federation/status", {
+          headers: { cookie: sessionCookie! },
+        });
+        assert.equal(apiSession.status, 200);
+      });
+    },
+  );
+});

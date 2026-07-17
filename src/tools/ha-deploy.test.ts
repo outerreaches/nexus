@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { ToolContext } from "../core/tools.js";
 import { buildDeployApprovalMetadata } from "../core/deploy-approval.js";
 import { inspectDeployWorktree } from "../core/deploy-policy.js";
-import { createCandidate, loadCandidate } from "../state/candidates.js";
+import { createCandidate, loadCandidate, updateCandidate } from "../state/candidates.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { setHomeSession } from "../storage/sessions.js";
 import { fulfillHumanAction, listHumanActions } from "../storage/human-actions.js";
@@ -618,6 +618,13 @@ test("continueApprovedDeployAfterApproval queues the deploy trigger automaticall
     });
     await writeFile(candidate.repoDir, "src/tools/example.ts", "export const example = 1;\n");
     const changes = inspectDeployWorktree(candidate.repoDir);
+    // The worker-side continuation refuses to re-run slow verification inline;
+    // seed the cached pass the agent-context ha_deploy would have produced.
+    await updateCandidate(candidateRootDir, candidate.candidateId, {
+      verificationStatus: "passed",
+      verificationFingerprint: changes.fingerprint,
+      verifiedAt: nowMs(),
+    });
 
     const metadata = buildDeployApprovalMetadata({
       policy: "approval_required",

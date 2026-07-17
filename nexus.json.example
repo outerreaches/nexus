@@ -130,6 +130,14 @@
       "enabled": true,
       "token": "${TELEGRAM_BOT_TOKEN}",
       "mode": "polling",
+      // Webhook mode (instead of polling) requires ALL of:
+      //   "mode": "webhook",
+      //   "webhookUrl": "https://<public-host>/telegram-webhook",
+      //   "webhookSecretToken": "${TELEGRAM_WEBHOOK_SECRET}",  // REQUIRED — startup refuses without it.
+      // Generate a secret (e.g. `openssl rand -hex 24`), vault it via ha-secretctl.sh,
+      // and map TELEGRAM_WEBHOOK_SECRET in secrets.env like TELEGRAM_BOT_TOKEN above.
+      // Without the secret, anyone who can reach the HTTP port can forge Telegram updates.
+      // "webhookAllowInsecure": true opts out ONLY if a reverse proxy authenticates the path.
       "allowFrom": [],
       "requireMentionInGroups": true,
       "agentId": "main",

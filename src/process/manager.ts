@@ -291,6 +291,10 @@ export class ProcessManager {
       shell: true,
       stdio: "pipe",
       env: process.env,
+      // New process group (POSIX): the sh wrapper leads it, so stop() can signal
+      // the whole tree with a negative pid. Without this, killing the sh orphans
+      // the real command — it keeps running with our stdout/stderr pipes open.
+      detached: process.platform !== "win32",
     });
 
     const info: ManagedProcessInfo = {
@@ -572,25 +576,46 @@ export class ProcessManager {
     if (!rec.child || rec.info.status !== "running") return rec.info;
 
     const stoppedAt = Date.now();
+    const pid = rec.child.pid ?? rec.info.pid;
 
     const signal = params.signal ?? "SIGTERM";
     const killAfterMs = typeof params.killAfterMs === "number" && Number.isFinite(params.killAfterMs) ? params.killAfterMs : 5_000;
 
-    try {
-      rec.child.kill(signal);
-    } catch {
-      // ignore
-    }
+    const signalTree = (sig: NodeJS.Signals): void => {
+      // Spawned detached, the sh wrapper leads its own process group; a negative
+      // pid signals every process it spawned. child.kill() alone would hit only
+      // the sh and orphan the real command.
+      if (pid !== null && pid > 0 && process.platform !== "win32") {
+        try {
+          process.kill(-pid, sig);
+          return;
+        } catch {
+          // group gone or not permitted — fall through to the direct signal
+        }
+      }
+      try {
+        rec.child?.kill(sig);
+      } catch {
+        // ignore
+      }
+    };
+
+    signalTree(signal);
 
     if (killAfterMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, killAfterMs));
       if (rec.child && rec.info.status === "running") {
-        try {
-          rec.child.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
+        signalTree("SIGKILL");
+        // Give the exit event a moment to land before judging the outcome.
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
       }
+    }
+
+    // Mirror the DB-fallback path: refuse to report success while the leader
+    // still lives. A false "stopped" hides the leak — and the orphaned command
+    // keeps our pipe ends open, hanging the parent event loop.
+    if (rec.info.status === "running" && pid !== null && isPidAlive(pid)) {
+      throw new Error(`Unable to stop process ${params.id}: pid ${pid} still appears to be running.`);
     }
 
     // If it hasn't emitted exit yet, mark stopped.

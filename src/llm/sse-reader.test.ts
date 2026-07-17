@@ -87,3 +87,32 @@ test("readSseDataEvents flushes trailing data on stream close without blank line
   }
   assert.deepEqual(collected, ["tail"]);
 });
+
+test("readSseDataEvents emits a final event with no trailing newline", async () => {
+  // Servers that close without a final \n must not lose the terminal event
+  // (for codex-responses this is typically response.completed / usage).
+  const body = 'data: {"a":1}\n\ndata: {"final":true}';
+  const collected: string[] = [];
+  for await (const ev of readSseDataEvents(streamFromString(body, 1024))) {
+    collected.push(ev);
+  }
+  assert.deepEqual(collected, [`{"a":1}`, `{"final":true}`]);
+});
+
+test("readSseDataEvents emits an unterminated final event across small chunks", async () => {
+  const body = 'data: {"final":true}';
+  const collected: string[] = [];
+  for await (const ev of readSseDataEvents(streamFromString(body, 3))) {
+    collected.push(ev);
+  }
+  assert.deepEqual(collected, [`{"final":true}`]);
+});
+
+test("readSseDataEvents handles a multibyte split in the unterminated final line", async () => {
+  const body = 'data: {"msg":"héllo→world"}';
+  const collected: string[] = [];
+  for await (const ev of readSseDataEvents(streamFromString(body, 5))) {
+    collected.push(ev);
+  }
+  assert.deepEqual(collected, ['{"msg":"héllo→world"}']);
+});

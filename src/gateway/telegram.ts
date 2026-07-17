@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
-import { Bot, Context, InputFile } from "grammy";
+import { Bot, Context, GrammyError, InputFile } from "grammy";
 
 
 import type { NexusConfig } from "../state/config.js";
@@ -522,8 +522,8 @@ function normalizeInlineFilePath(line: string): string | null {
   return s;
 }
 
-async function extractTelegramImageAttachments(output: string): Promise<{ text: string; imagePaths: string[] }> {
-  const stateDir = path.resolve(process.env.NEXUS_STATE_DIR ?? "/data/nexus");
+async function extractTelegramImageAttachments(output: string, stateDir: string): Promise<{ text: string; imagePaths: string[] }> {
+  const stateRoot = path.resolve(stateDir);
   const lines = output.split(/\r?\n/);
   const kept: string[] = [];
   const images: string[] = [];
@@ -535,7 +535,7 @@ async function extractTelegramImageAttachments(output: string): Promise<{ text: 
       continue;
     }
     const full = path.resolve(candidate);
-    if (!(full === stateDir || full.startsWith(`${stateDir}${path.sep}`))) {
+    if (!(full === stateRoot || full.startsWith(`${stateRoot}${path.sep}`))) {
       kept.push(line);
       continue;
     }
@@ -1386,7 +1386,10 @@ export async function startTelegramBot(deps: {
     }
     return await sem.withLock(fn);
   };
-  const stateDir = process.env.NEXUS_STATE_DIR ?? "/data/nexus";
+  // Use the gateway-resolved state root, not a re-derived env default:
+  // resolveRuntimePaths honors config.stateDir and ~/.nexus, and a mismatch
+  // here writes inbound attachments where the blackboard allowlist can't see them.
+  const stateDir = path.resolve(deps.stateDir);
   const maxInboundFilesPerMessage = envInt("NEXUS_TELEGRAM_MAX_INBOUND_FILES_PER_MESSAGE", DEFAULT_MAX_INBOUND_FILES_PER_MESSAGE, {
     min: 1,
     max: 20,
@@ -1488,7 +1491,7 @@ export async function startTelegramBot(deps: {
       deps.log(`telegram: send chat_id=${chatId} skipped (empty output)`);
       return;
     }
-    const extracted = await extractTelegramImageAttachments(output);
+    const extracted = await extractTelegramImageAttachments(output, stateDir);
     const chunks = splitTelegramMessage(extracted.text);
     deps.log(`telegram: send chat_id=${chatId} chunks=${chunks.length} images=${extracted.imagePaths.length} chars=${output.length}`);
 
@@ -2050,7 +2053,7 @@ export async function startTelegramBot(deps: {
                 );
               }
 
-              const extracted = await extractTelegramImageAttachments(res.output);
+              const extracted = await extractTelegramImageAttachments(res.output, stateDir);
               const rateLimitedPreviewCanFinalize =
                 previewState.failed
                 && typeof previewState.rateLimitedUntilMs === "number"
@@ -2183,6 +2186,18 @@ export async function startTelegramBot(deps: {
       throw new Error("Telegram webhook mode requires channels.telegram.webhookUrl or channels.telegram.webhookPublicUrl.");
     }
     const secret = tg.webhookSecretToken && !isEnvPlaceholder(tg.webhookSecretToken) ? tg.webhookSecretToken : undefined;
+    if (!secret) {
+      if (!tg.webhookAllowInsecure) {
+        throw new Error(
+          "Telegram webhook mode requires channels.telegram.webhookSecretToken: without it, anyone who can reach " +
+          `${tg.webhookPath} can forge updates from allowlisted users. Set webhookSecretToken, or set ` +
+          "channels.telegram.webhookAllowInsecure=true only if an upstream proxy authenticates this path.",
+        );
+      }
+      deps.log(
+        `WARNING: telegram webhook has no secret token; forged updates are possible unless an upstream proxy authenticates ${tg.webhookPath}`,
+      );
+    }
 
     deps.app.post(tg.webhookPath, async (c) => {
       if (secret) {
@@ -2207,11 +2222,50 @@ export async function startTelegramBot(deps: {
   }
 
   await bot.api.deleteWebhook({ drop_pending_updates: true } as any).catch(() => { });
-  bot.start({ onStart: () => deps.log("telegram: polling") });
+
+  // Middleware errors: log instead of grammy's default handler, which writes to
+  // console and stops polling entirely.
+  bot.catch((err) => {
+    deps.log(`telegram: middleware error: ${toErrorText(err.error ?? err)}`);
+  });
+
+  // bot.start() rejects on fatal polling errors: grammy rethrows 401/409 out of
+  // the poll loop, and an unhandled rejection crashes the gateway. That is
+  // exactly the HA-failover scenario — the old instance's poller is still
+  // tearing down, so Telegram returns 409 to the new poller. Supervise the
+  // loop: 401 is unrecoverable (bad token); anything else retries with backoff
+  // so the failover overlap resolves once the peer's poller dies.
+  const POLL_RESTART_DELAY_MS = 10_000;
+  let pollingStopped = false;
+  const runPolling = async (): Promise<void> => {
+    try {
+      await bot.start({ onStart: () => deps.log("telegram: polling") });
+    } catch (err) {
+      if (pollingStopped) return;
+      const code = err instanceof GrammyError ? err.error_code : undefined;
+      deps.log(`telegram: polling loop exited with error: ${toErrorText(err)}`);
+      if (code === 401) {
+        deps.log(
+          "telegram: FATAL: bot token rejected (401); polling will not restart. Fix the token and restart the gateway.",
+        );
+        return;
+      }
+      deps.log(`telegram: restarting polling in ${POLL_RESTART_DELAY_MS}ms`);
+      const timer = setTimeout(() => {
+        if (!pollingStopped) void runPolling();
+      }, POLL_RESTART_DELAY_MS);
+      if (typeof timer.unref === "function") timer.unref();
+    }
+  };
+  void runPolling();
 
   return {
     stop: async () => {
-      bot.stop();
+      pollingStopped = true;
+      // Await so teardown (deactivate -> db.close -> process exit) does not race
+      // the poller's in-flight getUpdates, and so the HA peer's new poller sees
+      // 409 conflicts for the shortest possible window.
+      await bot.stop();
     },
     sendOutput,
     sendFile,

@@ -83,20 +83,16 @@ export async function* readSseDataEvents(
         currentData = currentData.length > 0 ? `${currentData}\n${payload}` : payload;
       }
     }
-    // Flush trailing decoder state and any final data fragment without a
-    // terminating blank line (some servers do that on close).
-    const trailing = decoder.decode();
-    if (trailing) {
-      lineBuffer += trailing;
-      const lines = lineBuffer.split(/\r?\n/);
-      lineBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.length === 0) continue;
-        if (line.startsWith(":")) continue;
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice("data:".length).trimStart();
-        currentData = currentData.length > 0 ? `${currentData}\n${payload}` : payload;
-      }
+    // Flush any final fragment: trailing decoder bytes plus the last
+    // unterminated line. Some servers close without a final newline; the
+    // terminal event (typically response.completed/usage) must not be lost.
+    const tail = lineBuffer + decoder.decode();
+    for (const line of tail.split(/\r?\n/)) {
+      if (line.length === 0) continue;
+      if (line.startsWith(":")) continue;
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice("data:".length).trimStart();
+      currentData = currentData.length > 0 ? `${currentData}\n${payload}` : payload;
     }
     if (currentData.length > 0) {
       const trimmed = currentData.trim();

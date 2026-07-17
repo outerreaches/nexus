@@ -12,7 +12,6 @@
  */
 
 import type { ChatMessage, ChatUserContent, ReasoningItem, ToolCall } from "../core/types.js";
-import type { Tool } from "../core/tools.js";
 import type { LLMClient, LLMCompleteChatParams, LLMUsage } from "./openai-compat.js";
 import { readSseDataEvents } from "./sse-reader.js";
 

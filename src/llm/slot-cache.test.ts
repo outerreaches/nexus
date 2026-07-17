@@ -243,17 +243,17 @@ test("concurrent acquires for the same key serialize on the slot lock", async ()
   let inFlight = 0;
   let maxConcurrent = 0;
   const stub = stubFetch(() => ({ status: 200, bodyText: "{}" }));
+  const mgr = new SlotCacheManager({ baseUrl: "http://localhost:8083/v1", slotCount: 1 });
+  async function work(key: string) {
+    const lease = await mgr.acquire(key);
+    inFlight += 1;
+    maxConcurrent = Math.max(maxConcurrent, inFlight);
+    // Hold the slot briefly to expose any races.
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight -= 1;
+    lease.release();
+  }
   try {
-    const mgr = new SlotCacheManager({ baseUrl: "http://localhost:8083/v1", slotCount: 1 });
-    async function work(key: string) {
-      const lease = await mgr.acquire(key);
-      inFlight += 1;
-      maxConcurrent = Math.max(maxConcurrent, inFlight);
-      // Hold the slot briefly to expose any races.
-      await new Promise((r) => setTimeout(r, 5));
-      inFlight -= 1;
-      lease.release();
-    }
     await Promise.all([work("A"), work("A"), work("A"), work("A")]);
     assert.equal(maxConcurrent, 1, "single-slot pool must serialize concurrent acquires");
   } finally {

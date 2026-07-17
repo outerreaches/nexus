@@ -120,6 +120,8 @@
       "enabled": true,
       "token": "${TELEGRAM_BOT_TOKEN}",
       "mode": "polling",
+      // Webhook mode requires webhookUrl + webhookSecretToken (startup refuses
+      // without the secret — see nexus.json.example for the full annotated block).
       "allowFrom": [],
       "requireMentionInGroups": true,
       "agentId": "main",

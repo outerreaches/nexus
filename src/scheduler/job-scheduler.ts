@@ -764,13 +764,33 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         if (oneShot) {
           archiveOneShot({ endedAt, runId, outcome: "success", output: res.output });
         } else {
-          const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
-          const nextRunAt = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
+          // A reschedule failure must never touch the successful run record:
+          // keep the run 'success', leave next_run_at null, and let the tick
+          // backfill (or disable a genuinely impossible cron) on the next pass.
+          let nextRunAt: number | null = null;
+          try {
+            const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
+            nextRunAt = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
+          } catch (rescheduleErr) {
+            deps.log(
+              `scheduler: reschedule failed job=${job.id} run=${runId} err=${
+                rescheduleErr instanceof Error ? rescheduleErr.message : String(rescheduleErr)
+              }`,
+            );
+          }
           deps.db.db
             .prepare(
-              "UPDATE jobs SET last_run_at = ?, next_run_at = ?, consecutive_failures = 0, last_failure_at = NULL, updated_at = ? WHERE id = ?",
+              "UPDATE jobs SET last_run_at = ?, consecutive_failures = 0, last_failure_at = NULL, updated_at = ? WHERE id = ?",
             )
-            .run(endedAt, nextRunAt, endedAt, job.id);
+            .run(endedAt, endedAt, job.id);
+          // Reschedule only if nobody touched next_run_at while the run was in
+          // flight: a concurrent job_pause / job_run_now / job_update must win
+          // over this run's stale snapshot.
+          deps.db.db
+            .prepare(
+              "UPDATE jobs SET next_run_at = ? WHERE id = ? AND next_run_at IS ?",
+            )
+            .run(nextRunAt, job.id, job.next_run_at);
 
           insertEvent({
             jobId: job.id,
@@ -799,9 +819,21 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
         return;
       }
       const backoffMs = computeFailureBackoffMs(consecutiveFailures);
-      const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
-      const nextScheduled = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
-      const nextRunAt = Math.max(nextScheduled, endedAt + backoffMs);
+      // Guard like the exception path below: a reschedule failure must not turn
+      // this application-level failure into a scheduler exception.
+      let nextScheduled: number | null = null;
+      let nextRunAt: number | null = null;
+      try {
+        const { schedule, timeZone } = getSchedule(job.cron, job.timezone);
+        nextScheduled = nextCronTimeMs({ schedule, afterMs: endedAt, timeZone });
+        nextRunAt = Math.max(nextScheduled, endedAt + backoffMs);
+      } catch (rescheduleErr) {
+        deps.log(
+          `scheduler: reschedule failed job=${job.id} run=${runId} err=${
+            rescheduleErr instanceof Error ? rescheduleErr.message : String(rescheduleErr)
+          }`,
+        );
+      }
 
       const infraFailure = isInfrastructureFailureOutput(res.output);
       const shouldPause = !infraFailure && consecutiveFailures >= maxConsecutiveFailures;
@@ -814,9 +846,17 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
 
       deps.db.db
         .prepare(
-          "UPDATE jobs SET consecutive_failures = ?, last_failure_at = ?, next_run_at = ?, enabled = ?, updated_at = ? WHERE id = ?",
+          "UPDATE jobs SET consecutive_failures = ?, last_failure_at = ?, updated_at = ? WHERE id = ?",
         )
-        .run(consecutiveFailures, endedAt, shouldPause ? null : nextRunAt, shouldPause ? 0 : job.enabled, endedAt, job.id);
+        .run(consecutiveFailures, endedAt, endedAt, job.id);
+      // Only apply the scheduling decision if next_run_at is untouched since the
+      // run started — never revert an operator's job_pause with the stale
+      // snapshot's enabled=1 (enabled keeps its current value unless pausing).
+      deps.db.db
+        .prepare(
+          "UPDATE jobs SET next_run_at = ?, enabled = CASE WHEN ? THEN 0 ELSE enabled END WHERE id = ? AND next_run_at IS ?",
+        )
+        .run(shouldPause ? null : nextRunAt, shouldPause ? 1 : 0, job.id, job.next_run_at);
 
       insertEvent({
         jobId: job.id,
@@ -911,9 +951,15 @@ export function startJobScheduler(deps: JobSchedulerDeps): { stop: () => void; t
 
       deps.db.db
         .prepare(
-          "UPDATE jobs SET consecutive_failures = ?, last_failure_at = ?, next_run_at = ?, enabled = ?, updated_at = ? WHERE id = ?",
+          "UPDATE jobs SET consecutive_failures = ?, last_failure_at = ?, updated_at = ? WHERE id = ?",
         )
-        .run(consecutiveFailures, endedAt, shouldPause ? null : nextRunAt, shouldPause ? 0 : job.enabled, endedAt, job.id);
+        .run(consecutiveFailures, endedAt, endedAt, job.id);
+      // Same optimistic guard as the application-failure path above.
+      deps.db.db
+        .prepare(
+          "UPDATE jobs SET next_run_at = ?, enabled = CASE WHEN ? THEN 0 ELSE enabled END WHERE id = ? AND next_run_at IS ?",
+        )
+        .run(shouldPause ? null : nextRunAt, shouldPause ? 1 : 0, job.id, job.next_run_at);
 
       insertEvent({
         jobId: job.id,

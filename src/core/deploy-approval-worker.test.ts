@@ -11,7 +11,7 @@ import { startDeployApprovalWorker } from "./deploy-approval-worker.js";
 import { getDeployRequest } from "../storage/deploy-requests.js";
 import { openDatabase, type NexusDatabase } from "../storage/database.js";
 import { createHumanAction, fulfillHumanAction } from "../storage/human-actions.js";
-import { createCandidate, loadCandidate } from "../state/candidates.js";
+import { createCandidate, loadCandidate, updateCandidate } from "../state/candidates.js";
 import { inspectDeployWorktree } from "./deploy-policy.js";
 
 const execFileAsync = promisify(execFile);
@@ -72,7 +72,7 @@ async function withRepoAndDb(
   const stateDir = path.join(root, "state");
   await fs.mkdir(stateDir, { recursive: true });
   const db = await openDatabase(path.join(root, "nexus.db"));
-  let currentNowMs = 1_700_000_000_000;
+  const currentNowMs = 1_700_000_000_000;
   try {
     const repoDir = await createRepo(root);
     await fn({
@@ -98,6 +98,13 @@ test("deploy approval worker backfills fulfilled approvals and queues the deploy
     });
     await writeFile(candidate.repoDir, "src/tools/example.ts", "export const example = 1;\n");
     const changes = inspectDeployWorktree(candidate.repoDir);
+    // The worker-side continuation refuses to re-run slow verification inline;
+    // seed the cached pass the agent-context ha_deploy would have produced.
+    await updateCandidate(candidateRootDir, candidate.candidateId, {
+      verificationStatus: "passed",
+      verificationFingerprint: changes.fingerprint,
+      verifiedAt: nowMs(),
+    });
 
     const approval = createHumanAction(db, {
       nowMs: nowMs(),

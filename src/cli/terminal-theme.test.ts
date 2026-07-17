@@ -56,6 +56,8 @@ test("loadTerminalThemePreference falls back on invalid stored theme", async () 
 test("classic terminal themes use explicit RGB with indexed-color fallback", () => {
   const green = getTerminalTheme("terminal-green");
   const amber = getTerminalTheme("terminal-amber");
+  // eslint-disable-next-line no-control-regex -- intentionally matching ANSI escape sequences
   assert.match(green.prompt, /\x1b\[38;5;\d+m\x1b\[38;2;/);
+  // eslint-disable-next-line no-control-regex -- intentionally matching ANSI escape sequences
   assert.match(amber.prompt, /\x1b\[38;5;\d+m\x1b\[38;2;/);
 });

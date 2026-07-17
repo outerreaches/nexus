@@ -28,12 +28,18 @@ import { buildRunState, type Tool, type ToolContext } from "./tools.js";
 import type { ChatMessage } from "./types.js";
 import type { ParentMessage, WorkerMessage, WorkerConfig } from "./isolated-worker-types.js";
 
-function send(msg: WorkerMessage): void {
-  if (process.send) process.send(msg);
+function send(msg: WorkerMessage): Promise<void> {
+  if (!process.send) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  // Resolve on the flush callback: Node queues large IPC payloads, and a
+  // process.exit() before the queue drains silently drops them (observed loss
+  // at >= ~256KB). Callers that fire-and-forget can ignore the promise.
+  process.send(msg, () => resolve());
+  return promise;
 }
 
 function log(line: string): void {
-  send({ type: "log", line });
+  void send({ type: "log", line });
 }
 
 const NODE_ROUTE_REQUEST_TIMEOUT_MS = 130_000;
@@ -330,26 +336,32 @@ process.on("message", async (msg: ParentMessage) => {
       log(`worker transcript persist failed: ${persistErr instanceof Error ? persistErr.message : String(persistErr)}`);
     }
 
-    send({
+    await send({
       type: "result",
       result: {
         status: result.status,
-        output: result.output,
         toolCallsUsed: result.toolCallsUsed,
         iterationsUsed: result.iterationsUsed,
+        output: result.output,
         deployApplied,
       },
     });
     rejectPendingNodeRouteRequests("worker completed");
 
-    if (mcp) {
-      await mcp.close();
+    // Cleanup after the result must not send a contradictory {type:'error'}:
+    // the parent has already recorded the outcome. Log and exit regardless.
+    try {
+      if (mcp) {
+        await mcp.close();
+      }
+      db.close();
+    } catch (cleanupErr) {
+      log(`worker cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
     }
-    db.close();
     process.exit(0);
   } catch (err) {
     rejectPendingNodeRouteRequests("worker failed");
-    send({
+    await send({
       type: "error",
       error: err instanceof Error ? err.message : String(err),
     });
@@ -360,14 +372,12 @@ process.on("message", async (msg: ParentMessage) => {
 // Handle uncaught errors
 process.on("uncaughtException", (err) => {
   rejectPendingNodeRouteRequests("worker uncaught exception");
-  send({ type: "error", error: `Uncaught exception: ${err.message}` });
-  process.exit(1);
+  void send({ type: "error", error: `Uncaught exception: ${err.message}` }).finally(() => process.exit(1));
 });
 
 process.on("unhandledRejection", (reason) => {
   rejectPendingNodeRouteRequests("worker unhandled rejection");
-  send({ type: "error", error: `Unhandled rejection: ${reason}` });
-  process.exit(1);
+  void send({ type: "error", error: `Unhandled rejection: ${reason}` }).finally(() => process.exit(1));
 });
 
 process.on("disconnect", () => {
@@ -409,7 +419,7 @@ function requestNodeRouteFromParent(tool: Tool, args: unknown, routeCtx: ToolCon
     }, NODE_ROUTE_REQUEST_TIMEOUT_MS);
     pendingNodeRouteRequests.set(requestId, { resolve, reject, timer });
     try {
-      send({
+      void send({
         type: "node_route_request",
         requestId,
         toolName: tool.name,

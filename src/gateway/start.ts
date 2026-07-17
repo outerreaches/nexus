@@ -1530,7 +1530,7 @@ export async function startGateway(
       };
     }
 
-    runReportBroker?.stop();
+    await runReportBroker?.stop();
     runReportBroker = startRunReportBroker({
       db,
       agent,
@@ -1539,7 +1539,7 @@ export async function startGateway(
     });
     if (runReportBroker) scheduleInitialTick("run_report_broker", () => runReportBroker!.tick());
 
-    deployCompletionWorker?.stop();
+    await deployCompletionWorker?.stop();
     deployCompletionWorker = startDeployCompletionWorker({
       db,
       stateDir: paths.stateDir,
@@ -1548,7 +1548,7 @@ export async function startGateway(
     });
     if (deployCompletionWorker) scheduleInitialTick("deploy_completion_worker", () => deployCompletionWorker!.tick());
 
-    deployApprovalWorker?.stop();
+    await deployApprovalWorker?.stop();
     deployApprovalWorker = startDeployApprovalWorker({
       db,
       stateDir: paths.stateDir,
@@ -1599,7 +1599,7 @@ export async function startGateway(
       if (!federationDispatcher) {
         log("federation/outbox: configured but dispatcher unavailable");
       } else {
-        federationOutboxWorker?.stop();
+        await federationOutboxWorker?.stop();
         federationOutboxWorker = startFederationOutboxWorker({
           db,
           dispatch: async (item) => {
@@ -1629,7 +1629,7 @@ export async function startGateway(
     }
 
     if (config.federation.enabled) {
-      webhookDeliveryWorker?.stop();
+      await webhookDeliveryWorker?.stop();
       webhookDeliveryWorker = startWebhookDeliveryWorker({
         db,
         stateDir: paths.stateDir,
@@ -1705,7 +1705,7 @@ export async function startGateway(
     toolContext.telegram = undefined as unknown;
   };
 
-  const activateServices = async (): Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> => {
+  const activateServicesInner = async (): Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> => {
     if (!isStandby) return { ok: true, already: true };
     const lease = ensureActiveLease(deactivateServices);
     if (!lease.ok) return { ok: false, holderId: lease.holderId, expiresAt: lease.expiresAt };
@@ -1723,6 +1723,21 @@ export async function startGateway(
       await deactivateServices("activation failed");
       throw err;
     }
+  };
+  // Concurrent /api/activate calls (watchdog failover plus the restart handoff
+  // loop, or a manual retry) must not double-start services: the second caller
+  // joins the in-flight activation instead of launching a parallel one, which
+  // would leak a Telegram poller into perpetual 409 conflicts and overwrite
+  // scheduler/worker handles.
+  let activationInFlight: Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> | null = null;
+  const activateServices = (): Promise<{ ok: boolean; holderId?: string; expiresAt?: number; already?: boolean }> => {
+    if (activationInFlight) return activationInFlight;
+    const run = activateServicesInner();
+    activationInFlight = run;
+    void run.catch(() => {}).finally(() => {
+      if (activationInFlight === run) activationInFlight = null;
+    });
+    return run;
   };
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const restartPeerUrl = normalizeHttpBaseUrl(process.env.NEXUS_HA_PEER_URL ?? "");

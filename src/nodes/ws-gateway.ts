@@ -678,31 +678,44 @@ export class NodeWebSocketGateway {
     }
 
     let finalStatusPayload: Record<string, unknown> | null = null;
-    for (;;) {
-      if (params.ctx.abortSignal?.aborted) {
+    try {
+      for (;;) {
+        if (params.ctx.abortSignal?.aborted) {
+          throw new NodeRoutingError("NODE_REQUEST_ABORTED", "Remote system.run cancelled by run stop.");
+        }
+
+        const statusResponse = await this.requestNode({
+          nodeId: params.nodeId,
+          method: "process.status",
+          params: { processId },
+          timeoutMs: params.timeoutMs,
+          abortSignal: params.ctx.abortSignal,
+        });
+        this.throwOnRemoteError(statusResponse, {
+          code: "NODE_EXECUTION_FAILED",
+          message: `Node ${params.nodeId} failed to fetch process status.`,
+        });
+        finalStatusPayload = this.asObject(statusResponse.payload);
+        const status = this.asString(finalStatusPayload.status) ?? "";
+        if (status === "completed" || status === "failed" || status === "cancelled") break;
+        await this.waitForAbortableDelay(250, params.ctx.abortSignal);
+      }
+    } catch (err) {
+      // The common abort case lands mid-poll — while process.status or the
+      // delay is in flight — not at the top-of-loop check. Cancel before
+      // rethrowing: after this the gateway discards the only processId handle
+      // and the remote process would run on with no way to reach it.
+      const aborted =
+        params.ctx.abortSignal?.aborted ||
+        (err instanceof NodeRoutingError && err.code === "NODE_REQUEST_ABORTED");
+      if (aborted) {
         await this.cancelRemoteProcessBestEffort({
           nodeId: params.nodeId,
           processId,
           reason: "run_cancelled",
         });
-        throw new NodeRoutingError("NODE_REQUEST_ABORTED", "Remote system.run cancelled by run stop.");
       }
-
-      const statusResponse = await this.requestNode({
-        nodeId: params.nodeId,
-        method: "process.status",
-        params: { processId },
-        timeoutMs: params.timeoutMs,
-        abortSignal: params.ctx.abortSignal,
-      });
-      this.throwOnRemoteError(statusResponse, {
-        code: "NODE_EXECUTION_FAILED",
-        message: `Node ${params.nodeId} failed to fetch process status.`,
-      });
-      finalStatusPayload = this.asObject(statusResponse.payload);
-      const status = this.asString(finalStatusPayload.status) ?? "";
-      if (status === "completed" || status === "failed" || status === "cancelled") break;
-      await this.waitForAbortableDelay(250, params.ctx.abortSignal);
+      throw err;
     }
 
     const logsResponse = await this.requestNode({
@@ -1583,6 +1596,9 @@ export class NodeWebSocketGateway {
 
   private handleEventMessage(session: NodeSocketSession, msg: ProtocolEvent): void {
     if (!session.nodeId) return;
+    // Events are only meaningful from the node's active session: a replaced
+    // (or not-yet-accepted) socket must not mutate registry/process state.
+    if (this.activeNodeSessions.get(session.nodeId) !== session.sessionId) return;
     const receivedAt = Date.now();
     const payload = this.asObject(msg.payload);
     if (msg.event === "capability.update" || msg.event === "caps.advertise") {
@@ -2062,6 +2078,19 @@ export class NodeWebSocketGateway {
     if (previousSessionId && previousSessionId !== session.sessionId) {
       this.rejectPendingRequestsForSession(previousSessionId, "node session replaced");
       this.deps.log(`nodes/ws: node=${session.nodeId} replaced prior session=${previousSessionId}`);
+      // Close the superseded socket: while open it stays event-authorized and
+      // its deliveries can never be acked (acks route to the active session),
+      // causing redelivery loops. handleDisconnect only drops node status when
+      // the closing session is the active one, so this cannot flap.
+      for (const [otherWs, otherSession] of this.sessions) {
+        if (otherSession.sessionId !== previousSessionId) continue;
+        try {
+          otherWs.close(4000, "session replaced");
+        } catch {
+          // best effort; the heartbeat timeout will reap it
+        }
+        break;
+      }
     }
     const nodeRow = this.deps.registry.get(session.nodeId);
     this.deps.registry.beginSession({

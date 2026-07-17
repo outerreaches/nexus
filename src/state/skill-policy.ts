@@ -33,11 +33,11 @@ export function canInjectPresetScopedSkills(config: SkillsConfig | undefined, ct
   return preset.skillAccess?.promptPreset === true;
 }
 
-export function canUseSkillReadTools(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
+export function canUseSkillReadTools(config: SkillsConfig | undefined, _ctx: SkillAccessContext): boolean {
   return config?.enabled !== false;
 }
 
-export function canUseSkillManageTools(config: SkillsConfig | undefined, ctx: SkillAccessContext): boolean {
+export function canUseSkillManageTools(config: SkillsConfig | undefined, _ctx: SkillAccessContext): boolean {
   return config?.enabled !== false;
 }
 

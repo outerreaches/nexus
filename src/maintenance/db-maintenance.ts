@@ -39,13 +39,14 @@ const ARCHIVE_TABLES: readonly { table: string; retentionDays?: number }[] = [
   { table: "job_events_archive" },
 ];
 const CLEANUP_TABLES = ["job_runs", "job_events"] as const;
-const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "pairing_codes", "federation_replay_nonces"] as const;
+const TTL_TABLES = ["blackboard", "human_actions", "pairing_requests", "federation_replay_nonces"] as const;
 const OPERATIONAL_CLEANUP_TABLES = [
   "run_reports",
   "federation_outbox",
   "federation_events",
   "webhook_deliveries",
   "webhook_dlq",
+  "process_runs",
 ] as const;
 
 // Date column mapping for each archivable/cleanable table
@@ -81,7 +82,6 @@ const TTL_CONFIG: Record<string, { expiresCol: string; statusCol?: string; expir
   blackboard: { expiresCol: "expires_at" },
   human_actions: { expiresCol: "expires_at", statusCol: "status", expiredStatus: "expired" },
   pairing_requests: { expiresCol: "expires_at" },
-  pairing_codes: { expiresCol: "expires_at" },
   federation_replay_nonces: { expiresCol: "expires_at" },
 };
 
@@ -262,6 +262,40 @@ export async function runMaintenance(params: {
     result.operational.webhook_dlq!.deleted = dlqDeleted;
   } catch (e) {
     const msg = `operational webhook_dlq: ${e instanceof Error ? e.message : String(e)}`;
+    errors.push(msg);
+    log(`maintenance: ERROR ${msg}`);
+  }
+
+  try {
+    // Remove log files for rows being reaped so on-disk logs don't accumulate
+    // alongside the table. Restrict to the managed processes dir.
+    if (!dryRun) {
+      const processesDir = path.join(stateDir, "processes") + path.sep;
+      const staleLogs = db.db
+        .prepare(
+          `SELECT log_path FROM process_runs
+           WHERE status IN ('exited', 'stopped')
+             AND ended_at IS NOT NULL
+             AND ended_at < ?`,
+        )
+        .all(cleanupCutoffMs) as Array<{ log_path: string }>;
+      for (const row of staleLogs) {
+        if (typeof row.log_path !== "string" || !row.log_path.startsWith(processesDir)) continue;
+        await fs.rm(row.log_path, { force: true }).catch(() => {});
+      }
+    }
+    const processRunsDeleted = cleanupOperationalTable({
+      db,
+      sql: `DELETE FROM process_runs
+            WHERE status IN ('exited', 'stopped')
+              AND ended_at IS NOT NULL
+              AND ended_at < ?`,
+      args: [cleanupCutoffMs],
+      dryRun,
+    });
+    result.operational.process_runs!.deleted = processRunsDeleted;
+  } catch (e) {
+    const msg = `operational process_runs: ${e instanceof Error ? e.message : String(e)}`;
     errors.push(msg);
     log(`maintenance: ERROR ${msg}`);
   }

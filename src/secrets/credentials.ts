@@ -228,7 +228,7 @@ async function acquireStoreFileLock(storePath: string): Promise<Awaited<ReturnTy
   const lockPath = `${storePath}.lock`;
   await fs.mkdir(path.dirname(lockPath), { recursive: true });
   const deadline = Date.now() + CREDENTIAL_STORE_LOCK_TIMEOUT_MS;
-  while (true) {
+  for (;;) {
     try {
       const handle = await fs.open(lockPath, "wx", 0o600);
       await handle.writeFile(

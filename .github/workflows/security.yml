@@ -95,7 +95,21 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # 6. Node Protocol Smoke Tests
+  # 6. Unit Tests
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+
+  # 7. Node Protocol Smoke Tests
   node-smoke:
     name: Node Protocol Smoke Tests
     runs-on: ubuntu-latest
@@ -112,7 +126,7 @@ jobs:
   # Summary
   security-summary:
     name: Security Scan Summary
-    needs: [typecheck, lint, audit, gitleaks, build, node-smoke]
+    needs: [typecheck, lint, audit, gitleaks, build, unit-tests, node-smoke]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -125,4 +139,5 @@ jobs:
           echo "✅ npm Audit: ${{ needs.audit.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Gitleaks: ${{ needs.gitleaks.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Unit Tests: ${{ needs.unit-tests.result }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ Node Protocol Smokes: ${{ needs.node-smoke.result }}" >> $GITHUB_STEP_SUMMARY
