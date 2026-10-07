@@ -1359,9 +1359,9 @@ bash infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
   --hostname nexus-service-vm \
   --memory-mb 8192 \
   --disk-size 40G \
-  --ssh-public-key-path /home/user/.ssh/id_ed25519.pub \
-  --ssh-private-key-path /home/user/.ssh/id_ed25519 \
-  --repo-url ssh://user@192.168.122.1/~/git/nexus.git \
+  --ssh-public-key-path /home/operator/.ssh/id_ed25519.pub \
+  --ssh-private-key-path /home/operator/.ssh/id_ed25519 \
+  --repo-url ssh://operator@192.168.122.1/~/git/nexus.git \
   --profile service_custom \
   --http-api-key '<strong-random-token>' \
   --require-http-api-key \
