@@ -1,5 +1,11 @@
 # Nexus
 
+> **Historical artifact.** Nexus was an experimental self-hosted multi-agent platform,
+> developed February–July 2026 and retired shortly after. It is published here for
+> reference — there is no maintenance or support promise.
+>
+> Built by **Alex Mazurovsky** — [Outer Reaches](https://outerreaches.space) (Outer Reaches Labs).
+
 Nexus is a multi-agent gateway with HA failover, sidecar-backed secrets, dynamic MCP integration, Telegram/CLI interaction, and self-editing workflows.
 
 ## Main Features
