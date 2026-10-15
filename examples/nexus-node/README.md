@@ -521,10 +521,6 @@ What it validates:
 - notifier duplicate suppression: two notifier loops share one DB and emit a single summary callback
 - HA active/standby smoke: mode transitions, readiness gating, `/nx/nodes` standby rejection behavior, and replay dedupe across failover
 
-Live operator validation runbook:
-
-- `examples/nexus-node/internal-doc`
-
 ## Pairing flow
 
 On first connection, the gateway records unknown fingerprints as `pending` and rejects the session.

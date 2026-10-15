@@ -1,17 +1,17 @@
-# Nexus Deployment Guide - host
+# Nexus Deployment Guide
 
-This guide sets up Nexus on a host workstation with:
+This guide deploys Nexus on a Linux host with:
 - Linux VM for isolation (QEMU/KVM)
-- Local Git remote on the host host
+- A local Git remote on the host
 - Fault-tolerant HA deployment (required)
 - Self-editing capability for the agent
 
-For gateway API/dashboard auth rollout, use `infra/internal-doc` before rotating credentials.
+For auth/credential hygiene, see the Security Notes in the top-level README.
 
 ## Prerequisites
 
-- host with Ubuntu 24.04 LTS installed
-- laptop with Nexus codebase at `~/Workspace/Nexus`
+- A Linux host with Ubuntu 24.04 LTS installed
+- A development machine with the Nexus codebase at `~/nexus`
 - Both machines on the same network
 - SSH access to the host
 
@@ -19,13 +19,13 @@ For gateway API/dashboard auth rollout, use `infra/internal-doc` before rotating
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           laptop (Development)                              │
-│  ~/Workspace/Nexus/ ──── git push ───→ host (bare repo)                  │
+│                           Development machine                                │
+│  ~/nexus/ ──── git push ───→ host (bare repo)                               │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     host (Ubuntu 24.04)                         │
+│                     Linux host (Ubuntu 24.04)                               │
 │                                                                              │
 │  ~/git/nexus.git (bare repo)                                                │
 │       │                                                                      │
@@ -43,12 +43,12 @@ For gateway API/dashboard auth rollout, use `infra/internal-doc` before rotating
 
 ---
 
-## Phase 1: Host Setup (host)
+## Phase 1: Host Setup
 
 ### 1.1 Install KVM/QEMU
 
 ```bash
-# SSH into host
+# SSH into the host
 ssh user@host
 
 # Update system
@@ -90,18 +90,18 @@ git init --bare ~/git/nexus.git
 
 ---
 
-## Phase 2: laptop Git Setup
+## Phase 2: Development Machine Git Setup
 
-### 2.1 Add host Remote and Push
+### 2.1 Add Host Remote and Push
 
 ```bash
-# On laptop
-cd ~/Workspace/Nexus
+# On the dev machine
+cd ~/nexus
 git remote add host ssh://user@host/~/git/nexus.git
 git push host main
 ```
 
-### 2.2 Pull on host Working Tree
+### 2.2 Pull on Host Working Tree
 
 ```bash
 # On VM (first time clone)
@@ -215,7 +215,7 @@ sudo chown -R nexus:nexus /data
 docker --version
 docker compose version
 
-# Clone code from host host
+# Clone code from the host
 git clone ssh://user@host/~/git/nexus.git /data/code
 ```
 
@@ -274,7 +274,7 @@ curl http://localhost:18789/status | jq .
 ### 5.1 Port Forward from Host to VM
 
 ```bash
-# On host host
+# On the host
 # Install socat for port forwarding
 sudo apt install -y socat
 
@@ -359,10 +359,10 @@ curl -k https://localhost:18790/health/live
 
 This forwarding model resolves the VM IP on each incoming connection, so VM restarts / DHCP lease changes do not require manual systemd edits or forwarder restarts.
 
-### 5.2 Access from laptop
+### 5.2 Access from the dev machine
 
 ```bash
-# On laptop
+# On the dev machine
 curl http://host:18789/health/live
 
 # Secure endpoint used by node wss transport
@@ -375,12 +375,12 @@ open http://host:18789/dashboard
 ### 5.3 (Optional) Tailscale Setup
 
 ```bash
-# On host host
+# On the host
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 
-# On laptop
-brew install tailscale
+# On the dev machine
+brew install tailscale  # or your OS package manager
 tailscale up
 
 # Now access via Tailscale hostname
@@ -393,10 +393,10 @@ curl http://host-tailscale-hostname:18789/health/live
 
 ### 6.1 Update Nexus Code
 
-**From laptop (manual push):**
+**From the dev machine (manual push):**
 
 ```bash
-cd ~/Workspace/Nexus
+cd ~/nexus
 git push host main
 
 # On VM — preferred helper (keeps TLS overlay + preflight checks)
@@ -439,8 +439,8 @@ cd /data/code
 infra/scripts/ha-rollout.sh rollback          # Roll back to last-good commit
 infra/scripts/ha-rollout.sh rollback <sha>    # Roll back to specific commit
 
-# Or from laptop (nuclear option)
-cd ~/Workspace/Nexus
+# Or from the dev machine (nuclear option)
+cd ~/nexus
 git log --oneline -10  # Find the good commit
 git push --force host main
 # Then on VM:
@@ -451,7 +451,7 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml -f /data/code/
 ### 6.4 VM Snapshots
 
 ```bash
-# On host host
+# On the host
 # Create snapshot before risky operations
 virsh snapshot-create-as nexus-vm clean-state "Known good state"
 
@@ -738,7 +738,7 @@ Audit interpretation note:
 Post-cutover baseline:
 - Keep `local-main` disabled.
 - Do not reintroduce `/data/nexus/secrets/credentials.json`.
-- Use `infra/internal-doc` for day-2 operations (create/rotate/revoke/audit/outage-drill).
+- Day-2 secret operations (create/rotate/revoke/audit/outage-drill) use the operator CLIs (`ha-secretctl.sh`, `ha-secrets-onboard.sh`).
 
 ### 7.3.0b Fresh Deployment Baseline (Sidecar-First)
 
@@ -814,7 +814,7 @@ If you intentionally run without the TLS overlay file, set `NEXUS_HAPROXY_CONFIG
 Node `.env` settings (example):
 
 ```bash
-NEXUS_NODE_GATEWAY_URL=wss://192.0.2.10:18790/nx/nodes
+NEXUS_NODE_GATEWAY_URL=wss://<host-ip>:18790/nx/nodes
 NEXUS_NODE_GATEWAY_TLS_FINGERPRINT=<sha256 fingerprint from ha-generate-tls-cert.sh>
 NEXUS_NODE_INSECURE_ALLOW_NONLOOPBACK_WS=0
 NEXUS_NODE_TZ=America/New_York
@@ -1243,7 +1243,7 @@ docker compose -p infra -f /data/code/infra/docker-compose.ha.yml config | grep 
 | Nexus API | VM container | `http://host:18789` |
 | Dashboard | VM container | `http://host:18789/dashboard` |
 | VM console | host | `virsh console nexus-vm` |
-| host bare repo | host | `~/git/nexus.git` |
+| Host bare repo | host | `~/git/nexus.git` |
 | VM code dir | VM | `/data/code` |
 
 | Command | Purpose |
@@ -1345,7 +1345,7 @@ eval "$(ssh-agent -s)"
 ssh-add /home/<user>/.ssh/id_ed25519
 ```
 
-- Prefer cloning from the host bare mirror for private repos:
+- Prefer cloning from the host's bare mirror for private repos:
   - `--repo-url ssh://<host-user>@192.168.122.1/~/git/nexus.git`
 - Always pass explicit SSH key paths so cloud-init auth and readiness checks use the same key:
   - `--ssh-public-key-path /home/<user>/.ssh/id_ed25519.pub`
@@ -1353,7 +1353,7 @@ ssh-add /home/<user>/.ssh/id_ed25519
 
 ```bash
 # Example: non-monetization federated service instance (8GB RAM, 40GB disk)
-# (private repo via host bare mirror)
+# (private repo via the host bare mirror)
 bash infra/scripts/archive/provisioning/provision-libvirt-instance.sh \
   --vm-name nexus-service-vm \
   --hostname nexus-service-vm \
@@ -1498,7 +1498,7 @@ bash infra/scripts/archive/portable/portable-smoke.sh
 ### Infra Smokes
 
 ```bash
-# host dual-VM presence
+# Dual-VM presence check
 bash infra/scripts/archive/federation/host-two-vm-smoke.sh
 
 # Legacy single-instance deploy retirement smoke

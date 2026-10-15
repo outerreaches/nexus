@@ -146,7 +146,7 @@ const GateRuleSchema = z.object({
   action: GateActionSchema,
 });
 
-/** Tool gate (see internal-doc). `default` is the fallback when no rule
+/** Tool gate (policy evaluated before tool dispatch). `default` is the fallback when no rule
  *  or built-in default matches; `unattended` controls how `ask` resolves for
  *  runs without a live human (deny now, queue once the approval flow ships —
  *  pre-approval is an allow rule scoped `unattended: true`). */

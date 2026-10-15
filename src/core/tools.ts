@@ -39,7 +39,7 @@ export type ToolContext = {
   allowCodeEdit?: boolean;
   allowCodeWrite?: boolean;
   /** Tool gate policy (permissions.gate). Evaluated by AgentRunner before
-   *  dispatching any tool call; see internal-doc. */
+   *  dispatching any tool call. */
   toolGate?: import("./tool-gate.js").ToolGateConfig;
   requestRestart?: (reason: string, delayMs?: number) => void;
   request?: {

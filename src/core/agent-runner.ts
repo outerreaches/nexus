@@ -1693,7 +1693,7 @@ export class AgentRunner {
         }
         toolCallsPerName.set(call.name, usedForTool + 1);
 
-        // Tool gate (internal-doc): policy verdict before any dispatch,
+        // Tool gate: policy verdict before any dispatch,
         // covering both the local and node-routed execution branches below.
         const gateVerdict = evaluateToolGate({
           toolName: call.name,
