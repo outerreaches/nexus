@@ -53,8 +53,10 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
+      # Frozen historical dependency set (artifact repo): high/moderate advisories in
+      # transitive dependencies are expected and will not be patched. Gate on criticals only.
       - name: Run npm audit
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=critical
       - name: Capture audit report
         if: failure()
         run: npm audit --json > npm-audit.json || true
